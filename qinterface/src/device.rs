@@ -64,6 +64,29 @@ impl InterfaceEvent {
     }
 }
 
+/// Compare two interfaces ignoring transient fields.
+///
+/// `netdev::Interface`'s derived `PartialEq` includes `stats` (rx/tx bytes and
+/// timestamp), which changes on every poll whenever the interface carries
+/// traffic. That caused spurious `Changed` events every scan interval. Only
+/// reconfigurable fields that affect bind/route decisions are considered here.
+fn interface_equivalent(a: &Interface, b: &Interface) -> bool {
+    a.index == b.index
+        && a.name == b.name
+        && a.mac_addr == b.mac_addr
+        && a.ipv4 == b.ipv4
+        && a.ipv6 == b.ipv6
+        && a.ipv6_scope_ids == b.ipv6_scope_ids
+        && a.ipv6_addr_flags == b.ipv6_addr_flags
+        && a.flags == b.flags
+        && a.oper_state == b.oper_state
+        && a.if_type == b.if_type
+        && a.gateway == b.gateway
+        && a.dns_servers == b.dns_servers
+        && a.mtu == b.mtu
+        && a.default == b.default
+}
+
 impl InterfaceEvent {
     pub fn from_update<'i>(
         old_interfaces: &'i HashMap<String, Interface>,
@@ -72,7 +95,7 @@ impl InterfaceEvent {
         new_interfaces
             .iter()
             .filter_map(|(name, new_interface)| match old_interfaces.get(name) {
-                Some(old_interface) if new_interface != old_interface => {
+                Some(old_interface) if !interface_equivalent(new_interface, old_interface) => {
                     Some(InterfaceEvent::Changed {
                         device: name.to_owned(),
                         old_interface: old_interface.clone(),
