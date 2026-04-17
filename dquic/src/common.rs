@@ -1,8 +1,10 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use futures::{Stream, StreamExt, stream};
+use std::iter;
+
+use futures::{Stream, stream::FuturesUnordered};
 use qconnection::{
-    prelude::{EndpointAddr, handy},
+    prelude::handy,
     qinterface::{
         BindInterface, Interface,
         bind_uri::BindUri,
@@ -21,7 +23,7 @@ use qconnection::{
         route::{ForwardersComponent, ReceiveAndDeliverPacketComponent},
     },
 };
-use qresolve::{Family, Resolve, SystemResolver};
+use qresolve::{Resolve, SystemResolver};
 
 #[derive(Clone)]
 pub struct Network {
@@ -49,33 +51,10 @@ impl Default for Network {
 }
 
 impl Network {
-    /// 只取第一个可用的 STUN agent 即返回，后续由 StunClientsComponent 自动补充到 MIN_AGENTS
-    async fn lookup_first_agent(
-        &self,
-        stun_server: &str,
-        family: Family,
-    ) -> Option<Vec<SocketAddr>> {
-        let stream = self.resolver.lookup(stun_server).await.ok()?;
-        let mut stream = std::pin::pin!(stream);
-        while let Some((_source, ep)) = stream.next().await {
-            let EndpointAddr::Direct { addr } = ep else {
-                continue;
-            };
-            if match family {
-                Family::V4 => addr.is_ipv4(),
-                Family::V6 => addr.is_ipv6(),
-            } {
-                tracing::trace!("resolved first stun agent for {stun_server}: {addr}");
-                return Some(vec![addr]);
-            }
-        }
-        None
-    }
-
     fn init_iface_components(
         &self,
         bind_iface: &BindInterface,
-        stun_agent: Option<(Arc<str>, Vec<SocketAddr>)>,
+        stun_server: Option<Arc<str>>,
     ) {
         bind_iface.with_components_mut(move |components: &mut Components, iface: &Interface| {
             // rebind interface on network changed
@@ -89,14 +68,15 @@ impl Network {
                 .init_with(|| LocationsComponent::new(iface.downgrade(), self.locations.clone()))
                 .clone();
 
-            match stun_agent {
+            match &stun_server {
                 // stun enabled:
-                Some((stun_server, stun_agents)) => {
+                Some(stun_server) => {
                     // initial stun router
                     let stun_router = components
                         .init_with(|| StunRouterComponent::new(iface.downgrade()))
                         .router();
-                    // initial stun clients (后续会自动补充到 MIN_AGENTS)
+                    // initial stun clients (DNS 解析推迟到后台 lookup 任务)
+                    let stun_server = stun_server.clone();
                     let clients = components
                         .init_with(|| {
                             StunClientsComponent::new(
@@ -104,7 +84,7 @@ impl Network {
                                 stun_router.clone(),
                                 self.resolver.clone(),
                                 stun_server,
-                                stun_agents,
+                                iter::empty(),
                                 Some(locations.clone()),
                             )
                         })
@@ -155,18 +135,13 @@ impl Network {
             self.stun_server.clone()
         };
 
-        let family = bind_uri.family();
-        let stun_agents = match &stun_server {
-            Some(server) => self
-                .lookup_first_agent(server.as_ref(), family)
-                .await
-                .unwrap_or_default(),
-            None => vec![],
-        };
+        // STUN agent 的 DNS 解析推迟到 StunClientsComponent 的后台任务（它会在
+        // clients < MIN_AGENTS 时自动触发 lookup，且自带超时保护）。bind 自身
+        // 不再在关键路径上等待 DNS，避免 resolver 挂起导致整个绑定流程锁死。
 
         let factory = self.iface_factory.clone();
         let bind_iface = self.iface_manager.bind(bind_uri, factory).await;
-        self.init_iface_components(&bind_iface, stun_server.map(|s| (s, stun_agents)));
+        self.init_iface_components(&bind_iface, stun_server);
 
         bind_iface
     }
@@ -175,6 +150,12 @@ impl Network {
         &self,
         bind_uris: impl IntoIterator<Item = impl Into<BindUri>>,
     ) -> impl Stream<Item = BindInterface> {
-        stream::iter(bind_uris).then(async |bind_uri| self.bind(bind_uri.into()).await)
+        bind_uris
+            .into_iter()
+            .map(|bind_uri| {
+                let network = self.clone();
+                async move { network.bind(bind_uri.into()).await }
+            })
+            .collect::<FuturesUnordered<_>>()
     }
 }
