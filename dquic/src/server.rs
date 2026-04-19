@@ -154,7 +154,10 @@ impl Server {
     }
 }
 
-type Incomings = BoundQueue<((Connection, String, Pathway, Link), OwnedSemaphorePermit)>;
+type Incomings = BoundQueue<(
+    (Arc<Connection>, String, Pathway, Link),
+    OwnedSemaphorePermit,
+)>;
 
 /// A QUIC listener that can serve multiple virtual servers, accepting incoming connections.
 ///
@@ -312,7 +315,9 @@ impl QuicListeners {
     ///
     /// The connection queue size is limited by the `backlog` parameter in [`QuicListenersBuilder::listen`].
     /// When the queue is full, new incoming packets may be dropped at the network level.
-    pub async fn accept(&self) -> Result<(Connection, String, Pathway, Link), ListenersShutdown> {
+    pub async fn accept(
+        &self,
+    ) -> Result<(Arc<Connection>, String, Pathway, Link), ListenersShutdown> {
         self.incomings
             .recv()
             .await

@@ -226,7 +226,7 @@ async fn download_files_with_progress(
     total_pb: ProgressBar,
     save: Option<PathBuf>,
 ) -> Result<usize, Error> {
-    let quic_connection = Arc::new(client.connect(authority.host()).await?);
+    let quic_connection = client.connect(authority.host()).await?;
     let odcid = quic_connection.origin_dcid()?;
     let span = tracing::info_span!("requests", %odcid, host = authority.host());
 

@@ -164,9 +164,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
     // handle incoming connections and requests
     while let Ok((new_conn, _server, _pathway, _link)) = listeners.accept().await {
         let h3_conn =
-            match h3::server::Connection::new(h3_shim::QuicConnection::new(Arc::new(new_conn)))
-                .await
-            {
+            match h3::server::Connection::new(h3_shim::QuicConnection::new(new_conn)).await {
                 Ok(h3_conn) => {
                     tracing::info!("accept a new quic connection");
                     h3_conn

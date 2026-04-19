@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Weak, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -45,8 +45,8 @@ use tracing::Instrument as _;
 
 use crate::{
     ArcLocalCids, ArcReliableFrameDeque, ArcRemoteCids, CidRegistry, Components, Connection,
-    ConnectionState, DataJournal, DataStreams, FlowController, Handshake, QuicRouterRegistry,
-    RawHandshake, SpecificComponents,
+    DataJournal, DataStreams, FlowController, Handshake, QuicRouterRegistry, RawHandshake,
+    SpecificComponents,
     events::{ArcEventBroker, EmitEvent, Event},
     path::ArcPathContexts,
     space::{
@@ -469,7 +469,7 @@ impl PendingConnection {
         self
     }
 
-    pub fn run(self) -> Connection {
+    pub fn run(self) -> Arc<Connection> {
         let (event_broker, events) = mpsc::unbounded_channel();
 
         let group_id = GroupID::from(self.origin_dcid);
@@ -575,15 +575,15 @@ impl PendingConnection {
         spawn_tls_handshake(&components, self.tx_wakers.clone());
         spawn_deliver_and_parse(&components);
 
-        let connection_state = Arc::new(ConnectionState {
+        let connection = Arc::new(Connection {
             state: Ok(components).into(),
             qlog_span,
             tracing_span,
         });
 
-        spawn_drive_connection(events, connection_state.clone());
+        spawn_drive_connection(events, Arc::downgrade(&connection));
 
-        Connection(connection_state)
+        connection
     }
 }
 
@@ -733,15 +733,21 @@ fn tls_fin_handler(
     }
 }
 
-fn spawn_drive_connection(mut events: mpsc::UnboundedReceiver<Event>, state: Arc<ConnectionState>) {
+fn spawn_drive_connection(
+    mut events: mpsc::UnboundedReceiver<Event>,
+    weak_connection: Weak<Connection>,
+) {
     tokio::spawn(
         async move {
             while let Some(event) = events.recv().await {
+                let Some(connection) = weak_connection.upgrade() else {
+                    break;
+                };
                 match event {
                     Event::Handshaked => {}
-                    Event::Failed(quic_error) => _ = state.enter_closing(quic_error),
+                    Event::Failed(quic_error) => _ = connection.enter_closing(quic_error),
                     Event::ApplicationClose(_app_error) => {}
-                    Event::Closed(ccf) => _ = state.enter_draining(ccf),
+                    Event::Closed(ccf) => _ = connection.enter_draining(ccf),
                     Event::StatelessReset => {}
                     Event::Terminated => {}
                 }

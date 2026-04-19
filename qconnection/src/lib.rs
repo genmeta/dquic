@@ -63,6 +63,7 @@ use qbase::{
     error::{AppError, Error, ErrorKind, QuicError},
     flow,
     frame::{ConnectionCloseFrame, CryptoFrame, Frame, ReliableFrame, StreamFrame},
+    metric::ArcConnectionMetrics,
     net::{
         addr::EndpointAddr,
         route::{Link, Pathway},
@@ -179,7 +180,7 @@ pub struct Components {
     flow_ctrl: FlowController,
     datagram_flow: DatagramFlow,
     event_broker: ArcEventBroker,
-    metrics: qbase::metric::ArcConnectionMetrics,
+    metrics: ArcConnectionMetrics,
     specific: SpecificComponents,
     puncher: ArcPuncher,
 }
@@ -209,7 +210,7 @@ impl Components {
     }
 
     /// Gets the connection metrics for tracking data volumes.
-    pub fn metrics(&self) -> &qbase::metric::ArcConnectionMetrics {
+    pub fn metrics(&self) -> &ArcConnectionMetrics {
         &self.metrics
     }
 
@@ -420,13 +421,13 @@ impl Components {
     }
 }
 
-struct ConnectionState {
+pub struct Connection {
     state: RwLock<Result<Components, Termination>>,
     qlog_span: qevent::telemetry::Span,
     tracing_span: tracing::Span,
 }
 
-impl ConnectionState {
+impl Connection {
     // called by event
     pub fn enter_closing(&self, error: QuicError) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
@@ -437,11 +438,11 @@ impl ConnectionState {
         Ok(())
     }
 
-    pub fn application_close(
-        &self,
-        reason: impl Into<Cow<'static, str>>,
-        code: u64,
-    ) -> Result<(), Error> {
+    /// Close the connection with application close frame.
+    ///
+    /// Return error if the connection is already closed.
+    #[doc(alias = "application_close")]
+    pub fn close(&self, reason: impl Into<Cow<'static, str>>, code: u64) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
         let core_conn = conn.as_ref().map_err(|t| t.error())?;
@@ -491,7 +492,11 @@ impl ConnectionState {
         }
     }
 
-    fn validate(&self) -> Result<(), Error> {
+    /// Check if the connection is still valid.
+    ///
+    /// Return error if no viable path exists, or the connection is closed.
+    #[doc(alias = "check")]
+    pub fn validate(&self) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
         let core_conn = conn.as_ref().map_err(|e| e.error())?;
@@ -512,33 +517,9 @@ impl ConnectionState {
         }
         Ok(())
     }
-}
 
-impl Drop for ConnectionState {
-    fn drop(&mut self) {
-        let _span = self.tracing_span.enter();
-        if self.validate().is_ok() && self.application_close("", 0).is_ok() {
-            #[cfg(debug_assertions)]
-            tracing::warn!(target: "quic", "connection is still active when dropped, close it automatically.");
-            #[cfg(not(debug_assertions))]
-            tracing::debug!(target: "quic", "connection is still active when dropped, close it automatically.");
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Connection(Arc<ConnectionState>);
-
-impl Connection {
     pub fn role(&self) -> Result<Role, Error> {
-        self.0.try_map_components(|core_conn| core_conn.role())
-    }
-
-    /// Close the connection with application close frame.
-    ///
-    /// Return error if the connection is already closed.
-    pub fn close(&self, reason: impl Into<Cow<'static, str>>, code: u64) -> Result<(), Error> {
-        self.0.application_close(reason, code)
+        self.try_map_components(|core_conn| core_conn.role())
     }
 
     /// Gets the connection metrics for tracking data volumes.
@@ -547,23 +528,20 @@ impl Connection {
     /// - pending_send_bytes: Data written by application but not yet sent
     /// - sent_unacked_bytes: Data sent but not yet acknowledged
     /// - sent_acked_bytes: Data sent and acknowledged
-    pub fn metrics(&self) -> Result<qbase::metric::ArcConnectionMetrics, Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.metrics().clone())
+    pub fn metrics(&self) -> Result<ArcConnectionMetrics, Error> {
+        self.try_map_components(|core_conn| core_conn.metrics().clone())
     }
 
     #[allow(clippy::type_complexity)]
     pub fn open_bi_stream(
         &self,
     ) -> Impl_Future![Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.open_bi_stream())
+        self.try_map_components_future(|core_conn| core_conn.open_bi_stream())
             .map(|result| result?)
     }
 
     pub fn open_uni_stream(&self) -> Impl_Future![Result<Option<(StreamId, StreamWriter)>, Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.open_uni_stream())
+        self.try_map_components_future(|core_conn| core_conn.open_uni_stream())
             .map(|result| result?)
     }
 
@@ -571,14 +549,12 @@ impl Connection {
     pub fn accept_bi_stream(
         &self,
     ) -> Impl_Future![Result<(StreamId, (StreamReader, StreamWriter)), Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.accept_bi_stream())
+        self.try_map_components_future(|core_conn| core_conn.accept_bi_stream())
             .map(|result| result?)
     }
 
     pub fn accept_uni_stream(&self) -> Impl_Future![Result<(StreamId, StreamReader), Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.accept_uni_stream())
+        self.try_map_components_future(|core_conn| core_conn.accept_uni_stream())
             .map(|result| result?)
     }
 
@@ -586,8 +562,7 @@ impl Connection {
     #[deprecated]
     #[allow(deprecated)]
     pub fn datagram_reader(&self) -> Result<io::Result<DatagramReader>, Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.datagram_reader())
+        self.try_map_components(|core_conn| core_conn.datagram_reader())
     }
 
     #[cfg(feature = "datagram")]
@@ -595,7 +570,6 @@ impl Connection {
     #[allow(deprecated)]
     pub async fn datagram_writer(&self) -> Result<io::Result<DatagramWriter>, Error> {
         Ok(self
-            .0
             .try_map_components(|core_conn| core_conn.datagram_writer())?
             .await)
     }
@@ -606,63 +580,54 @@ impl Connection {
         link: Link,
         pathway: Pathway,
     ) -> Result<(), CreatePathFailure> {
-        self.0
-            .try_map_components(|core_conn| core_conn.add_path(bind_uri, link, pathway))
+        self.try_map_components(|core_conn| core_conn.add_path(bind_uri, link, pathway))
             .unwrap_or_else(|cc| Err(CreatePathFailure::ConnectionClosed(cc)))
     }
 
     pub fn del_path(&self, pathway: &Pathway) -> Result<(), Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.del_path(pathway))
+        self.try_map_components(|core_conn| core_conn.del_path(pathway))
     }
 
     pub fn origin_dcid(&self) -> Result<cid::ConnectionId, Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.cid_registry.origin_dcid())
+        self.try_map_components(|core_conn| core_conn.cid_registry.origin_dcid())
     }
 
     pub fn handshaked(&self) -> Impl_Future![Result<(), Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.conn_state.handshaked())
+        self.try_map_components_future(|core_conn| core_conn.conn_state.handshaked())
             .map(|result| result?)
     }
 
     pub fn terminated(&self) -> Impl_Future![Error] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.conn_state.terminated())
+        self.try_map_components_future(|core_conn| core_conn.conn_state.terminated())
             .map(|(Ok(error) | Err(error))| error)
     }
 
     pub fn local_agent(&self) -> Impl_Future![Result<Option<LocalAgent>, Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.local_agent())
+        self.try_map_components_future(|core_conn| core_conn.local_agent())
             .map(|result| result?)
     }
 
     pub fn remote_agent(&self) -> Impl_Future![Result<Option<RemoteAgent>, Error>] {
-        self.0
-            .try_map_components_future(|core_conn| core_conn.remote_agent())
+        self.try_map_components_future(|core_conn| core_conn.remote_agent())
             .map(|result| result?)
     }
 
     pub fn server_name(&self) -> Impl_Future![Result<String, Error>] {
-        self.0
-            .try_map_components_future(|core_conn| match core_conn.role() {
-                Role::Client => core_conn
-                    .remote_agent()
-                    .map_ok(|agent| agent.unwrap().name().to_owned())
-                    .left_future(),
-                Role::Server => core_conn
-                    .local_agent()
-                    .map_ok(|agent| agent.unwrap().name().to_owned())
-                    .right_future(),
-            })
-            .map(|result| result?)
+        self.try_map_components_future(|core_conn| match core_conn.role() {
+            Role::Client => core_conn
+                .remote_agent()
+                .map_ok(|agent| agent.unwrap().name().to_owned())
+                .left_future(),
+            Role::Server => core_conn
+                .local_agent()
+                .map_ok(|agent| agent.unwrap().name().to_owned())
+                .right_future(),
+        })
+        .map(|result| result?)
     }
 
     pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) -> Result<(), Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.add_local_endpoint(bind, addr))
+        self.try_map_components(|core_conn| core_conn.add_local_endpoint(bind, addr))
     }
 
     pub fn add_peer_endpoint(
@@ -670,29 +635,30 @@ impl Connection {
         addr: EndpointAddr,
         source: qresolve::Source,
     ) -> Result<(), Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.add_peer_endpoint(addr, source))
+        self.try_map_components(|core_conn| core_conn.add_peer_endpoint(addr, source))
     }
 
     pub fn remove_address(&self, addr: SocketAddr) -> Result<(), Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.remove_address(addr))
+        self.try_map_components(|core_conn| core_conn.remove_address(addr))
     }
 
     pub fn subscribe_local_address(&self) -> Result<(), Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.subscribe_local_address())
+        self.try_map_components(|core_conn| core_conn.subscribe_local_address())
     }
 
     pub fn path_context(&self) -> Result<ArcPathContexts, Error> {
-        self.0
-            .try_map_components(|core_conn| core_conn.paths.clone())
+        self.try_map_components(|core_conn| core_conn.paths.clone())
     }
+}
 
-    /// Check if the connection is still valid.
-    ///
-    /// Return error if no viable path exists, or the connection is closed.
-    pub fn validate(&self) -> Result<(), Error> {
-        self.0.validate()
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let _span = self.tracing_span.enter();
+        if self.validate().is_ok() && self.close("", 0).is_ok() {
+            #[cfg(debug_assertions)]
+            tracing::warn!(target: "quic", "connection is still active when dropped, close it automatically.");
+            #[cfg(not(debug_assertions))]
+            tracing::debug!(target: "quic", "connection is still active when dropped, close it automatically.");
+        }
     }
 }
