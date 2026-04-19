@@ -122,7 +122,7 @@ impl QuicClient {
     ///
     /// This is useful for advanced scenarios where you need fine-grained control
     /// over which interfaces and paths are used for the connection.
-    pub fn new_connection(&self, server_name: impl Into<String>) -> Connection {
+    pub fn new_connection(&self, server_name: impl Into<String>) -> Arc<Connection> {
         Connection::new_client(server_name.into(), self.token_sink.clone())
             .with_parameters(self.parameters.clone())
             .with_tls_config(self.tls_config.clone())
@@ -132,8 +132,6 @@ impl QuicClient {
             .with_iface_manager(self.network.iface_manager.clone())
             .with_quic_router(self.network.quic_router.clone())
             .with_locations(self.network.locations.clone())
-            // todo
-            // .with_stun_servers()
             .with_defer_idle_timeout(self.defer_idle_timeout)
             .with_cids(ConnectionId::random_gen(8))
             .with_qlog(self.qlogger.clone())
@@ -329,7 +327,7 @@ impl QuicClient {
         &self,
         server_name: impl Into<String>,
         server_eps: impl IntoIterator<Item = (Source, EndpointAddr)>,
-    ) -> Result<Connection, ConnectServerError> {
+    ) -> Result<Arc<Connection>, ConnectServerError> {
         let connection = self.new_connection(server_name);
         _ = connection.subscribe_local_address();
         for (source, server_ep) in server_eps {
@@ -350,7 +348,10 @@ impl QuicClient {
     ///
     /// The returned [`Connection`] may not have completed the handshake yet.
     /// Asynchronous operations on the connection will wait for the handshake.
-    pub async fn connect(self: &Arc<Self>, server: &str) -> Result<Connection, ConnectServerError> {
+    pub async fn connect(
+        self: &Arc<Self>,
+        server: &str,
+    ) -> Result<Arc<Connection>, ConnectServerError> {
         let mut server_eps = self
             .network
             .resolver
@@ -397,14 +398,27 @@ impl QuicClient {
         }
 
         // Background task: keep consuming the DNS stream for late-arriving endpoints.
+        // Uses `Weak<Connection>` so this task does not keep the connection alive when
+        // all external callers have dropped their `Arc<Connection>`. The task races
+        // the DNS drain against `terminated()` so it exits promptly on shutdown.
         tokio::spawn({
-            let connection = connection.clone();
+            let weak_connection = Arc::downgrade(&connection);
+            let terminated = connection.terminated();
             let client = self.clone();
             async move {
-                while let Some((source, server_ep)) = server_eps.next().await {
-                    _ = client
-                        .setup_server_endpoint(&connection, source, server_ep)
-                        .await;
+                tokio::pin!(terminated);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut terminated => break,
+                        next = server_eps.next() => {
+                            let Some((source, server_ep)) = next else { break };
+                            let Some(connection) = weak_connection.upgrade() else { break };
+                            _ = client
+                                .setup_server_endpoint(&connection, source, server_ep)
+                                .await;
+                        }
+                    }
                 }
             }
         });

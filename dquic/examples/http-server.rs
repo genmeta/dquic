@@ -151,7 +151,7 @@ async fn run(options: Options) -> Result<(), Error> {
     }
 }
 
-async fn serve_files(connection: Connection) -> Result<(), Error> {
+async fn serve_files(connection: Arc<Connection>) -> Result<(), Error> {
     async fn serve_file(mut reader: StreamReader, mut writer: StreamWriter) -> Result<(), Error> {
         let mut request = String::new();
         reader.read_to_string(&mut request).await?;
