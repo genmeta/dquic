@@ -387,19 +387,21 @@ impl Component for StunClientComponent {
             return;
         }
 
-        let Ok(locations) = iface.with_component(|loc: &LocationsComponent| {
-            loc.reinit(iface);
-            loc.clone()
+        let Ok(Some((router, locations))) = iface.with_components(|components| {
+            let router = components.with(|router: &StunRouterComponent| {
+                router.reinit(iface);
+                router.router()
+            })?;
+            let locations = components.with(|locations: &LocationsComponent| {
+                locations.reinit(iface);
+                locations.clone()
+            });
+            Some((router, locations))
         }) else {
             return;
         };
 
-        let new_client = StunClient::new(
-            iface.downgrade(),
-            client.stun_router.clone(),
-            client.stun_agent,
-            locations,
-        );
+        let new_client = StunClient::new(iface.downgrade(), router, client.stun_agent, locations);
         *client = new_client;
     }
 }
