@@ -18,7 +18,7 @@ use qbase::{
     net::{
         NatType,
         addr::EndpointAddr,
-        route::{Line, Link, Route},
+        route::{Line, Link, Pathway, Route},
         tx::Signals,
     },
     packet::{
@@ -42,7 +42,6 @@ use tokio::{task::AbortHandle, time::timeout};
 use tracing::Instrument as _;
 
 use crate::{
-    PathWay,
     addr::AddressBook,
     nat::{
         client::{StunClientComponent, StunClientsComponent},
@@ -93,9 +92,9 @@ fn build_validated_way(
     remote: EndpointAddr,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
-) -> Result<(BindUri, Link, PathWay), InvalidWay> {
+) -> Result<(BindUri, Link, Pathway), InvalidWay> {
     let link = Link::new(local_addr, remote_addr);
-    let pathway = PathWay::new(local, remote);
+    let pathway = Pathway::new(local, remote);
     let way = (bind.clone(), pathway, link);
     validate_outbound_candidate(&way)?;
     Ok((way.0, way.2, way.1))
@@ -903,7 +902,7 @@ where
         &self,
         endpoint: EndpointAddr,
         source: qresolve::Source,
-    ) -> io::Result<Vec<(BindUri, Link, PathWay)>> {
+    ) -> io::Result<Vec<(BindUri, Link, Pathway)>> {
         let local_endpoints = {
             let mut address_book = self.0.address_book.lock().unwrap();
             address_book.add_peer_endpoint(endpoint, source.clone())?;
@@ -991,7 +990,7 @@ where
 
     fn recv_punch_me_now(
         &self,
-        pathway: PathWay,
+        pathway: Pathway,
         punch_me_now_frame: PunchMeNowFrame,
     ) -> io::Result<()> {
         let punch_id = punch_me_now_frame.punch_id().flip();
@@ -1655,7 +1654,7 @@ where
         local: &EndpointAddr,
         remote: &EndpointAddr,
         source: &qresolve::Source,
-    ) -> Result<(BindUri, Link, PathWay), ResolvePathError> {
+    ) -> Result<(BindUri, Link, Pathway), ResolvePathError> {
         if let qresolve::Source::Mdns { nic, family } = source {
             let matches_iface = bind
                 .as_iface_bind_uri()
@@ -1701,7 +1700,7 @@ where
     }
 }
 
-impl<TX, PH, S> ReceiveFrame<(BindUri, PathWay, Link, ReliableFrame)> for ArcPuncher<TX, PH, S>
+impl<TX, PH, S> ReceiveFrame<(BindUri, Pathway, Link, ReliableFrame)> for ArcPuncher<TX, PH, S>
 where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
     PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
@@ -1714,7 +1713,7 @@ where
 
     fn recv_frame(
         &self,
-        (_bind, pathway, link, frame): (BindUri, PathWay, Link, ReliableFrame),
+        (_bind, pathway, link, frame): (BindUri, Pathway, Link, ReliableFrame),
     ) -> Result<Self::Output, qbase::error::Error> {
         tracing::debug!(target: "punch", %pathway, %link, frame = ?frame, "received reliable punch frame");
         match frame {
@@ -1748,7 +1747,7 @@ where
     }
 }
 
-impl<TX, PH, S> ReceiveFrame<(BindUri, PathWay, Link, PunchHelloFrame)> for ArcPuncher<TX, PH, S>
+impl<TX, PH, S> ReceiveFrame<(BindUri, Pathway, Link, PunchHelloFrame)> for ArcPuncher<TX, PH, S>
 where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
     PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
@@ -1761,7 +1760,7 @@ where
 
     fn recv_frame(
         &self,
-        (_bind, pathway, link, frame): (BindUri, PathWay, Link, PunchHelloFrame),
+        (_bind, pathway, link, frame): (BindUri, Pathway, Link, PunchHelloFrame),
     ) -> Result<Self::Output, qbase::error::Error> {
         tracing::debug!(target: "punch", %pathway, %link, frame = ?frame, "received punch hello frame");
         let punch_id = frame.punch_id().flip();
@@ -1871,7 +1870,7 @@ mod tests {
         let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
             .expect("matching loopback scope must be retained");
         assert_eq!(link, Link::new(local_addr, remote_addr));
-        assert_eq!(pathway, PathWay::new(local, remote));
+        assert_eq!(pathway, Pathway::new(local, remote));
     }
 
     #[test]
@@ -1886,7 +1885,7 @@ mod tests {
             .expect("wildcard source selection belongs to IO");
 
         assert_eq!(link, Link::new(local_addr, remote_addr));
-        assert_eq!(pathway, PathWay::new(local, remote));
+        assert_eq!(pathway, Pathway::new(local, remote));
     }
 
     #[test]

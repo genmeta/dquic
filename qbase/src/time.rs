@@ -152,6 +152,8 @@ impl IdleTimer {
     // Checks health of the path and
     // determines whether a heartbeat packet needs to be sent.
     pub fn health(&mut self) -> Result<Option<PingFrame>, TimeOut> {
+        // TODO: 考虑连接还没关闭，闲置路径的 defer_idle_timeout 不能生效
+        //       得统一考虑成连接级的 defer_idle_timeout
         if let Some(t) = self.last_effective_comm {
             let elapsed = t.elapsed();
             if elapsed > self.idle_config.defer_idle_timeout() {

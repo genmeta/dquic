@@ -5,11 +5,11 @@ use std::{
     task::{Context, Poll},
 };
 
-use qbase::util::WakerVec;
+use qbase::util::WakerGroup;
 
 #[derive(Debug)]
 enum FutureState<T> {
-    Demand(WakerVec),
+    Demand(WakerGroup),
     Ready(T),
 }
 
@@ -137,7 +137,7 @@ impl<T> Future<T> {
         let mut state = self.state();
         match state.deref_mut() {
             FutureState::Demand(wakers) => {
-                wakers.register(cx.waker());
+                wakers.add(cx.waker());
                 Poll::Pending
             }
             FutureState::Ready(..) => Poll::Ready(ReadyFuture(state)),
@@ -167,7 +167,7 @@ impl<T> Future<T> {
         let mut state = self.state();
         *state = match state.deref_mut() {
             FutureState::Demand(wakers) => FutureState::Demand(mem::take(wakers)),
-            FutureState::Ready(_) => FutureState::Demand(WakerVec::default()),
+            FutureState::Ready(_) => FutureState::Demand(WakerGroup::default()),
         };
     }
 }
