@@ -14,7 +14,7 @@ use bytes::BytesMut;
 use qbase::{
     net::{
         addr::EndpointAddr,
-        route::{Line, Link, Route},
+        route::{Line, Link, Pathway, Route},
     },
     util::ArcAsyncDeque,
 };
@@ -30,10 +30,9 @@ use smallvec::SmallVec;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument as _;
 
-pub type ArcRecvQueue = ArcAsyncDeque<(BytesMut, PathWay, Link)>;
+pub type ArcRecvQueue = ArcAsyncDeque<(BytesMut, Pathway, Link)>;
 
 use crate::{
-    PathWay,
     nat::{
         client::{StunClients, StunClientsComponent},
         router::{StunRouter, StunRouterComponent},

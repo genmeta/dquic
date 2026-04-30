@@ -12,9 +12,13 @@ categories.workspace = true
 [dependencies]
 bytes = { workspace = true }
 nom = { workspace = true }
+dashmap = { workspace = true }
 qbase = { workspace = true }
+qinterface = { workspace = true }
+qudp = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [features]
 # Enable shorter TTL only for tests (especially integration tests in other crates).

@@ -1,5 +1,7 @@
+use bytes::BytesMut;
 use clap::Parser;
-use qudp::UdpSocket;
+use qbase::net::route::Line;
+use qudp::{BATCH_SIZE, UdpSocket};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -18,16 +20,24 @@ async fn main() {
     let addr = args.bind.parse().unwrap();
 
     let socket = UdpSocket::bind(addr).expect("failed to create socket");
-    let mut receiver = socket.receiver();
+    let mut iovecs: Vec<BytesMut> = (0..BATCH_SIZE)
+        .map(|_| {
+            let mut buf = BytesMut::with_capacity(1500);
+            buf.resize(1500, 0);
+            buf
+        })
+        .collect();
+    let mut lines: Vec<Line> = (0..BATCH_SIZE).map(|_| Line::default()).collect();
+
     loop {
-        match receiver.recv().await {
+        match socket.receive(&mut iovecs, &mut lines).await {
             Ok(n) => {
                 tracing::info!(
                     target: "qudp",
                     packets = n,
-                    dst = %receiver.lines[0].dst,
-                    src = %receiver.lines[0].src,
-                    len = receiver.lines[0].seg_size,
+                    dst = %lines[0].dst,
+                    src = %lines[0].src,
+                    len = lines[0].seg_size,
                     "received packets"
                 );
             }

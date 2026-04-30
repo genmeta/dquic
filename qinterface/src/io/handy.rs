@@ -84,7 +84,7 @@ pub mod qudp {
             }
         }
 
-        fn usc(&self) -> io::Result<&qudp::UdpSocket> {
+        fn socket(&self) -> io::Result<&qudp::UdpSocket> {
             self.io
                 .as_ref()
                 .map_err(|e| io::Error::from(e.clone()))
@@ -98,7 +98,7 @@ pub mod qudp {
         }
 
         fn bound_addr(&self) -> io::Result<SocketAddr> {
-            self.usc()?.local_addr()
+            self.socket()?.local_addr()
         }
 
         fn max_segments(&self) -> io::Result<usize> {
@@ -115,11 +115,17 @@ pub mod qudp {
             pkts: &[io::IoSlice],
             route: Route,
         ) -> Poll<io::Result<usize>> {
-            let io = self.usc()?;
-            self.send_wakers.combine_with(cx, |cx| {
-                debug_assert_eq!(route.ecn(), None);
-                io.poll_send(cx, pkts, &route.line)
-            })
+            let io = self.socket()?;
+            let waker = cx.waker();
+            let waker_group = self.send_wakers.together_with(waker);
+            let cx = &mut Context::from_waker(&waker_group);
+
+            debug_assert_eq!(route.ecn(), None);
+            let result = io.poll_send(cx, pkts, &route);
+            if result.is_ready() {
+                self.send_wakers.remove(waker);
+            }
+            result
         }
 
         fn poll_recv(
@@ -128,7 +134,7 @@ pub mod qudp {
             pkts: &mut [BytesMut],
             route: &mut [Route],
         ) -> Poll<io::Result<usize>> {
-            let io = self.usc()?;
+            let io = self.socket()?;
             self.recv_wakers.combine_with(cx, |cx| {
                 let len = route.len().min(pkts.len());
                 let mut rcvd_lines = Vec::with_capacity(len);
@@ -152,7 +158,7 @@ pub mod qudp {
         }
 
         fn poll_close(&mut self, _cx: &mut Context) -> Poll<io::Result<()>> {
-            self.usc()?;
+            self.socket()?;
             self.send_wakers.wake_all();
             self.recv_wakers.wake_all();
             self.io = Ok(Err(Closed(())));

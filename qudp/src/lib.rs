@@ -25,6 +25,8 @@ cfg_if::cfg_if! {
     }
 }
 
+pub mod ext;
+
 #[derive(Debug)]
 pub struct UdpSocket {
     io: tokio::net::UdpSocket,
@@ -191,25 +193,19 @@ impl UdpSocket {
         }
     }
 
-    pub fn receiver(&self) -> Receiver<'_> {
-        Receiver {
+    pub fn receive<'a>(&'a self, iovecs: &'a mut [BytesMut], lines: &'a mut [Line]) -> Receive<'a> {
+        Receive {
             socket: self,
-            iovecs: (0..BATCH_SIZE)
-                .map(|_| {
-                    let mut buf = BytesMut::with_capacity(1500);
-                    buf.resize(1500, 0);
-                    buf
-                })
-                .collect::<Vec<_>>(),
-            lines: (0..BATCH_SIZE).map(|_| Line::default()).collect::<Vec<_>>(),
+            iovecs,
+            lines,
         }
     }
 }
 
 pub struct Send<'a> {
-    pub socket: &'a UdpSocket,
-    pub iovecs: &'a [IoSlice<'a>],
-    pub line: Line,
+    socket: &'a UdpSocket,
+    iovecs: &'a [IoSlice<'a>],
+    line: Line,
 }
 
 impl Future for Send<'_> {
@@ -221,27 +217,23 @@ impl Future for Send<'_> {
     }
 }
 
-pub struct Receiver<'u> {
-    pub socket: &'u UdpSocket,
-    pub iovecs: Vec<BytesMut>,
-    pub lines: Vec<Line>,
+pub struct Receive<'a> {
+    socket: &'a UdpSocket,
+    iovecs: &'a mut [BytesMut],
+    lines: &'a mut [Line],
 }
 
-impl Receiver<'_> {
-    #[inline]
-    pub fn poll_recv(&mut self, cx: &mut Context) -> Poll<io::Result<usize>> {
-        let mut bufs = self
+impl Future for Receive<'_> {
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut bufs = this
             .iovecs
             .iter_mut()
             .map(|b| IoSliceMut::new(b))
             .collect::<Vec<_>>();
-
-        self.socket.poll_recv(cx, &mut bufs, &mut self.lines)
-    }
-
-    #[inline]
-    pub async fn recv(&mut self) -> io::Result<usize> {
-        core::future::poll_fn(|cx| self.poll_recv(cx)).await
+        this.socket.poll_recv(cx, &mut bufs, this.lines)
     }
 }
 
@@ -257,23 +249,28 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ipv6_wildcard_socket_does_not_receive_ipv4_packets() -> io::Result<()> {
-        let socket = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+        let socket4 = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::UNSPECIFIED,
             0,
             0,
             0,
         )))?;
-        let port = socket.local_addr()?.port();
+        let port = socket4.local_addr()?.port();
 
-        let sender =
+        let socket6 =
             std::net::UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))?;
-        sender.send_to(
+        socket6.send_to(
             b"ping",
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
         )?;
 
-        let mut receiver = socket.receiver();
-        let result = tokio::time::timeout(Duration::from_millis(200), receiver.recv()).await;
+        let mut iovecs = [BytesMut::with_capacity(1500); 1];
+        let mut lines = [Line::default(); 1];
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            socket4.receive(&mut iovecs, &mut lines),
+        )
+        .await;
         assert!(
             result.is_err(),
             "unexpected ipv4 datagram arrived on ipv6 wildcard socket: {result:?}"
