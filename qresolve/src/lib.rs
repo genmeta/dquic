@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     fmt::{Debug, Display},
     io,
     sync::Arc,
@@ -9,7 +10,7 @@ pub use qbase::net::{Family, addr::EndpointAddr};
 
 pub type PublishFuture<'a> = BoxFuture<'a, io::Result<()>>;
 
-pub trait Publish: Display + Debug {
+pub trait Publish: Any + Send + Sync + Display + Debug {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a>;
 }
 
@@ -41,7 +42,7 @@ pub type ResolveFuture<'r> = BoxFuture<'r, ResolveResult>;
 ///
 /// The result is a stream to allow implementations that yield endpoints over time
 /// (e.g. multi-source resolvers, H3x Dns, Mdns).
-pub trait Resolve: Send + Sync + Display + Debug {
+pub trait Resolve: Any + Send + Sync + Display + Debug {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l>;
 }
 
@@ -69,5 +70,52 @@ impl Resolve for SystemResolver {
                 .boxed()
             })
             .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        any::Any,
+        fmt::{self, Debug, Display},
+    };
+
+    use futures::FutureExt;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestPublisher;
+
+    impl Display for TestPublisher {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("test publisher")
+        }
+    }
+
+    impl Publish for TestPublisher {
+        fn publish<'a>(&'a self, _name: &'a str, _packet: &'a [u8]) -> PublishFuture<'a> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn resolve_trait_objects_upcast_to_any() {
+        assert_send_sync::<SystemResolver>();
+        let resolver: &dyn Resolve = &SystemResolver;
+        let any: &dyn Any = resolver;
+
+        assert!(any.is::<SystemResolver>());
+    }
+
+    #[test]
+    fn publish_trait_objects_upcast_to_any() {
+        assert_send_sync::<TestPublisher>();
+        let publisher: &dyn Publish = &TestPublisher;
+        let any: &dyn Any = publisher;
+
+        assert!(any.is::<TestPublisher>());
     }
 }
