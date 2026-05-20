@@ -61,14 +61,21 @@ pub mod qudp {
 
     impl UdpSocketController {
         pub fn bind(bind_uri: BindUri) -> Self {
-            let io = SocketAddr::try_from(&bind_uri)
+            let io = bind_uri
+                .resolve_binding()
                 .map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("Failed to bind {bind_uri}: {e}"),
                     )
                 })
-                .and_then(qudp::UdpSocket::bind);
+                .and_then(|binding| match binding.device {
+                    Some(device) => {
+                        let device = qudp::BoundDevice::new(device.name, device.index)?;
+                        qudp::UdpSocket::bind_to_device(binding.addr, device)
+                    }
+                    None => qudp::UdpSocket::bind(binding.addr),
+                });
             UdpSocketController {
                 bind_uri,
                 send_wakers: Arc::new(Wakers::new()),

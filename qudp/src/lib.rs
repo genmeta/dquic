@@ -2,6 +2,7 @@ use std::{
     future::Future,
     io::{self, IoSlice, IoSliceMut},
     net::SocketAddr,
+    num::NonZeroU32,
     pin::Pin,
     sync::atomic::AtomicI32,
     task::{Context, Poll, ready},
@@ -28,10 +29,48 @@ cfg_if::cfg_if! {
 pub struct UdpSocket {
     io: tokio::net::UdpSocket,
     ttl: AtomicI32,
+    bound_device: Option<BoundDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundDevice {
+    name: String,
+    index: NonZeroU32,
+}
+
+impl BoundDevice {
+    pub fn new(name: impl Into<String>, index: u32) -> io::Result<Self> {
+        let index = NonZeroU32::new(index).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "interface index must be non-zero",
+            )
+        })?;
+        Ok(Self {
+            name: name.into(),
+            index,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn index(&self) -> NonZeroU32 {
+        self.index
+    }
 }
 
 impl UdpSocket {
     pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+        Self::bind_scoped(addr, None)
+    }
+
+    pub fn bind_to_device(addr: SocketAddr, device: BoundDevice) -> io::Result<Self> {
+        Self::bind_scoped(addr, Some(device))
+    }
+
+    fn bind_scoped(addr: SocketAddr, bound_device: Option<BoundDevice>) -> io::Result<Self> {
         let domain = if addr.is_ipv4() {
             Domain::IPV4
         } else {
@@ -41,16 +80,25 @@ impl UdpSocket {
         let socket = Socket::new(domain, Type::DGRAM, None)?;
         socket.set_nonblocking(true)?;
         Self::config(&socket, addr)?;
+        if let Some(device) = bound_device.as_ref() {
+            let socket_ref = socket2::SockRef::from(&socket);
+            Self::bind_device_to_socket(&socket_ref, addr, device)?;
+        }
         let io = tokio::net::UdpSocket::from_std(socket.into())?;
         let usc = Self {
             io,
             ttl: AtomicI32::new(Line::DEFAULT_TTL as i32),
+            bound_device,
         };
         Ok(usc)
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.io.local_addr()
+    }
+
+    pub fn bound_device(&self) -> Option<&BoundDevice> {
+        self.bound_device.as_ref()
     }
 
     pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -99,43 +147,33 @@ impl UdpSocket {
         }
     }
 
-    #[allow(unreachable_code)]
-    pub fn bind_device(&self, _device: &str) -> io::Result<()> {
-        // #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        // android and linux support bind_device_by_index, which is called by codes below
-        #[cfg(target_os = "fuchsia")]
+    pub fn bind_device(&self, device: &str) -> io::Result<()> {
+        #[cfg(not(unix))]
         {
-            let socket = socket2::SockRef::from(&self.io);
-            return socket.bind_device(Some(_device.as_bytes()));
+            let _ = device;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "binding an existing UDP socket by interface name is unsupported on this platform",
+            ));
         }
-        #[cfg(any(
-            target_os = "ios",
-            target_os = "visionos",
-            target_os = "macos",
-            target_os = "tvos",
-            target_os = "watchos",
-            target_os = "illumos",
-            target_os = "solaris",
-            target_os = "linux",
-            target_os = "android",
-        ))]
+        #[cfg(unix)]
         {
+            let index = nix::net::if_::if_nametoindex(device)?;
+            let device = BoundDevice::new(device, index)?;
             let socket = socket2::SockRef::from(&self.io);
-            let index = nix::net::if_::if_nametoindex(_device)?;
-            let index = std::num::NonZeroU32::new(index)
-                .expect("Already checked by nix::net::if_::if_nametoindex");
-            match self.io.local_addr()? {
-                SocketAddr::V4(..) => socket.bind_device_by_index_v4(Some(index))?,
-                SocketAddr::V6(..) => socket.bind_device_by_index_v6(Some(index))?,
-            }
-            return Ok(());
+            Self::bind_device_to_socket(&socket, self.io.local_addr()?, &device)
         }
-        Ok(())
     }
 }
 
 pub trait Io {
     fn config(io: &socket2::Socket, addr: SocketAddr) -> io::Result<()>;
+
+    fn bind_device_to_socket(
+        io: &socket2::SockRef<'_>,
+        addr: SocketAddr,
+        device: &BoundDevice,
+    ) -> io::Result<()>;
 
     fn sendmsg(&self, bufs: &[IoSlice<'_>], line: &Line) -> io::Result<usize>;
 

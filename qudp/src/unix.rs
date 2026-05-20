@@ -14,7 +14,7 @@ use nix::{
 use qbase::net::route::Line;
 use socket2::Socket;
 
-use crate::{Io, UdpSocket};
+use crate::{BoundDevice, Io, UdpSocket};
 
 const OPTION_ON: bool = true;
 const OPTION_OFF: bool = false;
@@ -50,6 +50,55 @@ impl Io for UdpSocket {
         socket.bind(&addr.into())
     }
 
+    fn bind_device_to_socket(
+        socket: &socket2::SockRef<'_>,
+        addr: SocketAddr,
+        device: &BoundDevice,
+    ) -> io::Result<()> {
+        let _ = addr;
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            if let Err(error) = socket.bind_device(Some(device.name().as_bytes())) {
+                tracing::debug!(
+                    target: "qudp",
+                    interface = device.name(),
+                    ifindex = device.index().get(),
+                    %error,
+                    "failed to apply socket-level device binding; sendmsg packet info will constrain egress interface"
+                );
+            }
+            return Ok(());
+        }
+
+        #[cfg(target_os = "fuchsia")]
+        {
+            return socket.bind_device(Some(device.name().as_bytes()));
+        }
+
+        #[cfg(any(
+            target_os = "ios",
+            target_os = "visionos",
+            target_os = "macos",
+            target_os = "tvos",
+            target_os = "watchos",
+        ))]
+        {
+            return match addr {
+                SocketAddr::V4(..) => socket.bind_device_by_index_v4(Some(device.index())),
+                SocketAddr::V6(..) => socket.bind_device_by_index_v6(Some(device.index())),
+            };
+        }
+
+        #[allow(unreachable_code)]
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "binding UDP socket to interface {} is unsupported on this platform",
+                device.name()
+            ),
+        ))
+    }
+
     #[cfg(any(
         target_os = "android",
         target_os = "linux",
@@ -73,15 +122,76 @@ impl Io for UdpSocket {
         if batch_size == 0 {
             return Ok(0);
         }
+        let mut cmsgs = Vec::new();
         #[cfg(feature = "gso")]
-        let (cmsgs, space) = (
-            vec![nix::sys::socket::ControlMessage::UdpGsoSegments(
-                &line.seg_size,
-            )],
-            Some(cmsg_space!(libc::c_int)),
-        );
+        let has_gso = true;
         #[cfg(not(feature = "gso"))]
-        let (cmsgs, space) = (Vec::new(), None);
+        let has_gso = false;
+        #[cfg(feature = "gso")]
+        cmsgs.push(nix::sys::socket::ControlMessage::UdpGsoSegments(
+            &line.seg_size,
+        ));
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[derive(Clone, Copy)]
+        enum PacketInfoKind {
+            V4,
+            V6,
+        }
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let mut packet_info_kind = None;
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let v4_pktinfo;
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let v6_pktinfo;
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Some(device) = self.bound_device.as_ref() {
+            let src = if line.src.ip().is_unspecified() {
+                self.io.local_addr()?
+            } else {
+                line.src
+            };
+            match src.ip() {
+                IpAddr::V4(src) => {
+                    v4_pktinfo = libc::in_pktinfo {
+                        ipi_ifindex: device.index().get() as _,
+                        ipi_spec_dst: libc::in_addr {
+                            s_addr: u32::from_ne_bytes(src.octets()),
+                        },
+                        ipi_addr: libc::in_addr { s_addr: 0 },
+                    };
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(
+                        &v4_pktinfo,
+                    ));
+                    packet_info_kind = Some(PacketInfoKind::V4);
+                }
+                IpAddr::V6(src) => {
+                    v6_pktinfo = libc::in6_pktinfo {
+                        ipi6_addr: libc::in6_addr {
+                            s6_addr: src.octets(),
+                        },
+                        ipi6_ifindex: device.index().get() as _,
+                    };
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(
+                        &v6_pktinfo,
+                    ));
+                    packet_info_kind = Some(PacketInfoKind::V6);
+                }
+            }
+        }
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let space = match (has_gso, packet_info_kind) {
+            (false, None) => None,
+            (true, None) => Some(cmsg_space!(libc::c_int)),
+            (false, Some(PacketInfoKind::V4)) => Some(cmsg_space!(libc::in_pktinfo)),
+            (false, Some(PacketInfoKind::V6)) => Some(cmsg_space!(libc::in6_pktinfo)),
+            (true, Some(PacketInfoKind::V4)) => Some(cmsg_space!(libc::c_int, libc::in_pktinfo)),
+            (true, Some(PacketInfoKind::V6)) => Some(cmsg_space!(libc::c_int, libc::in6_pktinfo)),
+        };
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        let space = has_gso.then_some(cmsg_space!(libc::c_int));
 
         macro_rules! send_batch {
             ($ty:ty, $addr:expr) => {{

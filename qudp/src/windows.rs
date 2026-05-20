@@ -11,7 +11,7 @@ use qbase::net::route::{Line, Link};
 use socket2::Socket;
 use windows_sys::Win32::Networking::WinSock::{self, SOCKET};
 
-use crate::{Io, UdpSocket};
+use crate::{BoundDevice, Io, UdpSocket};
 
 const CMSG_LEN: usize = 128;
 #[derive(Copy, Clone)]
@@ -57,6 +57,14 @@ impl Io for UdpSocket {
         Ok(())
     }
 
+    fn bind_device_to_socket(
+        _socket: &socket2::SockRef<'_>,
+        _addr: SocketAddr,
+        _device: &BoundDevice,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
     fn sendmsg(&self, bufs: &[std::io::IoSlice<'_>], line: &Line) -> std::io::Result<usize> {
         let dst = socket2::SockAddr::from(line.dst);
         let mut count = 0;
@@ -84,15 +92,24 @@ impl Io for UdpSocket {
 
             let mut cmsg = unsafe { first_cmsg(&mut wsa_msg).as_mut() };
             let mut cmsg_len = 0;
-            if !line.src.ip().is_unspecified() {
-                let src = socket2::SockAddr::from(line.src);
+            if !line.src.ip().is_unspecified() || self.bound_device.is_some() {
+                let src = if line.src.ip().is_unspecified() {
+                    self.io.local_addr()?
+                } else {
+                    line.src
+                };
+                let src = socket2::SockAddr::from(src);
+                let ifindex = self
+                    .bound_device
+                    .as_ref()
+                    .map_or(0, |device| device.index().get());
                 match src.family() {
                     WinSock::AF_INET => {
                         let src_ip =
                             unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
                         let pktinfo = WinSock::IN_PKTINFO {
                             ipi_addr: src_ip.sin_addr,
-                            ipi_ifindex: 0,
+                            ipi_ifindex: ifindex,
                         };
 
                         cmsg = append_cmsg(
@@ -107,9 +124,14 @@ impl Io for UdpSocket {
                     WinSock::AF_INET6 => {
                         let src_ip =
                             unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
+                        let scope_id = unsafe { src_ip.Anonymous.sin6_scope_id };
                         let pktinfo = WinSock::IN6_PKTINFO {
                             ipi6_addr: src_ip.sin6_addr,
-                            ipi6_ifindex: unsafe { src_ip.Anonymous.sin6_scope_id },
+                            ipi6_ifindex: if self.bound_device.is_some() {
+                                ifindex
+                            } else {
+                                scope_id
+                            },
                         };
 
                         cmsg = append_cmsg(
