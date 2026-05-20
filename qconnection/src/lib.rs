@@ -638,6 +638,14 @@ impl Connection {
         self.try_map_components(|core_conn| core_conn.add_peer_endpoint(addr, source))
     }
 
+    pub fn add_local_punch_address(
+        &self,
+        bind: BindUri,
+        addr: EndpointAddr,
+    ) -> Result<io::Result<()>, Error> {
+        self.try_map_components(|core_conn| core_conn.add_local_punch_address(bind, addr))
+    }
+
     pub fn remove_address(&self, addr: SocketAddr) -> Result<(), Error> {
         self.try_map_components(|core_conn| core_conn.remove_address(addr))
     }
