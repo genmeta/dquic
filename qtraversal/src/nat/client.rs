@@ -295,7 +295,12 @@ impl<I: RefIO + 'static> StunClient<I> {
         // 又因为Dynamic 总是会新建 iface 进行打洞，所以这里污染了影响不会很大
         let task = async move {
             tracing::debug!(target: "stun", "starting NAT type detection");
-            let timeout = Duration::from_millis(100);
+            // NAT classification uses changed-address responses that may
+            // traverse another STUN server and Docker/router conntrack before
+            // reaching this socket. A 100ms per-attempt budget is too close to
+            // the normal response latency under load and can misclassify a
+            // full-cone NAT as restricted after a transient late response.
+            let timeout = Duration::from_millis(300);
             _ = nat_type.assign(
                 detect_nat_type(ref_iface, stun_router, stun_agent, 30, timeout)
                     .await
