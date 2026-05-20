@@ -57,10 +57,20 @@ impl ArcPathContexts {
     ) -> bool {
         let mut handshake_path = self.initial_path.lock().unwrap();
         if handshake_path.is_some() {
+            tracing::trace!(
+                pathway = %path.pathway,
+                initial_dcid = %initial_dcid,
+                "handshake path already assigned"
+            );
             return false;
         }
         remote_cids.apply_initial_dcid(initial_dcid, &path.dcid_cell);
         *handshake_path = Some(Arc::downgrade(path));
+        tracing::debug!(
+            pathway = %path.pathway,
+            initial_dcid = %initial_dcid,
+            "assigned handshake path"
+        );
         true
     }
 

@@ -177,6 +177,13 @@ async fn parse_normal_packet(
     let paths = &components.paths;
     let remote_cids = &components.cid_registry.remote;
 
+    tracing::trace!(
+        %bind_uri,
+        %pathway,
+        %link,
+        "received initial packet"
+    );
+
     let validate_token = {
         let token_registry = &components.token_registry;
         let tls_handshake = &components.tls_handshake;
