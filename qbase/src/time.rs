@@ -120,13 +120,21 @@ pub struct IdleTimer {
 }
 
 impl IdleTimer {
-    // Updates the timer when a packet is sent.
-    pub fn on_sent(&mut self, packet_content: PacketContent) {
-        if packet_content == PacketContent::EffectivePayload {
-            self.last_effective_comm = Some(Instant::now());
-            self.heartbeat_times = 0;
-            self.idle_begin_at = None;
-        }
+    pub fn on_sent(&mut self, _packet_content: PacketContent) {
+        // Temporarily disabled.
+        //
+        // Sending a packet locally is not evidence that the peer is still reachable.  The previous
+        // implementation reset `last_effective_comm`, `heartbeat_times`, and, most importantly,
+        // `idle_begin_at` whenever an EffectivePayload packet was assembled for transmission.  If a
+        // peer disappears while this endpoint still has ack-eliciting payload to retransmit, those
+        // retransmissions repeatedly call this hook and keep clearing `idle_begin_at`.  The path can
+        // then keep itself alive without receiving anything from the peer, which turns stale
+        // connections into an unbounded send storm.
+        //
+        // Keep the hook as a compatibility stub for now so the per-path idle timer work from
+        // 835b9e9566db04168a055ec04e2aeb2aa3a427e3 does not need to be reverted wholesale.  A
+        // future cleanup should split heartbeat/defer-idle bookkeeping from max-idle liveness
+        // tracking.  Until then, only receive-side activity may refresh this timer.
     }
 
     // Updates the timer when a packet is received.
@@ -186,5 +194,29 @@ impl ArcIdleTimer {
     // determines whether a heartbeat packet needs to be sent.
     pub fn health(&self) -> Result<Option<PingFrame>, TimeOut> {
         self.0.lock().unwrap().health()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sent_effective_payload_does_not_extend_idle_timeout() {
+        let mut timer = IdleTimer {
+            idle_config: ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO),
+            heartbeat_times: 0,
+            last_effective_comm: None,
+            idle_begin_at: None,
+        };
+
+        timer.on_rcvd(PacketContent::EffectivePayload);
+        assert!(timer.health().expect("timer should be healthy").is_some());
+
+        std::thread::sleep(Duration::from_millis(6));
+        timer.on_sent(PacketContent::EffectivePayload);
+        std::thread::sleep(Duration::from_millis(6));
+
+        assert!(timer.health().is_err());
     }
 }
