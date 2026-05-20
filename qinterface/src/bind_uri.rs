@@ -13,6 +13,18 @@ use thiserror::Error;
 #[derive(Debug, Display, Clone, Into, PartialEq, Eq, Hash)]
 pub struct BindUri(http::Uri);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBindUri {
+    pub addr: SocketAddr,
+    pub device: Option<ResolvedBindDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBindDevice {
+    pub name: String,
+    pub index: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("Invalid uri {0}")]
@@ -305,7 +317,7 @@ impl BindUri {
             .to_string()
     }
 
-    pub fn resolve(&self) -> Result<SocketAddr, io::Error> {
+    pub fn resolve_binding(&self) -> Result<ResolvedBindUri, io::Error> {
         match self.scheme() {
             Scheme::Iface => {
                 let (ip_family, interface, port) = self
@@ -313,21 +325,43 @@ impl BindUri {
                     .expect("Already checked BindUriScheme is iface");
 
                 let devices = crate::device::Devices::global();
-                devices.get(interface).ok_or(io::Error::new(
+                let device = devices.get(interface).ok_or(io::Error::new(
                     io::ErrorKind::NotFound,
                     "device not found".to_string(),
                 ))?;
-                let ip_addr = devices.resolve(interface, ip_family).ok_or(io::Error::new(
+                let ip_addr = match ip_family {
+                    Family::V4 => device.ipv4.first().map(|ipnet| IpAddr::V4(ipnet.addr())),
+                    Family::V6 => device
+                        .ipv6
+                        .iter()
+                        .map(|ipnet| ipnet.addr())
+                        .find(|ip| !matches!(ip.octets(), [0xfe, 0x80, ..]))
+                        .map(IpAddr::V6),
+                }
+                .ok_or(io::Error::new(
                     io::ErrorKind::NotFound,
                     "ip not matched".to_string(),
                 ))?;
 
-                Ok(SocketAddr::new(ip_addr, port))
+                Ok(ResolvedBindUri {
+                    addr: SocketAddr::new(ip_addr, port),
+                    device: Some(ResolvedBindDevice {
+                        name: interface.to_owned(),
+                        index: device.index,
+                    }),
+                })
             }
-            Scheme::Inet => Ok(self
-                .as_inet_bind_uri()
-                .expect("Already checked BindUriScheme is inet")),
+            Scheme::Inet => Ok(ResolvedBindUri {
+                addr: self
+                    .as_inet_bind_uri()
+                    .expect("Already checked BindUriScheme is inet"),
+                device: None,
+            }),
         }
+    }
+
+    pub fn resolve(&self) -> Result<SocketAddr, io::Error> {
+        self.resolve_binding().map(|binding| binding.addr)
     }
 }
 
@@ -491,6 +525,34 @@ mod tests {
         )
         .unwrap();
         assert!(SocketAddr::try_from(bind_uri).is_err_and(|e| e.kind() == io::ErrorKind::NotFound))
+    }
+
+    #[tokio::test]
+    async fn iface_binding_retains_device_index() {
+        let devices = crate::device::Devices::global();
+        let (device_name, iface, ip) = devices
+            .interfaces()
+            .into_iter()
+            .find_map(|(device_name, iface)| {
+                iface
+                    .ipv4
+                    .first()
+                    .map(|ipnet| (device_name, iface.clone(), ipnet.addr()))
+            })
+            .expect("test host should have at least one IPv4 interface");
+
+        let bind_uri = BindUri::from_str(&format!("iface://v4.{device_name}:8080")).unwrap();
+        let binding = bind_uri.resolve_binding().unwrap();
+
+        assert_eq!(binding.addr, SocketAddr::new(IpAddr::V4(ip), 8080));
+        assert_eq!(
+            binding.device.as_ref().map(|device| device.name.as_str()),
+            Some(device_name.as_str())
+        );
+        assert_eq!(
+            binding.device.as_ref().map(|device| device.index),
+            Some(iface.index)
+        );
     }
 
     #[test]
