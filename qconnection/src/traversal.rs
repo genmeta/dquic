@@ -97,9 +97,18 @@ impl Components {
     // 添加本地直通地址 可以直接新建 path
     pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) {
         tracing::trace!(target: "quic", bind_uri = %bind, %addr,"add local endpoint");
+        let bind_uri = bind.clone();
         match self.puncher.add_local_endpoint(bind, addr) {
             Ok(ways) => {
                 let ways: Vec<(BindUri, Link, qtraversal::PathWay)> = ways;
+                tracing::trace!(
+                    target: "quic",
+                    bind_uri = %bind_uri,
+                    %addr,
+                    path_count = ways.len(),
+                    paths = ?ways,
+                    "resolved local endpoint paths"
+                );
                 ways.into_iter().for_each(|way| {
                     let _ = self.add_path(way.0, way.1, way.2);
                 });
@@ -113,8 +122,17 @@ impl Components {
     // 添加对端直通地址，可以直接新建 path
     pub fn add_peer_endpoint(&self, addr: EndpointAddr, source: qresolve::Source) {
         tracing::trace!(target: "quic", %addr, ?source, "add peer endpoint");
+        let source_for_log = source.clone();
         match self.puncher.add_peer_endpoint(addr, source) {
             Ok(ways) => {
+                tracing::trace!(
+                    target: "quic",
+                    %addr,
+                    source = ?source_for_log,
+                    path_count = ways.len(),
+                    paths = ?ways,
+                    "resolved peer endpoint paths"
+                );
                 ways.into_iter().for_each(|way| {
                     let _ = self.add_path(way.0, way.1, way.2);
                 });
