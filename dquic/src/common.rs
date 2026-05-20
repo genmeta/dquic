@@ -1,6 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
-
-use std::iter;
+use std::{iter, net::SocketAddr, sync::Arc};
 
 use futures::{Stream, stream::FuturesUnordered};
 use qconnection::{
@@ -51,11 +49,7 @@ impl Default for Network {
 }
 
 impl Network {
-    fn init_iface_components(
-        &self,
-        bind_iface: &BindInterface,
-        stun_server: Option<Arc<str>>,
-    ) {
+    fn init_iface_components(&self, bind_iface: &BindInterface, stun_server: Option<Arc<str>>) {
         bind_iface.with_components_mut(move |components: &mut Components, iface: &Interface| {
             // rebind interface on network changed
             components.init_with(|| RebindOnNetworkChangedComponent::new(iface, self.devices));
