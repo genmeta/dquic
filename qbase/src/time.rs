@@ -91,7 +91,7 @@ impl ArcIdleConfig {
             idle_config: self.clone(),
             heartbeat_times: 0,
             last_effective_comm: None,
-            idle_begin_at: None,
+            idle_begin_at: Some(Instant::now()),
         })))
     }
 
@@ -218,5 +218,33 @@ mod tests {
         std::thread::sleep(Duration::from_millis(6));
 
         assert!(timer.health().is_err());
+    }
+
+    #[test]
+    fn new_timer_times_out_without_receive() {
+        let timer = ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO).timer();
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(timer.health().is_err());
+    }
+
+    #[test]
+    fn zero_max_idle_timeout_disables_new_timer_timeout() {
+        let timer = ArcIdleConfig::new(Duration::ZERO, Duration::ZERO).timer();
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(timer.health().is_ok());
+    }
+
+    #[test]
+    fn effective_receive_clears_initial_idle_deadline() {
+        let timer = ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO).timer();
+
+        timer.on_rcvd(PacketContent::EffectivePayload);
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(timer.health().is_ok());
     }
 }
