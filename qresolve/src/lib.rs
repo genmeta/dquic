@@ -18,6 +18,7 @@ pub trait Publish: Any + Send + Sync + Display + Debug {
 pub enum Source {
     Mdns { nic: Arc<str>, family: Family },
     Http { server: Arc<str> },
+    H3 { server: Arc<str> },
     System,
     Dht,
 }
@@ -27,6 +28,7 @@ impl Display for Source {
         match self {
             Source::Mdns { nic, family } => write!(f, "MDNS Resolver({nic} {family})"),
             Source::Http { server } => write!(f, "HTTP DNS Resolver({server})"),
+            Source::H3 { server } => write!(f, "H3 DNS Resolver({server})"),
             Source::System => write!(f, "System DNS Resolver"),
             Source::Dht => write!(f, "DHT"),
         }
@@ -117,5 +119,17 @@ mod tests {
         let any: &dyn Any = publisher;
 
         assert!(any.is::<TestPublisher>());
+    }
+
+    #[test]
+    fn h3_source_display_identifies_h3_dns() {
+        let source = Source::H3 {
+            server: Arc::from("https://dns.genmeta.net:4433"),
+        };
+
+        assert_eq!(
+            source.to_string(),
+            "H3 DNS Resolver(https://dns.genmeta.net:4433)"
+        );
     }
 }
