@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use dquic::{
     prelude::{handy::*, *},
@@ -156,6 +156,36 @@ fn idle_timeout() -> Result<(), BoxError> {
         connection.terminated().await;
 
         listeners.shutdown();
+        Ok(())
+    })
+}
+
+#[test]
+fn unreachable_server_connection_times_out() -> Result<(), BoxError> {
+    run(async {
+        fn short_idle_client_parameters() -> ClientParameters {
+            let mut params = client_parameters();
+            params
+                .set(ParameterId::MaxIdleTimeout, Duration::from_millis(100))
+                .expect("unreachable");
+            params
+        }
+
+        let router = Arc::new(QuicRouter::default());
+        let client = launch_test_client(router, short_idle_client_parameters());
+
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let unreachable: SocketAddr = socket.local_addr()?;
+        drop(socket);
+
+        let connection = client
+            .connected_to_with_source("localhost", [(Source::System, unreachable.into())])
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(2), connection.terminated())
+            .await
+            .expect("unreachable connection should terminate by max idle timeout");
+
         Ok(())
     })
 }
