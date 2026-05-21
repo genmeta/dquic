@@ -27,6 +27,7 @@ qudp = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
 smallvec = { workspace = true }
+snafu = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }

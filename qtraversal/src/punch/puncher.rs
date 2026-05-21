@@ -223,6 +223,8 @@ impl<TX, PH, S> Drop for Puncher<TX, PH, S> {
             .map(|entry| self.ifaces.unbind(entry.key().clone()))
             .collect();
         if !futures.is_empty() {
+            // Inherent termination: this task owns a finite set of unbind futures
+            // and exits once they all complete.
             tokio::spawn(
                 async move {
                     futures::future::join_all(futures).await;
@@ -258,6 +260,8 @@ where
             let stun_servers = self.0.stun_servers.clone();
             let quic_router = self.0.quic_router.clone();
 
+            // Inherent termination: dynamic address publication performs one probe
+            // and sends at most one AddAddress frame before returning.
             tokio::spawn(
                 async move {
                     let (iface, stun_client) =
@@ -265,10 +269,19 @@ where
                             .await?;
                     let dynamic_bind = iface.bind_uri();
                     let outer = stun_client.outer_addr().await.inspect_err(|error| {
-                        tracing::warn!(target: "punch", %error, bind_uri = %dynamic_bind, "failed to detect outer address for dynamic interface, unbinding");
+                        tracing::warn!(
+                            target: "punch",
+                            error = %snafu::Report::from_error(error),
+                            bind_uri = %dynamic_bind,
+                            "failed to detect outer address for dynamic interface, unbinding"
+                        );
                         let ifaces = ifaces.clone();
                         let dynamic_bind = dynamic_bind.clone();
-                        tokio::spawn(async move { ifaces.unbind(dynamic_bind).await });
+                        // Inherent termination: this task owns one interface bind
+                        // and exits once the unbind future completes.
+                        tokio::spawn(
+                            async move { ifaces.unbind(dynamic_bind).await }.in_current_span(),
+                        );
                     })?;
                     puncher
                         .0

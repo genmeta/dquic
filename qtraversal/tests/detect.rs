@@ -135,7 +135,7 @@ async fn test_detect_case(case: usize) {
         .outer_addr()
         .await
         .expect("failed to get outer addr");
-    tracing::info!("Outer addr: {} Agent addr {}", outer_addr, stun_agent);
+    tracing::info!("outer addr: {} agent addr {}", outer_addr, stun_agent);
     let nat_type = stun_client
         .nat_type()
         .await
@@ -172,4 +172,37 @@ test_detect! {
     async fn test_detect_port_restricted_server = test_detect_case(7)
     async fn test_detect_dynamic_server = test_detect_case(8)
     async fn test_detect_symmetric_server = test_detect_case(9)
+}
+
+#[test]
+fn client_location_data_preserves_typed_probe_error() {
+    use std::time::Duration;
+
+    use qtraversal::nat::client::{ClientLocationData, DetectOuterAddrError, StunProbeError};
+
+    let stun_server = "192.0.2.1:20004".parse().unwrap();
+    let timeout = Duration::from_millis(300);
+
+    let source = StunProbeError::NoResponse {
+        stun_server,
+        retry_times: 3,
+        timeout,
+    };
+    let error = DetectOuterAddrError::Probe { source };
+    let data: ClientLocationData = Err(error.clone());
+
+    let Err(DetectOuterAddrError::Probe {
+        source:
+            StunProbeError::NoResponse {
+                retry_times,
+                timeout: actual_timeout,
+                ..
+            },
+    }) = data
+    else {
+        panic!("expected typed no response error");
+    };
+
+    assert_eq!(retry_times, 3);
+    assert_eq!(actual_timeout, timeout);
 }
