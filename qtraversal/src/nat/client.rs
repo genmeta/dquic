@@ -17,7 +17,8 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use qbase::net::{Family, addr::EndpointAddr};
 pub use qbase::net::{NatType, NetFeature};
 use qinterface::{
-    Interface, RebindedError, WeakInterface,
+    Interface, WeakInterface,
+    bind_uri::BindUri,
     component::{
         Component,
         location::{IfaceLocations, LocationsComponent},
@@ -25,7 +26,7 @@ use qinterface::{
     io::{IO, RefIO},
 };
 use qresolve::Resolve;
-use thiserror::Error;
+use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
@@ -33,27 +34,130 @@ use tracing::Instrument;
 use super::{router::StunRouter, tx::Transaction};
 use crate::{
     future::Future,
-    nat::{iface::StunIO, msg::Request, router::StunRouterComponent},
+    nat::{
+        iface::StunIO,
+        msg::{Attr, Request, Response},
+        router::StunRouterComponent,
+    },
 };
 
-#[derive(Error, Clone)]
-#[error(transparent)]
-pub struct ArcIoError(Arc<io::Error>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatDetectionStep {
+    Access,
+    Mapping,
+    Filtering,
+    Dynamic,
+}
 
-impl fmt::Debug for ArcIoError {
+impl fmt::Display for NatDetectionStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.as_ref().fmt(f)
+        match self {
+            Self::Access => f.write_str("access test"),
+            Self::Mapping => f.write_str("mapping test"),
+            Self::Filtering => f.write_str("filtering test"),
+            Self::Dynamic => f.write_str("dynamic test"),
+        }
     }
 }
 
-impl From<io::Error> for ArcIoError {
-    fn from(source: io::Error) -> Self {
-        Self(source.into())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StunResponseAttribute {
+    MappedAddress,
+    ChangedAddress,
+    SourceAddress,
+}
+
+impl fmt::Display for StunResponseAttribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MappedAddress => f.write_str("mapped address"),
+            Self::ChangedAddress => f.write_str("changed address"),
+            Self::SourceAddress => f.write_str("source address"),
+        }
     }
 }
 
-impl From<ArcIoError> for io::Error {
-    fn from(source: ArcIoError) -> io::Error {
+#[derive(Debug, Clone, Snafu)]
+#[snafu(module)]
+pub enum StunProbeError {
+    #[snafu(display("failed to send stun request to {stun_server}"))]
+    SendRequest {
+        stun_server: SocketAddr,
+        #[snafu(source(from(io::Error, Arc::new)))]
+        source: Arc<io::Error>,
+    },
+
+    #[snafu(display("stun server {stun_server} did not respond"))]
+    NoResponse {
+        stun_server: SocketAddr,
+        retry_times: u8,
+        timeout: Duration,
+    },
+}
+
+#[derive(Debug, Clone, Snafu)]
+#[snafu(module)]
+pub enum StunResponseError {
+    #[snafu(display("stun response from {stun_server} is missing {attribute}"))]
+    MissingAttribute {
+        stun_server: SocketAddr,
+        attribute: StunResponseAttribute,
+    },
+}
+
+#[derive(Debug, Clone, Snafu)]
+#[snafu(module)]
+pub enum DetectOuterAddrError {
+    #[snafu(display("stun client interface `{bind_uri}` was rebinded"))]
+    Rebinded { bind_uri: BindUri },
+
+    #[snafu(display("failed to detect outer address"))]
+    Probe { source: StunProbeError },
+
+    #[snafu(display("failed to read outer address response"))]
+    Response { source: StunResponseError },
+}
+
+impl From<StunProbeError> for DetectOuterAddrError {
+    fn from(source: StunProbeError) -> Self {
+        Self::Probe { source }
+    }
+}
+
+impl From<DetectOuterAddrError> for io::Error {
+    fn from(source: DetectOuterAddrError) -> Self {
+        io::Error::other(source)
+    }
+}
+
+#[derive(Debug, Clone, Snafu)]
+#[snafu(module)]
+pub enum DetectNatTypeError {
+    #[snafu(display("stun client interface `{bind_uri}` was rebinded"))]
+    Rebinded { bind_uri: BindUri },
+
+    #[snafu(display("failed to get local address for NAT detection on `{bind_uri}`"))]
+    LocalAddr {
+        bind_uri: BindUri,
+        #[snafu(source(from(io::Error, Arc::new)))]
+        source: Arc<io::Error>,
+    },
+
+    #[snafu(display("failed to run NAT detection {step}"))]
+    Probe {
+        step: NatDetectionStep,
+        source: StunProbeError,
+    },
+
+    #[snafu(display("failed to read NAT detection {step} response"))]
+    Response {
+        step: NatDetectionStep,
+        source: StunResponseError,
+    },
+}
+
+impl From<DetectNatTypeError> for io::Error {
+    fn from(source: DetectNatTypeError) -> Self {
         io::Error::other(source)
     }
 }
@@ -134,8 +238,8 @@ impl ArcClientState {
 #[derive(Debug, Clone)]
 pub struct StunClient<I: RefIO + 'static> {
     #[allow(clippy::type_complexity)]
-    outer_addr: Arc<Future<Result<SocketAddr, ArcIoError>>>,
-    nat_type: Arc<Future<Result<NatType, ArcIoError>>>,
+    outer_addr: Arc<Future<Result<SocketAddr, DetectOuterAddrError>>>,
+    nat_type: Arc<Future<Result<NatType, DetectNatTypeError>>>,
     ref_iface: I,
     // 可能被复制进keep_alive_task
     stun_router: StunRouter,
@@ -146,7 +250,7 @@ pub struct StunClient<I: RefIO + 'static> {
     tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
-pub type ClientLocationData = Result<EndpointAddr, ArcIoError>;
+pub type ClientLocationData = Result<EndpointAddr, DetectOuterAddrError>;
 
 impl<I: RefIO + 'static> StunClient<I> {
     pub fn new(
@@ -193,23 +297,33 @@ impl<I: RefIO + 'static> StunClient<I> {
         let client_state = self.state.clone();
 
         let keep_alive_task = async move {
-            let log_detect_result = |detect_result: &io::Result<SocketAddr>| match &detect_result {
-                Ok(new_outer_addr) => match outer_addr.try_get().as_deref().cloned() {
-                    Some(Ok(old_outer)) if old_outer == *new_outer_addr => {
-                        tracing::trace!(target: "stun", %new_outer_addr,  "Keep alive, outer addr unchanged");
+            let log_detect_result = |detect_result: &Result<SocketAddr, DetectOuterAddrError>| {
+                match &detect_result {
+                    Ok(new_outer_addr) => match outer_addr.try_get().as_deref().cloned() {
+                        Some(Ok(old_outer)) if old_outer == *new_outer_addr => {
+                            tracing::trace!(target: "stun", %new_outer_addr,  "keep alive, outer addr unchanged");
+                        }
+                        Some(Ok(old_outer)) => {
+                            tracing::debug!(target: "stun", %old_outer, %new_outer_addr, "keep alive, outer addr changed");
+                        }
+                        Some(Err(error)) => {
+                            tracing::debug!(
+                                target: "stun",
+                                error = %snafu::Report::from_error(&error),
+                                %new_outer_addr,
+                                "outer addr detection recovered"
+                            );
+                        }
+                        None => {
+                            tracing::debug!(target: "stun", %new_outer_addr, "detected outer addr");
+                        }
+                    },
+                    Err(error) => {
+                        tracing::trace!(target: "stun", error = %snafu::Report::from_error(error), "detect outer addr failed");
                     }
-                    Some(old_state) => {
-                        tracing::debug!(target: "stun", ?old_state, %new_outer_addr, "keep alive, outer addr changed");
-                    }
-                    None => {
-                        tracing::debug!(target: "stun", %new_outer_addr, "detected outer addr");
-                    }
-                },
-                Err(error) => {
-                    tracing::trace!(target: "stun", ?error, "Detect outer addr failed");
                 }
             };
-            tracing::trace!(target: "stun", "Starting keep alive task");
+            tracing::trace!(target: "stun", "starting keep alive task");
             loop {
                 let detect_result = detect_outer_addr(
                     ref_iface.clone(),
@@ -231,8 +345,6 @@ impl<I: RefIO + 'static> StunClient<I> {
                     Ok(_) => Duration::from_secs(30),
                     Err(_) => Duration::from_secs(1),
                 };
-
-                let detect_result = detect_result.map_err(ArcIoError::from);
 
                 if !bind_uri.is_temporary()
                     && let Some(locations) = locations.as_ref()
@@ -258,16 +370,19 @@ impl<I: RefIO + 'static> StunClient<I> {
         ))
     }
 
-    pub fn poll_outer_addr(&self, cx: &mut Context) -> Poll<io::Result<SocketAddr>> {
+    pub fn poll_outer_addr(
+        &self,
+        cx: &mut Context,
+    ) -> Poll<Result<SocketAddr, DetectOuterAddrError>> {
         if self.state.get() == ClientState::Closing {
-            return Poll::Ready(Err(RebindedError.into()));
+            return Poll::Ready(Err(DetectOuterAddrError::Rebinded {
+                bind_uri: self.ref_iface.iface().bind_uri(),
+            }));
         }
-        self.outer_addr
-            .poll_get(cx)
-            .map(|result| result.clone().map_err(io::Error::from))
+        self.outer_addr.poll_get(cx).map(|result| result.clone())
     }
 
-    pub async fn outer_addr(&self) -> io::Result<SocketAddr> {
+    pub async fn outer_addr(&self) -> Result<SocketAddr, DetectOuterAddrError> {
         core::future::poll_fn(|cx| self.poll_outer_addr(cx)).await
     }
 
@@ -275,14 +390,14 @@ impl<I: RefIO + 'static> StunClient<I> {
         self.stun_agent
     }
 
-    pub fn get_outer_addr(&self) -> Option<io::Result<SocketAddr>> {
+    pub fn get_outer_addr(&self) -> Option<Result<SocketAddr, DetectOuterAddrError>> {
         if self.state.get() == ClientState::Closing {
-            return Some(Err(RebindedError.into()));
+            return Some(Err(DetectOuterAddrError::Rebinded {
+                bind_uri: self.ref_iface.iface().bind_uri(),
+            }));
         }
 
-        self.outer_addr
-            .try_get()
-            .map(|result| result.clone().map_err(io::Error::from))
+        self.outer_addr.try_get().map(|result| result.clone())
     }
 
     fn nat_detect_task(&self) -> impl futures::Future<Output = ()> + use<I> {
@@ -301,11 +416,8 @@ impl<I: RefIO + 'static> StunClient<I> {
             // the normal response latency under load and can misclassify a
             // full-cone NAT as restricted after a transient late response.
             let timeout = Duration::from_millis(300);
-            _ = nat_type.assign(
-                detect_nat_type(ref_iface, stun_router, stun_agent, 30, timeout)
-                    .await
-                    .map_err(ArcIoError::from),
-            );
+            _ = nat_type
+                .assign(detect_nat_type(ref_iface, stun_router, stun_agent, 30, timeout).await);
         };
 
         task.instrument(tracing::debug_span!(
@@ -316,26 +428,26 @@ impl<I: RefIO + 'static> StunClient<I> {
         ))
     }
 
-    pub fn poll_nat_type(&self, cx: &mut Context) -> Poll<io::Result<NatType>> {
+    pub fn poll_nat_type(&self, cx: &mut Context) -> Poll<Result<NatType, DetectNatTypeError>> {
         if self.state.get() == ClientState::Closing {
-            return Poll::Ready(Err(RebindedError.into()));
+            return Poll::Ready(Err(DetectNatTypeError::Rebinded {
+                bind_uri: self.ref_iface.iface().bind_uri(),
+            }));
         }
-        self.nat_type
-            .poll_get(cx)
-            .map(|result| result.clone().map_err(io::Error::from))
+        self.nat_type.poll_get(cx).map(|result| result.clone())
     }
 
-    pub async fn nat_type(&self) -> io::Result<NatType> {
+    pub async fn nat_type(&self) -> Result<NatType, DetectNatTypeError> {
         core::future::poll_fn(|cx| self.poll_nat_type(cx)).await
     }
 
-    pub fn get_nat_type(&self) -> Option<io::Result<NatType>> {
+    pub fn get_nat_type(&self) -> Option<Result<NatType, DetectNatTypeError>> {
         if self.state.get() == ClientState::Closing {
-            return Some(Err(RebindedError.into()));
+            return Some(Err(DetectNatTypeError::Rebinded {
+                bind_uri: self.ref_iface.iface().bind_uri(),
+            }));
         }
-        self.nat_type
-            .try_get()
-            .map(|result| result.clone().map_err(io::Error::from))
+        self.nat_type.try_get().map(|result| result.clone())
     }
 
     // fn restart(&mut self) -> io::Result<()> {
@@ -456,7 +568,7 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
             agents
                 .into_iter()
                 .filter_map(|agent| {
-                    tracing::trace!(target: "stun", %agent, "Initializing STUN client for agent");
+                    tracing::trace!(target: "stun", %agent, "initializing STUN client for agent");
                     new_stun_client(agent).map(|client| (agent, client))
                 })
                 .collect(),
@@ -633,8 +745,114 @@ impl Component for StunClientsComponent {
     }
 }
 
-fn no_response_error() -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, "No response from STUN server")
+async fn send_stun_request<I: RefIO>(
+    ref_iface: I,
+    stun_router: StunRouter,
+    stun_server: SocketAddr,
+    request: Request,
+    retry_times: u8,
+    timeout: Duration,
+) -> Result<Option<Response>, StunProbeError> {
+    Transaction::begin(ref_iface, stun_router, retry_times, timeout)
+        .send_request(request, stun_server)
+        .await
+        .context(stun_probe_error::SendRequestSnafu { stun_server })
+}
+
+async fn send_required_stun_request<I: RefIO>(
+    ref_iface: I,
+    stun_router: StunRouter,
+    stun_server: SocketAddr,
+    request: Request,
+    retry_times: u8,
+    timeout: Duration,
+) -> Result<Response, StunProbeError> {
+    send_stun_request(
+        ref_iface,
+        stun_router,
+        stun_server,
+        request,
+        retry_times,
+        timeout,
+    )
+    .await?
+    .context(stun_probe_error::NoResponseSnafu {
+        stun_server,
+        retry_times,
+        timeout,
+    })
+}
+
+fn response_attr(
+    response: &Response,
+    stun_server: SocketAddr,
+    attribute: StunResponseAttribute,
+) -> Result<SocketAddr, StunResponseError> {
+    response
+        .0
+        .iter()
+        .find_map(|attr| match (attribute, attr) {
+            (StunResponseAttribute::MappedAddress, Attr::MappedAddress(addr))
+            | (StunResponseAttribute::ChangedAddress, Attr::ChangedAddress(addr))
+            | (StunResponseAttribute::SourceAddress, Attr::SourceAddress(addr)) => Some(*addr),
+            _ => None,
+        })
+        .context(stun_response_error::MissingAttributeSnafu {
+            stun_server,
+            attribute,
+        })
+}
+
+async fn nat_detection_request<I: RefIO>(
+    ref_iface: I,
+    stun_router: StunRouter,
+    stun_server: SocketAddr,
+    request: Request,
+    retry_times: u8,
+    timeout: Duration,
+    step: NatDetectionStep,
+) -> Result<Option<Response>, DetectNatTypeError> {
+    send_stun_request(
+        ref_iface,
+        stun_router,
+        stun_server,
+        request,
+        retry_times,
+        timeout,
+    )
+    .await
+    .context(detect_nat_type_error::ProbeSnafu { step })
+}
+
+async fn required_nat_detection_request<I: RefIO>(
+    ref_iface: I,
+    stun_router: StunRouter,
+    stun_server: SocketAddr,
+    request: Request,
+    retry_times: u8,
+    timeout: Duration,
+    step: NatDetectionStep,
+) -> Result<Response, DetectNatTypeError> {
+    send_required_stun_request(
+        ref_iface,
+        stun_router,
+        stun_server,
+        request,
+        retry_times,
+        timeout,
+    )
+    .await
+    .context(detect_nat_type_error::ProbeSnafu { step })
+}
+
+fn nat_response_attr(
+    response: &Response,
+    stun_server: SocketAddr,
+    attribute: StunResponseAttribute,
+    step: NatDetectionStep,
+) -> Result<SocketAddr, DetectNatTypeError> {
+    response_attr(response, stun_server, attribute)
+        .context(detect_nat_type_error::ResponseSnafu { step })
 }
 
 async fn detect_outer_addr<I: RefIO>(
@@ -643,13 +861,19 @@ async fn detect_outer_addr<I: RefIO>(
     stun_agent: SocketAddr,
     retry_times: u8,
     timeout: Duration,
-) -> io::Result<SocketAddr> {
+) -> Result<SocketAddr, DetectOuterAddrError> {
     let request = Request::default();
-    let response = Transaction::begin(ref_iface, stun_router, retry_times, timeout)
-        .send_request(request, stun_agent)
-        .await?
-        .ok_or_else(no_response_error)?;
-    response.map_addr()
+    let response = send_required_stun_request(
+        ref_iface,
+        stun_router,
+        stun_agent,
+        request,
+        retry_times,
+        timeout,
+    )
+    .await?;
+    response_attr(&response, stun_agent, StunResponseAttribute::MappedAddress)
+        .context(detect_outer_addr_error::ResponseSnafu)
 }
 
 pub static VISUALIZE_NAT_DETECTION: AtomicBool = AtomicBool::new(false);
@@ -672,16 +896,30 @@ async fn detect_nat_type<I: RefIO>(
     stun_agent: SocketAddr,
     retry_times: u8,
     timeout: Duration,
-) -> io::Result<NatType> {
-    let local_addr = ref_iface.iface().local_addr()?;
+) -> Result<NatType, DetectNatTypeError> {
+    let bind_uri = ref_iface.iface().bind_uri();
+    let local_addr =
+        ref_iface
+            .iface()
+            .local_addr()
+            .context(detect_nat_type_error::LocalAddrSnafu {
+                bind_uri: bind_uri.clone(),
+            })?;
     visualize_nat_detection!("Starting NAT detection with local address: {local_addr}");
     let stun_agent1 = stun_agent;
 
     visualize_nat_detection!("Access Test: probing server {stun_agent1}");
     let request = Request::default();
-    let response = Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-        .send_request(request, stun_agent1)
-        .await?;
+    let response = nat_detection_request(
+        ref_iface.clone(),
+        stun_router.clone(),
+        stun_agent1,
+        request,
+        retry_times,
+        timeout,
+        NatDetectionStep::Access,
+    )
+    .await?;
 
     let Some(response) = response else {
         visualize_nat_detection!("Result: No response after {retry_times} attempts");
@@ -695,8 +933,18 @@ async fn detect_nat_type<I: RefIO>(
 
     let mut net_features = NetFeature::empty();
 
-    let mapped_addr1 = response.map_addr()?;
-    let stun_agent2 = response.changed_addr()?;
+    let mapped_addr1 = nat_response_attr(
+        &response,
+        stun_agent1,
+        StunResponseAttribute::MappedAddress,
+        NatDetectionStep::Access,
+    )?;
+    let stun_agent2 = nat_response_attr(
+        &response,
+        stun_agent1,
+        StunResponseAttribute::ChangedAddress,
+        NatDetectionStep::Access,
+    )?;
     visualize_nat_detection!("Result: Received from {stun_agent1}, external addr: {mapped_addr1}");
     if mapped_addr1 == local_addr {
         // Public IP
@@ -708,15 +956,31 @@ async fn detect_nat_type<I: RefIO>(
         );
         net_features |= NetFeature::Public;
         let request = Request::change_ip_and_port();
-        let response =
-            Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-                .send_request(request, stun_agent2)
-                .await?;
+        let response = nat_detection_request(
+            ref_iface.clone(),
+            stun_router.clone(),
+            stun_agent2,
+            request,
+            retry_times,
+            timeout,
+            NatDetectionStep::Filtering,
+        )
+        .await?;
         if let Some(response) = response {
-            let mapped_addr2 = response.map_addr()?;
+            let mapped_addr2 = nat_response_attr(
+                &response,
+                stun_agent2,
+                StunResponseAttribute::MappedAddress,
+                NatDetectionStep::Filtering,
+            )?;
+            let source_addr = nat_response_attr(
+                &response,
+                stun_agent2,
+                StunResponseAttribute::SourceAddress,
+                NatDetectionStep::Filtering,
+            )?;
             visualize_nat_detection!(
-                "Result: received from {}, external addr: {mapped_addr2}",
-                response.source_addr()?
+                "Result: received from {source_addr}, external addr: {mapped_addr2}",
             );
             visualize_nat_detection!("Conclusion: Destination IP independent filtering\n");
         } else {
@@ -728,15 +992,31 @@ async fn detect_nat_type<I: RefIO>(
             "Filtering Test: probing server {stun_agent2}. Request server to respond from a changed port",
         );
         let request = Request::change_port();
-        let response =
-            Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-                .send_request(request, stun_agent2)
-                .await?;
+        let response = nat_detection_request(
+            ref_iface.clone(),
+            stun_router.clone(),
+            stun_agent2,
+            request,
+            retry_times,
+            timeout,
+            NatDetectionStep::Filtering,
+        )
+        .await?;
         if let Some(response) = response {
-            let mapped_addr2 = response.map_addr()?;
+            let mapped_addr2 = nat_response_attr(
+                &response,
+                stun_agent2,
+                StunResponseAttribute::MappedAddress,
+                NatDetectionStep::Filtering,
+            )?;
+            let source_addr = nat_response_attr(
+                &response,
+                stun_agent2,
+                StunResponseAttribute::SourceAddress,
+                NatDetectionStep::Filtering,
+            )?;
             visualize_nat_detection!(
-                "Result: received from {}, external addr: {mapped_addr2}",
-                response.source_addr()?
+                "Result: received from {source_addr}, external addr: {mapped_addr2}",
             );
             visualize_nat_detection!("Conclusion: Destination port independent filtering\n");
         } else {
@@ -756,14 +1036,29 @@ async fn detect_nat_type<I: RefIO>(
         visualize_nat_detection!("Conclusion: Address {local_addr} has private IP.\n");
         visualize_nat_detection!("Mapping Test1: probing server {stun_agent2}");
         let request = Request::default();
-        let response =
-            Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-                .send_request(request, stun_agent2)
-                .await?
-                .ok_or_else(no_response_error)?;
+        let response = required_nat_detection_request(
+            ref_iface.clone(),
+            stun_router.clone(),
+            stun_agent2,
+            request,
+            retry_times,
+            timeout,
+            NatDetectionStep::Mapping,
+        )
+        .await?;
 
-        let stun_agent3 = response.changed_addr()?;
-        let mapped_addr2 = response.map_addr()?;
+        let stun_agent3 = nat_response_attr(
+            &response,
+            stun_agent2,
+            StunResponseAttribute::ChangedAddress,
+            NatDetectionStep::Mapping,
+        )?;
+        let mapped_addr2 = nat_response_attr(
+            &response,
+            stun_agent2,
+            StunResponseAttribute::MappedAddress,
+            NatDetectionStep::Mapping,
+        )?;
         if mapped_addr1 != mapped_addr2 {
             net_features |= NetFeature::Symmetric;
             visualize_nat_detection!(
@@ -776,10 +1071,16 @@ async fn detect_nat_type<I: RefIO>(
             // 判断规律
             visualize_nat_detection!("Mapping Test2: probing server {stun_agent3}");
             let request = Request::default();
-            let response =
-                Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-                    .send_request(request, stun_agent3)
-                    .await?;
+            let response = nat_detection_request(
+                ref_iface.clone(),
+                stun_router.clone(),
+                stun_agent3,
+                request,
+                retry_times,
+                timeout,
+                NatDetectionStep::Mapping,
+            )
+            .await?;
 
             let Some(response) = response else {
                 visualize_nat_detection!("Result: No response after {retry_times} attempts");
@@ -789,7 +1090,12 @@ async fn detect_nat_type<I: RefIO>(
                 return Ok(NatType::from(net_features));
             };
 
-            let mapped_addr3 = response.map_addr()?;
+            let mapped_addr3 = nat_response_attr(
+                &response,
+                stun_agent3,
+                StunResponseAttribute::MappedAddress,
+                NatDetectionStep::Mapping,
+            )?;
             let step1 = mapped_addr2.port() as i32 - mapped_addr1.port() as i32;
             let step2 = mapped_addr3.port() as i32 - mapped_addr2.port() as i32;
             visualize_nat_detection!(
@@ -818,19 +1124,31 @@ async fn detect_nat_type<I: RefIO>(
             );
             let request = Request::change_ip_and_port();
             // 可能会不响应，超时太久会导致探测很久
-            let response = Transaction::begin(
+            let response = nat_detection_request(
                 ref_iface.clone(),
                 stun_router.clone(),
+                stun_agent2,
+                request,
                 RESTRICTED_RETRY_TIMES,
                 timeout,
+                NatDetectionStep::Filtering,
             )
-            .send_request(request, stun_agent2)
             .await?;
             if let Some(response) = response {
-                let mapped_addr2 = response.map_addr()?;
+                let mapped_addr2 = nat_response_attr(
+                    &response,
+                    stun_agent2,
+                    StunResponseAttribute::MappedAddress,
+                    NatDetectionStep::Filtering,
+                )?;
+                let source_addr = nat_response_attr(
+                    &response,
+                    stun_agent2,
+                    StunResponseAttribute::SourceAddress,
+                    NatDetectionStep::Filtering,
+                )?;
                 visualize_nat_detection!(
-                    "Result: received from {}, external addr: {mapped_addr2}",
-                    response.source_addr()?
+                    "Result: received from {source_addr}, external addr: {mapped_addr2}",
                 );
                 visualize_nat_detection!("Conclusion: Destination IP independent filtering\n");
             } else {
@@ -847,19 +1165,31 @@ async fn detect_nat_type<I: RefIO>(
             // server2 换 port 即 server5 回，可能不响应
             // 可能会不响应，超时太久会导致探测很久
             let request = Request::change_port();
-            let response = Transaction::begin(
+            let response = nat_detection_request(
                 ref_iface.clone(),
                 stun_router.clone(),
+                stun_agent2,
+                request,
                 RESTRICTED_RETRY_TIMES,
                 timeout,
+                NatDetectionStep::Filtering,
             )
-            .send_request(request, stun_agent2)
             .await?;
             if let Some(response) = response {
-                let mapped_addr2 = response.map_addr()?;
+                let mapped_addr2 = nat_response_attr(
+                    &response,
+                    stun_agent2,
+                    StunResponseAttribute::MappedAddress,
+                    NatDetectionStep::Filtering,
+                )?;
+                let source_addr = nat_response_attr(
+                    &response,
+                    stun_agent2,
+                    StunResponseAttribute::SourceAddress,
+                    NatDetectionStep::Filtering,
+                )?;
                 visualize_nat_detection!(
-                    "Result: received from {}, external addr: {mapped_addr2}",
-                    response.source_addr()?
+                    "Result: received from {source_addr}, external addr: {mapped_addr2}",
                 );
                 visualize_nat_detection!("Conclusion: Destination port independent filtering\n");
             } else {
@@ -872,17 +1202,33 @@ async fn detect_nat_type<I: RefIO>(
             // dynamic test， 请求 server3
             visualize_nat_detection!("Dynamic Test: probing server {stun_agent3}",);
             let request = Request::default();
-            let response =
-                Transaction::begin(ref_iface.clone(), stun_router.clone(), retry_times, timeout)
-                    .send_request(request, stun_agent3)
-                    .await?;
+            let response = nat_detection_request(
+                ref_iface.clone(),
+                stun_router.clone(),
+                stun_agent3,
+                request,
+                retry_times,
+                timeout,
+                NatDetectionStep::Dynamic,
+            )
+            .await?;
 
             if let Some(response) = response {
                 // 回包，但是映射地址不一致，为动态型
-                let mapped_addr3 = response.map_addr()?;
+                let mapped_addr3 = nat_response_attr(
+                    &response,
+                    stun_agent3,
+                    StunResponseAttribute::MappedAddress,
+                    NatDetectionStep::Dynamic,
+                )?;
+                let source_addr = nat_response_attr(
+                    &response,
+                    stun_agent3,
+                    StunResponseAttribute::SourceAddress,
+                    NatDetectionStep::Dynamic,
+                )?;
                 visualize_nat_detection!(
-                    "Result: received from {}, external addr: {mapped_addr3}",
-                    response.source_addr()?
+                    "Result: received from {source_addr}, external addr: {mapped_addr3}",
                 );
                 if mapped_addr1 != mapped_addr3 {
                     net_features |= NetFeature::Dynamic;
