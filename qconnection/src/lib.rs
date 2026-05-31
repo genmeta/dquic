@@ -36,7 +36,7 @@ pub mod prelude {
     pub use crate::{
         Connection, StreamReader, StreamWriter,
         tls::{
-            AuthClient, ClientAgentVerifyResult, ClientNameVerifyResult, LocalAgent, RemoteAgent,
+            AuthClient, ClientAuthorityVerifyResult, ClientNameVerifyResult, LocalAuthority, RemoteAuthority,
             SignError, VerifyError,
         },
     };
@@ -104,7 +104,7 @@ use crate::{
     path::{CreatePathFailure, PathDeactivated},
     space::data::DataSpace,
     termination::Terminator,
-    tls::{ArcTlsHandshake, LocalAgent, RemoteAgent},
+    tls::{ArcTlsHandshake, LocalAuthority, RemoteAuthority},
     traversal::PunchTransaction,
 };
 
@@ -302,26 +302,26 @@ impl Components {
         self.paths.remove(pathway, &PathDeactivated::App);
     }
 
-    pub fn local_agent(&self) -> Impl_Future![Result<Option<LocalAgent>, Error>] {
+    pub fn local_authority(&self) -> Impl_Future![Result<Option<LocalAuthority>, Error>] {
         let tls_handshake = self.tls_handshake.clone();
         async move {
             match tls_handshake.info().await?.as_ref() {
-                tls::TlsHandshakeInfo::Client { local_agent, .. } => Ok(local_agent.clone()),
-                tls::TlsHandshakeInfo::Server { local_agent, .. } => Ok(Some(local_agent.clone())),
+                tls::TlsHandshakeInfo::Client { local_authority, .. } => Ok(local_authority.clone()),
+                tls::TlsHandshakeInfo::Server { local_authority, .. } => Ok(Some(local_authority.clone())),
             }
         }
         .instrument_in_current()
         .in_current_span()
     }
 
-    pub fn remote_agent(&self) -> Impl_Future![Result<Option<RemoteAgent>, Error>] {
+    pub fn remote_authority(&self) -> Impl_Future![Result<Option<RemoteAuthority>, Error>] {
         let tls_handshake = self.tls_handshake.clone();
         async move {
             match tls_handshake.info().await?.as_ref() {
-                tls::TlsHandshakeInfo::Client { remote_agent, .. } => {
-                    Ok(Some(remote_agent.clone()))
+                tls::TlsHandshakeInfo::Client { remote_authority, .. } => {
+                    Ok(Some(remote_authority.clone()))
                 }
-                tls::TlsHandshakeInfo::Server { remote_agent, .. } => Ok(remote_agent.clone()),
+                tls::TlsHandshakeInfo::Server { remote_authority, .. } => Ok(remote_authority.clone()),
             }
         }
         .instrument_in_current()
@@ -602,24 +602,24 @@ impl Connection {
             .map(|(Ok(error) | Err(error))| error)
     }
 
-    pub fn local_agent(&self) -> Impl_Future![Result<Option<LocalAgent>, Error>] {
-        self.try_map_components_future(|core_conn| core_conn.local_agent())
+    pub fn local_authority(&self) -> Impl_Future![Result<Option<LocalAuthority>, Error>] {
+        self.try_map_components_future(|core_conn| core_conn.local_authority())
             .map(|result| result?)
     }
 
-    pub fn remote_agent(&self) -> Impl_Future![Result<Option<RemoteAgent>, Error>] {
-        self.try_map_components_future(|core_conn| core_conn.remote_agent())
+    pub fn remote_authority(&self) -> Impl_Future![Result<Option<RemoteAuthority>, Error>] {
+        self.try_map_components_future(|core_conn| core_conn.remote_authority())
             .map(|result| result?)
     }
 
     pub fn server_name(&self) -> Impl_Future![Result<String, Error>] {
         self.try_map_components_future(|core_conn| match core_conn.role() {
             Role::Client => core_conn
-                .remote_agent()
+                .remote_authority()
                 .map_ok(|agent| agent.unwrap().name().to_owned())
                 .left_future(),
             Role::Server => core_conn
-                .local_agent()
+                .local_authority()
                 .map_ok(|agent| agent.unwrap().name().to_owned())
                 .right_future(),
         })

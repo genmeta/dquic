@@ -1,4 +1,4 @@
-mod agent;
+mod authority;
 mod client_auth;
 
 use std::{
@@ -7,9 +7,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-pub use agent::{LocalAgent, RemoteAgent, SignError, VerifyError};
+pub use authority::{LocalAuthority, RemoteAuthority, SignError, VerifyError};
 pub use client_auth::{
-    AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAgentVerifyResult, ClientNameVerifyResult,
+    AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAuthorityVerifyResult, ClientNameVerifyResult,
 };
 use futures::{future::poll_fn, never::Never};
 use qbase::{
@@ -98,12 +98,12 @@ impl TlsSession {
         match self {
             TlsSession::Client(tls_session) => TlsHandshakeInfo::Client {
                 zero_rtt_accepted: tls_session.zero_rtt_accepted.expect(INCOMPLETE),
-                local_agent: tls_session.local_agent().clone(),
-                remote_agent: tls_session.remote_agent.clone().expect(INCOMPLETE),
+                local_authority: tls_session.local_authority().clone(),
+                remote_authority: tls_session.remote_authority.clone().expect(INCOMPLETE),
             },
             TlsSession::Server(tls_session) => TlsHandshakeInfo::Server {
-                local_agent: tls_session.local_agent().clone().expect(INCOMPLETE),
-                remote_agent: tls_session.remote_agent.clone(),
+                local_authority: tls_session.local_authority().clone().expect(INCOMPLETE),
+                remote_authority: tls_session.remote_authority.clone(),
             },
         }
     }
@@ -115,16 +115,16 @@ pub struct ClientTlsSession {
     read_waker: Option<Waker>,
 
     // shared with ClientCertResolver
-    local_agent: Arc<Mutex<Option<LocalAgent>>>,
+    local_authority: Arc<Mutex<Option<LocalAuthority>>>,
     zero_rtt_accepted: Option<bool>,
-    remote_agent: Option<RemoteAgent>,
+    remote_authority: Option<RemoteAuthority>,
 }
 
 #[derive(Debug, Clone)]
 struct ClientCertResolver {
     client_name: Arc<str>,
     inner: Arc<dyn ResolvesClientCert>,
-    client_agent: Arc<Mutex<Option<LocalAgent>>>,
+    client_authority: Arc<Mutex<Option<LocalAuthority>>>,
 }
 
 impl ResolvesClientCert for ClientCertResolver {
@@ -136,8 +136,8 @@ impl ResolvesClientCert for ClientCertResolver {
         self.inner
             .resolve(root_hint_subjects, sigschemes)
             .inspect(|resolved_cert| {
-                let client_agent = LocalAgent::new(self.client_name.clone(), resolved_cert.clone());
-                let old = self.client_agent.lock().unwrap().replace(client_agent);
+                let client_authority = LocalAuthority::new(self.client_name.clone(), resolved_cert.clone());
+                let old = self.client_authority.lock().unwrap().replace(client_authority);
                 assert!(
                     old.is_none(),
                     "unreachable: qconnection::tls::ClientCertResolver resolve only once"
@@ -163,14 +163,14 @@ impl ClientTlsSession {
         let mut params_buf = Vec::with_capacity(1024);
         params_buf.put_parameters(client_params);
 
-        let local_agent = Arc::new(Mutex::new(None));
+        let local_authority = Arc::new(Mutex::new(None));
         // 通过注入ServerCertResolver实现CertifiedKey向上传递
         if let Some(client_name) = client_params.get::<String>(ParameterId::ClientName) {
             let tls_config = Arc::make_mut(&mut tls_config);
             tls_config.client_auth_cert_resolver = Arc::new(ClientCertResolver {
                 client_name: client_name.into(),
                 inner: tls_config.client_auth_cert_resolver.clone(),
-                client_agent: local_agent.clone(),
+                client_authority: local_authority.clone(),
             });
         };
 
@@ -179,18 +179,18 @@ impl ClientTlsSession {
         let tls_conn = ClientConnection::new(tls_config, QUIC_VERSION, name, params_buf)?;
 
         let tls_session = Self {
-            local_agent,
+            local_authority,
             server_name,
             tls_conn,
             read_waker: None,
             zero_rtt_accepted: None,
-            remote_agent: None,
+            remote_authority: None,
         };
         Ok(tls_session)
     }
 
-    fn local_agent(&self) -> MutexGuard<'_, Option<LocalAgent>> {
-        self.local_agent.lock().expect("Poison")
+    fn local_authority(&self) -> MutexGuard<'_, Option<LocalAuthority>> {
+        self.local_authority.lock().expect("Poison")
     }
 
     #[must_use]
@@ -208,8 +208,8 @@ impl ClientTlsSession {
     }
 
     fn try_process_sh(&mut self) {
-        self.remote_agent = (self.tls_conn.peer_certificates())
-            .map(|cert| RemoteAgent::new(self.server_name.as_str().into(), Arc::from(cert)))
+        self.remote_authority = (self.tls_conn.peer_certificates())
+            .map(|cert| RemoteAuthority::new(self.server_name.as_str().into(), Arc::from(cert)))
     }
 
     fn try_process_ee(&mut self, parameters: &ArcParameters) -> Result<(), Error> {
@@ -246,24 +246,24 @@ pub struct ServerTlsSession {
     read_waker: Option<Waker>,
 
     // shared with ServerCertResolver
-    local_agent: Arc<Mutex<Option<LocalAgent>>>,
+    local_authority: Arc<Mutex<Option<LocalAuthority>>>,
     client_name: Option<Arc<str>>,
     send_lock: ArcSendLock,
-    remote_agent: Option<RemoteAgent>,
+    remote_authority: Option<RemoteAuthority>,
 }
 
 #[derive(Debug, Clone)]
 struct ServerCertResolver {
     inner: Arc<dyn ResolvesServerCert>,
-    server_agent: Arc<Mutex<Option<LocalAgent>>>,
+    server_authority: Arc<Mutex<Option<LocalAuthority>>>,
 }
 
 impl ResolvesServerCert for ServerCertResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let server_name = client_hello.server_name()?.into();
         self.inner.resolve(client_hello).inspect(|resolved_cert| {
-            let sever_agent = LocalAgent::new(server_name, resolved_cert.clone());
-            let old = self.server_agent.lock().unwrap().replace(sever_agent);
+            let server_authority = LocalAuthority::new(server_name, resolved_cert.clone());
+            let old = self.server_authority.lock().unwrap().replace(server_authority);
             assert!(
                 old.is_none(),
                 "unreachable: qconnection::tls::ServerCertResolver resolve only once"
@@ -285,13 +285,13 @@ impl ServerTlsSession {
         let mut params_buf = Vec::with_capacity(1024);
         params_buf.put_parameters(server_params);
 
-        let local_agent = Arc::new(Mutex::new(None));
+        let local_authority = Arc::new(Mutex::new(None));
         // 通过注入ServerCertResolver实现CertifiedKey向上传递
         {
             let tls_config = Arc::make_mut(&mut tls_config);
             tls_config.cert_resolver = Arc::new(ServerCertResolver {
                 inner: tls_config.cert_resolver.clone(),
-                server_agent: local_agent.clone(),
+                server_authority: local_authority.clone(),
             });
         };
         let tls_conn = ServerConnection::new(tls_config, QUIC_VERSION, params_buf)?;
@@ -300,10 +300,10 @@ impl ServerTlsSession {
             client_auther,
             tls_conn,
             read_waker: None,
-            local_agent,
+            local_authority,
             client_name: None,
             send_lock: ArcSendLock::new(),
-            remote_agent: None,
+            remote_authority: None,
         };
         Ok(tls_session)
     }
@@ -312,12 +312,12 @@ impl ServerTlsSession {
         &self.send_lock
     }
 
-    fn local_agent(&self) -> MutexGuard<'_, Option<LocalAgent>> {
-        self.local_agent.lock().expect("Poison")
+    fn local_authority(&self) -> MutexGuard<'_, Option<LocalAuthority>> {
+        self.local_authority.lock().expect("Poison")
     }
 
     pub fn server_name(&self) -> Option<String> {
-        Some(self.local_agent().as_ref()?.name().to_owned())
+        Some(self.local_authority().as_ref()?.name().to_owned())
     }
 
     fn try_process_ch(
@@ -333,13 +333,13 @@ impl ServerTlsSession {
 
         let client_name = client_params.get::<String>(ParameterId::ClientName);
 
-        let server_agent = self.local_agent().clone().ok_or_else(|| {
+        let server_authority = self.local_authority().clone().ok_or_else(|| {
             QuicError::with_default_fty(ErrorKind::ConnectionRefused, "Missing SNI in client hello")
         })?;
 
         match self
             .client_auther
-            .verify_client_name(&server_agent, client_name.as_deref())
+            .verify_client_name(&server_authority, client_name.as_deref())
         {
             ClientNameVerifyResult::Accept => {
                 self.send_lock.grant_permit();
@@ -358,7 +358,7 @@ impl ServerTlsSession {
                 self.send_lock.grant_permit();
                 tracing::debug!(
                     target: "quic",
-                    server_name = %server_agent.name(),
+                    server_name = %server_authority.name(),
                     client_name = ?self.client_name.as_deref(),
                     ?reason,
                     "Client name verification failed, refusing connection."
@@ -371,7 +371,7 @@ impl ServerTlsSession {
             ClientNameVerifyResult::SilentRefuse(reason) => {
                 tracing::debug!(
                     target: "quic",
-                    server_name = %server_agent.name(),
+                    server_name = %server_authority.name(),
                     client_name = ?self.client_name.as_deref(),
                     ?reason,
                     "Client name verification failed, refusing connection silently."
@@ -392,24 +392,24 @@ impl ServerTlsSession {
             return Ok(());
         };
 
-        let client_agent = RemoteAgent::new(client_name.clone(), client_cert);
+        let client_authority = RemoteAuthority::new(client_name.clone(), client_cert);
 
-        let server_agent = self
-            .local_agent()
+        let server_authority = self
+            .local_authority()
             .clone()
             .expect("Server name must be known at this point");
 
         match (ClientNameAuther, &self.client_auther)
-            .verify_client_agent(&server_agent, &client_agent)
+            .verify_client_authority(&server_authority, &client_authority)
         {
-            ClientAgentVerifyResult::Accept => {
-                self.remote_agent = Some(client_agent);
+            ClientAuthorityVerifyResult::Accept => {
+                self.remote_authority = Some(client_authority);
                 Ok(())
             }
-            ClientAgentVerifyResult::Refuse(reason) => {
+            ClientAuthorityVerifyResult::Refuse(reason) => {
                 tracing::debug!(
                     target: "quic",
-                    server_name = %server_agent.name(),
+                    server_name = %server_authority.name(),
                     ?self.client_name,
                     ?reason,
                     "Client certificate verification failed, refusing connection."
@@ -434,13 +434,13 @@ impl Drop for ServerTlsSession {
 #[derive(Debug, Clone)]
 pub enum TlsHandshakeInfo {
     Client {
-        local_agent: Option<LocalAgent>,
-        remote_agent: RemoteAgent,
+        local_authority: Option<LocalAuthority>,
+        remote_authority: RemoteAuthority,
         zero_rtt_accepted: bool,
     },
     Server {
-        local_agent: LocalAgent,
-        remote_agent: Option<RemoteAgent>,
+        local_authority: LocalAuthority,
+        remote_authority: Option<RemoteAuthority>,
     },
 }
 
@@ -592,7 +592,7 @@ impl ArcTlsHandshake {
 
         match &mut tls_handshake.session {
             TlsSession::Client(session) => {
-                if session.remote_agent.is_none() {
+                if session.remote_authority.is_none() {
                     session.try_process_sh();
                 }
                 if !parameters.lock_guard()?.is_remote_params_received() {
@@ -603,7 +603,7 @@ impl ArcTlsHandshake {
                 if !parameters.lock_guard()?.is_remote_params_received() {
                     session.try_process_ch(parameters, zero_rtt_keys)?;
                 }
-                if session.remote_agent.is_none() {
+                if session.remote_authority.is_none() {
                     session.try_process_cert()?;
                 }
             }

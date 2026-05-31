@@ -60,7 +60,7 @@ struct ClientNameAuther<const SILENT_REFUSE: bool>;
 impl<const SILENT: bool> AuthClient for ClientNameAuther<SILENT> {
     fn verify_client_name(
         &self,
-        _: &LocalAgent,
+        _: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
         match matches!(client_name, Some("client")) {
@@ -70,8 +70,12 @@ impl<const SILENT: bool> AuthClient for ClientNameAuther<SILENT> {
         }
     }
 
-    fn verify_client_agent(&self, _: &LocalAgent, _: &RemoteAgent) -> ClientAgentVerifyResult {
-        ClientAgentVerifyResult::Accept
+    fn verify_client_authority(
+        &self,
+        _: &LocalAuthority,
+        _: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
+        ClientAuthorityVerifyResult::Accept
     }
 }
 
@@ -290,14 +294,14 @@ async fn send_and_verify_echo_with_sign_verify(
     connection: &Connection,
     data: &[u8],
 ) -> Result<(), BoxError> {
-    let local_agent = connection.local_agent().await.unwrap().unwrap();
-    let remote_agent = connection.remote_agent().await.unwrap().unwrap();
+    let local = connection.local_authority().await.unwrap().unwrap();
+    let remote = connection.remote_authority().await.unwrap().unwrap();
     let (_sid, (mut reader, mut writer)) = connection.open_bi_stream().await?.unwrap();
     tracing::debug!("stream opened");
 
     let write = async {
         let data = data.to_vec();
-        let sign = local_agent.sign(SIGNATURE_SCHEME, &data).unwrap();
+        let sign = local.sign(SIGNATURE_SCHEME, &data).unwrap();
         let message = postcard::to_stdvec(&Message { data, sign }).unwrap();
         writer.write_all(&message).await?;
         writer.shutdown().await?;
@@ -308,7 +312,7 @@ async fn send_and_verify_echo_with_sign_verify(
         let mut message = Vec::new();
         reader.read_to_end(&mut message).await?;
         let message: Message = postcard::from_bytes(&message).unwrap();
-        remote_agent
+        remote
             .verify(SIGNATURE_SCHEME, &message.data, &message.sign)
             .unwrap();
         assert_eq!(message.data, data);
@@ -320,18 +324,20 @@ async fn send_and_verify_echo_with_sign_verify(
 }
 
 async fn echo_stream_with_sign_verify(
-    local_agent: LocalAgent,
-    remote_agent: RemoteAgent,
+    local: LocalAuthority,
+    remote: RemoteAuthority,
     mut reader: StreamReader,
     mut writer: StreamWriter,
 ) {
     let mut message = Vec::new();
     reader.read_to_end(&mut message).await.unwrap();
     let Message { data, sign } = postcard::from_bytes(&message).unwrap();
-    remote_agent.verify(SIGNATURE_SCHEME, &data, &sign).unwrap();
+    remote
+        .verify(SIGNATURE_SCHEME, &data, &sign)
+        .unwrap();
     tracing::debug!("message received and verified");
 
-    let sign = local_agent.sign(SIGNATURE_SCHEME, &data).unwrap();
+    let sign = local.sign(SIGNATURE_SCHEME, &data).unwrap();
     let message = postcard::to_stdvec(&Message { data, sign }).unwrap();
     writer.write_all(&message).await.unwrap();
     writer.shutdown().await.unwrap();
@@ -341,14 +347,14 @@ async fn echo_stream_with_sign_verify(
 pub async fn serve_echo_with_sign_verify(listeners: Arc<QuicListeners>) {
     while let Ok((connection, server, pathway, _link)) = listeners.accept().await {
         assert_eq!(server, "localhost");
-        let local_agent = connection.local_agent().await.unwrap().unwrap();
-        let remote_agent = connection.remote_agent().await.unwrap().unwrap();
+        let local = connection.local_authority().await.unwrap().unwrap();
+        let remote = connection.remote_authority().await.unwrap().unwrap();
         tracing::info!(source = ?pathway.remote(),"accepted new connection");
         tokio::spawn(async move {
             while let Ok((_sid, (reader, writer))) = connection.accept_bi_stream().await {
                 tokio::spawn(echo_stream_with_sign_verify(
-                    local_agent.clone(),
-                    remote_agent.clone(),
+                    local.clone(),
+                    remote.clone(),
                     reader,
                     writer,
                 ));
