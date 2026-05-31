@@ -103,7 +103,7 @@ impl ResolvesServerCert for VirtualHosts {
 pub struct Server {
     network: common::Network,
     bind_ifaces: DashMap<BindUri, BindInterface>,
-    // todo: [update] change to LocalAgent
+    // todo: [update] change to LocalAuthority
     certified_key: ArcSwap<CertifiedKey>,
 }
 
@@ -349,12 +349,12 @@ struct ServerAuther {
 impl AuthClient for ServerAuther {
     fn verify_client_name(
         &self,
-        server_agent: &LocalAgent,
+        server_authority: &LocalAuthority,
         _: Option<&str>,
     ) -> ClientNameVerifyResult {
         match self
             .servers
-            .get(server_agent.name())
+            .get(server_authority.name())
             .is_some_and(|server| server.bind_ifaces.contains_key(&self.iface))
         {
             true => ClientNameVerifyResult::Accept,
@@ -363,8 +363,8 @@ impl AuthClient for ServerAuther {
         }
     }
 
-    fn verify_client_agent(&self, _: &LocalAgent, _: &RemoteAgent) -> ClientAgentVerifyResult {
-        ClientAgentVerifyResult::Accept
+    fn verify_client_authority(&self, _: &LocalAuthority, _: &RemoteAuthority) -> ClientAuthorityVerifyResult {
+        ClientAuthorityVerifyResult::Accept
     }
 }
 

@@ -1110,10 +1110,7 @@ where
             }
             (
                 Agent { .. },
-                Agent {
-                    agent: remote_agent,
-                    ..
-                },
+                Agent { agent, .. },
             ) => {
                 let iface = self.0.ifaces.borrow(bind).ok_or_else(|| {
                     io::Error::new(
@@ -1121,7 +1118,7 @@ where
                         format!("Interface not found for bind URI: {:?}", bind),
                     )
                 })?;
-                Ok((iface.bound_addr()?, *remote_agent))
+                Ok((iface.bound_addr()?, *agent))
             }
             _ => Err(io::Error::other(
                 "Unsupported endpoint type combination for punching",

@@ -5,7 +5,7 @@ use std::{
 
 use tokio::sync::SetOnce;
 
-use crate::prelude::{LocalAgent, RemoteAgent};
+use crate::prelude::{LocalAuthority, RemoteAuthority};
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub enum ClientNameVerifyResult {
@@ -33,17 +33,17 @@ impl BitAnd for ClientNameVerifyResult {
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
-pub enum ClientAgentVerifyResult {
+pub enum ClientAuthorityVerifyResult {
     #[default]
     Accept,
     Refuse(String),
 }
 
-impl BitAnd for ClientAgentVerifyResult {
+impl BitAnd for ClientAuthorityVerifyResult {
     type Output = Self;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        use ClientAgentVerifyResult::*;
+        use ClientAuthorityVerifyResult::*;
         match (self, rhs) {
             (Accept, Accept) => Accept,
             (Refuse(reason), ..) | (.., Refuse(reason)) => Refuse(reason),
@@ -54,27 +54,27 @@ impl BitAnd for ClientAgentVerifyResult {
 pub trait AuthClient: Send + Sync {
     fn verify_client_name(
         &self,
-        server_agent: &LocalAgent,
+        server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult;
 
-    fn verify_client_agent(
+    fn verify_client_authority(
         &self,
-        server_agent: &LocalAgent,
-        client_agent: &RemoteAgent,
-    ) -> ClientAgentVerifyResult;
+        server_authority: &LocalAuthority,
+        client_authority: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult;
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AcceptAllClientAuther;
 
 impl AuthClient for AcceptAllClientAuther {
-    fn verify_client_name(&self, _: &LocalAgent, _: Option<&str>) -> ClientNameVerifyResult {
+    fn verify_client_name(&self, _: &LocalAuthority, _: Option<&str>) -> ClientNameVerifyResult {
         ClientNameVerifyResult::Accept
     }
 
-    fn verify_client_agent(&self, _: &LocalAgent, _: &RemoteAgent) -> ClientAgentVerifyResult {
-        ClientAgentVerifyResult::Accept
+    fn verify_client_authority(&self, _: &LocalAuthority, _: &RemoteAuthority) -> ClientAuthorityVerifyResult {
+        ClientAuthorityVerifyResult::Accept
     }
 }
 
@@ -82,23 +82,23 @@ impl AuthClient for AcceptAllClientAuther {
 pub struct ClientNameAuther;
 
 impl AuthClient for ClientNameAuther {
-    fn verify_client_name(&self, _: &LocalAgent, _: Option<&str>) -> ClientNameVerifyResult {
+    fn verify_client_name(&self, _: &LocalAuthority, _: Option<&str>) -> ClientNameVerifyResult {
         ClientNameVerifyResult::Accept
     }
 
-    fn verify_client_agent(
+    fn verify_client_authority(
         &self,
-        _: &LocalAgent,
-        client_agent: &RemoteAgent,
-    ) -> ClientAgentVerifyResult {
+        _: &LocalAuthority,
+        client_authority: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
         use x509_parser::prelude::*;
         macro_rules! refuse {
             ($($tt:tt)*) => {
-                return ClientAgentVerifyResult::Refuse(format!($($tt)*))
+                return ClientAuthorityVerifyResult::Refuse(format!($($tt)*))
             };
         }
 
-        let cert = match x509_parser::parse_x509_certificate(&client_agent.cert_chain()[0]) {
+        let cert = match x509_parser::parse_x509_certificate(&client_authority.cert_chain()[0]) {
             Ok((_remain, cert)) => cert,
             Err(error) => refuse!("Invalid certificate: {error}"),
         };
@@ -109,10 +109,10 @@ impl AuthClient for ClientNameAuther {
         };
 
         if san.value.general_names.iter().any(|name| match name {
-            GeneralName::DNSName(name) => *name == client_agent.name(),
+            GeneralName::DNSName(name) => *name == client_authority.name(),
             _ => false,
         }) {
-            return ClientAgentVerifyResult::Accept;
+            return ClientAuthorityVerifyResult::Accept;
         }
 
         refuse!("Client name not verified by client certificate")
@@ -122,54 +122,54 @@ impl AuthClient for ClientNameAuther {
 impl<A: AuthClient + ?Sized> AuthClient for &A {
     fn verify_client_name(
         &self,
-        server_agent: &LocalAgent,
+        server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
-        A::verify_client_name(self, server_agent, client_name)
+        A::verify_client_name(self, server_authority, client_name)
     }
 
-    fn verify_client_agent(
+    fn verify_client_authority(
         &self,
-        server_agent: &LocalAgent,
-        client_agent: &RemoteAgent,
-    ) -> ClientAgentVerifyResult {
-        A::verify_client_agent(self, server_agent, client_agent)
+        server_authority: &LocalAuthority,
+        client_authority: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
+        A::verify_client_authority(self, server_authority, client_authority)
     }
 }
 
 impl<A: AuthClient + ?Sized> AuthClient for Box<A> {
     fn verify_client_name(
         &self,
-        server_agent: &LocalAgent,
+        server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
-        self.deref().verify_client_name(server_agent, client_name)
+        self.deref().verify_client_name(server_authority, client_name)
     }
 
-    fn verify_client_agent(
+    fn verify_client_authority(
         &self,
-        server_agent: &LocalAgent,
-        client_agent: &RemoteAgent,
-    ) -> ClientAgentVerifyResult {
-        self.deref().verify_client_agent(server_agent, client_agent)
+        server_authority: &LocalAuthority,
+        client_authority: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
+        self.deref().verify_client_authority(server_authority, client_authority)
     }
 }
 
 impl<A: AuthClient + ?Sized> AuthClient for Arc<A> {
     fn verify_client_name(
         &self,
-        server_agent: &LocalAgent,
+        server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
-        self.deref().verify_client_name(server_agent, client_name)
+        self.deref().verify_client_name(server_authority, client_name)
     }
 
-    fn verify_client_agent(
+    fn verify_client_authority(
         &self,
-        server_agent: &LocalAgent,
-        client_agent: &RemoteAgent,
-    ) -> ClientAgentVerifyResult {
-        self.deref().verify_client_agent(server_agent, client_agent)
+        server_authority: &LocalAuthority,
+        client_authority: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
+        self.deref().verify_client_authority(server_authority, client_authority)
     }
 }
 
@@ -185,22 +185,22 @@ macro_rules! impl_auth_client_for_tuple {
         {
             fn verify_client_name(
                 &self,
-                server_agent: &LocalAgent,
+                server_authority: &LocalAuthority,
                 client_name: Option<&str>
             ) -> ClientNameVerifyResult {
                 #[allow(non_snake_case)]
                 let ($($t,)*) = self;
-                $($t.verify_client_name(server_agent, client_name) &)* Default::default()
+                $($t.verify_client_name(server_authority, client_name) &)* Default::default()
             }
 
-            fn verify_client_agent(
+            fn verify_client_authority(
                 &self,
-                server_agent: &LocalAgent,
-                client_agent: &RemoteAgent
-            ) -> ClientAgentVerifyResult {
+                server_authority: &LocalAuthority,
+                client_authority: &RemoteAuthority
+            ) -> ClientAuthorityVerifyResult {
                 #[allow(non_snake_case)]
                 let ($($t,)*) = self;
-                $($t.verify_client_agent(server_agent, client_agent) &)* Default::default()
+                $($t.verify_client_authority(server_authority, client_authority) &)* Default::default()
             }
         }
     };

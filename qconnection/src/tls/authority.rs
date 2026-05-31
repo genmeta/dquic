@@ -10,7 +10,7 @@ use thiserror::Error;
 use x509_parser::prelude::FromDer;
 
 #[derive(Debug, Clone, AsRef)]
-pub struct LocalAgent {
+pub struct LocalAuthority {
     name: Arc<str>,
     certified_key: Arc<CertifiedKey>,
 }
@@ -26,7 +26,7 @@ pub enum SignError {
     },
 }
 
-impl LocalAgent {
+impl LocalAuthority {
     pub fn new(name: Arc<str>, certified_key: Arc<CertifiedKey>) -> Self {
         Self {
             name,
@@ -65,7 +65,7 @@ impl LocalAgent {
 }
 
 #[derive(Debug, Clone, AsRef)]
-pub struct RemoteAgent {
+pub struct RemoteAuthority {
     name: Arc<str>,
     cert: Arc<[CertificateDer<'static>]>,
 }
@@ -76,7 +76,7 @@ pub enum VerifyError {
     UnsupportedScheme { scheme: SignatureScheme },
 }
 
-impl RemoteAgent {
+impl RemoteAuthority {
     pub fn new(name: Arc<str>, cert: Arc<[CertificateDer<'static>]>) -> Self {
         Self { name, cert }
     }
