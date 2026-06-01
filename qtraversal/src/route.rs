@@ -1,5 +1,4 @@
 use std::{
-    convert::identity,
     io,
     net::SocketAddr,
     pin::Pin,
@@ -134,42 +133,47 @@ impl Component for ForwardersComponent {
 }
 
 #[derive(Debug)]
-pub struct ReceiveAndDeliverPacket {
+pub struct ReceiveAndDeliverPacket<I: RefIO + 'static = WeakInterface> {
+    ref_iface: Mutex<I>,
     task: Mutex<Option<AbortOnDropHandle<io::Result<()>>>>,
     quic: bool,
     stun: bool,
     forward: bool,
 }
 
-pub type ReceiveAndDeliverPacketComponent = ReceiveAndDeliverPacket;
+pub type ReceiveAndDeliverPacketComponent = ReceiveAndDeliverPacket<WeakInterface>;
 
 #[bon::bon]
-impl ReceiveAndDeliverPacket {
+impl<I: RefIO + 'static> ReceiveAndDeliverPacket<I> {
     #[builder(finish_fn = init)]
     pub fn new(
-        #[builder(start_fn)] weak_iface: WeakInterface,
+        #[builder(start_fn)] ref_iface: I,
         quic_router: Option<Arc<QuicRouter>>,
         stun_router: Option<StunRouter>,
-        forwarder: Option<Forwarder<WeakInterface>>,
+        forwarder: Option<Forwarder<I>>,
     ) -> Self {
         let enable_quic = quic_router.is_some();
         let enable_stun = stun_router.is_some();
         let enable_forward = forwarder.is_some();
 
-        let task = Self::task()
+        let task = ReceiveAndDeliverPacketComponent::task()
             .maybe_quic_router(quic_router)
             .maybe_stun_router(stun_router)
             .maybe_forwarder(forwarder)
-            .iface_ref(weak_iface)
+            .iface_ref(ref_iface.clone())
             .spawn();
         Self {
+            ref_iface: Mutex::new(ref_iface),
             task: Mutex::new(Some(task)),
             quic: enable_quic,
             stun: enable_stun,
             forward: enable_forward,
         }
     }
+}
 
+#[bon::bon]
+impl ReceiveAndDeliverPacketComponent {
     #[builder(finish_fn = spawn)]
     pub fn task<I: RefIO + 'static>(
         quic_router: Option<Arc<QuicRouter>>,
@@ -258,37 +262,73 @@ impl ReceiveAndDeliverPacket {
     }
 }
 
-impl ReceiveAndDeliverPacket {
+impl<I: RefIO + 'static> ReceiveAndDeliverPacket<I> {
+    fn lock_ref_iface(&self) -> MutexGuard<'_, I> {
+        self.ref_iface
+            .lock()
+            .expect("receive and deliver packet ref_iface lock poisoned")
+    }
+
     fn lock_task(&self) -> MutexGuard<'_, Option<AbortOnDropHandle<io::Result<()>>>> {
         self.task.lock().unwrap()
     }
+}
 
+impl ReceiveAndDeliverPacketComponent {
     pub fn reinit(&self, iface: &Interface) {
+        let new_ref_iface = iface.downgrade();
+        if self.lock_ref_iface().same_io(&new_ref_iface) {
+            return;
+        }
+
         _ = iface.with_components(|components| {
-            let quic_router = (self.quic)
-                .then(|| components.with(QuicRouterComponent::router))
-                .and_then(identity);
+            let quic_router = self
+                .quic
+                .then(|| {
+                    components.with(|router: &QuicRouterComponent| {
+                        router.reinit(iface);
+                        router.router()
+                    })
+                })
+                .flatten();
             let stun_router = self
                 .stun
-                .then(|| components.with(StunRouterComponent::router))
-                .and_then(identity);
+                .then(|| {
+                    components.with(|router: &StunRouterComponent| {
+                        router.reinit(iface);
+                        router.router()
+                    })
+                })
+                .flatten();
             let forwarder = self
                 .forward
-                .then(|| components.with(ForwardersComponent::forwarder))
-                .and_then(identity);
+                .then(|| {
+                    components.with(|forwarder: &ForwardersComponent| {
+                        forwarder.reinit(iface);
+                        forwarder.forwarder()
+                    })
+                })
+                .flatten();
+            if (self.quic && quic_router.is_none())
+                || (self.stun && stun_router.is_none())
+                || (self.forward && forwarder.is_none())
+            {
+                return;
+            }
             *self.lock_task() = Some(
                 Self::task()
                     .maybe_quic_router(quic_router)
                     .maybe_stun_router(stun_router)
                     .maybe_forwarder(forwarder)
-                    .iface_ref(iface.downgrade())
+                    .iface_ref(new_ref_iface.clone())
                     .spawn(),
             );
+            *self.lock_ref_iface() = new_ref_iface;
         });
     }
 }
 
-impl Component for ReceiveAndDeliverPacket {
+impl Component for ReceiveAndDeliverPacketComponent {
     fn poll_shutdown(&self, cx: &mut Context<'_>) -> std::task::Poll<()> {
         let mut task_guard = self.lock_task();
         if let Some(task) = task_guard.as_mut() {
