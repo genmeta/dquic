@@ -14,9 +14,7 @@ rust-version.workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
-bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_more = { workspace = true, features = ["deref"] }
 futures = { workspace = true }
 qconnection = { workspace = true }
 qresolve = { workspace = true }
@@ -39,7 +37,6 @@ serde = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-std", "rt-multi-thread"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing-appender = { workspace = true }
-x509-parser = { workspace = true }
 
 # console-subscriber = "0.4"
 

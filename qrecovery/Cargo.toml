@@ -15,12 +15,9 @@ rust-version.workspace = true
 [dependencies]
 bytes = { workspace = true }
 derive_more = { workspace = true, features = ["deref"] }
-enum_dispatch = { workspace = true }
 futures = { workspace = true }
 qbase = { workspace = true }
 qevent = { workspace = true }
-rand = { workspace = true }
-rustls = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "time"] }
 tracing = { workspace = true }
