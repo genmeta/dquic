@@ -9,7 +9,8 @@ use std::{
 
 pub use authority::{LocalAuthority, RemoteAuthority, SignError, VerifyError};
 pub use client_auth::{
-    AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAuthorityVerifyResult, ClientNameVerifyResult,
+    AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAuthorityVerifyResult,
+    ClientNameVerifyResult,
 };
 use futures::{future::poll_fn, never::Never};
 use qbase::{
@@ -136,8 +137,13 @@ impl ResolvesClientCert for ClientCertResolver {
         self.inner
             .resolve(root_hint_subjects, sigschemes)
             .inspect(|resolved_cert| {
-                let client_authority = LocalAuthority::new(self.client_name.clone(), resolved_cert.clone());
-                let old = self.client_authority.lock().unwrap().replace(client_authority);
+                let client_authority =
+                    LocalAuthority::new(self.client_name.clone(), resolved_cert.clone());
+                let old = self
+                    .client_authority
+                    .lock()
+                    .unwrap()
+                    .replace(client_authority);
                 assert!(
                     old.is_none(),
                     "unreachable: qconnection::tls::ClientCertResolver resolve only once"
@@ -263,7 +269,11 @@ impl ResolvesServerCert for ServerCertResolver {
         let server_name = client_hello.server_name()?.into();
         self.inner.resolve(client_hello).inspect(|resolved_cert| {
             let server_authority = LocalAuthority::new(server_name, resolved_cert.clone());
-            let old = self.server_authority.lock().unwrap().replace(server_authority);
+            let old = self
+                .server_authority
+                .lock()
+                .unwrap()
+                .replace(server_authority);
             assert!(
                 old.is_none(),
                 "unreachable: qconnection::tls::ServerCertResolver resolve only once"

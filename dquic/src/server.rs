@@ -363,7 +363,11 @@ impl AuthClient for ServerAuther {
         }
     }
 
-    fn verify_client_authority(&self, _: &LocalAuthority, _: &RemoteAuthority) -> ClientAuthorityVerifyResult {
+    fn verify_client_authority(
+        &self,
+        _: &LocalAuthority,
+        _: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
         ClientAuthorityVerifyResult::Accept
     }
 }

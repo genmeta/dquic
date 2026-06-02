@@ -332,9 +332,7 @@ async fn echo_stream_with_sign_verify(
     let mut message = Vec::new();
     reader.read_to_end(&mut message).await.unwrap();
     let Message { data, sign } = postcard::from_bytes(&message).unwrap();
-    remote
-        .verify(SIGNATURE_SCHEME, &data, &sign)
-        .unwrap();
+    remote.verify(SIGNATURE_SCHEME, &data, &sign).unwrap();
     tracing::debug!("message received and verified");
 
     let sign = local.sign(SIGNATURE_SCHEME, &data).unwrap();
