@@ -73,7 +73,11 @@ impl AuthClient for AcceptAllClientAuther {
         ClientNameVerifyResult::Accept
     }
 
-    fn verify_client_authority(&self, _: &LocalAuthority, _: &RemoteAuthority) -> ClientAuthorityVerifyResult {
+    fn verify_client_authority(
+        &self,
+        _: &LocalAuthority,
+        _: &RemoteAuthority,
+    ) -> ClientAuthorityVerifyResult {
         ClientAuthorityVerifyResult::Accept
     }
 }
@@ -143,7 +147,8 @@ impl<A: AuthClient + ?Sized> AuthClient for Box<A> {
         server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
-        self.deref().verify_client_name(server_authority, client_name)
+        self.deref()
+            .verify_client_name(server_authority, client_name)
     }
 
     fn verify_client_authority(
@@ -151,7 +156,8 @@ impl<A: AuthClient + ?Sized> AuthClient for Box<A> {
         server_authority: &LocalAuthority,
         client_authority: &RemoteAuthority,
     ) -> ClientAuthorityVerifyResult {
-        self.deref().verify_client_authority(server_authority, client_authority)
+        self.deref()
+            .verify_client_authority(server_authority, client_authority)
     }
 }
 
@@ -161,7 +167,8 @@ impl<A: AuthClient + ?Sized> AuthClient for Arc<A> {
         server_authority: &LocalAuthority,
         client_name: Option<&str>,
     ) -> ClientNameVerifyResult {
-        self.deref().verify_client_name(server_authority, client_name)
+        self.deref()
+            .verify_client_name(server_authority, client_name)
     }
 
     fn verify_client_authority(
@@ -169,7 +176,8 @@ impl<A: AuthClient + ?Sized> AuthClient for Arc<A> {
         server_authority: &LocalAuthority,
         client_authority: &RemoteAuthority,
     ) -> ClientAuthorityVerifyResult {
-        self.deref().verify_client_authority(server_authority, client_authority)
+        self.deref()
+            .verify_client_authority(server_authority, client_authority)
     }
 }
 

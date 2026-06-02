@@ -333,7 +333,7 @@ impl Devices {
             }
         }));
 
-        let watcher = netwatcher::watch_interfaces({
+        let watcher = netwatcher::watch_interfaces_with_callback({
             let state = state.clone();
             move |_update| {
                 // TODO: use the update info to avoid full scan
@@ -354,7 +354,7 @@ impl Devices {
 
     #[inline]
     pub fn restart_watcher(&self) -> Result<(), WatcherError> {
-        let new_watcher = netwatcher::watch_interfaces({
+        let new_watcher = netwatcher::watch_interfaces_with_callback({
             let state = self.state.clone();
             move |_update| {
                 // TODO: use the update info to avoid full scan

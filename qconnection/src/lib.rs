@@ -36,8 +36,8 @@ pub mod prelude {
     pub use crate::{
         Connection, StreamReader, StreamWriter,
         tls::{
-            AuthClient, ClientAuthorityVerifyResult, ClientNameVerifyResult, LocalAuthority, RemoteAuthority,
-            SignError, VerifyError,
+            AuthClient, ClientAuthorityVerifyResult, ClientNameVerifyResult, LocalAuthority,
+            RemoteAuthority, SignError, VerifyError,
         },
     };
 }
@@ -306,8 +306,12 @@ impl Components {
         let tls_handshake = self.tls_handshake.clone();
         async move {
             match tls_handshake.info().await?.as_ref() {
-                tls::TlsHandshakeInfo::Client { local_authority, .. } => Ok(local_authority.clone()),
-                tls::TlsHandshakeInfo::Server { local_authority, .. } => Ok(Some(local_authority.clone())),
+                tls::TlsHandshakeInfo::Client {
+                    local_authority, ..
+                } => Ok(local_authority.clone()),
+                tls::TlsHandshakeInfo::Server {
+                    local_authority, ..
+                } => Ok(Some(local_authority.clone())),
             }
         }
         .instrument_in_current()
@@ -318,10 +322,12 @@ impl Components {
         let tls_handshake = self.tls_handshake.clone();
         async move {
             match tls_handshake.info().await?.as_ref() {
-                tls::TlsHandshakeInfo::Client { remote_authority, .. } => {
-                    Ok(Some(remote_authority.clone()))
-                }
-                tls::TlsHandshakeInfo::Server { remote_authority, .. } => Ok(remote_authority.clone()),
+                tls::TlsHandshakeInfo::Client {
+                    remote_authority, ..
+                } => Ok(Some(remote_authority.clone())),
+                tls::TlsHandshakeInfo::Server {
+                    remote_authority, ..
+                } => Ok(remote_authority.clone()),
             }
         }
         .instrument_in_current()

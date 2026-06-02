@@ -1108,10 +1108,7 @@ where
             (Direct { addr: local_addr }, Direct { addr: remote_addr }) => {
                 Ok((*local_addr, *remote_addr))
             }
-            (
-                Agent { .. },
-                Agent { agent, .. },
-            ) => {
+            (Agent { .. }, Agent { agent, .. }) => {
                 let iface = self.0.ifaces.borrow(bind).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
