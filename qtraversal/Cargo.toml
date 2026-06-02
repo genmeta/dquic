@@ -10,36 +10,26 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_more = { workspace = true }
-enum_dispatch = { workspace = true }
 futures = { workspace = true }
-bitflags = { workspace = true }
 nom = { workspace = true }
 qbase = { workspace = true }
 qresolve = { workspace = true }
 qevent = { workspace = true }
 qinterface = { workspace = true, features = ["qudp"] }
-qudp = { workspace = true }
 rand = { workspace = true }
-rustls = { workspace = true }
 smallvec = { workspace = true }
 snafu = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-netdev = { workspace = true }
 
 [dev-dependencies]
 clap = { workspace = true }
-rustls = { workspace = true, features = ["ring"] }
 tokio = { features = ["fs", "rt-multi-thread"], workspace = true }
-tokio-test = "0.4"
-tracing = { workspace = true }
 
 [dev-dependencies.tracing-subscriber]
 workspace = true

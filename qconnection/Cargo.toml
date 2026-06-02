@@ -30,7 +30,6 @@ qevent = { workspace = true }
 qrecovery = { workspace = true }
 ring = { workspace = true }
 qtraversal = { workspace = true }
-rand = { workspace = true }
 rustls = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

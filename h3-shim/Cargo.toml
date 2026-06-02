@@ -16,7 +16,6 @@ autoexamples = false
 h3 = { workspace = true }
 h3-datagram = { workspace = true, optional = true }
 bytes = { workspace = true }
-dashmap = { workspace = true }
 futures = { workspace = true }
 dquic = { workspace = true }
 tokio = { workspace = true }
@@ -26,18 +25,12 @@ datagram = ["dep:h3-datagram", "dquic/datagram"]
 telemetry = ["dquic/telemetry"]
 
 [dev-dependencies]
-base64 = "0.22"
 clap = { workspace = true, features = ["derive"] }
-crossterm = { version = "0.29", features = ["events", "event-stream"] }
 http = { workspace = true }
 indicatif = { workspace = true }
-libc = "0.2"
 qevent = { workspace = true, features = ["telemetry"] }
 rustls = { workspace = true, features = ["logging", "ring"] }
 rustls-native-certs = { workspace = true }
-rpassword = "7.3"
-serde = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "fs", "rt-multi-thread"] }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }

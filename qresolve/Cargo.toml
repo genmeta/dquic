@@ -12,5 +12,4 @@ categories.workspace = true
 [dependencies]
 futures = { workspace = true }
 tokio = { workspace = true }
-qinterface = { workspace = true }
 qbase = { workspace = true }
