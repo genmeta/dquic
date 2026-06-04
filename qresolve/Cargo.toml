@@ -11,5 +11,5 @@ categories.workspace = true
 
 [dependencies]
 futures = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 qbase = { workspace = true }
