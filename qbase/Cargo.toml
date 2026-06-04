@@ -1,6 +1,6 @@
 [package]
 name = "qbase"
-version = "0.5.0"
+version = "0.5.1"
 edition.workspace = true
 description = "Core structure of the QUIC protocol, a part of dquic"
 readme.workspace = true
