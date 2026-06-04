@@ -259,35 +259,55 @@ async fn test_punch_case(client_nat: NatType, server_nat: NatType) {
     launch_client(client_case, server_ep).await;
 }
 
-async fn get_stun_data(server_iface: dquic::qinterface::Interface) -> Vec<(EndpointAddr, NatType)> {
-    let mut outer_addresses = server_iface
-        .with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|clients| {
-                // workaround. clippy issue: https://github.com/rust-lang/rust-clippy/issues/16428
-                #[allow(clippy::redundant_iter_cloned)]
-                clients
-                    .values()
-                    .cloned()
-                    .map(|client| async move {
-                        let agent = client.agent_addr();
-                        let outer = client.outer_addr().await?;
-                        let ep = EndpointAddr::with_agent(agent, outer);
-                        let nat_type = client.nat_type().await?;
-                        io::Result::Ok((ep, nat_type))
-                    })
-                    .collect::<JoinSet<_>>()
-            })
-        })
-        .expect("interface rebinded too quickly")
-        .expect("traversal components missing");
-    let mut datas = vec![];
+const STUN_DATA_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const STUN_DATA_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-    while let Some(join_result) = outer_addresses.join_next().await {
-        let result = join_result.expect("detect panic");
-        let data = result.expect("detect outer addr or nat type failed");
-        datas.push(data);
+async fn get_stun_data(server_iface: dquic::qinterface::Interface) -> Vec<(EndpointAddr, NatType)> {
+    let deadline = tokio::time::Instant::now() + STUN_DATA_WAIT_TIMEOUT;
+
+    loop {
+        let mut outer_addresses = server_iface
+            .with_component(|clients: &StunClientsComponent| {
+                clients.with_clients(|clients| {
+                    // workaround. clippy issue: https://github.com/rust-lang/rust-clippy/issues/16428
+                    #[allow(clippy::redundant_iter_cloned)]
+                    clients
+                        .values()
+                        .cloned()
+                        .map(|client| async move {
+                            let agent = client.agent_addr();
+                            let outer = client.outer_addr().await?;
+                            let ep = EndpointAddr::with_agent(agent, outer);
+                            let nat_type = client.nat_type().await?;
+                            io::Result::Ok((ep, nat_type))
+                        })
+                        .collect::<JoinSet<_>>()
+                })
+            })
+            .expect("interface rebinded too quickly")
+            .expect("traversal components missing");
+        let mut datas = vec![];
+
+        while let Some(join_result) = outer_addresses.join_next().await {
+            let result = join_result.expect("detect panic");
+            let data = result.expect("detect outer addr or nat type failed");
+            datas.push(data);
+        }
+
+        if !datas.is_empty() {
+            return datas;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            panic!(
+                "timed out waiting for STUN endpoint discovery on {}",
+                server_iface.bind_uri()
+            );
+        }
+
+        tokio::time::sleep_until(std::cmp::min(now + STUN_DATA_POLL_INTERVAL, deadline)).await;
     }
-    datas
 }
 
 async fn launch_client(client_case: TestCase, server_ep: EndpointAddr) {
