@@ -1,4 +1,4 @@
-name: Release crates.io
+name: Publish crates.io
 
 on:
   pull_request:
