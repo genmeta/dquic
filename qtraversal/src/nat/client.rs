@@ -41,6 +41,8 @@ use crate::{
     },
 };
 
+const NAT_MAPPING_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatDetectionStep {
     Access,
@@ -342,7 +344,7 @@ impl<I: RefIO + 'static> StunClient<I> {
                 log_detect_result(&detect_result);
 
                 let timeout = match detect_result {
-                    Ok(_) => Duration::from_secs(30),
+                    Ok(_) => NAT_MAPPING_REFRESH_INTERVAL,
                     Err(_) => Duration::from_secs(1),
                 };
 
