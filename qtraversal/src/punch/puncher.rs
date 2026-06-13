@@ -40,7 +40,7 @@ use tracing::Instrument as _;
 
 use crate::{
     PathWay,
-    addr::AddressBook,
+    addr::{AddressBook, LocalEndpointEffect, LocalEndpointEffects},
     nat::{client::StunClientComponent, router::StunRouterComponent},
     punch::{
         predictor::{PacketSendFn, PortPredictor},
@@ -73,6 +73,12 @@ const MAX_RETRIES: usize = 5;
 const COLLISION_PORTS: u32 = 800;
 
 pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
+
+#[derive(Debug, Default)]
+pub struct LocalEndpointChanges {
+    pub effects: LocalEndpointEffects,
+    pub ways: Vec<(BindUri, Link, PathWay)>,
+}
 
 impl<TX, PH, S> Clone for ArcPuncher<TX, PH, S> {
     fn clone(&self) -> Self {
@@ -237,6 +243,53 @@ impl<TX, PH, S> Drop for Puncher<TX, PH, S> {
     }
 }
 
+fn add_local_address_when_endpoint_present_locked(
+    address_book: &mut AddressBook,
+    bind_uri: &BindUri,
+    endpoint_addr: EndpointAddr,
+    advertise_bind_uri: BindUri,
+    local_addr: SocketAddr,
+    nat_type: NatType,
+    tire: u32,
+) -> io::Result<AddAddressFrame> {
+    if !address_book.has_local_endpoint(bind_uri, endpoint_addr) {
+        tracing::trace!(
+            target: "punch",
+            %bind_uri,
+            %endpoint_addr,
+            advertise_bind_uri = %advertise_bind_uri,
+            %local_addr,
+            ?nat_type,
+            "skipping local address advertisement for removed endpoint"
+        );
+        return Err(io::Error::other("local endpoint removed"));
+    }
+
+    address_book.add_local_address(advertise_bind_uri, local_addr, tire, nat_type)
+}
+
+fn add_guarded_dynamic_local_address_locked(
+    address_book: &mut AddressBook,
+    bind_uri: &BindUri,
+    endpoint_addr: EndpointAddr,
+    dynamic_bind: BindUri,
+    local_addr: SocketAddr,
+    nat_type: NatType,
+    tire: u32,
+) -> (io::Result<AddAddressFrame>, bool) {
+    let result = add_local_address_when_endpoint_present_locked(
+        address_book,
+        bind_uri,
+        endpoint_addr,
+        dynamic_bind,
+        local_addr,
+        nat_type,
+        tire,
+    );
+    let retain_dynamic_iface = result.is_ok();
+    (result, retain_dynamic_iface)
+}
+
 impl<TX, PH, S> ArcPuncher<TX, PH, S>
 where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
@@ -246,6 +299,27 @@ where
     for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
     for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
 {
+    fn local_endpoint_changes(
+        &self,
+        effects: LocalEndpointEffects,
+        remote_endpoints: Vec<(EndpointAddr, qresolve::Source)>,
+    ) -> LocalEndpointChanges {
+        let mut ways = Vec::new();
+        for effect in &effects {
+            let LocalEndpointEffect::AddEndpoint { bind_uri, endpoint } = effect else {
+                continue;
+            };
+            for (remote_ep, source) in &remote_endpoints {
+                if let Ok(way) =
+                    self.resolve_punch_connection(bind_uri, endpoint, remote_ep, source)
+                {
+                    ways.push(way);
+                }
+            }
+        }
+        LocalEndpointChanges { effects, ways }
+    }
+
     pub fn add_local_address(
         &self,
         bind_uri: BindUri,
@@ -254,53 +328,7 @@ where
         tire: u32,
     ) -> io::Result<()> {
         if nat_type == NatType::Dynamic {
-            let puncher = self.clone();
-            let ifaces = self.0.ifaces.clone();
-            let iface_factory = self.0.iface_factory.clone();
-            let stun_servers = self.0.stun_servers.clone();
-            let quic_router = self.0.quic_router.clone();
-
-            // Inherent termination: dynamic address publication performs one probe
-            // and sends at most one AddAddress frame before returning.
-            tokio::spawn(
-                async move {
-                    let (iface, stun_client) =
-                        dynamic_iface(&bind_uri, &ifaces, &iface_factory, &quic_router, &stun_servers)
-                            .await?;
-                    let dynamic_bind = iface.bind_uri();
-                    let outer = stun_client.outer_addr().await.inspect_err(|error| {
-                        tracing::warn!(
-                            target: "punch",
-                            error = %snafu::Report::from_error(error),
-                            bind_uri = %dynamic_bind,
-                            "failed to detect outer address for dynamic interface, unbinding"
-                        );
-                        let ifaces = ifaces.clone();
-                        let dynamic_bind = dynamic_bind.clone();
-                        // Inherent termination: this task owns one interface bind
-                        // and exits once the unbind future completes.
-                        tokio::spawn(
-                            async move { ifaces.unbind(dynamic_bind).await }.in_current_span(),
-                        );
-                    })?;
-                    puncher
-                        .0
-                        .punch_ifaces
-                        .insert(dynamic_bind.clone(), iface.clone());
-
-                    let mut address_book = puncher.0.address_book.lock().unwrap();
-                    let frame =
-                        address_book.add_local_address(dynamic_bind.clone(), outer, tire, nat_type)?;
-                    tracing::trace!(target: "punch", bind_uri = %dynamic_bind, %outer, nat_type = ?nat_type, "sending AddAddress frame for dynamic");
-                    puncher
-                        .0
-                        .broker
-                        .send_frame([ReliableFrame::AddAddress(frame)]);
-                    Ok::<_, io::Error>(())
-                }
-                .instrument_in_current()
-                .in_current_span(),
-            );
+            self.spawn_dynamic_local_address(bind_uri, nat_type, tire, None);
             return Ok(());
         }
         let mut address_book = self.0.address_book.lock().unwrap();
@@ -310,20 +338,263 @@ where
         Ok(())
     }
 
+    pub fn add_local_address_if_endpoint_present(
+        &self,
+        bind_uri: BindUri,
+        endpoint_addr: EndpointAddr,
+        local_addr: SocketAddr,
+        nat_type: NatType,
+        tire: u32,
+    ) -> io::Result<()> {
+        if nat_type == NatType::Dynamic {
+            {
+                let address_book = self.0.address_book.lock().unwrap();
+                if !address_book.has_local_endpoint(&bind_uri, endpoint_addr) {
+                    tracing::trace!(
+                        target: "punch",
+                        %bind_uri,
+                        %endpoint_addr,
+                        %local_addr,
+                        ?nat_type,
+                        "skipping dynamic local address advertisement for removed endpoint"
+                    );
+                    return Err(io::Error::other("local endpoint removed"));
+                }
+            }
+
+            self.spawn_dynamic_local_address(bind_uri, nat_type, tire, Some(endpoint_addr));
+            return Ok(());
+        }
+
+        let mut address_book = self.0.address_book.lock().unwrap();
+        let frame = add_local_address_when_endpoint_present_locked(
+            &mut address_book,
+            &bind_uri,
+            endpoint_addr,
+            bind_uri.clone(),
+            local_addr,
+            nat_type,
+            tire,
+        )?;
+        tracing::trace!(
+            target: "punch",
+            bind_uri = %bind_uri,
+            %local_addr,
+            nat_type = ?nat_type,
+            "sending AddAddress frame"
+        );
+        self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
+        Ok(())
+    }
+
+    fn spawn_dynamic_local_address(
+        &self,
+        bind_uri: BindUri,
+        nat_type: NatType,
+        tire: u32,
+        endpoint_guard: Option<EndpointAddr>,
+    ) {
+        let puncher = self.clone();
+        let ifaces = self.0.ifaces.clone();
+        let iface_factory = self.0.iface_factory.clone();
+        let stun_servers = self.0.stun_servers.clone();
+        let quic_router = self.0.quic_router.clone();
+
+        // Inherent termination: dynamic address publication performs one probe
+        // and sends at most one AddAddress frame before returning.
+        tokio::spawn(
+            async move {
+                let (iface, stun_client) = dynamic_iface(
+                    &bind_uri,
+                    &ifaces,
+                    &iface_factory,
+                    &quic_router,
+                    &stun_servers,
+                )
+                .await?;
+                let dynamic_bind = iface.bind_uri();
+                let outer = stun_client.outer_addr().await.inspect_err(|error| {
+                    tracing::warn!(
+                        target: "punch",
+                        error = %snafu::Report::from_error(error),
+                        bind_uri = %dynamic_bind,
+                        "failed to detect outer address for dynamic interface, unbinding"
+                    );
+                    let ifaces = ifaces.clone();
+                    let dynamic_bind = dynamic_bind.clone();
+                    // Inherent termination: this task owns one interface bind
+                    // and exits once the unbind future completes.
+                    tokio::spawn(async move { ifaces.unbind(dynamic_bind).await }.in_current_span());
+                })?;
+
+                let frame = match endpoint_guard {
+                    Some(endpoint_addr) => {
+                        let (result, retain_dynamic_iface) = {
+                            let mut address_book = puncher.0.address_book.lock().unwrap();
+                            add_guarded_dynamic_local_address_locked(
+                                &mut address_book,
+                                &bind_uri,
+                                endpoint_addr,
+                                dynamic_bind.clone(),
+                                outer,
+                                nat_type,
+                                tire,
+                            )
+                        };
+
+                        match result {
+                            Ok(frame) => {
+                                puncher
+                                    .0
+                                    .punch_ifaces
+                                    .insert(dynamic_bind.clone(), iface.clone());
+                                frame
+                            }
+                            Err(error) => {
+                                if !retain_dynamic_iface {
+                                    ifaces.unbind(dynamic_bind.clone()).await;
+                                }
+                                return Err(error);
+                            }
+                        }
+                    }
+                    None => {
+                        puncher
+                            .0
+                            .punch_ifaces
+                            .insert(dynamic_bind.clone(), iface.clone());
+                        let mut address_book = puncher.0.address_book.lock().unwrap();
+                        address_book.add_local_address(
+                            dynamic_bind.clone(),
+                            outer,
+                            tire,
+                            nat_type,
+                        )?
+                    }
+                };
+                tracing::trace!(target: "punch", bind_uri = %dynamic_bind, %outer, nat_type = ?nat_type, "sending AddAddress frame for dynamic");
+                puncher
+                    .0
+                    .broker
+                    .send_frame([ReliableFrame::AddAddress(frame)]);
+                Ok::<_, io::Error>(())
+            }
+            .instrument_in_current()
+            .in_current_span(),
+        );
+    }
+
     pub fn add_local_endpoint(
         &self,
         bind: BindUri,
         addr: EndpointAddr,
     ) -> io::Result<Vec<(BindUri, Link, PathWay)>> {
-        let mut address_book = self.0.address_book.lock().unwrap();
-        address_book.add_local_endpoint(bind.clone(), addr)?;
-        let mut ways = Vec::new();
-        for (remote_ep, source) in address_book.remote_endpoint().iter() {
-            if let Ok(way) = self.resolve_punch_connection(&bind, &addr, remote_ep, source) {
-                ways.push(way);
-            }
+        Ok(self.add_local_endpoint_changes(bind, addr)?.ways)
+    }
+
+    pub fn add_local_endpoint_changes(
+        &self,
+        bind: BindUri,
+        addr: EndpointAddr,
+    ) -> io::Result<LocalEndpointChanges> {
+        let (effects, remote_endpoints) = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            let effects = address_book.add_local_endpoint(bind, addr)?;
+            let remote_endpoints = address_book
+                .remote_endpoint()
+                .iter()
+                .map(|(endpoint, source)| (*endpoint, source.clone()))
+                .collect();
+            (effects, remote_endpoints)
+        };
+        Ok(self.local_endpoint_changes(effects, remote_endpoints))
+    }
+
+    pub fn remove_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> bool {
+        self.remove_local_endpoint_changes(bind, addr)
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, LocalEndpointEffect::RemoveEndpoint { .. }))
+    }
+
+    pub fn remove_local_endpoint_changes(
+        &self,
+        bind: &BindUri,
+        addr: EndpointAddr,
+    ) -> LocalEndpointChanges {
+        let effects = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.remove_local_endpoint(bind, addr)
+        };
+        LocalEndpointChanges {
+            effects,
+            ways: Vec::new(),
         }
-        Ok(ways)
+    }
+
+    pub fn upsert_direct_endpoint(&self, bind: BindUri, addr: SocketAddr) -> LocalEndpointChanges {
+        let (effects, remote_endpoints) = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            let effects = address_book.upsert_direct_endpoint(bind, addr);
+            let remote_endpoints = address_book
+                .remote_endpoint()
+                .iter()
+                .map(|(endpoint, source)| (*endpoint, source.clone()))
+                .collect();
+            (effects, remote_endpoints)
+        };
+        self.local_endpoint_changes(effects, remote_endpoints)
+    }
+
+    pub fn remove_direct_endpoint(&self, bind: &BindUri) -> LocalEndpointChanges {
+        let effects = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.remove_direct_endpoint(bind)
+        };
+        LocalEndpointChanges {
+            effects,
+            ways: Vec::new(),
+        }
+    }
+
+    pub fn upsert_stun_endpoint(
+        &self,
+        bind: BindUri,
+        endpoint: EndpointAddr,
+    ) -> LocalEndpointChanges {
+        let (effects, remote_endpoints) = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            let effects = address_book.upsert_stun_endpoint(bind, endpoint);
+            let remote_endpoints = address_book
+                .remote_endpoint()
+                .iter()
+                .map(|(endpoint, source)| (*endpoint, source.clone()))
+                .collect();
+            (effects, remote_endpoints)
+        };
+        self.local_endpoint_changes(effects, remote_endpoints)
+    }
+
+    pub fn remove_stun_endpoint(&self, bind: &BindUri) -> LocalEndpointChanges {
+        let effects = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.remove_stun_endpoint(bind)
+        };
+        LocalEndpointChanges {
+            effects,
+            ways: Vec::new(),
+        }
+    }
+
+    pub fn close_tracked_bind_uri(&self, bind: &BindUri) -> LocalEndpointChanges {
+        let effects = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.close_tracked_bind_uri(bind)
+        };
+        LocalEndpointChanges {
+            effects,
+            ways: Vec::new(),
+        }
     }
 
     pub fn add_peer_endpoint(
@@ -331,11 +602,14 @@ where
         endpoint: EndpointAddr,
         source: qresolve::Source,
     ) -> io::Result<Vec<(BindUri, Link, PathWay)>> {
-        let mut address_book = self.0.address_book.lock().unwrap();
-        address_book.add_peer_endpoint(endpoint, source.clone())?;
+        let local_endpoints = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.add_peer_endpoint(endpoint, source.clone())?;
+            address_book.local_endpoint()
+        };
         let mut ways = Vec::new();
-        for (bind, local_ep) in address_book.local_endpoint().iter() {
-            if let Ok(way) = self.resolve_punch_connection(bind, local_ep, &endpoint, &source) {
+        for (bind, local_ep) in local_endpoints {
+            if let Ok(way) = self.resolve_punch_connection(&bind, &local_ep, &endpoint, &source) {
                 ways.push(way);
             }
         }
@@ -1261,4 +1535,131 @@ async fn dynamic_iface(
             });
             Ok((iface.to_owned(), stun_client))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bind_uri() -> BindUri {
+        "inet://127.0.0.1:0".parse().expect("valid bind uri")
+    }
+
+    fn endpoint_addr() -> EndpointAddr {
+        EndpointAddr::direct("127.0.0.1:34567".parse().expect("socket addr"))
+    }
+
+    #[test]
+    fn guarded_add_local_address_rejects_absent_endpoint_without_mutating() {
+        let mut address_book = AddressBook::default();
+        let bind_uri = bind_uri();
+        let endpoint_addr = endpoint_addr();
+        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
+
+        let error = add_local_address_when_endpoint_present_locked(
+            &mut address_book,
+            &bind_uri,
+            endpoint_addr,
+            bind_uri.clone(),
+            local_addr,
+            NatType::FullCone,
+            7,
+        )
+        .expect_err("absent endpoint must be rejected");
+
+        assert_eq!(error.to_string(), "local endpoint removed");
+        assert!(address_book.get_local_address(&0).is_none());
+    }
+
+    #[test]
+    fn guarded_add_local_address_returns_frame_for_present_endpoint() {
+        let mut address_book = AddressBook::default();
+        let bind_uri = bind_uri();
+        let endpoint_addr = endpoint_addr();
+        let advertised_bind_uri: BindUri =
+            "inet://127.0.0.1:45678".parse().expect("valid bind uri");
+        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
+
+        address_book
+            .add_local_endpoint(bind_uri.clone(), endpoint_addr)
+            .expect("local endpoint insert");
+
+        let frame = add_local_address_when_endpoint_present_locked(
+            &mut address_book,
+            &bind_uri,
+            endpoint_addr,
+            advertised_bind_uri.clone(),
+            local_addr,
+            NatType::RestrictedCone,
+            7,
+        )
+        .expect("present endpoint must add local address");
+
+        assert_eq!(*frame, local_addr);
+        assert_eq!(frame.seq_num(), 0);
+        assert_eq!(frame.tire(), 7);
+        assert_eq!(frame.nat_type(), NatType::RestrictedCone);
+        assert_eq!(
+            address_book.get_local_address(&0),
+            Some((advertised_bind_uri, frame))
+        );
+    }
+
+    #[test]
+    fn guarded_dynamic_local_address_rejects_absent_endpoint_without_retaining_iface() {
+        let mut address_book = AddressBook::default();
+        let bind_uri = bind_uri();
+        let endpoint_addr = endpoint_addr();
+        let dynamic_bind: BindUri = "inet://127.0.0.1:45678".parse().expect("valid bind uri");
+        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
+
+        let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
+            &mut address_book,
+            &bind_uri,
+            endpoint_addr,
+            dynamic_bind,
+            local_addr,
+            NatType::Dynamic,
+            7,
+        );
+
+        let error = result.expect_err("absent endpoint must be rejected");
+        assert_eq!(error.to_string(), "local endpoint removed");
+        assert!(!retain_dynamic_iface);
+        assert!(address_book.get_local_address(&0).is_none());
+    }
+
+    #[test]
+    fn guarded_dynamic_local_address_returns_frame_and_retains_iface_for_present_endpoint() {
+        let mut address_book = AddressBook::default();
+        let bind_uri = bind_uri();
+        let endpoint_addr = endpoint_addr();
+        let dynamic_bind: BindUri = "inet://127.0.0.1:45678".parse().expect("valid bind uri");
+        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
+
+        address_book
+            .add_local_endpoint(bind_uri.clone(), endpoint_addr)
+            .expect("local endpoint insert");
+
+        let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
+            &mut address_book,
+            &bind_uri,
+            endpoint_addr,
+            dynamic_bind.clone(),
+            local_addr,
+            NatType::Dynamic,
+            7,
+        );
+
+        let frame = result.expect("present endpoint must add local address");
+        assert!(retain_dynamic_iface);
+        assert_eq!(*frame, local_addr);
+        assert_eq!(frame.seq_num(), 0);
+        assert_eq!(frame.tire(), 7);
+        assert_eq!(frame.nat_type(), NatType::Dynamic);
+        assert_eq!(
+            address_book.get_local_address(&0),
+            Some((dynamic_bind, frame))
+        );
+    }
 }
