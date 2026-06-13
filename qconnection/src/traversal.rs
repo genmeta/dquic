@@ -12,7 +12,11 @@ use qbase::{
 };
 use qevent::telemetry::Instrument;
 use qinterface::{bind_uri::BindUri, component::location::AddressEvent};
-use qtraversal::nat::client::{ClientLocationData, StunClientsComponent};
+use qtraversal::{
+    addr::LocalEndpointEffect,
+    nat::client::{ClientLocationData, StunClientsComponent},
+    punch::puncher::LocalEndpointChanges,
+};
 use tracing::Instrument as _;
 
 use super::Components;
@@ -40,50 +44,75 @@ impl ReceiveFrame<(BindUri, Pathway, Link, PunchHelloFrame)> for Components {
 }
 
 impl Components {
+    fn apply_local_endpoint_changes(&self, changes: LocalEndpointChanges) {
+        for way in changes.ways {
+            let _ = self.add_path(way.0, way.1, way.2);
+        }
+
+        for effect in changes.effects {
+            match effect {
+                LocalEndpointEffect::AddEndpoint { .. } => {}
+                LocalEndpointEffect::RemoveEndpoint { endpoint, .. } => {
+                    self.remove_paths_for_local_endpoint(endpoint);
+                }
+                LocalEndpointEffect::AddPunchAddress { bind_uri, endpoint } => {
+                    if let Err(error) = self.add_local_punch_address(bind_uri, endpoint) {
+                        tracing::debug!(target: "quic", ?error, "failed to add local punch address");
+                    }
+                }
+                LocalEndpointEffect::RemovePunchAddress { addr } => self.remove_address(addr),
+            }
+        }
+    }
+
+    fn remove_paths_for_local_endpoint(&self, endpoint: EndpointAddr) {
+        let pathways = self
+            .paths
+            .paths::<Vec<_>>()
+            .into_iter()
+            .filter_map(|(pathway, _path)| (pathway.local() == endpoint).then_some(pathway))
+            .collect::<Vec<_>>();
+        for pathway in pathways {
+            self.del_path(&pathway);
+        }
+    }
+
+    fn upsert_tracked_direct_endpoint(&self, bind_uri: BindUri, addr: SocketAddr) {
+        let changes = self.puncher.upsert_direct_endpoint(bind_uri, addr);
+        self.apply_local_endpoint_changes(changes);
+    }
+
+    fn remove_tracked_direct_endpoint(&self, bind_uri: &BindUri) {
+        let changes = self.puncher.remove_direct_endpoint(bind_uri);
+        self.apply_local_endpoint_changes(changes);
+    }
+
+    fn upsert_tracked_stun_endpoint(&self, bind_uri: BindUri, endpoint: EndpointAddr) {
+        let changes = self.puncher.upsert_stun_endpoint(bind_uri, endpoint);
+        self.apply_local_endpoint_changes(changes);
+    }
+
+    fn remove_tracked_stun_endpoint(&self, bind_uri: &BindUri) {
+        let changes = self.puncher.remove_stun_endpoint(bind_uri);
+        self.apply_local_endpoint_changes(changes);
+    }
+
+    fn close_tracked_bind_uri(&self, bind_uri: &BindUri) {
+        let changes = self.puncher.close_tracked_bind_uri(bind_uri);
+        self.apply_local_endpoint_changes(changes);
+    }
+
     pub fn subscribe_local_address(&self) {
         let mut observer = self.locations.subscribe();
         let conn = self.clone();
 
         let future = async move {
-            let handle_address_event = |(bind_uri, event): (BindUri, AddressEvent)| {
-                let event = match event.downcast::<io::Result<SocketAddr>>() {
-                    Ok(AddressEvent::Upsert(data)) => {
-                        // on error: delect from address book
-                        // THINK: Err和remove的异同？
-                        let Ok(bound_addr) = data.as_ref() else {
-                            return;
-                        };
-                        let endpoint_addr = EndpointAddr::direct(*bound_addr);
-                        conn.add_local_endpoint(bind_uri, endpoint_addr);
-                        return;
-                    }
-                    Ok(AddressEvent::Remove(_type_id)) => return,
-                    Ok(AddressEvent::Closed) => return,
-                    Err(event) => event,
-                };
-                let _event = match event.downcast::<ClientLocationData>() {
-                    Ok(AddressEvent::Upsert(data)) => {
-                        let Ok(endpoint_addr) = data.as_ref() else {
-                            return;
-                        };
-                        conn.add_local_endpoint(bind_uri.clone(), *endpoint_addr);
-                        if matches!(*endpoint_addr, EndpointAddr::Agent { .. }) {
-                            _ = conn.add_local_punch_address(bind_uri.clone(), *endpoint_addr);
-                        }
-                        return;
-                    }
-                    Ok(AddressEvent::Remove(_type_id)) => return,
-                    Ok(AddressEvent::Closed) => return,
-                    Err(_event) => return,
-                };
-            };
-
             loop {
                 tokio::select! {
                     _ =  conn.conn_state.terminated() => break,
                     address_event = observer.recv() => {
                         match address_event {
-                            Some(event) => handle_address_event(event),
+                            Some((bind_uri, event)) => conn.handle_local_address_event(bind_uri, event),
                             None => break,
                         }
                     }
@@ -94,29 +123,89 @@ impl Components {
         tokio::spawn(future.instrument_in_current().in_current_span());
     }
 
+    fn handle_local_address_event(&self, bind_uri: BindUri, event: AddressEvent) {
+        let event = match event.downcast::<io::Result<SocketAddr>>() {
+            Ok(event) => {
+                self.handle_direct_address_event(bind_uri, event);
+                return;
+            }
+            Err(event) => event,
+        };
+
+        match event.downcast::<ClientLocationData>() {
+            Ok(event) => self.handle_stun_address_event(bind_uri, event),
+            Err(AddressEvent::Upsert(data)) => {
+                let type_id = data.as_ref().type_id();
+                tracing::trace!(target: "quic", ?type_id, "ignored unknown local address upsert event");
+            }
+            Err(AddressEvent::Remove(type_id)) => {
+                tracing::trace!(target: "quic", ?type_id, "ignored unknown local address remove event");
+            }
+            Err(AddressEvent::Closed) => self.close_tracked_bind_uri(&bind_uri),
+        }
+    }
+
+    fn handle_direct_address_event(
+        &self,
+        bind_uri: BindUri,
+        event: AddressEvent<io::Result<SocketAddr>>,
+    ) {
+        match event {
+            AddressEvent::Upsert(data) => match data.as_ref() {
+                Ok(addr) => self.upsert_tracked_direct_endpoint(bind_uri, *addr),
+                Err(error) => {
+                    tracing::debug!(target: "quic", bind_uri = %bind_uri, ?error, "direct local address update failed");
+                    self.remove_tracked_direct_endpoint(&bind_uri);
+                }
+            },
+            AddressEvent::Remove(_type_id) => self.remove_tracked_direct_endpoint(&bind_uri),
+            AddressEvent::Closed => self.close_tracked_bind_uri(&bind_uri),
+        }
+    }
+
+    fn handle_stun_address_event(
+        &self,
+        bind_uri: BindUri,
+        event: AddressEvent<ClientLocationData>,
+    ) {
+        match event {
+            AddressEvent::Upsert(data) => match data.as_ref() {
+                Ok(endpoint) => self.upsert_tracked_stun_endpoint(bind_uri, *endpoint),
+                Err(error) => {
+                    tracing::debug!(target: "quic", bind_uri = %bind_uri, ?error, "stun local address update failed");
+                    self.remove_tracked_stun_endpoint(&bind_uri);
+                }
+            },
+            AddressEvent::Remove(_type_id) => self.remove_tracked_stun_endpoint(&bind_uri),
+            AddressEvent::Closed => self.close_tracked_bind_uri(&bind_uri),
+        }
+    }
+
     // 添加本地直通地址 可以直接新建 path
     pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) {
-        tracing::trace!(target: "quic", bind_uri = %bind, %addr,"add local endpoint");
+        tracing::trace!(target: "quic", bind_uri = %bind, %addr, "add local endpoint");
         let bind_uri = bind.clone();
-        match self.puncher.add_local_endpoint(bind, addr) {
-            Ok(ways) => {
-                let ways: Vec<(BindUri, Link, qtraversal::PathWay)> = ways;
+        match self.puncher.add_local_endpoint_changes(bind, addr) {
+            Ok(changes) => {
                 tracing::trace!(
                     target: "quic",
                     bind_uri = %bind_uri,
                     %addr,
-                    path_count = ways.len(),
-                    paths = ?ways,
+                    path_count = changes.ways.len(),
+                    paths = ?changes.ways,
                     "resolved local endpoint paths"
                 );
-                ways.into_iter().for_each(|way| {
-                    let _ = self.add_path(way.0, way.1, way.2);
-                });
+                self.apply_local_endpoint_changes(changes);
             }
             Err(error) => {
-                tracing::debug!(target: "quic", ?error, "Add local endpoint failed");
+                tracing::debug!(target: "quic", ?error, "add local endpoint failed");
             }
         }
+    }
+
+    pub fn remove_local_endpoint(&self, bind: &BindUri, endpoint: EndpointAddr) {
+        let changes = self.puncher.remove_local_endpoint_changes(bind, endpoint);
+        self.apply_local_endpoint_changes(changes);
     }
 
     // 添加对端直通地址，可以直接新建 path
@@ -175,13 +264,17 @@ impl Components {
         tokio::spawn(
             async move {
                 while let Some(result) = tasks.next().await {
-                    if let Ok(nat_type) = result {
-                        _ = conn.puncher.add_local_address(
-                            bind_uri.clone(),
-                            local_addr,
-                            nat_type,
-                            0,
-                        );
+                    let Ok(nat_type) = result else {
+                        continue;
+                    };
+                    if let Err(error) = conn.puncher.add_local_address_if_endpoint_present(
+                        bind_uri.clone(),
+                        endpoint_addr,
+                        local_addr,
+                        nat_type,
+                        0,
+                    ) {
+                        tracing::debug!(target: "quic", ?error, "failed to add local punch address");
                     }
                 }
             }

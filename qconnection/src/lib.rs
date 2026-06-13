@@ -636,6 +636,10 @@ impl Connection {
         self.try_map_components(|core_conn| core_conn.add_local_endpoint(bind, addr))
     }
 
+    pub fn remove_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> Result<(), Error> {
+        self.try_map_components(|core_conn| core_conn.remove_local_endpoint(bind, addr))
+    }
+
     pub fn add_peer_endpoint(
         &self,
         addr: EndpointAddr,
