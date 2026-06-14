@@ -85,6 +85,7 @@ impl QuicRouter {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn try_deliver(&self, packet: Packet, way: Way) -> Result<(), (Packet, Way)> {
         match self.find_entry(&packet, &way.2) {
             Some(rcvd_pkt_q) => {
