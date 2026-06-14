@@ -17,7 +17,6 @@ use socket2::Socket;
 use crate::{BoundDevice, Io, UdpSocket};
 
 const OPTION_ON: bool = true;
-const OPTION_OFF: bool = false;
 
 impl Io for UdpSocket {
     fn config(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
@@ -40,7 +39,7 @@ impl Io for UdpSocket {
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv4PacketInfo, &OPTION_ON)?;
             }
             SocketAddr::V6(_) => {
-                nix::sys::socket::setsockopt(&io, sockopt::Ipv6V6Only, &OPTION_OFF)?;
+                nix::sys::socket::setsockopt(&io, sockopt::Ipv6V6Only, &OPTION_ON)?;
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv6RecvPacketInfo, &OPTION_ON)?;
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv6DontFrag, &OPTION_ON)?;
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv6Ttl, &(Line::DEFAULT_TTL as i32))?;

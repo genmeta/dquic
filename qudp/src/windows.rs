@@ -21,7 +21,6 @@ pub(crate) struct Aligned<T>(pub(crate) T);
 impl Io for UdpSocket {
     fn config(socket: &Socket, addr: SocketAddr) -> std::io::Result<()> {
         const OPTION_ON: c_int = 1;
-        const OPTION_OFF: c_int = 0;
         let io = socket.as_raw_socket().try_into().unwrap();
 
         setsockopt(io, WinSock::SOL_SOCKET, WinSock::SO_RCVBUF, 2 * 1024 * 1024);
@@ -39,7 +38,7 @@ impl Io for UdpSocket {
                 );
             }
             SocketAddr::V6(_) => {
-                setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_V6ONLY, OPTION_OFF);
+                setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_V6ONLY, OPTION_ON);
                 setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_HOPLIMIT, OPTION_ON);
                 setsockopt(
                     io,
