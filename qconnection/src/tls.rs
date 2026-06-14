@@ -344,7 +344,7 @@ impl ServerTlsSession {
         let client_name = client_params.get::<String>(ParameterId::ClientName);
 
         let server_authority = self.local_authority().clone().ok_or_else(|| {
-            QuicError::with_default_fty(ErrorKind::ConnectionRefused, "Missing SNI in client hello")
+            QuicError::with_default_fty(ErrorKind::ConnectionRefused, "missing SNI in client hello")
         })?;
 
         match self
@@ -371,7 +371,7 @@ impl ServerTlsSession {
                     server_name = %server_authority.name(),
                     client_name = ?self.client_name.as_deref(),
                     ?reason,
-                    "Client name verification failed, refusing connection."
+                    "client name verification failed, refusing connection"
                 );
                 Err(Error::Quic(QuicError::with_default_fty(
                     ErrorKind::ConnectionRefused,
@@ -384,7 +384,7 @@ impl ServerTlsSession {
                     server_name = %server_authority.name(),
                     client_name = ?self.client_name.as_deref(),
                     ?reason,
-                    "Client name verification failed, refusing connection silently."
+                    "client name verification failed, refusing connection silently"
                 );
                 Err(Error::Quic(QuicError::with_default_fty(
                     ErrorKind::ConnectionRefused,
@@ -422,7 +422,7 @@ impl ServerTlsSession {
                     server_name = %server_authority.name(),
                     ?self.client_name,
                     ?reason,
-                    "Client certificate verification failed, refusing connection."
+                    "client certificate verification failed, refusing connection"
                 );
                 Err(Error::Quic(QuicError::with_default_fty(
                     ErrorKind::ConnectionRefused,
@@ -553,7 +553,7 @@ impl ArcTlsHandshake {
                 };
                 Err(Error::Quic(QuicError::with_default_fty(
                     error_kind,
-                    format!("TLS error: {error}"),
+                    format!("tls error: {error}"),
                 )))
             }
         }
@@ -621,7 +621,7 @@ impl ArcTlsHandshake {
 
         if tls_handshake.session.is_finished() && tls_handshake.info.get().is_none() {
             let info = Arc::new(tls_handshake.session.r#yield());
-            tracing::debug!(target: "quic", "TLS handshake finished");
+            tracing::debug!(target: "quic", "tls handshake finished");
             tls_handshake.info.set(info.clone());
             return Ok(Some(info));
         }

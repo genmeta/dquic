@@ -104,12 +104,12 @@ impl AuthClient for ClientNameAuther {
 
         let cert = match x509_parser::parse_x509_certificate(&client_authority.cert_chain()[0]) {
             Ok((_remain, cert)) => cert,
-            Err(error) => refuse!("Invalid certificate: {error}"),
+            Err(error) => refuse!("invalid certificate: {error}"),
         };
         let san = match cert.subject_alternative_name() {
             Ok(Some(san)) => san,
-            Ok(None) => refuse!("Missing SAN in certificate"),
-            Err(error) => refuse!("Invalid SAN in certificate: {error}"),
+            Ok(None) => refuse!("missing SAN in certificate"),
+            Err(error) => refuse!("invalid SAN in certificate: {error}"),
         };
 
         if san.value.general_names.iter().any(|name| match name {
@@ -119,7 +119,7 @@ impl AuthClient for ClientNameAuther {
             return ClientAuthorityVerifyResult::Accept;
         }
 
-        refuse!("Client name not verified by client certificate")
+        refuse!("client name not verified by client certificate")
     }
 }
 
@@ -274,5 +274,103 @@ impl ArcSendLock {
     /// successfully. Unblocks all pending transmission requests.
     pub fn grant_permit(&self) {
         _ = self.0.set(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rustls::{
+        SignatureAlgorithm, SignatureScheme,
+        pki_types::{CertificateDer, pem::PemObject},
+        sign::{CertifiedKey, Signer, SigningKey},
+    };
+
+    use super::{AuthClient, ClientAuthorityVerifyResult, ClientNameAuther};
+    use crate::prelude::{LocalAuthority, RemoteAuthority};
+
+    const CLIENT_CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/client.cert");
+
+    #[derive(Debug)]
+    struct DummySigner;
+
+    impl Signer for DummySigner {
+        fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            Ok(Vec::new())
+        }
+
+        fn scheme(&self) -> SignatureScheme {
+            SignatureScheme::ED25519
+        }
+    }
+
+    #[derive(Debug)]
+    struct DummySigningKey;
+
+    impl SigningKey for DummySigningKey {
+        fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            offered
+                .contains(&SignatureScheme::ED25519)
+                .then(|| Box::new(DummySigner) as Box<dyn Signer>)
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            SignatureAlgorithm::ED25519
+        }
+    }
+
+    fn server_authority() -> LocalAuthority {
+        LocalAuthority::new(
+            "server.example".into(),
+            Arc::new(CertifiedKey {
+                cert: Vec::new(),
+                key: Arc::new(DummySigningKey),
+                ocsp: None,
+            }),
+        )
+    }
+
+    fn client_certificate_chain() -> Arc<[CertificateDer<'static>]> {
+        CertificateDer::pem_slice_iter(CLIENT_CERT)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("client cert should parse")
+            .into()
+    }
+
+    fn mismatched_remote_authority() -> RemoteAuthority {
+        RemoteAuthority::new("not-localhost".into(), client_certificate_chain())
+    }
+
+    fn invalid_remote_authority() -> RemoteAuthority {
+        RemoteAuthority::new(
+            "not-localhost".into(),
+            vec![CertificateDer::from(vec![0x01, 0x02, 0x03])].into(),
+        )
+    }
+
+    #[test]
+    fn client_name_auther_rejects_invalid_certificate_with_lowercase_reason() {
+        let result = ClientNameAuther
+            .verify_client_authority(&server_authority(), &invalid_remote_authority());
+
+        assert!(matches!(
+            result,
+            ClientAuthorityVerifyResult::Refuse(reason)
+                if reason.starts_with("invalid certificate:")
+        ));
+    }
+
+    #[test]
+    fn client_name_auther_rejects_mismatched_dns_name_with_lowercase_reason() {
+        let result = ClientNameAuther
+            .verify_client_authority(&server_authority(), &mismatched_remote_authority());
+
+        assert_eq!(
+            result,
+            ClientAuthorityVerifyResult::Refuse(
+                "client name not verified by client certificate".to_owned(),
+            ),
+        );
     }
 }
