@@ -46,8 +46,91 @@ jobs:
             mode=dry-run
           fi
 
+          packages=(
+            qmacro
+            qbase
+            qdatagram
+            qevent
+            qprotocol
+            qresolve
+            qudp
+            qcongestion
+            qrecovery
+            qinterface
+            qtraversal
+            qconnection
+            dquic
+          )
+
           if [[ "$mode" == "dry-run" ]]; then
-            cargo publish --workspace --dry-run --locked
-          else
-            cargo publish --workspace --locked
+            publish_args=(cargo publish --dry-run --locked)
+            for package in "${packages[@]}"; do
+              publish_args+=(-p "$package")
+            done
+            echo "dry-run publish packages: ${packages[*]}"
+            "${publish_args[@]}"
+            exit 0
           fi
+
+          cargo metadata --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
+          package_versions="$(
+            PACKAGES="$(printf '%s\n' "${packages[@]}")" RUNNER_TEMP="$RUNNER_TEMP" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads((Path(os.environ["RUNNER_TEMP"]) / "workspace-metadata.json").read_text())
+          packages = [line for line in os.environ["PACKAGES"].splitlines() if line]
+          by_name = {package["name"]: package for package in metadata["packages"]}
+          for name in packages:
+              package = by_name.get(name)
+              if package is None:
+                  raise SystemExit(f"failed to resolve workspace package metadata for {name}")
+              print(f"{name}\t{package['version']}")
+          PY
+          )"
+
+          missing_packages=()
+          while IFS=$'\t' read -r crate_name crate_version; do
+            [ -n "$crate_name" ] || continue
+            crate_state="$(
+              python3 - <<'PY' "$crate_name" "$crate_version"
+          import sys
+          import urllib.error
+          import urllib.request
+
+          name, version = sys.argv[1], sys.argv[2]
+          url = f"https://crates.io/api/v1/crates/{name}/{version}"
+          request = urllib.request.Request(url, headers={"User-Agent": "genmeta dquic publish workflow"})
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  if response.status == 200:
+                      print("published")
+                  else:
+                      raise SystemExit(f"unexpected crates.io status for {name} {version}: {response.status}")
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  print("missing")
+              else:
+                  raise
+          PY
+            )"
+
+            if [[ "$crate_state" == "published" ]]; then
+              echo "skip $crate_name $crate_version (already on crates.io)"
+            else
+              echo "publish $crate_name $crate_version"
+              missing_packages+=("$crate_name")
+            fi
+          done <<< "$package_versions"
+
+          if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+            echo "all selected packages are already published"
+            exit 0
+          fi
+
+          publish_args=(cargo publish --locked)
+          for package in "${missing_packages[@]}"; do
+            publish_args+=(-p "$package")
+          done
+          "${publish_args[@]}"
