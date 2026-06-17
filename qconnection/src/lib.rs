@@ -351,8 +351,14 @@ impl Components {
             {
                 let pto_duration = self.paths.max_pto_duration().unwrap_or_default();
                 let event_broker = self.event_broker.clone();
+                let rcvd_pkt_q = self.rcvd_pkt_q.clone();
+                let paths = self.paths.clone();
+                let local_cids = self.cid_registry.local.clone();
                 async move {
                     tokio::time::sleep(pto_duration).await;
+                    rcvd_pkt_q.close_all();
+                    paths.clear();
+                    local_cids.clear();
                     event_broker.emit(Event::Terminated);
                 }
             }
@@ -370,11 +376,8 @@ impl Components {
                         .in_current_span(),
                 );
             }
-            // No need to send packets, just clear the paths.
-            false => {
-                // TODO: check the remote of close spaces
-                self.paths.clear();
-            }
+            // Closing finalizer owns path cleanup after the closing period.
+            false => {}
         }
 
         Termination::closing(error, self.cid_registry.local, self.rcvd_pkt_q, self.paths)
@@ -396,8 +399,10 @@ impl Components {
             {
                 let pto_duration = self.paths.max_pto_duration().unwrap_or_default();
                 let event_broker = self.event_broker.clone();
+                let local_cids = self.cid_registry.local.clone();
                 async move {
                     tokio::time::sleep(pto_duration).await;
+                    local_cids.clear();
                     event_broker.emit(Event::Terminated);
                 }
             }
@@ -405,24 +410,9 @@ impl Components {
             .in_current_span(),
         );
 
-        match self.send_lock.is_permitted() {
-            // If permitted, we can send ccf packets.
-            true => {
-                let terminator = Arc::new(Terminator::new(ccf, &self));
-                tokio::spawn(
-                    async move { self.spaces.send_ccf_packets(terminator.as_ref()).await }
-                        .instrument_in_current()
-                        .in_current_span(),
-                );
-            }
-            // No need to send packets, just clear the paths.
-            false => {
-                self.paths.clear();
-            }
-        }
-
         // No need to receive packets, just close all queues.
         self.rcvd_pkt_q.close_all();
+        self.paths.clear();
         Termination::draining(error, self.cid_registry.local)
     }
 }
