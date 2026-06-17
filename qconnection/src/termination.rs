@@ -198,8 +198,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        events::ArcEventBroker, path::ArcPathContexts, state::ArcConnState, ArcLocalCids,
-        ArcReliableFrameDeque,
+        ArcLocalCids, ArcReliableFrameDeque, events::ArcEventBroker, path::ArcPathContexts,
+        state::ArcConnState,
     };
 
     fn test_local_cids() -> ArcLocalCids {

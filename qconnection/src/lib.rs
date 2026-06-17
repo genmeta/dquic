@@ -376,8 +376,8 @@ impl Components {
                         .in_current_span(),
                 );
             }
-            // Closing finalizer owns path cleanup after the closing period.
-            false => {}
+            // The send lock denies close packets for silent refusal paths.
+            false => self.paths.clear(),
         }
 
         Termination::closing(error, self.cid_registry.local, self.rcvd_pkt_q, self.paths)
