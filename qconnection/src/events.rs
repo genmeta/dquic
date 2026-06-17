@@ -5,7 +5,6 @@ use qbase::{
     error::{AppError, QuicError},
     frame::ConnectionCloseFrame,
 };
-use qevent::quic::connectivity::BaseConnectionStates;
 use tokio::sync::mpsc;
 
 use crate::state::ArcConnState;
@@ -54,24 +53,11 @@ impl EmitEvent for ArcEventBroker {
                     return;
                 }
             }
-            Event::Failed(error) => {
-                if self.conn_state.enter_closing(error).is_none() {
-                    return;
-                }
-            }
-            Event::ApplicationClose(error) => {
-                if self.conn_state.enter_closing(error).is_none() {
-                    return;
-                }
-            }
-            Event::Closed(ccf) => {
-                if self.conn_state.enter_draining(ccf).is_none() {
-                    return;
-                }
-            }
+            Event::Failed(_) | Event::ApplicationClose(_) | Event::Closed(_) => {}
             Event::Terminated => {
-                let terminated_state = BaseConnectionStates::Closed;
-                self.conn_state.update(terminated_state.into());
+                if self.conn_state.enter_closed().is_none() {
+                    return;
+                }
             }
             Event::StatelessReset => todo!("unsupported"),
         };
@@ -88,14 +74,63 @@ impl EmitEvent for mpsc::UnboundedSender<Event> {
 
 #[cfg(test)]
 mod tests {
+    use qbase::{
+        error::{ErrorFrameType, ErrorKind, QuicError},
+        frame::ConnectionCloseFrame,
+        varint::VarInt,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::state;
 
     #[test]
     fn test_emit_event() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         tx.emit(Event::Handshaked);
         assert_eq!(rx.try_recv().unwrap(), Event::Handshaked);
+    }
+
+    #[test]
+    fn failed_event_is_forwarded_without_entering_closing() {
+        let conn_state = ArcConnState::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let broker = ArcEventBroker::new(conn_state.clone(), tx);
+        let error = QuicError::with_default_fty(ErrorKind::NoViablePath, "no path");
+
+        broker.emit(Event::Failed(error.clone()));
+
+        assert_eq!(rx.try_recv().unwrap(), Event::Failed(error));
+        assert_ne!(conn_state.current(), Some(state::CLOSING));
+    }
+
+    #[test]
+    fn closed_event_is_forwarded_without_entering_draining() {
+        let conn_state = ArcConnState::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let broker = ArcEventBroker::new(conn_state.clone(), tx);
+        let ccf = ConnectionCloseFrame::new_quic(
+            ErrorKind::NoViablePath,
+            ErrorFrameType::Ext(VarInt::from_u32(0)),
+            "",
+        );
+
+        broker.emit(Event::Closed(ccf.clone()));
+
+        assert_eq!(rx.try_recv().unwrap(), Event::Closed(ccf));
+        assert_ne!(conn_state.current(), Some(state::DRAINING));
+    }
+
+    #[test]
+    fn application_close_event_is_forwarded_without_entering_closing() {
+        let conn_state = ArcConnState::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let broker = ArcEventBroker::new(conn_state.clone(), tx);
+        let error = qbase::error::AppError::new(VarInt::from_u32(0), "");
+
+        broker.emit(Event::ApplicationClose(error.clone()));
+
+        assert_eq!(rx.try_recv().unwrap(), Event::ApplicationClose(error));
+        assert_ne!(conn_state.current(), Some(state::CLOSING));
     }
 }
