@@ -49,7 +49,7 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
-    sync::{Arc, RwLock, atomic::AtomicBool},
+    sync::{Arc, RwLock, Weak, atomic::AtomicBool},
 };
 
 pub use ::{qbase, qdatagram, qevent, qinterface, qrecovery, qtraversal};
@@ -429,19 +429,66 @@ impl Components {
 
 pub struct Connection {
     state: RwLock<Result<Components, Termination>>,
+    conn_state: ArcConnState,
+    weak_self: Weak<Connection>,
     qlog_span: qevent::telemetry::Span,
     tracing_span: tracing::Span,
 }
 
 impl Connection {
+    fn keep_alive_until_closed(&self) {
+        let Some(connection) = self.weak_self.upgrade() else {
+            return;
+        };
+        let span = connection.tracing_span.clone();
+        tokio::spawn(tracing::Instrument::instrument(
+            async move {
+                connection.conn_state.closed().await;
+            },
+            span,
+        ));
+    }
+
+    fn close_by_application(&self, error: AppError, keep_alive: bool) -> Result<(), Error> {
+        let _span = (self.qlog_span.enter(), self.tracing_span.enter());
+        let event_broker = {
+            let mut conn = self.state.write().unwrap();
+            match conn.as_ref() {
+                Ok(core_conn) => {
+                    if self.conn_state.enter_closing(&error).is_none() {
+                        return Err(error.into());
+                    }
+
+                    let event_broker = core_conn.event_broker.clone();
+                    *conn = Err(core_conn.clone().enter_closing(error.clone().into()));
+                    event_broker
+                }
+                Err(termination) => return Err(termination.error()),
+            }
+        };
+
+        if keep_alive {
+            self.keep_alive_until_closed();
+        }
+        event_broker.emit(Event::ApplicationClose(error));
+        Ok(())
+    }
+
     // called by event
     pub fn enter_closing(&self, error: QuicError) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
-        let core_conn = conn.as_ref().map_err(|t| t.error())?;
+        match conn.as_ref() {
+            Ok(core_conn) => {
+                if self.conn_state.enter_closing(&error).is_none() {
+                    return Err(error.into());
+                }
 
-        *conn = Err(core_conn.clone().enter_closing(error.into()));
-        Ok(())
+                *conn = Err(core_conn.clone().enter_closing(error.into()));
+                Ok(())
+            }
+            Err(termination) => Err(termination.error()),
+        }
     }
 
     /// Close the connection with application close frame.
@@ -449,22 +496,17 @@ impl Connection {
     /// Return error if the connection is already closed.
     #[doc(alias = "application_close")]
     pub fn close(&self, reason: impl Into<Cow<'static, str>>, code: u64) -> Result<(), Error> {
-        let _span = (self.qlog_span.enter(), self.tracing_span.enter());
-        let mut conn = self.state.write().unwrap();
-        let core_conn = conn.as_ref().map_err(|t| t.error())?;
-
         let error_code = code.try_into().expect("application error code overflow");
         let error = AppError::new(error_code, reason);
-        let event = Event::ApplicationClose(error.clone());
-        core_conn.event_broker.emit(event);
-        *conn = Err(core_conn.clone().enter_closing(error.into()));
-
-        Ok(())
+        self.close_by_application(error, true)
     }
 
     pub fn enter_draining(&self, ccf: ConnectionCloseFrame) -> bool {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
+        if self.conn_state.enter_draining(&ccf).is_none() {
+            return false;
+        }
         match conn.as_mut() {
             Ok(core_conn) => {
                 *conn = Err(core_conn.clone().enter_draining(ccf));
@@ -672,7 +714,8 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         let _span = self.tracing_span.enter();
-        if self.validate().is_ok() && self.close("", 0).is_ok() {
+        let error = AppError::new(0_u64.try_into().expect("zero app error code"), "");
+        if self.close_by_application(error, false).is_ok() {
             #[cfg(debug_assertions)]
             tracing::warn!(target: "quic", "connection is still active when dropped, close it automatically.");
             #[cfg(not(debug_assertions))]

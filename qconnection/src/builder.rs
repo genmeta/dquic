@@ -551,7 +551,7 @@ impl PendingConnection {
             interfaces: self.interfaces,
             locations: self.locations,
             rcvd_pkt_q: self.rcvd_pkt_q,
-            conn_state,
+            conn_state: conn_state.clone(),
             idle_config: ArcIdleConfig::new(max_idle_timeout, self.defer_idle_timeout),
             paths: ArcPathContexts::new(self.tx_wakers.clone(), event_broker.clone()),
             send_lock: self.send_lock,
@@ -575,8 +575,10 @@ impl PendingConnection {
         spawn_tls_handshake(&components, self.tx_wakers.clone());
         spawn_deliver_and_parse(&components);
 
-        let connection = Arc::new(Connection {
+        let connection = Arc::new_cyclic(|weak_self| Connection {
             state: Ok(components).into(),
+            conn_state: conn_state.clone(),
+            weak_self: weak_self.clone(),
             qlog_span,
             tracing_span,
         });
