@@ -741,17 +741,34 @@ fn spawn_drive_connection(
 ) {
     tokio::spawn(
         async move {
+            let mut retained_connection: Option<Arc<Connection>> = None;
             while let Some(event) = events.recv().await {
-                let Some(connection) = weak_connection.upgrade() else {
+                let Some(connection) = retained_connection
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| weak_connection.upgrade())
+                else {
                     break;
                 };
+
                 match event {
                     Event::Handshaked => {}
-                    Event::Failed(quic_error) => _ = connection.enter_closing(quic_error),
-                    Event::ApplicationClose(_app_error) => {}
-                    Event::Closed(ccf) => _ = connection.enter_draining(ccf),
+                    Event::Failed(quic_error) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                        _ = connection.enter_closing(quic_error);
+                    }
+                    Event::ApplicationClose(_app_error) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                    }
+                    Event::Closed(ccf) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                        _ = connection.enter_draining(ccf);
+                    }
                     Event::StatelessReset => {}
-                    Event::Terminated => {}
+                    Event::Terminated => {
+                        retained_connection.take();
+                        break;
+                    }
                 }
             }
         }
