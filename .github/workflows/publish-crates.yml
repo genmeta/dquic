@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
@@ -146,3 +146,44 @@ jobs:
             publish_args+=(-p "$package")
           done
           "${publish_args[@]}"
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          git fetch --force origin "$tag_ref:$tag_ref"
+          tag_object="$(git rev-parse "$tag_ref^{tag}" 2>/dev/null || true)"
+          target_commit="$(git rev-parse "$tag_ref^{commit}")"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          git for-each-ref "$tag_ref" --format='%(contents)' > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            git log -1 --format=%B "$target_commit" > "$notes_file"
+          fi
+          {
+            printf '\n## Authentication and provenance\n\n'
+            printf -- '- Tag: `%s`\n' "$GITHUB_REF_NAME"
+            if [ -n "$tag_object" ]; then
+              printf -- '- Annotated tag object: `%s`\n' "$tag_object"
+            else
+              printf -- '- Tag object: lightweight tag\n'
+            fi
+            printf -- '- Target commit: `%s`\n' "$target_commit"
+            printf -- '- Workflow run: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf -- '- Workflow attempt: `%s`\n' "$GITHUB_RUN_ATTEMPT"
+            printf -- '- Published by: GitHub Actions `%s` workflow\n' "$GITHUB_WORKFLOW"
+          } >> "$notes_file"
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "github release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$notes_file"
