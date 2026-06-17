@@ -377,7 +377,7 @@ impl Components {
             }
         }
 
-        Termination::closing(error, self.cid_registry.local, self.rcvd_pkt_q)
+        Termination::closing(error, self.cid_registry.local, self.rcvd_pkt_q, self.paths)
     }
 
     pub fn enter_draining(self, ccf: ConnectionCloseFrame) -> Termination {

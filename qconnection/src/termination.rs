@@ -26,8 +26,6 @@ use tokio::time::Instant;
 use crate::{ArcLocalCids, Components, path::ArcPathContexts};
 
 /// Keep a few states to support sending packets with ccf.
-///
-/// when it is dropped all paths will be destroyed
 pub struct Terminator {
     last_recv_time: Mutex<Instant>,
     rcvd_packets: AtomicUsize,
@@ -35,12 +33,6 @@ pub struct Terminator {
     dcid: Option<ConnectionId>,
     ccf: ConnectionCloseFrame,
     paths: ArcPathContexts,
-}
-
-impl Drop for Terminator {
-    fn drop(&mut self) {
-        self.paths.clear();
-    }
 }
 
 impl ProductHeader<InitialHeader> for Terminator {
@@ -137,7 +129,10 @@ impl Terminator {
 
 #[derive(Clone)]
 enum State {
-    Closing(Arc<RcvdPacketQueue>),
+    Closing {
+        rcvd_pkt_q: Arc<RcvdPacketQueue>,
+        paths: ArcPathContexts,
+    },
     Draining,
 }
 
@@ -151,11 +146,16 @@ pub struct Termination {
 }
 
 impl Termination {
-    pub fn closing(error: Error, local_cids: ArcLocalCids, state: Arc<RcvdPacketQueue>) -> Self {
+    pub fn closing(
+        error: Error,
+        local_cids: ArcLocalCids,
+        rcvd_pkt_q: Arc<RcvdPacketQueue>,
+        paths: ArcPathContexts,
+    ) -> Self {
         Self {
             error,
             _local_cids: local_cids,
-            state: State::Closing(state),
+            state: State::Closing { rcvd_pkt_q, paths },
         }
     }
 
@@ -174,11 +174,80 @@ impl Termination {
     // Close packets queues, dont send and receive any more packets.
     pub fn enter_draining(&mut self) -> bool {
         match mem::replace(&mut self.state, State::Draining) {
-            State::Closing(rcvd_pkt_q) => {
+            State::Closing { rcvd_pkt_q, paths } => {
                 rcvd_pkt_q.close_all();
+                paths.clear();
                 true
             }
-            _ => false,
+            State::Draining => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use qbase::{
+        cid::GenUniqueCid,
+        error::{Error, ErrorKind, QuicError},
+        net::tx::ArcSendWakers,
+    };
+    use qinterface::component::route::{QuicRouter, RcvdPacketQueue};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::{
+        events::ArcEventBroker, path::ArcPathContexts, state::ArcConnState, ArcLocalCids,
+        ArcReliableFrameDeque,
+    };
+
+    fn test_local_cids() -> ArcLocalCids {
+        let queue = Arc::new(RcvdPacketQueue::new());
+        let tx_wakers = ArcSendWakers::default();
+        let reliable = ArcReliableFrameDeque::with_capacity_and_wakers(8, tx_wakers);
+        let registry = Arc::new(QuicRouter::default()).registry_on_issuing_scid(queue, reliable);
+        let initial_scid = registry.gen_unique_cid();
+        ArcLocalCids::new(initial_scid, registry)
+    }
+
+    fn test_paths() -> ArcPathContexts {
+        let tx_wakers = ArcSendWakers::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let broker = ArcEventBroker::new(ArcConnState::new(), tx);
+        ArcPathContexts::new(tx_wakers, broker)
+    }
+
+    fn test_error() -> Error {
+        QuicError::with_default_fty(ErrorKind::NoViablePath, "closed").into()
+    }
+
+    #[tokio::test]
+    async fn enter_draining_closes_closing_packet_queues() {
+        let rcvd_pkt_q = Arc::new(RcvdPacketQueue::new());
+        let packets = rcvd_pkt_q.one_rtt().clone();
+        let paths = test_paths();
+        let mut termination =
+            Termination::closing(test_error(), test_local_cids(), rcvd_pkt_q, paths);
+
+        assert!(termination.enter_draining());
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), packets.recv())
+                .await
+                .expect("closed queue should wake")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn enter_draining_is_idempotent() {
+        let rcvd_pkt_q = Arc::new(RcvdPacketQueue::new());
+        let paths = test_paths();
+        let mut termination =
+            Termination::closing(test_error(), test_local_cids(), rcvd_pkt_q, paths);
+
+        assert!(termination.enter_draining());
+        assert!(!termination.enter_draining());
     }
 }
