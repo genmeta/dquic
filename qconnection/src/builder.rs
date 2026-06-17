@@ -551,7 +551,7 @@ impl PendingConnection {
             interfaces: self.interfaces,
             locations: self.locations,
             rcvd_pkt_q: self.rcvd_pkt_q,
-            conn_state,
+            conn_state: conn_state.clone(),
             idle_config: ArcIdleConfig::new(max_idle_timeout, self.defer_idle_timeout),
             paths: ArcPathContexts::new(self.tx_wakers.clone(), event_broker.clone()),
             send_lock: self.send_lock,
@@ -575,8 +575,10 @@ impl PendingConnection {
         spawn_tls_handshake(&components, self.tx_wakers.clone());
         spawn_deliver_and_parse(&components);
 
-        let connection = Arc::new(Connection {
+        let connection = Arc::new_cyclic(|weak_self| Connection {
             state: Ok(components).into(),
+            conn_state: conn_state.clone(),
+            weak_self: weak_self.clone(),
             qlog_span,
             tracing_span,
         });
@@ -739,17 +741,34 @@ fn spawn_drive_connection(
 ) {
     tokio::spawn(
         async move {
+            let mut retained_connection: Option<Arc<Connection>> = None;
             while let Some(event) = events.recv().await {
-                let Some(connection) = weak_connection.upgrade() else {
+                let Some(connection) = retained_connection
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| weak_connection.upgrade())
+                else {
                     break;
                 };
+
                 match event {
                     Event::Handshaked => {}
-                    Event::Failed(quic_error) => _ = connection.enter_closing(quic_error),
-                    Event::ApplicationClose(_app_error) => {}
-                    Event::Closed(ccf) => _ = connection.enter_draining(ccf),
+                    Event::Failed(quic_error) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                        _ = connection.enter_closing(quic_error);
+                    }
+                    Event::ApplicationClose(_app_error) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                    }
+                    Event::Closed(ccf) => {
+                        retained_connection.get_or_insert_with(|| connection.clone());
+                        _ = connection.enter_draining(ccf);
+                    }
                     Event::StatelessReset => {}
-                    Event::Terminated => {}
+                    Event::Terminated => {
+                        retained_connection.take();
+                        break;
+                    }
                 }
             }
         }

@@ -28,6 +28,7 @@ pub struct ArcConnState {
     state: Arc<AtomicU8>,
     handshaked: Arc<SetOnce<()>>,
     terminated: Arc<SetOnce<Error>>,
+    closed: Arc<SetOnce<()>>,
 }
 
 impl Default for ArcConnState {
@@ -36,6 +37,7 @@ impl Default for ArcConnState {
             state: Default::default(),
             handshaked: Arc::new(SetOnce::new()),
             terminated: Arc::new(SetOnce::new()),
+            closed: Arc::new(SetOnce::new()),
         }
     }
 }
@@ -154,6 +156,14 @@ impl ArcConnState {
         None
     }
 
+    pub fn enter_closed(&self) -> Option<QlogConnectionState> {
+        if let Some(old_state) = self.update(BaseConnectionStates::Closed.into()) {
+            _ = self.closed.set(());
+            return Some(old_state);
+        }
+        None
+    }
+
     pub fn handshaked(&self) -> impl Future<Output = Result<(), Error>> + Send + use<> {
         let handshaked = self.handshaked.clone();
         let terminated = self.terminated.clone();
@@ -172,6 +182,15 @@ impl ArcConnState {
         async move { terminated.wait().await.clone() }
             .instrument_in_current()
             .in_current_span()
+    }
+
+    pub fn closed(&self) -> impl Future<Output = ()> + Send + use<> {
+        let closed = self.closed.clone();
+        async move {
+            closed.wait().await;
+        }
+        .instrument_in_current()
+        .in_current_span()
     }
 
     pub fn current(&self) -> Option<QlogConnectionState> {
@@ -221,3 +240,30 @@ pub const DRAINING: QlogConnectionState =
 
 pub const CLOSED: QlogConnectionState =
     QlogConnectionState::Granular(GranularConnectionStates::Closed);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_waits_for_final_closed_state() {
+        let conn_state = ArcConnState::new();
+        let waiter = conn_state.closed();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), waiter)
+                .await
+                .is_err()
+        );
+
+        assert!(conn_state.enter_closed().is_some());
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), conn_state.closed())
+            .await
+            .expect("closed wait should complete after enter_closed");
+        assert_eq!(
+            conn_state.current(),
+            Some(BaseConnectionStates::Closed.into())
+        );
+    }
+}

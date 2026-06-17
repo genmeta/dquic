@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
@@ -33,7 +33,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
-      - name: Release workspace crates
+      - name: Release publishable workspace crates
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
@@ -62,16 +62,6 @@ jobs:
             dquic
           )
 
-          if [[ "$mode" == "dry-run" ]]; then
-            publish_args=(cargo publish --dry-run --locked)
-            for package in "${packages[@]}"; do
-              publish_args+=(-p "$package")
-            done
-            echo "dry-run publish packages: ${packages[*]}"
-            "${publish_args[@]}"
-            exit 0
-          fi
-
           cargo metadata --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
           package_versions="$(
             PACKAGES="$(printf '%s\n' "${packages[@]}")" RUNNER_TEMP="$RUNNER_TEMP" python3 - <<'PY'
@@ -90,7 +80,7 @@ jobs:
           PY
           )"
 
-          missing_packages=()
+          packages_to_publish=()
           while IFS=$'\t' read -r crate_name crate_version; do
             [ -n "$crate_name" ] || continue
             crate_state="$(
@@ -100,37 +90,100 @@ jobs:
           import urllib.request
 
           name, version = sys.argv[1], sys.argv[2]
-          url = f"https://crates.io/api/v1/crates/{name}/{version}"
-          request = urllib.request.Request(url, headers={"User-Agent": "genmeta dquic publish workflow"})
+          headers = {"User-Agent": "genmeta dquic publish workflow"}
+          version_url = f"https://crates.io/api/v1/crates/{name}/{version}"
+          version_request = urllib.request.Request(version_url, headers=headers)
           try:
-              with urllib.request.urlopen(request, timeout=20) as response:
+              with urllib.request.urlopen(version_request, timeout=20) as response:
                   if response.status == 200:
-                      print("published")
+                      print("published_version")
                   else:
                       raise SystemExit(f"unexpected crates.io status for {name} {version}: {response.status}")
           except urllib.error.HTTPError as error:
               if error.code == 404:
-                  print("missing")
+                  crate_url = f"https://crates.io/api/v1/crates/{name}"
+                  crate_request = urllib.request.Request(crate_url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(crate_request, timeout=20) as response:
+                          if response.status == 200:
+                              print("missing_version")
+                          else:
+                              raise SystemExit(f"unexpected crates.io crate status for {name}: {response.status}")
+                  except urllib.error.HTTPError as crate_error:
+                      if crate_error.code == 404:
+                          print("missing_crate")
+                      else:
+                          raise
               else:
                   raise
           PY
             )"
 
-            if [[ "$crate_state" == "published" ]]; then
+            if [[ "$crate_state" == "published_version" ]]; then
               echo "skip $crate_name $crate_version (already on crates.io)"
-            else
+            elif [[ "$crate_state" == "missing_version" ]]; then
               echo "publish $crate_name $crate_version"
-              missing_packages+=("$crate_name")
+              packages_to_publish+=("$crate_name")
+            else
+              echo "skip $crate_name $crate_version (crate not yet initialized on crates.io)"
             fi
           done <<< "$package_versions"
 
-          if [[ "${#missing_packages[@]}" -eq 0 ]]; then
-            echo "all selected packages are already published"
+          if [[ "${#packages_to_publish[@]}" -eq 0 ]]; then
+            echo "no already-initialized crates need a new crates.io release"
             exit 0
           fi
 
-          publish_args=(cargo publish --locked)
-          for package in "${missing_packages[@]}"; do
+          if [[ "$mode" == "dry-run" ]]; then
+            publish_args=(cargo publish --dry-run --locked)
+            echo "dry-run publish packages: ${packages_to_publish[*]}"
+          else
+            publish_args=(cargo publish --locked)
+            echo "publish packages: ${packages_to_publish[*]}"
+          fi
+
+          for package in "${packages_to_publish[@]}"; do
             publish_args+=(-p "$package")
           done
           "${publish_args[@]}"
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          git fetch --force origin "$tag_ref:$tag_ref"
+          tag_object="$(git rev-parse "$tag_ref^{tag}" 2>/dev/null || true)"
+          target_commit="$(git rev-parse "$tag_ref^{commit}")"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          git for-each-ref "$tag_ref" --format='%(contents)' > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            git log -1 --format=%B "$target_commit" > "$notes_file"
+          fi
+          {
+            printf '\n## Authentication and provenance\n\n'
+            printf -- '- Tag: `%s`\n' "$GITHUB_REF_NAME"
+            if [ -n "$tag_object" ]; then
+              printf -- '- Annotated tag object: `%s`\n' "$tag_object"
+            else
+              printf -- '- Tag object: lightweight tag\n'
+            fi
+            printf -- '- Target commit: `%s`\n' "$target_commit"
+            printf -- '- Workflow run: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf -- '- Workflow attempt: `%s`\n' "$GITHUB_RUN_ATTEMPT"
+            printf -- '- Published by: GitHub Actions `%s` workflow\n' "$GITHUB_WORKFLOW"
+          } >> "$notes_file"
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "github release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$notes_file"

@@ -106,7 +106,7 @@ qresolve = { path = "./qresolve", version = "0.5.1" }
 qrecovery = { path = "./qrecovery", version = "0.5.1" }
 qtraversal = { path = "./qtraversal", version = "0.5.1" }
 qcongestion = { path = "./qcongestion", version = "0.5.1" }
-qconnection = { path = "./qconnection", version = "0.5.1" }
+qconnection = { path = "./qconnection", version = "0.5.2" }
 dquic = { path = "./dquic", version = "0.5.1" }
 h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
