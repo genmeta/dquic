@@ -131,6 +131,30 @@ fn shutdown() -> Result<(), BoxError> {
 }
 
 #[test]
+fn application_close_then_drop_does_not_strand_connection() -> Result<(), BoxError> {
+    run(async {
+        let router = Arc::new(QuicRouter::default());
+        let (listeners, server_task) =
+            launch_echo_server(router.clone(), server_parameters()).await?;
+        let _server_task = AbortOnDropHandle::new(tokio::spawn(server_task));
+
+        let server_addr = get_server_addr(&listeners);
+        let client = launch_test_client(router, client_parameters());
+        let connection = client
+            .connected_to_with_source("localhost", [(Source::System, server_addr.into())])
+            .await?;
+
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+        connection.close("client done", 0)?;
+        drop(connection);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        listeners.shutdown();
+        Ok(())
+    })
+}
+
+#[test]
 fn idle_timeout() -> Result<(), BoxError> {
     run(async {
         fn server_parameters() -> ServerParameters {
