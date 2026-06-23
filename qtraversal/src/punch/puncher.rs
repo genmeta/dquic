@@ -532,39 +532,14 @@ where
         }
     }
 
-    pub fn upsert_direct_endpoint(&self, bind: BindUri, addr: SocketAddr) -> LocalEndpointChanges {
-        let (effects, remote_endpoints) = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            let effects = address_book.upsert_direct_endpoint(bind, addr);
-            let remote_endpoints = address_book
-                .remote_endpoint()
-                .iter()
-                .map(|(endpoint, source)| (*endpoint, source.clone()))
-                .collect();
-            (effects, remote_endpoints)
-        };
-        self.local_endpoint_changes(effects, remote_endpoints)
-    }
-
-    pub fn remove_direct_endpoint(&self, bind: &BindUri) -> LocalEndpointChanges {
-        let effects = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_direct_endpoint(bind)
-        };
-        LocalEndpointChanges {
-            effects,
-            ways: Vec::new(),
-        }
-    }
-
-    pub fn upsert_stun_endpoint(
+    pub fn upsert_local_endpoints(
         &self,
         bind: BindUri,
-        endpoint: EndpointAddr,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
     ) -> LocalEndpointChanges {
         let (effects, remote_endpoints) = {
             let mut address_book = self.0.address_book.lock().unwrap();
-            let effects = address_book.upsert_stun_endpoint(bind, endpoint);
+            let effects = address_book.upsert_local_endpoints(bind, endpoints);
             let remote_endpoints = address_book
                 .remote_endpoint()
                 .iter()
@@ -575,21 +550,10 @@ where
         self.local_endpoint_changes(effects, remote_endpoints)
     }
 
-    pub fn remove_stun_endpoint(&self, bind: &BindUri) -> LocalEndpointChanges {
+    pub fn remove_observed_local_endpoints(&self, bind: &BindUri) -> LocalEndpointChanges {
         let effects = {
             let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_stun_endpoint(bind)
-        };
-        LocalEndpointChanges {
-            effects,
-            ways: Vec::new(),
-        }
-    }
-
-    pub fn close_tracked_bind_uri(&self, bind: &BindUri) -> LocalEndpointChanges {
-        let effects = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.close_tracked_bind_uri(bind)
+            address_book.remove_observed_local_endpoints(bind)
         };
         LocalEndpointChanges {
             effects,

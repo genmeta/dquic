@@ -415,6 +415,23 @@ impl Components {
         self.paths.clear();
         Termination::draining(error, self.cid_registry.local)
     }
+
+    fn has_viable_path(&self) -> bool {
+        self.paths
+            .paths::<Vec<_>>()
+            .into_iter()
+            .any(|(pathway, _)| Self::pathway_is_viable(pathway))
+    }
+
+    fn pathway_is_viable(pathway: Pathway) -> bool {
+        if let (EndpointAddr::Direct { addr: local }, EndpointAddr::Direct { addr: remote }) =
+            (pathway.local(), pathway.remote())
+        {
+            local.ip().is_loopback() == remote.ip().is_loopback()
+        } else {
+            true
+        }
+    }
 }
 
 pub struct Connection {
@@ -556,6 +573,10 @@ impl Connection {
         Ok(())
     }
 
+    pub fn has_viable_path(&self) -> Result<bool, Error> {
+        self.try_map_components(Components::has_viable_path)
+    }
+
     pub fn role(&self) -> Result<Role, Error> {
         self.try_map_components(|core_conn| core_conn.role())
     }
@@ -664,10 +685,16 @@ impl Connection {
         .map(|result| result?)
     }
 
+    #[deprecated(
+        note = "use upsert_local_endpoints for observed interface endpoints; this method only adds an explicit local endpoint"
+    )]
     pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) -> Result<(), Error> {
         self.try_map_components(|core_conn| core_conn.add_local_endpoint(bind, addr))
     }
 
+    #[deprecated(
+        note = "use remove_local_endpoints for observed interface endpoints; this method only removes an explicit local endpoint"
+    )]
     pub fn remove_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> Result<(), Error> {
         self.try_map_components(|core_conn| core_conn.remove_local_endpoint(bind, addr))
     }
@@ -678,6 +705,20 @@ impl Connection {
         source: qresolve::Source,
     ) -> Result<(), Error> {
         self.try_map_components(|core_conn| core_conn.add_peer_endpoint(addr, source))
+    }
+
+    pub fn upsert_local_endpoints(
+        &self,
+        bind: BindUri,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
+    ) -> Result<(), Error> {
+        self.try_map_components(|core_conn| {
+            core_conn.upsert_observed_local_endpoints(bind, endpoints)
+        })
+    }
+
+    pub fn remove_local_endpoints(&self, bind: &BindUri) -> Result<(), Error> {
+        self.try_map_components(|core_conn| core_conn.remove_observed_local_endpoints(bind))
     }
 
     pub fn add_local_punch_address(

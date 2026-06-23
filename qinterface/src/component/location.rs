@@ -1,13 +1,16 @@
 use std::{
     any::{Any, TypeId},
-    collections::{HashMap, hash_map},
+    collections::{BTreeMap, HashMap, hash_map},
     fmt::Debug,
-    ops::Deref,
-    sync::{Arc, LazyLock, Mutex, MutexGuard},
+    net::SocketAddr,
+    sync::{Arc, LazyLock, Mutex, MutexGuard, Weak},
     task::{Context, Poll},
 };
 
-use qbase::util::{UniqueId, UniqueIdGenerator};
+use qbase::{
+    net::addr::EndpointAddr,
+    util::{UniqueId, UniqueIdGenerator},
+};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -31,6 +34,26 @@ impl<D: ?Sized> Clone for AddressEvent<D> {
             Self::Remove(arg0) => Self::Remove(*arg0),
             Self::Closed => Self::Closed,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalEndpointSet {
+    endpoints: Arc<[EndpointAddr]>,
+}
+
+impl LocalEndpointSet {
+    pub fn from_endpoints(endpoints: impl IntoIterator<Item = EndpointAddr>) -> Self {
+        let endpoints = endpoints.into_iter().collect::<Vec<_>>();
+        Self::new(Arc::from(endpoints.into_boxed_slice()))
+    }
+
+    fn new(endpoints: Arc<[EndpointAddr]>) -> Self {
+        Self { endpoints }
+    }
+
+    pub fn endpoints(&self) -> &[EndpointAddr] {
+        &self.endpoints
     }
 }
 
@@ -195,26 +218,311 @@ impl Observer {
 }
 
 #[derive(Debug, Clone)]
-pub struct IfaceLocations<I> {
-    locations: Arc<Locations>,
-    ref_iface: Arc<Mutex<I>>,
+pub struct InterfaceLocations<I> {
+    current: Arc<Mutex<CurrentInterfaceLocations<I>>>,
 }
 
-impl<I: RefIO + 'static> IfaceLocations<I> {
-    pub fn new(ref_iface: I, locations: Arc<Locations>) -> Self {
-        locations.upsert(
-            ref_iface.iface().bind_uri(),
-            Arc::new(ref_iface.iface().bound_addr()),
-        );
+#[derive(Debug)]
+struct CurrentInterfaceLocations<I> {
+    ref_iface: I,
+    state: Arc<InterfaceLocationsState>,
+    _direct: InterfaceDirectLocation,
+}
 
+#[derive(Debug, Clone)]
+pub struct InterfaceDirectLocation {
+    lease: Arc<InterfaceLocationLease>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceAgentLocation {
+    lease: Arc<InterfaceLocationLease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum InterfaceLocationKey {
+    Direct,
+    Agent(SocketAddr),
+}
+
+#[derive(Debug)]
+struct InterfaceLocationLease {
+    state: Weak<InterfaceLocationsState>,
+    key: InterfaceLocationKey,
+    this: Weak<InterfaceLocationLease>,
+}
+
+#[derive(Debug)]
+struct InterfaceLocationsState {
+    bind_uri: BindUri,
+    locations: Arc<Locations>,
+    inner: Mutex<InterfaceLocationsStateInner>,
+}
+
+#[derive(Debug)]
+struct InterfaceLocationsStateInner {
+    closed: bool,
+    entries: BTreeMap<InterfaceLocationKey, InterfaceLocationEntry>,
+    published: Arc<[EndpointAddr]>,
+}
+
+#[derive(Debug)]
+struct InterfaceLocationEntry {
+    lease: Weak<InterfaceLocationLease>,
+    endpoint: Option<EndpointAddr>,
+}
+
+impl Default for InterfaceLocationsStateInner {
+    fn default() -> Self {
         Self {
+            closed: false,
+            entries: BTreeMap::new(),
+            published: Arc::from([]),
+        }
+    }
+}
+
+impl InterfaceLocationsState {
+    fn new(bind_uri: BindUri, locations: Arc<Locations>) -> Arc<Self> {
+        Arc::new(Self {
+            bind_uri,
             locations,
-            ref_iface: Arc::new(Mutex::new(ref_iface)),
+            inner: Mutex::new(InterfaceLocationsStateInner::default()),
+        })
+    }
+
+    fn lock_inner(&self) -> MutexGuard<'_, InterfaceLocationsStateInner> {
+        self.inner
+            .lock()
+            .expect("InterfaceLocations state mutex poisoned")
+    }
+
+    fn claim(self: &Arc<Self>, key: InterfaceLocationKey) -> Arc<InterfaceLocationLease> {
+        let lease = Arc::new_cyclic(|this| InterfaceLocationLease {
+            state: Arc::downgrade(self),
+            key: key.clone(),
+            this: this.clone(),
+        });
+
+        let mut inner = self.lock_inner();
+        if !inner.closed {
+            inner.entries.insert(
+                key,
+                InterfaceLocationEntry {
+                    lease: Arc::downgrade(&lease),
+                    endpoint: None,
+                },
+            );
+        }
+        lease
+    }
+
+    fn upsert_if_owned(
+        &self,
+        key: &InterfaceLocationKey,
+        lease: &Weak<InterfaceLocationLease>,
+        endpoint: EndpointAddr,
+    ) -> bool {
+        let mut inner = self.lock_inner();
+        if inner.closed {
+            return false;
+        }
+        let Some(entry) = inner.entries.get_mut(key) else {
+            return false;
+        };
+        if !entry.lease.ptr_eq(lease) {
+            return false;
+        }
+        if entry.endpoint == Some(endpoint) {
+            return true;
+        }
+        entry.endpoint = Some(endpoint);
+        self.publish_if_changed(&mut inner);
+        true
+    }
+
+    fn clear_if_owned(
+        &self,
+        key: &InterfaceLocationKey,
+        lease: &Weak<InterfaceLocationLease>,
+    ) -> bool {
+        let mut inner = self.lock_inner();
+        if inner.closed {
+            return false;
+        }
+        let Some(entry) = inner.entries.get_mut(key) else {
+            return false;
+        };
+        if !entry.lease.ptr_eq(lease) {
+            return false;
+        }
+        if entry.endpoint.is_none() {
+            return true;
+        }
+        entry.endpoint = None;
+        self.publish_if_changed(&mut inner);
+        true
+    }
+
+    fn remove_if_owned(&self, key: &InterfaceLocationKey, lease: &Weak<InterfaceLocationLease>) {
+        let mut inner = self.lock_inner();
+        if inner.closed
+            || !inner
+                .entries
+                .get(key)
+                .is_some_and(|entry| entry.lease.ptr_eq(lease))
+        {
+            return;
+        }
+        inner.entries.remove(key);
+        self.publish_if_changed(&mut inner);
+    }
+
+    fn close(&self) {
+        let mut inner = self.lock_inner();
+        if inner.closed {
+            return;
+        }
+        inner.closed = true;
+        inner.entries.clear();
+        inner.published = Arc::from([]);
+        self.locations.close(self.bind_uri.clone());
+    }
+
+    fn publish_if_changed(&self, inner: &mut InterfaceLocationsStateInner) {
+        let endpoints = inner
+            .entries
+            .values()
+            .filter_map(|entry| entry.endpoint)
+            .collect::<Vec<_>>();
+        let endpoints: Arc<[EndpointAddr]> = Arc::from(endpoints.into_boxed_slice());
+        if endpoints == inner.published {
+            return;
+        }
+        inner.published = endpoints.clone();
+        if endpoints.is_empty() {
+            self.locations
+                .remove::<LocalEndpointSet>(self.bind_uri.clone());
+        } else {
+            self.locations.upsert(
+                self.bind_uri.clone(),
+                Arc::new(LocalEndpointSet::new(endpoints)),
+            );
+        }
+    }
+}
+
+impl Drop for InterfaceLocationLease {
+    fn drop(&mut self) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        state.remove_if_owned(&self.key, &self.this);
+    }
+}
+
+impl InterfaceLocationLease {
+    fn upsert(&self, endpoint: EndpointAddr) -> bool {
+        let Some(state) = self.state.upgrade() else {
+            return false;
+        };
+        state.upsert_if_owned(&self.key, &self.this, endpoint)
+    }
+
+    fn clear(&self) -> bool {
+        let Some(state) = self.state.upgrade() else {
+            return false;
+        };
+        state.clear_if_owned(&self.key, &self.this)
+    }
+}
+
+impl InterfaceDirectLocation {
+    fn new(state: Arc<InterfaceLocationsState>) -> Self {
+        Self {
+            lease: state.claim(InterfaceLocationKey::Direct),
         }
     }
 
-    fn lock_ref_iface(&self) -> MutexGuard<'_, I> {
-        self.ref_iface.lock().expect("Mutex poisoned")
+    pub fn upsert(&self, addr: SocketAddr) -> bool {
+        self.lease.upsert(EndpointAddr::direct(addr))
+    }
+
+    pub fn clear(&self) -> bool {
+        self.lease.clear()
+    }
+}
+
+impl InterfaceAgentLocation {
+    fn new(state: Arc<InterfaceLocationsState>, agent: SocketAddr) -> Self {
+        Self {
+            lease: state.claim(InterfaceLocationKey::Agent(agent)),
+        }
+    }
+
+    pub fn agent(&self) -> SocketAddr {
+        match self.lease.key {
+            InterfaceLocationKey::Agent(agent) => agent,
+            InterfaceLocationKey::Direct => unreachable!("agent location cannot use direct key"),
+        }
+    }
+
+    pub fn upsert(&self, outer: SocketAddr) -> bool {
+        self.lease
+            .upsert(EndpointAddr::with_agent(self.agent(), outer))
+    }
+
+    pub fn clear(&self) -> bool {
+        self.lease.clear()
+    }
+}
+
+impl<I: RefIO + 'static> CurrentInterfaceLocations<I> {
+    fn new(ref_iface: I, locations: Arc<Locations>) -> Self {
+        let bind_uri = ref_iface.iface().bind_uri();
+        let state = InterfaceLocationsState::new(bind_uri.clone(), locations.clone());
+        let direct = InterfaceDirectLocation::new(state.clone());
+        match ref_iface.iface().bound_addr() {
+            Ok(addr) => {
+                direct.upsert(addr);
+            }
+            Err(error) => {
+                tracing::trace!(
+                    bind_uri = %bind_uri,
+                    ?error,
+                    "local interface has no direct endpoint"
+                );
+            }
+        }
+
+        locations.upsert(bind_uri, Arc::new(ref_iface.iface().bound_addr()));
+
+        Self {
+            ref_iface,
+            state,
+            _direct: direct,
+        }
+    }
+}
+
+impl<I: RefIO + 'static> InterfaceLocations<I> {
+    pub fn new(ref_iface: I, locations: Arc<Locations>) -> Self {
+        Self {
+            current: Arc::new(Mutex::new(CurrentInterfaceLocations::new(
+                ref_iface, locations,
+            ))),
+        }
+    }
+
+    fn lock_current(&self) -> MutexGuard<'_, CurrentInterfaceLocations<I>> {
+        self.current
+            .lock()
+            .expect("InterfaceLocations current mutex poisoned")
+    }
+
+    pub fn agent_location(&self, agent: SocketAddr) -> InterfaceAgentLocation {
+        let current = self.lock_current();
+        InterfaceAgentLocation::new(current.state.clone(), agent)
     }
 
     /// Scope operation to the newest interface.
@@ -222,36 +530,37 @@ impl<I: RefIO + 'static> IfaceLocations<I> {
     where
         R: RefIO + 'static,
     {
-        let current_iface = self.lock_ref_iface();
-        let current_iface = current_iface.deref();
+        let current = self.lock_current();
+        let current_iface = &current.ref_iface;
         if !(ref_iface as &dyn Any)
             .downcast_ref::<I>()
             .is_some_and(|ref_iface| ref_iface.same_io(current_iface))
         {
             return;
         }
-        f(&self.locations, current_iface.iface().bind_uri());
+        f(&current.state.locations, current.state.bind_uri.clone());
     }
 }
 
-pub type LocationsComponent = IfaceLocations<WeakInterface>;
+pub type IfaceLocations<I> = InterfaceLocations<I>;
+
+pub type LocationsComponent = InterfaceLocations<WeakInterface>;
 
 impl Component for LocationsComponent {
     fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
         _ = cx;
+        self.lock_current().state.close();
         Poll::Ready(())
     }
 
     fn reinit(&self, iface: &Interface) {
-        let mut ref_iface = self.lock_ref_iface();
-        if iface.downgrade().same_io(ref_iface.deref()) {
+        let mut current = self.lock_current();
+        if iface.downgrade().same_io(&current.ref_iface) {
             return;
         }
-        *ref_iface = iface.downgrade();
-        let bind_uri = iface.bind_uri();
 
-        self.locations.close(bind_uri.clone());
-        self.locations
-            .upsert(bind_uri.clone(), Arc::new(iface.bound_addr()));
+        let locations = current.state.locations.clone();
+        current.state.close();
+        *current = CurrentInterfaceLocations::new(iface.downgrade(), locations);
     }
 }

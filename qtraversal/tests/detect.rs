@@ -175,10 +175,10 @@ test_detect! {
 }
 
 #[test]
-fn client_location_data_preserves_typed_probe_error() {
+fn detect_outer_addr_error_preserves_typed_probe_error() {
     use std::time::Duration;
 
-    use qtraversal::nat::client::{ClientLocationData, DetectOuterAddrError, StunProbeError};
+    use qtraversal::nat::client::{DetectOuterAddrError, StunProbeError};
 
     let stun_server = "192.0.2.1:20004".parse().unwrap();
     let timeout = Duration::from_millis(300);
@@ -189,7 +189,6 @@ fn client_location_data_preserves_typed_probe_error() {
         timeout,
     };
     let error = DetectOuterAddrError::Probe { source };
-    let data: ClientLocationData = Err(error.clone());
 
     let Err(DetectOuterAddrError::Probe {
         source:
@@ -198,7 +197,7 @@ fn client_location_data_preserves_typed_probe_error() {
                 timeout: actual_timeout,
                 ..
             },
-    }) = data
+    }) = Result::<(), _>::Err(error.clone())
     else {
         panic!("expected typed no response error");
     };

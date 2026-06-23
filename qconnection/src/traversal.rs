@@ -11,10 +11,12 @@ use qbase::{
     packet::{ProductHeader, header::short::OneRttHeader},
 };
 use qevent::telemetry::Instrument;
-use qinterface::{bind_uri::BindUri, component::location::AddressEvent};
+use qinterface::{
+    bind_uri::BindUri,
+    component::location::{AddressEvent, LocalEndpointSet},
+};
 use qtraversal::{
-    addr::LocalEndpointEffect,
-    nat::client::{ClientLocationData, StunClientsComponent},
+    addr::LocalEndpointEffect, nat::client::StunClientsComponent,
     punch::puncher::LocalEndpointChanges,
 };
 use tracing::Instrument as _;
@@ -77,28 +79,17 @@ impl Components {
         }
     }
 
-    fn upsert_tracked_direct_endpoint(&self, bind_uri: BindUri, addr: SocketAddr) {
-        let changes = self.puncher.upsert_direct_endpoint(bind_uri, addr);
+    pub(crate) fn upsert_observed_local_endpoints(
+        &self,
+        bind_uri: BindUri,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
+    ) {
+        let changes = self.puncher.upsert_local_endpoints(bind_uri, endpoints);
         self.apply_local_endpoint_changes(changes);
     }
 
-    fn remove_tracked_direct_endpoint(&self, bind_uri: &BindUri) {
-        let changes = self.puncher.remove_direct_endpoint(bind_uri);
-        self.apply_local_endpoint_changes(changes);
-    }
-
-    fn upsert_tracked_stun_endpoint(&self, bind_uri: BindUri, endpoint: EndpointAddr) {
-        let changes = self.puncher.upsert_stun_endpoint(bind_uri, endpoint);
-        self.apply_local_endpoint_changes(changes);
-    }
-
-    fn remove_tracked_stun_endpoint(&self, bind_uri: &BindUri) {
-        let changes = self.puncher.remove_stun_endpoint(bind_uri);
-        self.apply_local_endpoint_changes(changes);
-    }
-
-    fn close_tracked_bind_uri(&self, bind_uri: &BindUri) {
-        let changes = self.puncher.close_tracked_bind_uri(bind_uri);
+    pub(crate) fn remove_observed_local_endpoints(&self, bind_uri: &BindUri) {
+        let changes = self.puncher.remove_observed_local_endpoints(bind_uri);
         self.apply_local_endpoint_changes(changes);
     }
 
@@ -124,16 +115,12 @@ impl Components {
     }
 
     fn handle_local_address_event(&self, bind_uri: BindUri, event: AddressEvent) {
-        let event = match event.downcast::<io::Result<SocketAddr>>() {
-            Ok(event) => {
-                self.handle_direct_address_event(bind_uri, event);
-                return;
+        match event.downcast::<LocalEndpointSet>() {
+            Ok(AddressEvent::Upsert(endpoints)) => self
+                .upsert_observed_local_endpoints(bind_uri, endpoints.endpoints().iter().copied()),
+            Ok(AddressEvent::Remove(_) | AddressEvent::Closed) => {
+                self.remove_observed_local_endpoints(&bind_uri);
             }
-            Err(event) => event,
-        };
-
-        match event.downcast::<ClientLocationData>() {
-            Ok(event) => self.handle_stun_address_event(bind_uri, event),
             Err(AddressEvent::Upsert(data)) => {
                 let type_id = data.as_ref().type_id();
                 tracing::trace!(target: "quic", ?type_id, "ignored unknown local address upsert event");
@@ -141,43 +128,7 @@ impl Components {
             Err(AddressEvent::Remove(type_id)) => {
                 tracing::trace!(target: "quic", ?type_id, "ignored unknown local address remove event");
             }
-            Err(AddressEvent::Closed) => self.close_tracked_bind_uri(&bind_uri),
-        }
-    }
-
-    fn handle_direct_address_event(
-        &self,
-        bind_uri: BindUri,
-        event: AddressEvent<io::Result<SocketAddr>>,
-    ) {
-        match event {
-            AddressEvent::Upsert(data) => match data.as_ref() {
-                Ok(addr) => self.upsert_tracked_direct_endpoint(bind_uri, *addr),
-                Err(error) => {
-                    tracing::debug!(target: "quic", bind_uri = %bind_uri, ?error, "direct local address update failed");
-                    self.remove_tracked_direct_endpoint(&bind_uri);
-                }
-            },
-            AddressEvent::Remove(_type_id) => self.remove_tracked_direct_endpoint(&bind_uri),
-            AddressEvent::Closed => self.close_tracked_bind_uri(&bind_uri),
-        }
-    }
-
-    fn handle_stun_address_event(
-        &self,
-        bind_uri: BindUri,
-        event: AddressEvent<ClientLocationData>,
-    ) {
-        match event {
-            AddressEvent::Upsert(data) => match data.as_ref() {
-                Ok(endpoint) => self.upsert_tracked_stun_endpoint(bind_uri, *endpoint),
-                Err(error) => {
-                    tracing::debug!(target: "quic", bind_uri = %bind_uri, ?error, "stun local address update failed");
-                    self.remove_tracked_stun_endpoint(&bind_uri);
-                }
-            },
-            AddressEvent::Remove(_type_id) => self.remove_tracked_stun_endpoint(&bind_uri),
-            AddressEvent::Closed => self.close_tracked_bind_uri(&bind_uri),
+            Err(AddressEvent::Closed) => self.remove_observed_local_endpoints(&bind_uri),
         }
     }
 

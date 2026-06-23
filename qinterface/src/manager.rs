@@ -119,7 +119,18 @@ impl InterfaceManager {
                 // try reuse existing binding
                 Entry::Occupied(entry) => match entry.get().weak_iface.upgrade() {
                     // (3) reuse existing binding
-                    Ok(iface) => return iface.clone(),
+                    Ok(iface) => {
+                        if iface.borrow().bound_addr().is_ok() {
+                            return iface.clone();
+                        }
+
+                        tracing::debug!(
+                            bind_uri = %bind_uri,
+                            "replacing closed interface binding during bind"
+                        );
+                        drop(iface);
+                        return self.new_binding(Entry::Occupied(entry), factory);
+                    }
                     // (4) no existing binding: close context and retry
                     Err(..) => {
                         let dropped_future = entry.get().dropped();

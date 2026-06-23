@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeSet, HashMap, hash_map::Entry},
     net::SocketAddr,
     ops::Deref,
 };
@@ -38,25 +38,20 @@ pub type LocalEndpointEffects = Vec<LocalEndpointEffect>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalEndpointSource {
     Explicit,
-    #[allow(dead_code)]
-    LocationDirect,
-    #[allow(dead_code)]
-    LocationStun,
+    Observed,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct LocalEndpointSources {
     explicit: bool,
-    location_direct: bool,
-    location_stun: bool,
+    observed: bool,
 }
 
 impl LocalEndpointSources {
     fn contains(self, source: LocalEndpointSource) -> bool {
         match source {
             LocalEndpointSource::Explicit => self.explicit,
-            LocalEndpointSource::LocationDirect => self.location_direct,
-            LocalEndpointSource::LocationStun => self.location_stun,
+            LocalEndpointSource::Observed => self.observed,
         }
     }
 
@@ -64,8 +59,7 @@ impl LocalEndpointSources {
         let existed = self.contains(source);
         match source {
             LocalEndpointSource::Explicit => self.explicit = true,
-            LocalEndpointSource::LocationDirect => self.location_direct = true,
-            LocalEndpointSource::LocationStun => self.location_stun = true,
+            LocalEndpointSource::Observed => self.observed = true,
         }
         !existed
     }
@@ -74,14 +68,13 @@ impl LocalEndpointSources {
         let existed = self.contains(source);
         match source {
             LocalEndpointSource::Explicit => self.explicit = false,
-            LocalEndpointSource::LocationDirect => self.location_direct = false,
-            LocalEndpointSource::LocationStun => self.location_stun = false,
+            LocalEndpointSource::Observed => self.observed = false,
         }
         existed
     }
 
     fn is_empty(self) -> bool {
-        !self.explicit && !self.location_direct && !self.location_stun
+        !self.explicit && !self.observed
     }
 }
 
@@ -142,72 +135,44 @@ impl AddressBook {
         self.remove_local_endpoint_source(bind, addr, LocalEndpointSource::Explicit)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn upsert_direct_endpoint(
+    pub(crate) fn upsert_local_endpoints(
         &mut self,
         bind: BindUri,
-        addr: SocketAddr,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
     ) -> LocalEndpointEffects {
-        let endpoint = EndpointAddr::direct(addr);
-        if self
-            .local_endpoint
-            .get(&bind)
-            .and_then(|endpoints| endpoints.get(&endpoint))
-            .is_some_and(|sources| sources.contains(LocalEndpointSource::LocationDirect))
-        {
-            return Vec::new();
+        let next = endpoints.into_iter().collect::<BTreeSet<_>>();
+        let current = self.local_endpoint_source_set(&bind, LocalEndpointSource::Observed);
+        let mut effects = Vec::new();
+
+        for endpoint in current.difference(&next).copied() {
+            effects.extend(self.remove_local_endpoint_source(
+                &bind,
+                endpoint,
+                LocalEndpointSource::Observed,
+            ));
+        }
+        for endpoint in next.difference(&current).copied() {
+            effects.extend(self.insert_local_endpoint_source(
+                bind.clone(),
+                endpoint,
+                LocalEndpointSource::Observed,
+            ));
         }
 
-        let mut effects =
-            self.remove_current_local_endpoint_source(&bind, LocalEndpointSource::LocationDirect);
-        effects.extend(self.insert_local_endpoint_source(
-            bind,
-            endpoint,
-            LocalEndpointSource::LocationDirect,
-        ));
         effects
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn remove_direct_endpoint(&mut self, bind: &BindUri) -> LocalEndpointEffects {
-        self.remove_current_local_endpoint_source(bind, LocalEndpointSource::LocationDirect)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn upsert_stun_endpoint(
+    pub(crate) fn remove_observed_local_endpoints(
         &mut self,
-        bind: BindUri,
-        endpoint: EndpointAddr,
+        bind: &BindUri,
     ) -> LocalEndpointEffects {
-        if self
-            .local_endpoint
-            .get(&bind)
-            .and_then(|endpoints| endpoints.get(&endpoint))
-            .is_some_and(|sources| sources.contains(LocalEndpointSource::LocationStun))
-        {
-            return Vec::new();
-        }
-
-        let mut effects =
-            self.remove_current_local_endpoint_source(&bind, LocalEndpointSource::LocationStun);
-        effects.extend(self.insert_local_endpoint_source(
-            bind,
-            endpoint,
-            LocalEndpointSource::LocationStun,
-        ));
-        effects
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn remove_stun_endpoint(&mut self, bind: &BindUri) -> LocalEndpointEffects {
-        self.remove_current_local_endpoint_source(bind, LocalEndpointSource::LocationStun)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn close_tracked_bind_uri(&mut self, bind: &BindUri) -> LocalEndpointEffects {
-        let mut effects = self.remove_direct_endpoint(bind);
-        effects.extend(self.remove_stun_endpoint(bind));
-        effects
+        let current = self.local_endpoint_source_set(bind, LocalEndpointSource::Observed);
+        current
+            .into_iter()
+            .flat_map(|endpoint| {
+                self.remove_local_endpoint_source(bind, endpoint, LocalEndpointSource::Observed)
+            })
+            .collect()
     }
 
     pub(crate) fn has_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> bool {
@@ -266,7 +231,7 @@ impl AddressBook {
                 endpoint,
             });
         }
-        if matches!(source, LocalEndpointSource::LocationStun)
+        if matches!(source, LocalEndpointSource::Observed)
             && matches!(endpoint, EndpointAddr::Agent { .. })
         {
             effects.push(LocalEndpointEffect::AddPunchAddress {
@@ -277,20 +242,20 @@ impl AddressBook {
         effects
     }
 
-    #[allow(dead_code)]
-    fn remove_current_local_endpoint_source(
-        &mut self,
+    fn local_endpoint_source_set(
+        &self,
         bind: &BindUri,
         source: LocalEndpointSource,
-    ) -> LocalEndpointEffects {
-        let Some(endpoint) = self.local_endpoint.get(bind).and_then(|endpoints| {
-            endpoints
-                .iter()
-                .find_map(|(endpoint, sources)| sources.contains(source).then_some(*endpoint))
-        }) else {
-            return Vec::new();
-        };
-        self.remove_local_endpoint_source(bind, endpoint, source)
+    ) -> BTreeSet<EndpointAddr> {
+        self.local_endpoint
+            .get(bind)
+            .into_iter()
+            .flat_map(|endpoints| {
+                endpoints.iter().filter_map(move |(endpoint, sources)| {
+                    sources.contains(source).then_some(*endpoint)
+                })
+            })
+            .collect()
     }
 
     fn remove_local_endpoint_source(
@@ -321,7 +286,7 @@ impl AddressBook {
             return effects;
         }
 
-        if matches!(source, LocalEndpointSource::LocationStun)
+        if matches!(source, LocalEndpointSource::Observed)
             && matches!(endpoint, EndpointAddr::Agent { .. })
         {
             effects.push(LocalEndpointEffect::RemovePunchAddress {
@@ -466,149 +431,65 @@ mod tests {
     }
 
     #[test]
-    fn explicit_source_survives_location_direct_remove() {
-        let mut book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let addr: SocketAddr = "127.0.0.1:34567".parse().expect("socket addr");
-        let endpoint = EndpointAddr::direct(addr);
-
-        assert_eq!(
-            book.add_local_endpoint(bind_uri.clone(), endpoint)
-                .expect("explicit endpoint insert"),
-            vec![LocalEndpointEffect::AddEndpoint {
-                bind_uri: bind_uri.clone(),
-                endpoint,
-            }]
-        );
-        assert_eq!(
-            book.upsert_direct_endpoint(bind_uri.clone(), addr),
-            Vec::new()
-        );
-        assert!(book.remove_direct_endpoint(&bind_uri).is_empty());
-        assert!(book.has_local_endpoint(&bind_uri, endpoint));
-    }
-
-    #[test]
-    fn location_direct_replace_emits_remove_then_add() {
-        let mut book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let first: SocketAddr = "127.0.0.1:34567".parse().expect("socket addr");
-        let second: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-        let first_endpoint = EndpointAddr::direct(first);
-        let second_endpoint = EndpointAddr::direct(second);
-
-        assert_eq!(
-            book.upsert_direct_endpoint(bind_uri.clone(), first),
-            vec![LocalEndpointEffect::AddEndpoint {
-                bind_uri: bind_uri.clone(),
-                endpoint: first_endpoint,
-            }]
-        );
-        assert_eq!(
-            book.upsert_direct_endpoint(bind_uri.clone(), first),
-            Vec::new()
-        );
-        assert_eq!(
-            book.upsert_direct_endpoint(bind_uri.clone(), second),
-            vec![
-                LocalEndpointEffect::RemoveEndpoint {
-                    bind_uri: bind_uri.clone(),
-                    endpoint: first_endpoint,
-                },
-                LocalEndpointEffect::AddEndpoint {
-                    bind_uri: bind_uri.clone(),
-                    endpoint: second_endpoint,
-                },
-            ]
-        );
-        assert!(!book.has_local_endpoint(&bind_uri, first_endpoint));
-        assert!(book.has_local_endpoint(&bind_uri, second_endpoint));
-    }
-
-    #[test]
-    fn location_stun_agent_remove_emits_endpoint_and_punch_cleanup() {
-        let mut book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let agent: SocketAddr = "192.0.2.10:3478".parse().expect("socket addr");
-        let outer: SocketAddr = "198.51.100.20:45678".parse().expect("socket addr");
-        let endpoint = EndpointAddr::with_agent(agent, outer);
-
-        assert_eq!(
-            book.upsert_stun_endpoint(bind_uri.clone(), endpoint),
-            vec![
-                LocalEndpointEffect::AddEndpoint {
-                    bind_uri: bind_uri.clone(),
-                    endpoint,
-                },
-                LocalEndpointEffect::AddPunchAddress {
-                    bind_uri: bind_uri.clone(),
-                    endpoint,
-                },
-            ]
-        );
-        assert_eq!(
-            book.upsert_stun_endpoint(bind_uri.clone(), endpoint),
-            Vec::new()
-        );
-        assert_eq!(
-            book.remove_stun_endpoint(&bind_uri),
-            vec![
-                LocalEndpointEffect::RemovePunchAddress { addr: outer },
-                LocalEndpointEffect::RemoveEndpoint {
-                    bind_uri: bind_uri.clone(),
-                    endpoint,
-                },
-            ]
-        );
-        assert!(!book.has_local_endpoint(&bind_uri, endpoint));
-    }
-
-    #[test]
-    fn explicit_agent_endpoint_survives_stun_remove_but_punch_address_is_removed() {
-        let mut book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let agent: SocketAddr = "192.0.2.10:3478".parse().expect("socket addr");
-        let outer: SocketAddr = "198.51.100.20:45678".parse().expect("socket addr");
-        let endpoint = EndpointAddr::with_agent(agent, outer);
-
-        book.add_local_endpoint(bind_uri.clone(), endpoint)
-            .expect("explicit endpoint insert");
-        assert_eq!(
-            book.upsert_stun_endpoint(bind_uri.clone(), endpoint),
-            vec![LocalEndpointEffect::AddPunchAddress {
-                bind_uri: bind_uri.clone(),
-                endpoint,
-            }]
-        );
-
-        assert_eq!(
-            book.remove_stun_endpoint(&bind_uri),
-            vec![LocalEndpointEffect::RemovePunchAddress { addr: outer }]
-        );
-        assert!(book.has_local_endpoint(&bind_uri, endpoint));
-    }
-
-    #[test]
-    fn close_tracked_bind_uri_keeps_explicit_endpoint() {
+    fn observed_local_endpoints_replace_bind_endpoint_set_without_touching_explicit() {
         let mut book = AddressBook::default();
         let bind_uri = bind_uri();
         let explicit = direct_endpoint(34567);
-        let direct: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-        let direct_endpoint = EndpointAddr::direct(direct);
+        let direct = direct_endpoint(45678);
+        let first_agent: SocketAddr = "192.0.2.10:3478".parse().expect("socket addr");
+        let first_outer: SocketAddr = "198.51.100.20:45678".parse().expect("socket addr");
+        let first_agent_endpoint = EndpointAddr::with_agent(first_agent, first_outer);
+        let second_agent: SocketAddr = "192.0.2.11:3478".parse().expect("socket addr");
+        let second_outer: SocketAddr = "198.51.100.21:45679".parse().expect("socket addr");
+        let second_agent_endpoint = EndpointAddr::with_agent(second_agent, second_outer);
 
         book.add_local_endpoint(bind_uri.clone(), explicit)
             .expect("explicit endpoint insert");
-        book.upsert_direct_endpoint(bind_uri.clone(), direct);
 
-        assert_eq!(
-            book.close_tracked_bind_uri(&bind_uri),
-            vec![LocalEndpointEffect::RemoveEndpoint {
-                bind_uri: bind_uri.clone(),
-                endpoint: direct_endpoint,
-            }]
+        let effects = book.upsert_local_endpoints(
+            bind_uri.clone(),
+            [direct, first_agent_endpoint, second_agent_endpoint],
         );
+        assert!(effects.contains(&LocalEndpointEffect::AddEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: direct
+        }));
+        assert!(effects.contains(&LocalEndpointEffect::AddEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: first_agent_endpoint
+        }));
+        assert!(effects.contains(&LocalEndpointEffect::AddEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: second_agent_endpoint
+        }));
         assert!(book.has_local_endpoint(&bind_uri, explicit));
-        assert!(!book.has_local_endpoint(&bind_uri, direct_endpoint));
+        assert!(book.has_local_endpoint(&bind_uri, direct));
+        assert!(book.has_local_endpoint(&bind_uri, first_agent_endpoint));
+        assert!(book.has_local_endpoint(&bind_uri, second_agent_endpoint));
+
+        let effects = book.upsert_local_endpoints(bind_uri.clone(), [second_agent_endpoint]);
+        assert!(effects.contains(&LocalEndpointEffect::RemoveEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: direct
+        }));
+        assert!(effects.contains(&LocalEndpointEffect::RemovePunchAddress { addr: first_outer }));
+        assert!(effects.contains(&LocalEndpointEffect::RemoveEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: first_agent_endpoint
+        }));
+        assert!(book.has_local_endpoint(&bind_uri, explicit));
+        assert!(!book.has_local_endpoint(&bind_uri, direct));
+        assert!(!book.has_local_endpoint(&bind_uri, first_agent_endpoint));
+        assert!(book.has_local_endpoint(&bind_uri, second_agent_endpoint));
+
+        let effects = book.remove_observed_local_endpoints(&bind_uri);
+        assert!(effects.contains(&LocalEndpointEffect::RemovePunchAddress { addr: second_outer }));
+        assert!(effects.contains(&LocalEndpointEffect::RemoveEndpoint {
+            bind_uri: bind_uri.clone(),
+            endpoint: second_agent_endpoint
+        }));
+        assert!(book.has_local_endpoint(&bind_uri, explicit));
+        assert!(!book.has_local_endpoint(&bind_uri, second_agent_endpoint));
     }
 
     #[test]

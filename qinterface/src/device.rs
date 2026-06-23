@@ -243,17 +243,39 @@ impl Default for State {
 
 impl State {
     fn check_network_changes(&self) {
-        let mut interfaces = self.interfaces.write().unwrap();
-        let subscribers = self.subscribers.read().unwrap();
-        let old_interfaces = interfaces.clone();
         let new_interfaces = scan_interfaces();
-        for event in InterfaceEvent::from_update(&old_interfaces, &new_interfaces) {
-            let arc_event = Arc::new(event);
+        self.check_network_changes_from(new_interfaces);
+    }
+
+    fn check_network_changes_from(&self, new_interfaces: HashMap<String, Interface>) {
+        let events = self.update_interfaces(new_interfaces);
+        self.broadcast_events(events);
+    }
+
+    fn update_interfaces(
+        &self,
+        new_interfaces: HashMap<String, Interface>,
+    ) -> Vec<Arc<InterfaceEvent>> {
+        let mut interfaces = self.interfaces.write().unwrap();
+        let old_interfaces = interfaces.clone();
+        let events = InterfaceEvent::from_update(&old_interfaces, &new_interfaces)
+            .map(Arc::new)
+            .collect();
+        *interfaces = new_interfaces;
+        events
+    }
+
+    fn broadcast_events(&self, events: Vec<Arc<InterfaceEvent>>) {
+        if events.is_empty() {
+            return;
+        }
+
+        let subscribers = self.subscribers.read().unwrap();
+        for event in events {
             for sender in subscribers.values() {
-                let _ = sender.send(arc_event.clone());
+                let _ = sender.send(event.clone());
             }
         }
-        *interfaces = new_interfaces.clone();
     }
 
     fn monitor(&self) -> (HashMap<String, Interface>, InterfaceEventReceiver) {
@@ -415,5 +437,68 @@ impl Default for Devices {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, TryLockError},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::{Interface, State};
+
+    fn interface_snapshot_with_added_test_interface(state: &State, name: &str) -> Interface {
+        let current = state.interfaces();
+        let mut interface = current
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_else(Interface::dummy);
+        interface.name = name.to_owned();
+        interface
+    }
+
+    #[test]
+    fn interface_update_does_not_hold_interface_lock_while_broadcast_is_blocked() {
+        let state = Arc::new(State::default());
+        let test_interface = "__qinterface_lock_order_test__";
+        let mut new_interfaces = state.interfaces();
+        new_interfaces.insert(
+            test_interface.to_owned(),
+            interface_snapshot_with_added_test_interface(&state, test_interface),
+        );
+
+        let subscribers = state.subscribers.write().unwrap();
+        let worker_state = state.clone();
+        let worker = thread::spawn(move || {
+            worker_state.check_network_changes_from(new_interfaces);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut observed_updated_snapshot = false;
+        while Instant::now() < deadline {
+            match state.interfaces.try_read() {
+                Ok(interfaces) => {
+                    if interfaces.contains_key(test_interface) {
+                        observed_updated_snapshot = true;
+                        break;
+                    }
+                }
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Poisoned(error)) => panic!("interfaces lock poisoned: {error}"),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(subscribers);
+        worker.join().expect("interface update worker panicked");
+
+        assert!(
+            observed_updated_snapshot,
+            "interface updates must release the interfaces lock before waiting for subscribers"
+        );
     }
 }

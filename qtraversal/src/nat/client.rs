@@ -21,7 +21,7 @@ use qinterface::{
     bind_uri::BindUri,
     component::{
         Component,
-        location::{IfaceLocations, LocationsComponent},
+        location::{IfaceLocations, InterfaceAgentLocation, LocationsComponent},
     },
     io::{IO, RefIO},
 };
@@ -246,13 +246,11 @@ pub struct StunClient<I: RefIO + 'static> {
     // 可能被复制进keep_alive_task
     stun_router: StunRouter,
     stun_agent: SocketAddr,
-    locations: Option<IfaceLocations<I>>,
+    location: Option<InterfaceAgentLocation>,
 
     state: ArcClientState,
     tasks: Arc<Mutex<JoinSet<()>>>,
 }
-
-pub type ClientLocationData = Result<EndpointAddr, DetectOuterAddrError>;
 
 impl<I: RefIO + 'static> StunClient<I> {
     pub fn new(
@@ -261,13 +259,16 @@ impl<I: RefIO + 'static> StunClient<I> {
         stun_agent: SocketAddr,
         locations: Option<IfaceLocations<I>>,
     ) -> Self {
+        let location = locations
+            .as_ref()
+            .map(|locations| locations.agent_location(stun_agent));
         let client = Self {
             nat_type: Default::default(),
             outer_addr: Default::default(),
             stun_agent,
             ref_iface,
             stun_router,
-            locations,
+            location,
             state: ArcClientState::new(),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
         };
@@ -294,7 +295,7 @@ impl<I: RefIO + 'static> StunClient<I> {
         let ref_iface = self.ref_iface.clone();
         let bind_uri = ref_iface.iface().bind_uri();
 
-        let locations = self.locations.clone();
+        let location = self.location.clone();
 
         let client_state = self.state.clone();
 
@@ -343,20 +344,22 @@ impl<I: RefIO + 'static> StunClient<I> {
 
                 log_detect_result(&detect_result);
 
-                let timeout = match detect_result {
+                let timeout = match &detect_result {
                     Ok(_) => NAT_MAPPING_REFRESH_INTERVAL,
                     Err(_) => Duration::from_secs(1),
                 };
 
                 if !bind_uri.is_temporary()
-                    && let Some(locations) = locations.as_ref()
+                    && let Some(location) = location.as_ref()
                 {
-                    locations.r#for(&ref_iface, |locations, bind_uri| {
-                        let data = detect_result
-                            .clone()
-                            .map(|outer| EndpointAddr::with_agent(stun_agent, outer));
-                        locations.upsert::<ClientLocationData>(bind_uri, Arc::new(data));
-                    });
+                    match &detect_result {
+                        Ok(outer) => {
+                            location.upsert(*outer);
+                        }
+                        Err(_) => {
+                            location.clear();
+                        }
+                    }
                 }
 
                 outer_addr.assign(detect_result);
@@ -468,6 +471,9 @@ impl<I: RefIO + 'static> StunClient<I> {
         }
         self.lock_tasks().abort_all();
         while ready!(self.lock_tasks().poll_join_next(cx)).is_some() {}
+        if let Some(location) = self.location.as_ref() {
+            location.clear();
+        }
         self.nat_type.clear();
         self.outer_addr.clear();
         Poll::Ready(())
