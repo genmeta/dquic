@@ -77,8 +77,21 @@ impl AddressEvent {
 type EventSender = mpsc::UnboundedSender<(BindUri, AddressEvent)>;
 type EventReceiver = mpsc::UnboundedReceiver<(BindUri, AddressEvent)>;
 
+enum ControlMessage {
+    Subscribe {
+        subscriber_id: UniqueId,
+        subscriber: EventSender,
+    },
+    Unsubscribe {
+        subscriber_id: UniqueId,
+    },
+    #[cfg(test)]
+    SubscriberCount {
+        reply: tokio::sync::oneshot::Sender<usize>,
+    },
+}
+
 struct EventPublisher {
-    subscriber_id_generator: UniqueIdGenerator,
     datas: HashMap<BindUri, HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     subscribers: HashMap<UniqueId, EventSender>,
 }
@@ -86,7 +99,6 @@ struct EventPublisher {
 impl EventPublisher {
     pub fn new() -> Self {
         Self {
-            subscriber_id_generator: UniqueIdGenerator::new(),
             datas: HashMap::new(),
             subscribers: HashMap::new(),
         }
@@ -118,8 +130,7 @@ impl EventPublisher {
             .retain(|_, subscriber| subscriber.send((bind_uri.clone(), event.clone())).is_ok());
     }
 
-    pub fn register_subscriber(&mut self, subscriber: EventSender) {
-        let subscriber_id = self.subscriber_id_generator.generate();
+    pub fn register_subscriber(&mut self, subscriber_id: UniqueId, subscriber: EventSender) {
         for (bind_uri, datas) in &self.datas {
             for (.., data) in datas {
                 let event = AddressEvent::Upsert(data.clone());
@@ -131,12 +142,17 @@ impl EventPublisher {
         }
         self.subscribers.insert(subscriber_id, subscriber);
     }
+
+    pub fn unregister_subscriber(&mut self, subscriber_id: UniqueId) {
+        self.subscribers.remove(&subscriber_id);
+    }
 }
 
 #[derive(Debug)]
 pub struct Locations {
+    subscriber_id_generator: UniqueIdGenerator,
     new_event_tx: EventSender,
-    new_subscriber_tx: mpsc::UnboundedSender<EventSender>,
+    control_tx: mpsc::UnboundedSender<ControlMessage>,
     _publisher_task: AbortOnDropHandle<()>,
 }
 
@@ -149,7 +165,7 @@ impl Default for Locations {
 impl Locations {
     pub fn new() -> Self {
         let (new_event_tx, mut new_event_rx) = mpsc::unbounded_channel::<(BindUri, AddressEvent)>();
-        let (new_subscriber_tx, mut new_subscriber_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
 
         let _publisher_task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut publisher = EventPublisher::new();
@@ -159,8 +175,22 @@ impl Locations {
                     Some((bind_uri, event)) = new_event_rx.recv() => {
                         publisher.publish_event(bind_uri, event);
                     }
-                    Some(new_subscriber) = new_subscriber_rx.recv() => {
-                        publisher.register_subscriber(new_subscriber);
+                    Some(control) = control_rx.recv() => {
+                        match control {
+                            ControlMessage::Subscribe {
+                                subscriber_id,
+                                subscriber,
+                            } => {
+                                publisher.register_subscriber(subscriber_id, subscriber);
+                            }
+                            ControlMessage::Unsubscribe { subscriber_id } => {
+                                publisher.unregister_subscriber(subscriber_id);
+                            }
+                            #[cfg(test)]
+                            ControlMessage::SubscriberCount { reply } => {
+                                let _ = reply.send(publisher.subscribers.len());
+                            }
+                        }
                     }
                     else => break
                 }
@@ -168,8 +198,9 @@ impl Locations {
         }));
 
         Self {
+            subscriber_id_generator: UniqueIdGenerator::new(),
             new_event_tx,
-            new_subscriber_tx,
+            control_tx,
             _publisher_task,
         }
     }
@@ -196,15 +227,34 @@ impl Locations {
     }
 
     pub fn subscribe(&self) -> Observer {
+        let subscriber_id = self.subscriber_id_generator.generate();
         let (tx, rx) = mpsc::unbounded_channel();
         // Register the new subscriber.
-        _ = self.new_subscriber_tx.send(tx);
-        Observer { receiver: rx }
+        _ = self.control_tx.send(ControlMessage::Subscribe {
+            subscriber_id,
+            subscriber: tx,
+        });
+        Observer {
+            subscriber_id,
+            receiver: rx,
+            control_tx: self.control_tx.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    async fn subscriber_count(&self) -> usize {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        _ = self
+            .control_tx
+            .send(ControlMessage::SubscriberCount { reply });
+        rx.await.expect("subscriber count request must succeed")
     }
 }
 
 pub struct Observer {
+    subscriber_id: UniqueId,
     receiver: EventReceiver,
+    control_tx: mpsc::UnboundedSender<ControlMessage>,
 }
 
 impl Observer {
@@ -214,6 +264,14 @@ impl Observer {
 
     pub fn try_recv(&mut self) -> Result<(BindUri, AddressEvent), mpsc::error::TryRecvError> {
         self.receiver.try_recv()
+    }
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        _ = self.control_tx.send(ControlMessage::Unsubscribe {
+            subscriber_id: self.subscriber_id,
+        });
     }
 }
 
@@ -562,5 +620,68 @@ impl Component for LocationsComponent {
         let locations = current.state.locations.clone();
         current.state.close();
         *current = CurrentInterfaceLocations::new(iface.downgrade(), locations);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::time::{Duration, sleep};
+
+    use super::{AddressEvent, Locations};
+    use crate::BindUri;
+
+    #[tokio::test]
+    async fn observer_drop_unsubscribes_without_publish() {
+        let locations = Arc::new(Locations::new());
+        let observer = locations.subscribe();
+
+        wait_for_subscriber_count(&locations, 1).await;
+
+        drop(observer);
+
+        wait_for_subscriber_count(&locations, 0).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_observer_is_not_retained_by_later_publish() {
+        let locations = Arc::new(Locations::new());
+        let bind_uri: BindUri = "inet://127.0.0.1:1".parse().expect("bind uri must parse");
+        let observer = locations.subscribe();
+
+        wait_for_subscriber_count(&locations, 1).await;
+        drop(observer);
+        wait_for_subscriber_count(&locations, 0).await;
+
+        locations.upsert(bind_uri.clone(), Arc::new("addr".to_string()));
+
+        sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(locations.subscriber_count().await, 0);
+    }
+
+    async fn wait_for_subscriber_count(locations: &Locations, expected: usize) {
+        for _ in 0..20 {
+            if locations.subscriber_count().await == expected {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(locations.subscriber_count().await, expected);
+    }
+
+    #[tokio::test]
+    async fn subscribe_replays_current_locations() {
+        let locations = Locations::new();
+        let bind_uri: BindUri = "inet://127.0.0.1:2".parse().expect("bind uri must parse");
+
+        locations.upsert(bind_uri.clone(), Arc::new("addr".to_string()));
+
+        let mut observer = locations.subscribe();
+        let (observed_bind_uri, event) = observer.recv().await.expect("observer must receive");
+
+        assert_eq!(observed_bind_uri, bind_uri);
+        assert!(matches!(event, AddressEvent::Upsert(_)));
     }
 }
