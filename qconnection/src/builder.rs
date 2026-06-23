@@ -776,3 +776,61 @@ fn spawn_drive_connection(
         .in_current_span(),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use qbase::{error::AppError, varint::VarInt};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::termination::Termination;
+
+    fn test_connection(conn_state: ArcConnState) -> Arc<Connection> {
+        Arc::new_cyclic(|weak_self| Connection {
+            state: Err(Termination::draining(
+                AppError::new(VarInt::from_u32(0), "").into(),
+            ))
+            .into(),
+            conn_state,
+            weak_self: weak_self.clone(),
+            qlog_span: qevent::telemetry::Span::default(),
+            tracing_span: tracing::Span::none(),
+        })
+    }
+
+    #[tokio::test]
+    async fn application_close_event_retains_connection_until_terminated() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let conn_state = ArcConnState::new();
+        let connection = test_connection(conn_state);
+        let weak_connection = Arc::downgrade(&connection);
+
+        spawn_drive_connection(rx, weak_connection.clone());
+
+        tx.send(Event::ApplicationClose(AppError::new(
+            VarInt::from_u32(0),
+            "",
+        )))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        drop(connection);
+        tokio::task::yield_now().await;
+
+        assert!(
+            weak_connection.upgrade().is_some(),
+            "drive loop should retain application-closed connections until termination"
+        );
+
+        tx.send(Event::Terminated).unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            weak_connection.upgrade().is_none(),
+            "retained connection should drop after termination"
+        );
+    }
+}

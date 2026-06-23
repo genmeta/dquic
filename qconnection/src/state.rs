@@ -156,6 +156,21 @@ impl ArcConnState {
         None
     }
 
+    pub fn enter_draining_with_error(
+        &self,
+        error: &(impl Into<Error> + Clone),
+    ) -> Option<QlogConnectionState> {
+        if let Some(old_state) = self.update(GranularConnectionStates::Draining.into()) {
+            if old_state != QlogConnectionState::Granular(GranularConnectionStates::Closing) {
+                self.terminated
+                    .set(error.clone().into())
+                    .expect("Terminated error already set");
+            }
+            return Some(old_state);
+        }
+        None
+    }
+
     pub fn enter_closed(&self) -> Option<QlogConnectionState> {
         if let Some(old_state) = self.update(BaseConnectionStates::Closed.into()) {
             _ = self.closed.set(());
@@ -264,6 +279,22 @@ mod tests {
         assert_eq!(
             conn_state.current(),
             Some(BaseConnectionStates::Closed.into())
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_with_error_sets_draining_and_termination_error() {
+        let conn_state = ArcConnState::new();
+        let error = qbase::error::QuicError::with_default_fty(
+            qbase::error::ErrorKind::ConnectionRefused,
+            "silent refusal",
+        );
+
+        assert!(conn_state.enter_draining_with_error(&error).is_some());
+        assert_eq!(conn_state.current(), Some(DRAINING));
+        assert_eq!(
+            conn_state.terminated().await.kind(),
+            qbase::error::ErrorKind::ConnectionRefused
         );
     }
 }

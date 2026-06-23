@@ -23,7 +23,7 @@ use qbase::{
 use qinterface::component::route::RcvdPacketQueue;
 use tokio::time::Instant;
 
-use crate::{ArcLocalCids, Components, path::ArcPathContexts};
+use crate::{Components, path::ArcPathContexts};
 
 /// Keep a few states to support sending packets with ccf.
 pub struct Terminator {
@@ -140,29 +140,20 @@ enum State {
 pub struct Termination {
     // for generate io::Error
     error: Error,
-    // keep this to keep the routing
-    _local_cids: ArcLocalCids,
     state: State,
 }
 
 impl Termination {
-    pub fn closing(
-        error: Error,
-        local_cids: ArcLocalCids,
-        rcvd_pkt_q: Arc<RcvdPacketQueue>,
-        paths: ArcPathContexts,
-    ) -> Self {
+    pub fn closing(error: Error, rcvd_pkt_q: Arc<RcvdPacketQueue>, paths: ArcPathContexts) -> Self {
         Self {
             error,
-            _local_cids: local_cids,
             state: State::Closing { rcvd_pkt_q, paths },
         }
     }
 
-    pub fn draining(error: Error, local_cids: ArcLocalCids) -> Self {
+    pub fn draining(error: Error) -> Self {
         Self {
             error,
-            _local_cids: local_cids,
             state: State::Draining,
         }
     }
@@ -176,7 +167,7 @@ impl Termination {
         match mem::replace(&mut self.state, State::Draining) {
             State::Closing { rcvd_pkt_q, paths } => {
                 rcvd_pkt_q.close_all();
-                paths.clear();
+                paths.close();
                 true
             }
             State::Draining => false,
@@ -186,14 +177,21 @@ impl Termination {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
     use qbase::{
-        cid::GenUniqueCid,
+        cid::{ConnectionId, GenUniqueCid},
         error::{Error, ErrorKind, QuicError},
-        net::tx::ArcSendWakers,
+        net::{
+            route::{Link, Pathway},
+            tx::ArcSendWakers,
+        },
+        packet::{LongHeaderBuilder, Packet},
     };
-    use qinterface::component::route::{QuicRouter, RcvdPacketQueue};
+    use qinterface::{
+        bind_uri::BindUri,
+        component::route::{QuicRouter, RcvdPacketQueue},
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -202,13 +200,13 @@ mod tests {
         state::ArcConnState,
     };
 
-    fn test_local_cids() -> ArcLocalCids {
+    fn test_local_cids(router: Arc<QuicRouter>) -> (ArcLocalCids, ConnectionId) {
         let queue = Arc::new(RcvdPacketQueue::new());
         let tx_wakers = ArcSendWakers::default();
         let reliable = ArcReliableFrameDeque::with_capacity_and_wakers(8, tx_wakers);
-        let registry = Arc::new(QuicRouter::default()).registry_on_issuing_scid(queue, reliable);
+        let registry = router.registry_on_issuing_scid(queue, reliable);
         let initial_scid = registry.gen_unique_cid();
-        ArcLocalCids::new(initial_scid, registry)
+        (ArcLocalCids::new(initial_scid, registry), initial_scid)
     }
 
     fn test_paths() -> ArcPathContexts {
@@ -222,13 +220,30 @@ mod tests {
         QuicError::with_default_fty(ErrorKind::NoViablePath, "closed").into()
     }
 
+    fn test_way() -> (BindUri, Pathway, Link) {
+        let src = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let dst = SocketAddr::from(([127, 0, 0, 1], 4433));
+        let link = Link::new(src, dst);
+        (BindUri::from(dst), Pathway::from(link), link)
+    }
+
+    fn test_routed_packet(dcid: ConnectionId) -> Packet {
+        Packet::VN(LongHeaderBuilder::with_cid(dcid, ConnectionId::from_slice(b"scid")).vn(vec![1]))
+    }
+
+    async fn route_exists(router: &Arc<QuicRouter>, dcid: ConnectionId) -> bool {
+        router
+            .try_deliver(test_routed_packet(dcid), test_way())
+            .await
+            .is_ok()
+    }
+
     #[tokio::test]
     async fn enter_draining_closes_closing_packet_queues() {
         let rcvd_pkt_q = Arc::new(RcvdPacketQueue::new());
         let packets = rcvd_pkt_q.one_rtt().clone();
         let paths = test_paths();
-        let mut termination =
-            Termination::closing(test_error(), test_local_cids(), rcvd_pkt_q, paths);
+        let mut termination = Termination::closing(test_error(), rcvd_pkt_q, paths);
 
         assert!(termination.enter_draining());
 
@@ -244,10 +259,31 @@ mod tests {
     fn enter_draining_is_idempotent() {
         let rcvd_pkt_q = Arc::new(RcvdPacketQueue::new());
         let paths = test_paths();
-        let mut termination =
-            Termination::closing(test_error(), test_local_cids(), rcvd_pkt_q, paths);
+        let mut termination = Termination::closing(test_error(), rcvd_pkt_q, paths);
 
         assert!(termination.enter_draining());
         assert!(!termination.enter_draining());
+    }
+
+    #[tokio::test]
+    async fn deferred_local_cids_and_odcid_route_clear_at_same_boundary() {
+        let router = Arc::new(QuicRouter::default());
+        let (local_cids, initial_scid) = test_local_cids(router.clone());
+        let rcvd_pkt_q = Arc::new(RcvdPacketQueue::new());
+        let odcid = ConnectionId::from_slice(b"odcid");
+        let odcid_router_entry = Arc::new(router.insert(odcid.into(), rcvd_pkt_q.clone()));
+
+        let deferred_local_cids = local_cids.clone();
+        let deferred_odcid_router_entry = Some(odcid_router_entry.clone());
+        drop(odcid_router_entry);
+
+        assert!(route_exists(&router, initial_scid).await);
+        assert!(route_exists(&router, odcid).await);
+
+        deferred_local_cids.clear();
+        drop(deferred_odcid_router_entry);
+
+        assert!(!route_exists(&router, initial_scid).await);
+        assert!(!route_exists(&router, odcid).await);
     }
 }

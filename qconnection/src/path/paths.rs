@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, RwLock, Weak},
     time::Duration,
 };
 
@@ -29,6 +29,32 @@ pub struct PathContext {
     #[deref]
     path: Arc<Path>,
     _task: AbortOnDropHandle<()>,
+    _send_waker_entry: PathSendWakerEntry,
+}
+
+struct PathSendWakerEntry {
+    pathway: Pathway,
+    tx_wakers: ArcSendWakers,
+}
+
+impl PathSendWakerEntry {
+    fn insert(
+        pathway: Pathway,
+        tx_wakers: &ArcSendWakers,
+        tx_waker: &qbase::net::tx::ArcSendWaker,
+    ) -> Self {
+        tx_wakers.insert(pathway, tx_waker);
+        Self {
+            pathway,
+            tx_wakers: tx_wakers.clone(),
+        }
+    }
+}
+
+impl Drop for PathSendWakerEntry {
+    fn drop(&mut self) {
+        self.tx_wakers.remove(&self.pathway);
+    }
 }
 
 #[derive(Clone)]
@@ -36,7 +62,13 @@ pub struct ArcPathContexts {
     paths: Arc<DashMap<Pathway, PathContext>>,
     tx_wakers: ArcSendWakers,
     broker: ArcEventBroker,
-    initial_path: Arc<Mutex<Option<Weak<Path>>>>,
+    state: Arc<RwLock<State>>,
+}
+
+#[derive(Default)]
+struct State {
+    accepting_paths: bool,
+    initial_path: Option<Weak<Path>>,
 }
 
 impl ArcPathContexts {
@@ -45,7 +77,10 @@ impl ArcPathContexts {
             paths: Default::default(),
             tx_wakers,
             broker,
-            initial_path: Arc::default(),
+            state: Arc::new(RwLock::new(State {
+                accepting_paths: true,
+                initial_path: None,
+            })),
         }
     }
 
@@ -55,8 +90,16 @@ impl ArcPathContexts {
         remote_cids: &ArcRemoteCids,
         initial_dcid: ConnectionId,
     ) -> bool {
-        let mut handshake_path = self.initial_path.lock().unwrap();
-        if handshake_path.is_some() {
+        let mut state = self.state.write().unwrap();
+        if !state.accepting_paths {
+            tracing::trace!(
+                pathway = %path.pathway,
+                initial_dcid = %initial_dcid,
+                "ignored handshake path assignment after path contexts closed"
+            );
+            return false;
+        }
+        if state.initial_path.is_some() {
             tracing::trace!(
                 pathway = %path.pathway,
                 initial_dcid = %initial_dcid,
@@ -65,7 +108,7 @@ impl ArcPathContexts {
             return false;
         }
         remote_cids.apply_initial_dcid(initial_dcid, &path.dcid_cell);
-        *handshake_path = Some(Arc::downgrade(path));
+        state.initial_path = Some(Arc::downgrade(path));
         tracing::debug!(
             pathway = %path.pathway,
             initial_dcid = %initial_dcid,
@@ -75,12 +118,12 @@ impl ArcPathContexts {
     }
 
     pub fn handshake_path(&self) -> Option<Arc<Path>> {
-        self.initial_path
-            .lock()
+        self.state
+            .read()
             .unwrap()
+            .initial_path
             .clone()
-            .expect("unreachable: Handshake packet received before first initial packet processed")
-            .upgrade()
+            .and_then(|path| path.upgrade())
     }
 
     pub fn get_or_try_create_with<T>(
@@ -91,11 +134,21 @@ impl ArcPathContexts {
     where
         T: Future<Output = Result<(), PathDeactivated>> + Send + 'static,
     {
+        let state = self.state.read().unwrap();
+        if !state.accepting_paths {
+            let error = QuicError::with_default_fty(
+                ErrorKind::NoViablePath,
+                "connection path set is closed",
+            );
+            return Err(CreatePathFailure::ConnectionClosed(error.into()));
+        }
+
         match self.paths.entry(pathway) {
             dashmap::Entry::Occupied(occupied_entry) => Ok(occupied_entry.get().path.clone()),
             dashmap::Entry::Vacant(vacant_entry) => {
                 let (path, task) = try_create()?;
-                self.tx_wakers.insert(pathway, &path.tx_waker);
+                let send_waker_entry =
+                    PathSendWakerEntry::insert(pathway, &self.tx_wakers, &path.tx_waker);
                 let paths = self.clone();
                 let task = AbortOnDropHandle::new(tokio::spawn(
                     async move {
@@ -106,7 +159,11 @@ impl ArcPathContexts {
                     .in_current_span(),
                 ));
                 Ok(vacant_entry
-                    .insert(PathContext { path, _task: task })
+                    .insert(PathContext {
+                        path,
+                        _task: task,
+                        _send_waker_entry: send_waker_entry,
+                    })
                     .clone())
             }
         }
@@ -116,11 +173,14 @@ impl ArcPathContexts {
         self.paths.get(pathway).map(|p| p.path.clone())
     }
 
+    fn remove_path_artifacts(&self, pathway: &Pathway) -> bool {
+        self.paths.remove(pathway).is_some()
+    }
+
     pub fn remove(&self, pathway: &Pathway, reason: &PathDeactivated) {
-        if self.paths.remove(pathway).is_some() {
-            self.tx_wakers.remove(pathway);
+        if self.remove_path_artifacts(pathway) {
             tracing::debug!(target: "quic", %pathway, %reason, "path deactivated");
-            if self.is_empty() {
+            if self.state.read().unwrap().accepting_paths && self.is_empty() {
                 let error = QuicError::with_default_fty(
                     ErrorKind::NoViablePath,
                     format!("No viable path exist, last path removed because: {reason}"),
@@ -152,8 +212,20 @@ impl ArcPathContexts {
         });
     }
 
-    pub fn clear(&self) {
-        self.paths.clear();
+    pub fn close(&self) {
+        let pathways = {
+            let mut state = self.state.write().unwrap();
+            state.accepting_paths = false;
+            state.initial_path = None;
+            self.paths
+                .iter()
+                .map(|entry| *entry.key())
+                .collect::<Vec<_>>()
+        };
+
+        for pathway in pathways {
+            _ = self.remove_path_artifacts(&pathway);
+        }
     }
 
     pub fn on_path_validated(&self, pathway: Pathway) {
@@ -164,5 +236,73 @@ impl ArcPathContexts {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Ready, net::SocketAddr, time::Duration};
+
+    use qbase::net::{
+        route::Pathway,
+        tx::{ArcSendWaker, ArcSendWakers, Signals},
+    };
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::*;
+    use crate::{events::ArcEventBroker, state::ArcConnState};
+
+    fn test_pathway() -> Pathway {
+        Pathway::new(
+            SocketAddr::from(([127, 0, 0, 1], 9000)).into(),
+            SocketAddr::from(([127, 0, 0, 1], 4433)).into(),
+        )
+    }
+
+    #[test]
+    fn close_rejects_new_paths() {
+        let tx_wakers = ArcSendWakers::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let broker = ArcEventBroker::new(ArcConnState::new(), tx);
+        let contexts = ArcPathContexts::new(tx_wakers, broker);
+
+        contexts.close();
+
+        let result = contexts
+            .get_or_try_create_with::<Ready<Result<(), PathDeactivated>>>(test_pathway(), || {
+                unreachable!("closed path contexts must not create new paths")
+            });
+
+        assert!(matches!(
+            result,
+            Err(CreatePathFailure::ConnectionClosed(..))
+        ));
+    }
+
+    #[tokio::test]
+    async fn path_send_waker_entry_removes_waker_on_drop() {
+        let tx_wakers = ArcSendWakers::default();
+        let send_waker = ArcSendWaker::new();
+        let pathway = test_pathway();
+        let entry = PathSendWakerEntry::insert(pathway, &tx_wakers, &send_waker);
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            send_waker.wait_for(Signals::PING).await;
+            _ = done_tx.send(());
+        });
+        tokio::task::yield_now().await;
+
+        drop(entry);
+        tx_wakers.wake_all_by(Signals::PING);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), done_rx)
+                .await
+                .is_err(),
+            "dropping the path-owned send waker entry should unlink it from connection wakeups"
+        );
+
+        waiter.abort();
     }
 }

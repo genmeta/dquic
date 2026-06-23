@@ -336,7 +336,43 @@ impl Components {
 }
 
 impl Components {
-    pub fn enter_closing(self, error: Error) -> Termination {
+    fn server_odcid_router_entry(&self) -> Option<Arc<QuicRouterEntry>> {
+        match &self.specific {
+            SpecificComponents::Client {} => None,
+            SpecificComponents::Server {
+                odcid_router_entry, ..
+            } => Some(odcid_router_entry.clone()),
+        }
+    }
+
+    fn spawn_deferred_termination(&self, close_receive_on_timeout: bool) {
+        let pto_duration = self.paths.max_pto_duration().unwrap_or_default();
+        let event_broker = self.event_broker.clone();
+        let local_cids = self.cid_registry.local.clone();
+        // Server ODCID is route-equivalent to an unplanned SCID: it was not
+        // issued by local_cids, but it must remain routable for exactly the
+        // same deferred period. The router entry itself is the RAII owner.
+        let odcid_router_entry = self.server_odcid_router_entry();
+        let receive_cleanup =
+            close_receive_on_timeout.then(|| (self.rcvd_pkt_q.clone(), self.paths.clone()));
+
+        tokio::spawn(
+            async move {
+                tokio::time::sleep(pto_duration).await;
+                if let Some((rcvd_pkt_q, paths)) = receive_cleanup {
+                    rcvd_pkt_q.close_all();
+                    paths.close();
+                }
+                local_cids.clear();
+                drop(odcid_router_entry);
+                event_broker.emit(Event::Terminated);
+            }
+            .instrument_in_current()
+            .in_current_span(),
+        );
+    }
+
+    fn enter_silent_draining(self, error: Error) -> Termination {
         qevent::event!(ConnectionClosed {
             owner: Owner::Local,
             error: &error, // TODO: trigger
@@ -347,40 +383,41 @@ impl Components {
         self.tls_handshake.on_conn_error(&error);
         self.parameters.on_conn_error(&error);
 
-        tokio::spawn(
-            {
-                let pto_duration = self.paths.max_pto_duration().unwrap_or_default();
-                let event_broker = self.event_broker.clone();
-                let rcvd_pkt_q = self.rcvd_pkt_q.clone();
-                let paths = self.paths.clone();
-                let local_cids = self.cid_registry.local.clone();
-                async move {
-                    tokio::time::sleep(pto_duration).await;
-                    rcvd_pkt_q.close_all();
-                    paths.clear();
-                    local_cids.clear();
-                    event_broker.emit(Event::Terminated);
-                }
-            }
-            .instrument_in_current()
-            .in_current_span(),
-        );
+        self.spawn_deferred_termination(false);
 
-        match self.send_lock.is_permitted() {
-            // If permitted, we can send ccf packets.
-            true => {
-                let terminator = Arc::new(Terminator::new(error.clone().into(), &self));
-                tokio::spawn(
-                    async move { self.spaces.send_ccf_packets(terminator.as_ref()).await }
-                        .instrument_in_current()
-                        .in_current_span(),
-                );
-            }
-            // The send lock denies close packets for silent refusal paths.
-            false => self.paths.clear(),
+        // Silent refusal sends no connection close frame. Semantically this
+        // connection only drains/drops incoming packets until the routing
+        // tombstones expire.
+        self.rcvd_pkt_q.close_all();
+        self.paths.close();
+        Termination::draining(error)
+    }
+
+    pub fn enter_closing(self, error: Error) -> Termination {
+        if !self.send_lock.is_permitted() {
+            return self.enter_silent_draining(error);
         }
 
-        Termination::closing(error, self.cid_registry.local, self.rcvd_pkt_q, self.paths)
+        qevent::event!(ConnectionClosed {
+            owner: Owner::Local,
+            error: &error, // TODO: trigger
+        });
+
+        self.data_streams.on_conn_error(&error);
+        self.datagram_flow.on_conn_error(&error);
+        self.tls_handshake.on_conn_error(&error);
+        self.parameters.on_conn_error(&error);
+
+        self.spawn_deferred_termination(true);
+
+        let terminator = Arc::new(Terminator::new(error.clone().into(), &self));
+        tokio::spawn(
+            async move { self.spaces.send_ccf_packets(terminator.as_ref()).await }
+                .instrument_in_current()
+                .in_current_span(),
+        );
+
+        Termination::closing(error, self.rcvd_pkt_q, self.paths)
     }
 
     pub fn enter_draining(self, ccf: ConnectionCloseFrame) -> Termination {
@@ -395,25 +432,12 @@ impl Components {
         self.tls_handshake.on_conn_error(&error);
         self.parameters.on_conn_error(&error);
 
-        tokio::spawn(
-            {
-                let pto_duration = self.paths.max_pto_duration().unwrap_or_default();
-                let event_broker = self.event_broker.clone();
-                let local_cids = self.cid_registry.local.clone();
-                async move {
-                    tokio::time::sleep(pto_duration).await;
-                    local_cids.clear();
-                    event_broker.emit(Event::Terminated);
-                }
-            }
-            .instrument_in_current()
-            .in_current_span(),
-        );
+        self.spawn_deferred_termination(false);
 
         // No need to receive packets, just close all queues.
         self.rcvd_pkt_q.close_all();
-        self.paths.clear();
-        Termination::draining(error, self.cid_registry.local)
+        self.paths.close();
+        Termination::draining(error)
     }
 
     fn has_viable_path(&self) -> bool {
@@ -462,12 +486,21 @@ impl Connection {
             let mut conn = self.state.write().unwrap();
             match conn.as_ref() {
                 Ok(core_conn) => {
-                    if self.conn_state.enter_closing(&error).is_none() {
-                        return Err(error.into());
-                    }
-
                     let event_broker = core_conn.event_broker.clone();
-                    *conn = Err(core_conn.clone().enter_closing(error.clone().into()));
+                    let termination = if core_conn.send_lock.is_permitted() {
+                        if self.conn_state.enter_closing(&error).is_none() {
+                            return Err(error.into());
+                        }
+                        core_conn.clone().enter_closing(error.clone().into())
+                    } else {
+                        if self.conn_state.enter_draining_with_error(&error).is_none() {
+                            return Err(error.into());
+                        }
+                        core_conn
+                            .clone()
+                            .enter_silent_draining(error.clone().into())
+                    };
+                    *conn = Err(termination);
                     event_broker
                 }
                 Err(termination) => return Err(termination.error()),
@@ -487,11 +520,18 @@ impl Connection {
         let mut conn = self.state.write().unwrap();
         match conn.as_ref() {
             Ok(core_conn) => {
-                if self.conn_state.enter_closing(&error).is_none() {
-                    return Err(error.into());
-                }
-
-                *conn = Err(core_conn.clone().enter_closing(error.into()));
+                let termination = if core_conn.send_lock.is_permitted() {
+                    if self.conn_state.enter_closing(&error).is_none() {
+                        return Err(error.into());
+                    }
+                    core_conn.clone().enter_closing(error.into())
+                } else {
+                    if self.conn_state.enter_draining_with_error(&error).is_none() {
+                        return Err(error.into());
+                    }
+                    core_conn.clone().enter_silent_draining(error.into())
+                };
+                *conn = Err(termination);
                 Ok(())
             }
             Err(termination) => Err(termination.error()),
