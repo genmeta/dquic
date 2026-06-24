@@ -31,7 +31,10 @@ use qevent::telemetry::Instrument;
 use qinterface::{
     Interface, WeakInterface,
     bind_uri::BindUri,
-    component::route::{QuicRouter, QuicRouterComponent},
+    component::{
+        local_endpoint::InterfaceEndpointKey,
+        route::{QuicRouter, QuicRouterComponent, Way},
+    },
     io::{IO, IoExt, ProductIO},
     manager::InterfaceManager,
 };
@@ -50,6 +53,13 @@ use crate::{
 };
 
 type StunClient<I = WeakInterface> = crate::nat::client::StunClient<I>;
+
+fn interface_endpoint_key(endpoint: EndpointAddr) -> InterfaceEndpointKey {
+    match endpoint {
+        EndpointAddr::Direct { .. } => InterfaceEndpointKey::Direct,
+        EndpointAddr::Agent { agent, .. } => InterfaceEndpointKey::Agent(agent),
+    }
+}
 // type StunProtocol<IO = WeakQuicInterface> = crate::nat::protocol::StunProtocol<I>;
 
 // TTL
@@ -73,6 +83,32 @@ const MAX_RETRIES: usize = 5;
 const COLLISION_PORTS: u32 = 800;
 
 pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocalEndpointPathChange {
+    AddPath(Way),
+}
+
+#[derive(Debug, Default)]
+pub struct LocalEndpointPathChanges {
+    changes: Vec<LocalEndpointPathChange>,
+}
+
+impl LocalEndpointPathChanges {
+    pub fn new(changes: Vec<LocalEndpointPathChange>) -> Self {
+        Self { changes }
+    }
+}
+
+impl IntoIterator for LocalEndpointPathChanges {
+    type Item = LocalEndpointPathChange;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.changes.into_iter()
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct LocalEndpointChanges {
@@ -252,7 +288,11 @@ fn add_local_address_when_endpoint_present_locked(
     nat_type: NatType,
     tire: u32,
 ) -> io::Result<AddAddressFrame> {
-    if !address_book.has_local_endpoint(bind_uri, endpoint_addr) {
+    if !address_book.has_local_endpoint(
+        bind_uri,
+        interface_endpoint_key(endpoint_addr),
+        endpoint_addr,
+    ) {
         tracing::trace!(
             target: "punch",
             %bind_uri,
@@ -349,7 +389,11 @@ where
         if nat_type == NatType::Dynamic {
             {
                 let address_book = self.0.address_book.lock().unwrap();
-                if !address_book.has_local_endpoint(&bind_uri, endpoint_addr) {
+                if !address_book.has_local_endpoint(
+                    &bind_uri,
+                    interface_endpoint_key(endpoint_addr),
+                    endpoint_addr,
+                ) {
                     tracing::trace!(
                         target: "punch",
                         %bind_uri,
@@ -499,7 +543,7 @@ where
     ) -> io::Result<LocalEndpointChanges> {
         let (effects, remote_endpoints) = {
             let mut address_book = self.0.address_book.lock().unwrap();
-            let effects = address_book.add_local_endpoint(bind, addr)?;
+            let effects = address_book.add_local_endpoint_addr(bind, addr)?;
             let remote_endpoints = address_book
                 .remote_endpoint()
                 .iter()
@@ -524,7 +568,7 @@ where
     ) -> LocalEndpointChanges {
         let effects = {
             let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_local_endpoint(bind, addr)
+            address_book.remove_local_endpoint_addr(bind, addr)
         };
         LocalEndpointChanges {
             effects,
@@ -569,7 +613,7 @@ where
         let local_endpoints = {
             let mut address_book = self.0.address_book.lock().unwrap();
             address_book.add_peer_endpoint(endpoint, source.clone())?;
-            address_book.local_endpoint()
+            address_book.local_endpoint().collect::<Vec<_>>()
         };
         let mut ways = Vec::new();
         for (bind, local_ep) in local_endpoints {
@@ -1545,7 +1589,7 @@ mod tests {
         let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
 
         address_book
-            .add_local_endpoint(bind_uri.clone(), endpoint_addr)
+            .add_local_endpoint_addr(bind_uri.clone(), endpoint_addr)
             .expect("local endpoint insert");
 
         let frame = add_local_address_when_endpoint_present_locked(
@@ -1602,7 +1646,7 @@ mod tests {
         let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
 
         address_book
-            .add_local_endpoint(bind_uri.clone(), endpoint_addr)
+            .add_local_endpoint_addr(bind_uri.clone(), endpoint_addr)
             .expect("local endpoint insert");
 
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
