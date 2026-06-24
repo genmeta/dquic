@@ -26,6 +26,7 @@ use crate::Components;
 #[derive(Clone)]
 pub struct ArcConnState {
     state: Arc<AtomicU8>,
+    attempted: Arc<SetOnce<()>>,
     handshaked: Arc<SetOnce<()>>,
     terminated: Arc<SetOnce<Error>>,
     closed: Arc<SetOnce<()>>,
@@ -35,6 +36,7 @@ impl Default for ArcConnState {
     fn default() -> Self {
         Self {
             state: Default::default(),
+            attempted: Arc::new(SetOnce::new()),
             handshaked: Arc::new(SetOnce::new()),
             terminated: Arc::new(SetOnce::new()),
             closed: Arc::new(SetOnce::new()),
@@ -60,6 +62,7 @@ impl ArcConnState {
             .is_ok();
 
         if success {
+            self.attempted.set(()).expect("Attempted already set");
             // same as Self::update
             qevent::event!(ConnectionStateUpdated {
                 new: BaseConnectionStates::Attempted,
@@ -111,6 +114,9 @@ impl ArcConnState {
                 Ordering::Acquire,
             ) {
                 Ok(_old_state_code) => {
+                    if state == QlogConnectionState::Base(BaseConnectionStates::Attempted) {
+                        self.attempted.set(()).expect("Attempted already set");
+                    }
                     // when server received a initial packet but failed to decrypt it, connection state will
                     // enter Closing directly without enter Attempted.
                     let old_state =
@@ -177,6 +183,19 @@ impl ArcConnState {
             return Some(old_state);
         }
         None
+    }
+
+    pub fn attempted(&self) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        let attempted = self.attempted.clone();
+        let terminated = self.terminated.clone();
+        async move {
+            tokio::select! {
+                _ = attempted.wait() => Ok(()),
+                error = terminated.wait() => Err(error.clone()),
+            }
+        }
+        .instrument_in_current()
+        .in_current_span()
     }
 
     pub fn handshaked(&self) -> impl Future<Output = Result<(), Error>> + Send + use<> {
@@ -294,6 +313,48 @@ mod tests {
         assert_eq!(conn_state.current(), Some(DRAINING));
         assert_eq!(
             conn_state.terminated().await.kind(),
+            qbase::error::ErrorKind::ConnectionRefused
+        );
+    }
+
+    #[tokio::test]
+    async fn attempted_waits_until_attempted_state() {
+        let conn_state = ArcConnState::new();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), conn_state.attempted())
+                .await
+                .is_err()
+        );
+
+        assert!(
+            conn_state
+                .update(BaseConnectionStates::Attempted.into())
+                .is_some()
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), conn_state.attempted())
+            .await
+            .expect("attempted wait should complete after attempted state")
+            .expect("attempted state should not be an error");
+    }
+
+    #[tokio::test]
+    async fn attempted_returns_termination_error_before_attempted_state() {
+        let conn_state = ArcConnState::new();
+        let error = qbase::error::QuicError::with_default_fty(
+            qbase::error::ErrorKind::ConnectionRefused,
+            "silent refusal",
+        );
+
+        assert!(conn_state.enter_draining_with_error(&error).is_some());
+
+        assert_eq!(
+            conn_state
+                .attempted()
+                .await
+                .expect_err("termination before attempted should be reported")
+                .kind(),
             qbase::error::ErrorKind::ConnectionRefused
         );
     }

@@ -685,6 +685,11 @@ impl Connection {
         self.try_map_components(|core_conn| core_conn.cid_registry.origin_dcid())
     }
 
+    pub fn attempted(&self) -> Impl_Future![Result<(), Error>] {
+        self.try_map_components_future(|core_conn| core_conn.conn_state.attempted())
+            .map(|result| result?)
+    }
+
     pub fn handshaked(&self) -> Impl_Future![Result<(), Error>] {
         self.try_map_components_future(|core_conn| core_conn.conn_state.handshaked())
             .map(|result| result?)
