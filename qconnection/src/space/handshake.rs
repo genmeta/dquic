@@ -178,7 +178,7 @@ async fn parse_normal_packet(
         return Ok(());
     };
 
-    let path = match components.get_or_try_create_path(bind_uri, link, pathway, true) {
+    let path = match components.get_or_try_create_path((bind_uri, pathway, link), true) {
         Ok(path) => path,
         Err(CreatePathFailure::ConnectionClosed(..)) => {
             packet.drop_on_conenction_closed();

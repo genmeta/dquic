@@ -48,7 +48,6 @@ use std::{
     fmt::Debug,
     future::Future,
     io,
-    net::SocketAddr,
     sync::{Arc, RwLock, Weak, atomic::AtomicBool},
 };
 
@@ -64,10 +63,7 @@ use qbase::{
     flow,
     frame::{ConnectionCloseFrame, CryptoFrame, Frame, ReliableFrame, StreamFrame},
     metric::ArcConnectionMetrics,
-    net::{
-        addr::EndpointAddr,
-        route::{Link, Pathway},
-    },
+    net::{addr::EndpointAddr, route::Pathway},
     param::{ArcParameters, ParameterId},
     role::Role,
     sid::StreamId,
@@ -84,8 +80,8 @@ use qevent::{
 use qinterface::{
     bind_uri::BindUri,
     component::{
-        location::Locations,
-        route::{self, QuicRouterEntry, RcvdPacketQueue},
+        local_endpoint::InterfaceEndpointKey,
+        route::{self, QuicRouterEntry, RcvdPacketQueue, Way},
     },
     manager::InterfaceManager,
 };
@@ -287,14 +283,8 @@ impl Components {
         .in_current_span()
     }
 
-    pub fn add_path(
-        &self,
-        bind_uri: BindUri,
-        link: Link,
-        pathway: Pathway,
-    ) -> Result<(), CreatePathFailure> {
-        self.get_or_try_create_path(bind_uri, link, pathway, false)
-            .map(|_| ())
+    pub fn add_path(&self, way: Way) -> Result<(), CreatePathFailure> {
+        self.get_or_try_create_path(way, false).map(|_| ())
     }
 
     pub fn del_path(&self, pathway: &Pathway) {
@@ -672,13 +662,8 @@ impl Connection {
             .await)
     }
 
-    pub fn add_path(
-        &self,
-        bind_uri: BindUri,
-        link: Link,
-        pathway: Pathway,
-    ) -> Result<(), CreatePathFailure> {
-        self.try_map_components(|core_conn| core_conn.add_path(bind_uri, link, pathway))
+    pub fn add_path(&self, way: Way) -> Result<(), CreatePathFailure> {
+        self.try_map_components(|core_conn| core_conn.add_path(way))
             .unwrap_or_else(|cc| Err(CreatePathFailure::ConnectionClosed(cc)))
     }
 
@@ -724,10 +709,6 @@ impl Connection {
         .map(|result| result?)
     }
 
-    pub fn subscribe_local_address_events(&self, locations: &Locations) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.subscribe_local_address_events(locations))
-    }
-
     pub fn add_peer_endpoint(
         &self,
         addr: EndpointAddr,
@@ -736,28 +717,25 @@ impl Connection {
         self.try_map_components(|core_conn| core_conn.add_peer_endpoint(addr, source))
     }
 
-    pub fn upsert_local_endpoints(
+    pub fn upsert_local_endpoint(
         &self,
         bind: BindUri,
-        endpoints: impl IntoIterator<Item = EndpointAddr>,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
     ) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.upsert_local_endpoints(bind, endpoints))
+        self.try_map_components(|core_conn| core_conn.upsert_local_endpoint(bind, key, endpoint))
     }
 
-    pub fn remove_local_endpoints(&self, bind: &BindUri) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.remove_local_endpoints(bind))
-    }
-
-    pub fn add_local_punch_address(
+    pub fn remove_local_endpoint(
         &self,
-        bind: BindUri,
-        addr: EndpointAddr,
-    ) -> Result<io::Result<()>, Error> {
-        self.try_map_components(|core_conn| core_conn.add_local_punch_address(bind, addr))
+        bind: &BindUri,
+        key: &InterfaceEndpointKey,
+    ) -> Result<(), Error> {
+        self.try_map_components(|core_conn| core_conn.remove_local_endpoint(bind, key))
     }
 
-    pub fn remove_address(&self, addr: SocketAddr) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.remove_address(addr))
+    pub fn close_local_endpoints(&self, bind: &BindUri) -> Result<(), Error> {
+        self.try_map_components(|core_conn| core_conn.close_local_endpoints(bind))
     }
 
     pub fn path_context(&self) -> Result<ArcPathContexts, Error> {

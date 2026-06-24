@@ -16,7 +16,10 @@ use qbase::{net::Family, param::ClientParameters, token::TokenSink};
 use qconnection::{
     self,
     qbase::net::AddrFamily,
-    qinterface::{component::location::Locations, io::IO},
+    qinterface::{
+        component::local_endpoint::{InterfaceEndpointUpdate, LocalEndpoints},
+        io::IO,
+    },
 };
 use qevent::telemetry::QLog;
 use qinterface::{
@@ -29,6 +32,7 @@ use rustls::{
     client::{ResolvesClientCert, WantsClientCert},
 };
 use thiserror::Error;
+use tracing::Instrument as _;
 
 use crate::{prelude::*, *};
 
@@ -123,7 +127,7 @@ impl QuicClient {
     /// This is useful for advanced scenarios where you need fine-grained control
     /// over which interfaces and paths are used for the connection.
     pub fn new_connection(&self, server_name: impl Into<String>) -> Arc<Connection> {
-        Connection::new_client(server_name.into(), self.token_sink.clone())
+        let connection = Connection::new_client(server_name.into(), self.token_sink.clone())
             .with_parameters(self.parameters.clone())
             .with_tls_config(self.tls_config.clone())
             .with_streams_concurrency_strategy(self.stream_strategy_factory.as_ref())
@@ -134,7 +138,57 @@ impl QuicClient {
             .with_defer_idle_timeout(self.defer_idle_timeout)
             .with_cids(ConnectionId::random_gen(8))
             .with_qlog(self.qlogger.clone())
-            .run()
+            .run();
+        self.subscribe_connection_local_endpoints(connection.clone());
+        connection
+    }
+
+    fn subscribe_connection_local_endpoints(&self, connection: Arc<Connection>) {
+        let mut subscriber = self.network.local_endpoints.subscribe();
+        let weak = Arc::downgrade(&connection);
+
+        // Inherent termination: this task exits when the connection drops,
+        // the connection terminates, or the LocalEndpoints subscriber ends.
+        tokio::spawn(
+            async move {
+                loop {
+                    let Some(terminated) = weak.upgrade().map(|connection| connection.terminated())
+                    else {
+                        break;
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = terminated => break,
+                        update = subscriber.recv() => {
+                            let Some((bind_uri, update)) = update else { break };
+                            let Some(connection) = weak.upgrade() else { break };
+                            Self::feed_connection_local_endpoint(&connection, bind_uri, update);
+                        }
+                    }
+                }
+            }
+            .in_current_span(),
+        );
+    }
+
+    fn feed_connection_local_endpoint(
+        connection: &Connection,
+        bind_uri: BindUri,
+        update: InterfaceEndpointUpdate,
+    ) {
+        let result = match update {
+            InterfaceEndpointUpdate::Upsert { key, endpoint } => {
+                connection.upsert_local_endpoint(bind_uri, key, endpoint)
+            }
+            InterfaceEndpointUpdate::Remove { key } => {
+                connection.remove_local_endpoint(&bind_uri, &key)
+            }
+            InterfaceEndpointUpdate::Close => connection.close_local_endpoints(&bind_uri),
+        };
+
+        if let Err(error) = result {
+            tracing::trace!(target: "quic", ?error, "failed to feed local endpoint update to client connection");
+        }
     }
 
     /// Builds a [`BindUri`] from the DNS [`Source`] and endpoint address.
@@ -248,7 +302,7 @@ impl QuicClient {
     /// let paths = quic_client.probe(server_addresses).await?;
     /// let connection = quic_client.new_connection("genmeta.net");
     /// for (iface, link, pathway) in paths {
-    ///     connection.add_path(iface.bind_uri(), link, pathway)?;
+    ///     connection.add_path((iface.bind_uri(), pathway, link))?;
     /// }
     /// # Ok(())
     /// # }
@@ -302,7 +356,7 @@ impl QuicClient {
         let paths = self.probe([(source, server_ep)]).await?;
         let has_direct_path = !paths.is_empty();
         for (iface, link, pathway) in paths {
-            _ = connection.add_path(iface.bind_uri(), link, pathway);
+            _ = connection.add_path((iface.bind_uri(), pathway, link));
         }
         Ok(has_direct_path)
     }
@@ -358,13 +412,6 @@ impl QuicClient {
             .map_err(|source| ConnectServerError::Dns { source })?;
 
         let connection = self.new_connection(server);
-        if connection
-            .subscribe_local_address_events(&self.network.locations)
-            .is_err()
-        {
-            // connection already closed, return immediately (not connect error)
-            return Ok(connection);
-        }
 
         let mut last_error: Option<ConnectServerError> = None;
 
@@ -528,11 +575,11 @@ impl<T> QuicClientBuilder<T> {
         self
     }
 
-    /// Specify the locations for interface sharing.
+    /// Specify the local endpoints for interface sharing.
     ///
-    /// The given locations is shared by all connections created by this client.
-    pub fn with_locations(mut self, locations: Arc<Locations>) -> Self {
-        self.network.locations = locations;
+    /// The given local endpoints hub is shared by all connections created by this client.
+    pub fn with_local_endpoints(mut self, local_endpoints: Arc<LocalEndpoints>) -> Self {
+        self.network.local_endpoints = local_endpoints;
         self
     }
 
@@ -854,5 +901,21 @@ impl QuicClientBuilder<TlsClientConfig> {
             defer_idle_timeout: self.defer_idle_timeout,
             qlogger: self.qlogger,
         }
+    }
+}
+
+#[cfg(test)]
+mod local_endpoint_subscription_tests {
+    #[test]
+    fn quic_client_subscribes_per_connection_without_qconnection_subscription_api() {
+        let source = include_str!("client.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module boundary");
+        assert!(production.contains(concat!("fn subscribe_connection_", "local_endpoints")));
+        assert!(production.contains(concat!("local_endpoints", ".subscribe()")));
+        assert!(production.contains(concat!("InterfaceEndpoint", "Update::Upsert")));
+        assert!(!production.contains(concat!("subscribe_local_", "address_events")));
     }
 }

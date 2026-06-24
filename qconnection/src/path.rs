@@ -23,6 +23,7 @@ use qevent::{quic::connectivity::PathAssigned, telemetry::Instrument};
 use qinterface::{
     Interface,
     bind_uri::BindUri,
+    component::route::Way,
     io::{IO, IoExt},
 };
 use tokio::time::Duration;
@@ -67,9 +68,7 @@ pub struct Path {
 impl Components {
     pub fn get_or_try_create_path(
         &self,
-        bind_uri: BindUri,
-        link: Link,
-        pathway: Pathway,
+        (bind_uri, pathway, link): Way,
         is_probed: bool,
     ) -> Result<Arc<Path>, CreatePathFailure> {
         let try_create = || {

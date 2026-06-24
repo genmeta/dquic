@@ -19,7 +19,12 @@ use qbase::{
 };
 use qconnection::{
     self,
-    qinterface::{self, bind_uri::BindUri, component::location::Locations, device::Devices},
+    qinterface::{
+        self,
+        bind_uri::BindUri,
+        component::local_endpoint::{InterfaceEndpointUpdate, LocalEndpoints},
+        device::Devices,
+    },
     tls::AcceptAllClientAuther,
 };
 use qevent::telemetry::QLog;
@@ -374,6 +379,54 @@ impl AuthClient for ServerAuther {
 
 // internal methods
 impl QuicListeners {
+    fn subscribe_connection_local_endpoints(&self, connection: Arc<Connection>) {
+        let mut subscriber = self.network.local_endpoints.subscribe();
+        let weak = Arc::downgrade(&connection);
+
+        // Inherent termination: this task exits when the connection drops,
+        // the connection terminates, or the LocalEndpoints subscriber ends.
+        tokio::spawn(
+            async move {
+                loop {
+                    let Some(terminated) = weak.upgrade().map(|connection| connection.terminated())
+                    else {
+                        break;
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = terminated => break,
+                        update = subscriber.recv() => {
+                            let Some((bind_uri, update)) = update else { break };
+                            let Some(connection) = weak.upgrade() else { break };
+                            Self::feed_connection_local_endpoint(&connection, bind_uri, update);
+                        }
+                    }
+                }
+            }
+            .in_current_span(),
+        );
+    }
+
+    fn feed_connection_local_endpoint(
+        connection: &Connection,
+        bind_uri: BindUri,
+        update: InterfaceEndpointUpdate,
+    ) {
+        let result = match update {
+            InterfaceEndpointUpdate::Upsert { key, endpoint } => {
+                connection.upsert_local_endpoint(bind_uri, key, endpoint)
+            }
+            InterfaceEndpointUpdate::Remove { key } => {
+                connection.remove_local_endpoint(&bind_uri, &key)
+            }
+            InterfaceEndpointUpdate::Close => connection.close_local_endpoints(&bind_uri),
+        };
+
+        if let Err(error) = result {
+            tracing::trace!(target: "quic_listeners", ?error, "failed to feed local endpoint update to accepted connection");
+        }
+    }
+
     #[tracing::instrument(
         target = "quic_listeners", level = "debug", skip_all, 
         fields(%bind_uri, %pathway, %link, odcid=tracing::field::Empty, server_name=tracing::field::Empty)
@@ -422,9 +475,9 @@ impl QuicListeners {
             .with_qlog(self.qlogger.clone())
             .run();
 
+        let listeners = self.clone();
         let incomings = self.incomings.clone();
         let quic_router = self.network.quic_router.clone();
-        let locations = self.network.locations.clone();
 
         let try_accept_connection = async move {
             quic_router.deliver(packet, (bind_uri, pathway, link)).await;
@@ -432,7 +485,7 @@ impl QuicListeners {
             match connection.server_name().await {
                 Ok(server_name) => {
                     tracing::Span::current().record("server_name", &server_name);
-                    _ = connection.subscribe_local_address_events(&locations);
+                    listeners.subscribe_connection_local_endpoints(connection.clone());
                     let incoming = (connection, server_name, pathway, link);
                     match incomings.send((incoming, premit)).await {
                         Ok(..) => {
@@ -565,11 +618,11 @@ impl<T> QuicListenersBuilder<T> {
         self
     }
 
-    /// Specify the locations for interface sharing.
+    /// Specify the local endpoints for interface sharing.
     ///
-    /// The given locations is shared by all connections created by this listeners.
-    pub fn with_locations(mut self, locations: Arc<Locations>) -> Self {
-        self.network.locations = locations;
+    /// The given local endpoints hub is shared by all connections created by these listeners.
+    pub fn with_local_endpoints(mut self, local_endpoints: Arc<LocalEndpoints>) -> Self {
+        self.network.local_endpoints = local_endpoints;
         self
     }
 
@@ -831,5 +884,21 @@ impl QuicListenersBuilder<TlsServerConfig> {
         }
 
         Ok(quic_listeners)
+    }
+}
+
+#[cfg(test)]
+mod local_endpoint_subscription_tests {
+    #[test]
+    fn quic_listeners_subscribe_accepted_connections_without_qconnection_subscription_api() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module boundary");
+        assert!(production.contains(concat!("fn subscribe_connection_", "local_endpoints")));
+        assert!(production.contains(concat!("local_endpoints", ".subscribe()")));
+        assert!(production.contains(concat!("InterfaceEndpoint", "Update::Upsert")));
+        assert!(!production.contains(concat!("subscribe_local_", "address_events")));
     }
 }
