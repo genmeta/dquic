@@ -28,10 +28,7 @@ use qevent::{
     telemetry::{Instrument, QLog, handy::NoopLogger},
 };
 use qinterface::{
-    component::{
-        location::Locations,
-        route::{QuicRouter, RcvdPacketQueue},
-    },
+    component::route::{QuicRouter, RcvdPacketQueue},
     io::{ProductIO, handy::DEFAULT_IO_FACTORY},
     manager::InterfaceManager,
 };
@@ -117,7 +114,6 @@ pub struct ConnectionFoundation<Foundation, TlsConfig> {
     ifaces: Arc<InterfaceManager>,
     iface_factory: Arc<dyn ProductIO>,
     quic_router: Arc<QuicRouter>,
-    locations: Arc<Locations>,
     stun_servers: Arc<[SocketAddr]>,
     streams_ctrl: Box<dyn ControlStreamsConcurrency>,
     defer_idle_timeout: Duration,
@@ -137,7 +133,6 @@ impl ClientFoundation {
             ifaces: InterfaceManager::global().clone(),
             iface_factory: Arc::new(DEFAULT_IO_FACTORY),
             quic_router: QuicRouter::global().clone(),
-            locations: Arc::new(Locations::new()),
             stun_servers: Arc::new([]),
             streams_ctrl: Box::new(DemandConcurrency), // ZST cause no alloc
             defer_idle_timeout: Duration::ZERO,
@@ -180,7 +175,6 @@ impl ServerFoundation {
             ifaces: InterfaceManager::global().clone(),
             iface_factory: Arc::new(DEFAULT_IO_FACTORY),
             quic_router: QuicRouter::global().clone(),
-            locations: Arc::new(Locations::new()),
             stun_servers: Arc::new([]),
             streams_ctrl: Box::new(DemandConcurrency), // ZST cause no alloc
             defer_idle_timeout: Duration::ZERO,
@@ -228,11 +222,6 @@ impl<Foundation, TlsConfig> ConnectionFoundation<Foundation, TlsConfig> {
 
     pub fn with_quic_router(mut self, quic_router: Arc<QuicRouter>) -> Self {
         self.quic_router = quic_router;
-        self
-    }
-
-    pub fn with_locations(mut self, locations: Arc<Locations>) -> Self {
-        self.locations = locations;
         self
     }
 
@@ -316,7 +305,6 @@ impl ConnectionFoundation<ClientFoundation, TlsClientConfig> {
             interfaces: self.ifaces,
             iface_factory: self.iface_factory,
             quic_router: self.quic_router,
-            locations: self.locations,
             stun_servers: self.stun_servers,
             rcvd_pkt_q,
             defer_idle_timeout: self.defer_idle_timeout,
@@ -375,7 +363,6 @@ impl ConnectionFoundation<ServerFoundation, TlsServerConfig> {
             interfaces: self.ifaces,
             iface_factory: self.iface_factory,
             quic_router: self.quic_router,
-            locations: self.locations,
             stun_servers: self.stun_servers,
             rcvd_pkt_q,
             defer_idle_timeout: self.defer_idle_timeout,
@@ -405,7 +392,6 @@ pub struct PendingConnection {
     interfaces: Arc<InterfaceManager>,
     iface_factory: Arc<dyn ProductIO>,
     quic_router: Arc<QuicRouter>,
-    locations: Arc<Locations>,
     stun_servers: Arc<[SocketAddr]>,
     rcvd_pkt_q: Arc<RcvdPacketQueue>,
     defer_idle_timeout: Duration,
@@ -549,7 +535,6 @@ impl PendingConnection {
             .expect("Duration::ZERO if not specified");
         let components = Components {
             interfaces: self.interfaces,
-            locations: self.locations,
             rcvd_pkt_q: self.rcvd_pkt_q,
             conn_state: conn_state.clone(),
             idle_config: ArcIdleConfig::new(max_idle_timeout, self.defer_idle_timeout),

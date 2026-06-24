@@ -131,7 +131,6 @@ impl QuicClient {
             .with_iface_factory(self.network.iface_factory.clone())
             .with_iface_manager(self.network.iface_manager.clone())
             .with_quic_router(self.network.quic_router.clone())
-            .with_locations(self.network.locations.clone())
             .with_defer_idle_timeout(self.defer_idle_timeout)
             .with_cids(ConnectionId::random_gen(8))
             .with_qlog(self.qlogger.clone())
@@ -329,7 +328,6 @@ impl QuicClient {
         server_eps: impl IntoIterator<Item = (Source, EndpointAddr)>,
     ) -> Result<Arc<Connection>, ConnectServerError> {
         let connection = self.new_connection(server_name);
-        _ = connection.subscribe_local_address();
         for (source, server_ep) in server_eps {
             self.setup_server_endpoint(&connection, source, server_ep)
                 .await
@@ -360,7 +358,10 @@ impl QuicClient {
             .map_err(|source| ConnectServerError::Dns { source })?;
 
         let connection = self.new_connection(server);
-        if connection.subscribe_local_address().is_err() {
+        if connection
+            .subscribe_local_address_events(&self.network.locations)
+            .is_err()
+        {
             // connection already closed, return immediately (not connect error)
             return Ok(connection);
         }

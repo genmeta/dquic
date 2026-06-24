@@ -416,7 +416,6 @@ impl QuicListeners {
             .with_iface_factory(self.network.iface_factory.clone())
             .with_iface_manager(self.network.iface_manager.clone())
             .with_quic_router(self.network.quic_router.clone())
-            .with_locations(self.network.locations.clone())
             // todo
             // .with_stun_servers()
             .with_cids(origin_dcid)
@@ -425,6 +424,7 @@ impl QuicListeners {
 
         let incomings = self.incomings.clone();
         let quic_router = self.network.quic_router.clone();
+        let locations = self.network.locations.clone();
 
         let try_accept_connection = async move {
             quic_router.deliver(packet, (bind_uri, pathway, link)).await;
@@ -432,7 +432,7 @@ impl QuicListeners {
             match connection.server_name().await {
                 Ok(server_name) => {
                     tracing::Span::current().record("server_name", &server_name);
-                    _ = connection.subscribe_local_address();
+                    _ = connection.subscribe_local_address_events(&locations);
                     let incoming = (connection, server_name, pathway, link);
                     match incomings.send((incoming, premit)).await {
                         Ok(..) => {

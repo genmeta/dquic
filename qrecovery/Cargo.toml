@@ -1,6 +1,6 @@
 [package]
 name = "qrecovery"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 description = "The reliable transport part of QUIC, a part of dquic"
 readme.workspace = true

@@ -10,7 +10,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
-    net::{addr::EndpointAddr, route::Pathway, tx::ArcSendWakers},
+    net::{route::Pathway, tx::ArcSendWakers},
 };
 use qcongestion::Transport;
 use qevent::telemetry::Instrument;
@@ -173,12 +173,8 @@ impl ArcPathContexts {
         self.paths.get(pathway).map(|p| p.path.clone())
     }
 
-    fn remove_path_artifacts(&self, pathway: &Pathway) -> bool {
-        self.paths.remove(pathway).is_some()
-    }
-
     pub fn remove(&self, pathway: &Pathway, reason: &PathDeactivated) {
-        if self.remove_path_artifacts(pathway) {
+        if self.paths.remove(pathway).is_some() {
             tracing::debug!(target: "quic", %pathway, %reason, "path deactivated");
             if self.state.read().unwrap().accepting_paths && self.is_empty() {
                 let error = QuicError::with_default_fty(
@@ -213,29 +209,12 @@ impl ArcPathContexts {
     }
 
     pub fn close(&self) {
-        let pathways = {
+        {
             let mut state = self.state.write().unwrap();
             state.accepting_paths = false;
             state.initial_path = None;
-            self.paths
-                .iter()
-                .map(|entry| *entry.key())
-                .collect::<Vec<_>>()
-        };
-
-        for pathway in pathways {
-            _ = self.remove_path_artifacts(&pathway);
         }
-    }
-
-    pub fn on_path_validated(&self, pathway: Pathway) {
-        if matches!(pathway.remote(), EndpointAddr::Direct { .. }) {
-            self.paths.iter().for_each(|p| {
-                if matches!(p.pathway.remote(), EndpointAddr::Direct { .. }) {
-                    p.path.deactivate();
-                }
-            });
-        }
+        self.paths.clear();
     }
 }
 

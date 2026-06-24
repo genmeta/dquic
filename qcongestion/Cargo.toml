@@ -1,6 +1,6 @@
 [package]
 name = "qcongestion"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 description = "Congestion control in QUIC, a part of dquic"
 readme.workspace = true

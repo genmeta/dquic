@@ -79,7 +79,7 @@ impl Components {
         }
     }
 
-    pub(crate) fn upsert_observed_local_endpoints(
+    pub(crate) fn upsert_local_endpoints(
         &self,
         bind_uri: BindUri,
         endpoints: impl IntoIterator<Item = EndpointAddr>,
@@ -88,13 +88,16 @@ impl Components {
         self.apply_local_endpoint_changes(changes);
     }
 
-    pub(crate) fn remove_observed_local_endpoints(&self, bind_uri: &BindUri) {
+    pub(crate) fn remove_local_endpoints(&self, bind_uri: &BindUri) {
         let changes = self.puncher.remove_observed_local_endpoints(bind_uri);
         self.apply_local_endpoint_changes(changes);
     }
 
-    pub fn subscribe_local_address(&self) {
-        let mut observer = self.locations.subscribe();
+    pub fn subscribe_local_address_events(
+        &self,
+        locations: &qinterface::component::location::Locations,
+    ) {
+        let mut observer = locations.subscribe();
         let conn = self.clone();
 
         let future = async move {
@@ -116,10 +119,11 @@ impl Components {
 
     fn handle_local_address_event(&self, bind_uri: BindUri, event: AddressEvent) {
         match event.downcast::<LocalEndpointSet>() {
-            Ok(AddressEvent::Upsert(endpoints)) => self
-                .upsert_observed_local_endpoints(bind_uri, endpoints.endpoints().iter().copied()),
+            Ok(AddressEvent::Upsert(endpoints)) => {
+                self.upsert_local_endpoints(bind_uri, endpoints.endpoints().iter().copied())
+            }
             Ok(AddressEvent::Remove(_) | AddressEvent::Closed) => {
-                self.remove_observed_local_endpoints(&bind_uri);
+                self.remove_local_endpoints(&bind_uri);
             }
             Err(AddressEvent::Upsert(data)) => {
                 let type_id = data.as_ref().type_id();
@@ -128,35 +132,10 @@ impl Components {
             Err(AddressEvent::Remove(type_id)) => {
                 tracing::trace!(target: "quic", ?type_id, "ignored unknown local address remove event");
             }
-            Err(AddressEvent::Closed) => self.remove_observed_local_endpoints(&bind_uri),
-        }
-    }
-
-    // 添加本地直通地址 可以直接新建 path
-    pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) {
-        tracing::trace!(target: "quic", bind_uri = %bind, %addr, "add local endpoint");
-        let bind_uri = bind.clone();
-        match self.puncher.add_local_endpoint_changes(bind, addr) {
-            Ok(changes) => {
-                tracing::trace!(
-                    target: "quic",
-                    bind_uri = %bind_uri,
-                    %addr,
-                    path_count = changes.ways.len(),
-                    paths = ?changes.ways,
-                    "resolved local endpoint paths"
-                );
-                self.apply_local_endpoint_changes(changes);
-            }
-            Err(error) => {
-                tracing::debug!(target: "quic", ?error, "add local endpoint failed");
+            Err(AddressEvent::Closed) => {
+                tracing::trace!(target: "quic", "ignored unknown local address closed event");
             }
         }
-    }
-
-    pub fn remove_local_endpoint(&self, bind: &BindUri, endpoint: EndpointAddr) {
-        let changes = self.puncher.remove_local_endpoint_changes(bind, endpoint);
-        self.apply_local_endpoint_changes(changes);
     }
 
     // 添加对端直通地址，可以直接新建 path

@@ -162,7 +162,6 @@ pub type ArcPuncher =
 pub struct Components {
     // TODO: delete this
     interfaces: Arc<InterfaceManager>,
-    locations: Arc<Locations>,
     rcvd_pkt_q: Arc<RcvdPacketQueue>,
     conn_state: ArcConnState,
     idle_config: ArcIdleConfig,
@@ -358,7 +357,7 @@ impl Components {
 
         tokio::spawn(
             async move {
-                tokio::time::sleep(pto_duration).await;
+                tokio::time::sleep(pto_duration * 3).await;
                 if let Some((rcvd_pkt_q, paths)) = receive_cleanup {
                     rcvd_pkt_q.close_all();
                     paths.close();
@@ -480,7 +479,7 @@ impl Connection {
         ));
     }
 
-    fn close_by_application(&self, error: AppError, keep_alive: bool) -> Result<(), Error> {
+    fn application_close(&self, error: AppError, keep_alive: bool) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let event_broker = {
             let mut conn = self.state.write().unwrap();
@@ -545,10 +544,10 @@ impl Connection {
     pub fn close(&self, reason: impl Into<Cow<'static, str>>, code: u64) -> Result<(), Error> {
         let error_code = code.try_into().expect("application error code overflow");
         let error = AppError::new(error_code, reason);
-        self.close_by_application(error, true)
+        self.application_close(error, true)
     }
 
-    pub fn enter_draining(&self, ccf: ConnectionCloseFrame) -> bool {
+    pub(crate) fn enter_draining(&self, ccf: ConnectionCloseFrame) -> bool {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
         if self.conn_state.enter_draining(&ccf).is_none() {
@@ -725,18 +724,8 @@ impl Connection {
         .map(|result| result?)
     }
 
-    #[deprecated(
-        note = "use upsert_local_endpoints for observed interface endpoints; this method only adds an explicit local endpoint"
-    )]
-    pub fn add_local_endpoint(&self, bind: BindUri, addr: EndpointAddr) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.add_local_endpoint(bind, addr))
-    }
-
-    #[deprecated(
-        note = "use remove_local_endpoints for observed interface endpoints; this method only removes an explicit local endpoint"
-    )]
-    pub fn remove_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.remove_local_endpoint(bind, addr))
+    pub fn subscribe_local_address_events(&self, locations: &Locations) -> Result<(), Error> {
+        self.try_map_components(|core_conn| core_conn.subscribe_local_address_events(locations))
     }
 
     pub fn add_peer_endpoint(
@@ -752,13 +741,11 @@ impl Connection {
         bind: BindUri,
         endpoints: impl IntoIterator<Item = EndpointAddr>,
     ) -> Result<(), Error> {
-        self.try_map_components(|core_conn| {
-            core_conn.upsert_observed_local_endpoints(bind, endpoints)
-        })
+        self.try_map_components(|core_conn| core_conn.upsert_local_endpoints(bind, endpoints))
     }
 
     pub fn remove_local_endpoints(&self, bind: &BindUri) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.remove_observed_local_endpoints(bind))
+        self.try_map_components(|core_conn| core_conn.remove_local_endpoints(bind))
     }
 
     pub fn add_local_punch_address(
@@ -773,10 +760,6 @@ impl Connection {
         self.try_map_components(|core_conn| core_conn.remove_address(addr))
     }
 
-    pub fn subscribe_local_address(&self) -> Result<(), Error> {
-        self.try_map_components(|core_conn| core_conn.subscribe_local_address())
-    }
-
     pub fn path_context(&self) -> Result<ArcPathContexts, Error> {
         self.try_map_components(|core_conn| core_conn.paths.clone())
     }
@@ -786,7 +769,7 @@ impl Drop for Connection {
     fn drop(&mut self) {
         let _span = self.tracing_span.enter();
         let error = AppError::new(0_u64.try_into().expect("zero app error code"), "");
-        if self.close_by_application(error, false).is_ok() {
+        if self.application_close(error, false).is_ok() {
             #[cfg(debug_assertions)]
             tracing::warn!(target: "quic", "connection is still active when dropped, close it automatically.");
             #[cfg(not(debug_assertions))]
