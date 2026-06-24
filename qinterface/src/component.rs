@@ -9,6 +9,7 @@ use std::{
 use crate::Interface;
 
 pub mod alive;
+pub mod local_endpoint;
 pub mod location;
 pub mod route;
 
