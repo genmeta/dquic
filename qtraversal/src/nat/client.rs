@@ -21,7 +21,9 @@ use qinterface::{
     bind_uri::BindUri,
     component::{
         Component,
-        location::{IfaceLocations, InterfaceAgentLocation, LocationsComponent},
+        local_endpoint::{
+            IfaceLocalEndpoints, InterfaceAgentEndpointPublisher, LocalEndpointsComponent,
+        },
     },
     io::{IO, RefIO},
 };
@@ -246,7 +248,7 @@ pub struct StunClient<I: RefIO + 'static> {
     // 可能被复制进keep_alive_task
     stun_router: StunRouter,
     stun_agent: SocketAddr,
-    location: Option<InterfaceAgentLocation>,
+    endpoint_publisher: Arc<Mutex<Option<InterfaceAgentEndpointPublisher>>>,
 
     state: ArcClientState,
     tasks: Arc<Mutex<JoinSet<()>>>,
@@ -257,18 +259,24 @@ impl<I: RefIO + 'static> StunClient<I> {
         ref_iface: I,
         stun_router: StunRouter,
         stun_agent: SocketAddr,
-        locations: Option<IfaceLocations<I>>,
+        local_endpoints: Option<IfaceLocalEndpoints<I>>,
     ) -> Self {
-        let location = locations
-            .as_ref()
-            .map(|locations| locations.agent_location(stun_agent));
+        let endpoint_publisher = local_endpoints.as_ref().and_then(|local_endpoints| {
+            match local_endpoints.agent_endpoint_publisher(stun_agent) {
+                Ok(publisher) => Some(publisher),
+                Err(error) => {
+                    tracing::debug!(target: "stun", %stun_agent, ?error, "failed to claim STUN agent endpoint publisher");
+                    None
+                }
+            }
+        });
         let client = Self {
             nat_type: Default::default(),
             outer_addr: Default::default(),
             stun_agent,
             ref_iface,
             stun_router,
-            location,
+            endpoint_publisher: Arc::new(Mutex::new(endpoint_publisher)),
             state: ArcClientState::new(),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
         };
@@ -295,7 +303,7 @@ impl<I: RefIO + 'static> StunClient<I> {
         let ref_iface = self.ref_iface.clone();
         let bind_uri = ref_iface.iface().bind_uri();
 
-        let location = self.location.clone();
+        let endpoint_publisher = self.endpoint_publisher.clone();
 
         let client_state = self.state.clone();
 
@@ -349,15 +357,18 @@ impl<I: RefIO + 'static> StunClient<I> {
                     Err(_) => Duration::from_secs(1),
                 };
 
-                if !bind_uri.is_temporary()
-                    && let Some(location) = location.as_ref()
-                {
-                    match &detect_result {
-                        Ok(outer) => {
-                            location.upsert(*outer);
-                        }
-                        Err(_) => {
-                            location.clear();
+                if !bind_uri.is_temporary() {
+                    let mut guard = endpoint_publisher
+                        .lock()
+                        .expect("STUN endpoint publisher mutex poisoned");
+                    if let Some(publisher) = guard.as_mut() {
+                        match &detect_result {
+                            Ok(outer) => {
+                                publisher.upsert(*outer);
+                            }
+                            Err(_) => {
+                                publisher.remove();
+                            }
                         }
                     }
                 }
@@ -471,8 +482,13 @@ impl<I: RefIO + 'static> StunClient<I> {
         }
         self.lock_tasks().abort_all();
         while ready!(self.lock_tasks().poll_join_next(cx)).is_some() {}
-        if let Some(location) = self.location.as_ref() {
-            location.clear();
+        if let Some(publisher) = self
+            .endpoint_publisher
+            .lock()
+            .expect("STUN endpoint publisher mutex poisoned")
+            .as_mut()
+        {
+            publisher.remove();
         }
         self.nat_type.clear();
         self.outer_addr.clear();
@@ -512,21 +528,26 @@ impl Component for StunClientComponent {
             return;
         }
 
-        let Ok(Some((router, locations))) = iface.with_components(|components| {
+        let Ok(Some((router, local_endpoints))) = iface.with_components(|components| {
             let router = components.with(|router: &StunRouterComponent| {
                 router.reinit(iface);
                 router.router()
             })?;
-            let locations = components.with(|locations: &LocationsComponent| {
-                locations.reinit(iface);
-                locations.clone()
+            let local_endpoints = components.with(|local_endpoints: &LocalEndpointsComponent| {
+                local_endpoints.reinit(iface);
+                local_endpoints.clone()
             });
-            Some((router, locations))
+            Some((router, local_endpoints))
         }) else {
             return;
         };
 
-        let new_client = StunClient::new(iface.downgrade(), router, client.stun_agent, locations);
+        let new_client = StunClient::new(
+            iface.downgrade(),
+            router,
+            client.stun_agent,
+            local_endpoints,
+        );
         *client = new_client;
     }
 }
@@ -553,7 +574,7 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
         resolver: Arc<dyn Resolve + Send + Sync>,
         server: Arc<str>,
         agents: impl IntoIterator<Item = SocketAddr>,
-        locations: Option<IfaceLocations<I>>,
+        local_endpoints: Option<IfaceLocalEndpoints<I>>,
     ) -> Self {
         let new_stun_client = {
             let ref_iface = ref_iface.clone();
@@ -567,7 +588,7 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
                     ref_iface.clone(),
                     stun_router,
                     agent_addr,
-                    locations.clone(),
+                    local_endpoints.clone(),
                 ))
             }
         };
@@ -686,7 +707,7 @@ impl<I: RefIO + 'static> StunClients<I> {
         resolver: Arc<dyn Resolve + Send + Sync>,
         server: impl Into<Arc<str>>,
         agents: impl IntoIterator<Item = SocketAddr>,
-        locations: Option<IfaceLocations<I>>,
+        local_endpoints: Option<IfaceLocalEndpoints<I>>,
     ) -> Self {
         Self {
             clients: Arc::new(Mutex::new(StunClientsInner::new(
@@ -695,7 +716,7 @@ impl<I: RefIO + 'static> StunClients<I> {
                 resolver,
                 server.into(),
                 agents,
-                locations,
+                local_endpoints,
             ))),
         }
     }
@@ -735,9 +756,9 @@ impl Component for StunClientsComponent {
             }) else {
                 return;
             };
-            let locations = components.with(|locations: &LocationsComponent| {
-                locations.reinit(iface);
-                locations.clone()
+            let local_endpoints = components.with(|local_endpoints: &LocalEndpointsComponent| {
+                local_endpoints.reinit(iface);
+                local_endpoints.clone()
             });
 
             let new_clinets = StunClientsInner::new(
@@ -746,7 +767,7 @@ impl Component for StunClientsComponent {
                 clients.resolver.clone(),
                 clients.server.clone(),
                 clients.lock_clients().keys().copied(),
-                locations,
+                local_endpoints,
             );
             *clients = new_clinets;
         });

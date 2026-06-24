@@ -149,3 +149,40 @@ async fn old_generation_drop_does_not_remove_new_generation_endpoint() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn agent_publishers_are_unique_per_agent_and_can_coexist_across_agents() {
+    let local_endpoints = LocalEndpoints::new();
+    let bind = bind_uri(10031);
+    let first_agent = socket(20031);
+    let second_agent = socket(20032);
+    let publishers = local_endpoints.publisher(bind.clone());
+
+    let mut first = publishers
+        .agent_endpoint_publisher(first_agent)
+        .expect("first agent claim should succeed");
+    assert!(publishers.agent_endpoint_publisher(first_agent).is_err());
+    let mut second = publishers
+        .agent_endpoint_publisher(second_agent)
+        .expect("second agent claim should succeed");
+
+    let mut subscriber = local_endpoints.subscribe();
+    assert!(first.upsert(socket(30031)));
+    assert!(second.upsert(socket(30032)));
+
+    let (_, first_update) = recv_update(&mut subscriber).await;
+    let (_, second_update) = recv_update(&mut subscriber).await;
+    assert!(matches!(
+        first_update,
+        InterfaceEndpointUpdate::Upsert { key: InterfaceEndpointKey::Agent(agent), .. }
+        if agent == first_agent || agent == second_agent
+    ));
+    assert!(matches!(
+        second_update,
+        InterfaceEndpointUpdate::Upsert { key: InterfaceEndpointKey::Agent(agent), .. }
+        if agent == first_agent || agent == second_agent
+    ));
+
+    drop(first);
+    assert!(publishers.agent_endpoint_publisher(first_agent).is_ok());
+}

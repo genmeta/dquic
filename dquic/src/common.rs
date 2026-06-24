@@ -9,6 +9,7 @@ use qconnection::{
         component::{
             Components,
             alive::RebindOnNetworkChangedComponent,
+            local_endpoint::{LocalEndpoints, LocalEndpointsComponent},
             location::{Locations, LocationsComponent},
             route::{QuicRouter, QuicRouterComponent},
         },
@@ -32,6 +33,7 @@ pub struct Network {
     pub quic_router: Arc<QuicRouter>,
     pub stun_server: Option<Arc<str>>,
     pub locations: Arc<Locations>,
+    pub local_endpoints: Arc<LocalEndpoints>,
 }
 
 impl Default for Network {
@@ -44,6 +46,7 @@ impl Default for Network {
             quic_router: QuicRouter::global().clone(),
             stun_server: None,
             locations: Arc::new(Locations::new()),
+            local_endpoints: Arc::new(LocalEndpoints::new()),
         }
     }
 }
@@ -58,8 +61,13 @@ impl Network {
                 .init_with(|| QuicRouterComponent::new(self.quic_router.clone()))
                 .router();
 
-            let locations = components
+            let _locations = components
                 .init_with(|| LocationsComponent::new(iface.downgrade(), self.locations.clone()))
+                .clone();
+            let local_endpoints = components
+                .init_with(|| {
+                    LocalEndpointsComponent::new(iface.downgrade(), self.local_endpoints.clone())
+                })
                 .clone();
 
             match &stun_server {
@@ -79,7 +87,7 @@ impl Network {
                                 self.resolver.clone(),
                                 stun_server,
                                 iter::empty(),
-                                Some(locations.clone()),
+                                Some(local_endpoints.clone()),
                             )
                         })
                         .clone();
