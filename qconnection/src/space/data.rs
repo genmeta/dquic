@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use qbase::{
     Epoch, GetEpoch,
@@ -529,34 +529,54 @@ pub async fn deliver_and_parse_packets(
     event_broker: ArcEventBroker,
 ) {
     let conn_state = &components.conn_state;
-    let dispatch_frame = frame_dispathcer(&space, &components, &event_broker);
-    let normal_deliver_and_parse_zero_rtt_loop = async {
-        while let Some(form) = zeor_rtt_packets.recv().await {
-            let span = qevent::span!(@current, path=form.1.2.to_string());
-            let parse = parse_normal_zero_rtt_packet(form, &space, &components, &dispatch_frame);
-            if let Err(Error::Quic(error)) = Instrument::instrument(parse, span).await {
-                event_broker.emit(Event::Failed(error));
-            };
-        }
-    };
-    let normal_deliver_and_parse_one_rtt_loop = async {
-        while let Some(form) = one_rtt_packets.recv().await {
-            let span = qevent::span!(@current, path=form.1.2.to_string());
-            let parse = parse_normal_one_rtt_packet(form, &space, &components, &dispatch_frame);
-            if let Err(Error::Quic(error)) = Instrument::instrument(parse, span).await {
-                event_broker.emit(Event::Failed(error));
-            };
-        }
-    };
-
+    let dispatch_frame = LazyLock::new(|| frame_dispathcer(&space, &components, &event_broker));
     let normal_deliver_and_parse_loops = async {
-        if components.tls_handshake.info().await.is_err() {
-            return;
+        let mut zero_rtt_open = true;
+        let mut one_rtt_open = true;
+        let mut one_rtt_tls_finished = false;
+
+        while zero_rtt_open || one_rtt_open {
+            tokio::select! {
+                biased;
+
+                form = one_rtt_packets.recv(), if one_rtt_open => {
+                    let Some(form) = form else {
+                        one_rtt_open = false;
+                        continue;
+                    };
+
+                    if !one_rtt_tls_finished {
+                        if components.tls_handshake.info().await.is_err() {
+                            return;
+                        }
+                        one_rtt_tls_finished = true;
+                    }
+
+                    let span = qevent::span!(@current, path=form.1.2.to_string());
+                    let parse = parse_normal_one_rtt_packet(form, &space, &components, |frame, pty, path| {
+                        (*dispatch_frame)(frame, pty, path);
+                    });
+                    if let Err(Error::Quic(error)) = Instrument::instrument(parse, span).await {
+                        event_broker.emit(Event::Failed(error));
+                    };
+                }
+
+                form = zeor_rtt_packets.recv(), if zero_rtt_open => {
+                    let Some(form) = form else {
+                        zero_rtt_open = false;
+                        continue;
+                    };
+
+                    let span = qevent::span!(@current, path=form.1.2.to_string());
+                    let parse = parse_normal_zero_rtt_packet(form, &space, &components, |frame, pty, path| {
+                        (*dispatch_frame)(frame, pty, path);
+                    });
+                    if let Err(Error::Quic(error)) = Instrument::instrument(parse, span).await {
+                        event_broker.emit(Event::Failed(error));
+                    };
+                }
+            }
         }
-        tokio::join!(
-            normal_deliver_and_parse_zero_rtt_loop,
-            normal_deliver_and_parse_one_rtt_loop,
-        );
     };
 
     let ccf = tokio::select! {
@@ -572,6 +592,7 @@ pub async fn deliver_and_parse_packets(
     };
 
     let terminator = Terminator::new(ccf, &components);
+    drop(dispatch_frame);
     // Release the primary connection state
     drop(components);
     zeor_rtt_packets.close();

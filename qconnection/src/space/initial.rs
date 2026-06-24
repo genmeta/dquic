@@ -1,4 +1,7 @@
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::Deref,
+    sync::{Arc, LazyLock, OnceLock},
+};
 
 use qbase::{
     Epoch, GetEpoch,
@@ -133,35 +136,48 @@ impl PacketSpace<InitialHeader> for InitialSpace {
     }
 }
 
-fn frame_dispathcer(
-    space: &InitialSpace,
-    components: &Components,
-    event_broker: &ArcEventBroker,
-) -> impl for<'p> Fn(Frame, &'p Path) + use<> {
-    let (crypto_frames_entry, rcvd_crypto_frames) = mpsc::unbounded_channel();
-    let (ack_frames_entry, rcvd_ack_frames) = mpsc::unbounded_channel();
-
-    pipe(
-        rcvd_crypto_frames,
-        components.crypto_streams[space.epoch()].incoming(),
-        event_broker.clone(),
-    );
-    pipe(
-        rcvd_ack_frames,
-        AckInitialSpace::new(&space.journal, &components.crypto_streams[space.epoch()]),
-        event_broker.clone(),
-    );
-
+fn frame_dispathcer<'a>(
+    space: &'a InitialSpace,
+    components: &'a Components,
+    event_broker: &'a ArcEventBroker,
+) -> impl for<'p> Fn(Frame, &'p Path) + use<'a> {
+    let crypto_frames_entry = OnceLock::new();
+    let ack_frames_entry = OnceLock::new();
     let event_broker = event_broker.clone();
     let rcvd_joural = space.journal.of_rcvd_packets();
     move |frame: Frame, path: &Path| match frame {
         Frame::Ack(f) => {
             path.cc().on_ack_rcvd(Epoch::Initial, &f);
             rcvd_joural.on_rcvd_ack(&f);
-            _ = ack_frames_entry.send(f);
+            _ = ack_frames_entry
+                .get_or_init(|| {
+                    let (entry, rcvd_ack_frames) = mpsc::unbounded_channel();
+                    pipe(
+                        rcvd_ack_frames,
+                        AckInitialSpace::new(
+                            &space.journal,
+                            &components.crypto_streams[space.epoch()],
+                        ),
+                        event_broker.clone(),
+                    );
+                    entry
+                })
+                .send(f);
         }
         Frame::Close(f) => event_broker.emit(Event::Closed(f)),
-        Frame::Crypto(f, bytes) => _ = crypto_frames_entry.send((f, bytes)),
+        Frame::Crypto(f, bytes) => {
+            _ = crypto_frames_entry
+                .get_or_init(|| {
+                    let (entry, rcvd_crypto_frames) = mpsc::unbounded_channel();
+                    pipe(
+                        rcvd_crypto_frames,
+                        components.crypto_streams[space.epoch()].incoming(),
+                        event_broker.clone(),
+                    );
+                    entry
+                })
+                .send((f, bytes))
+        }
         Frame::Padding(_) | Frame::Ping(_) => {}
         _ => unreachable!("unexpected frame: {:?} in initial packet", frame),
     }
@@ -285,11 +301,13 @@ pub async fn deliver_and_parse_packets(
     event_broker: ArcEventBroker,
 ) {
     let conn_state = &components.conn_state;
-    let dispatch_frame = frame_dispathcer(&space, &components, &event_broker);
+    let dispatch_frame = LazyLock::new(|| frame_dispathcer(&space, &components, &event_broker));
     let normal_deliver_and_parse_loop = async {
         while let Some(form) = packets.recv().await {
             let span = qevent::span!(@current, path=form.1.2.to_string());
-            let parse = parse_normal_packet(form, &space, &components, &dispatch_frame);
+            let parse = parse_normal_packet(form, &space, &components, |frame, path| {
+                (*dispatch_frame)(frame, path);
+            });
             if let Err(Error::Quic(error)) = Instrument::instrument(parse, span).await {
                 event_broker.emit(Event::Failed(error));
             };
@@ -309,6 +327,7 @@ pub async fn deliver_and_parse_packets(
     };
 
     let terminator = Terminator::new(ccf, &components);
+    drop(dispatch_frame);
     // Release the primary connection state
     drop(components);
 
