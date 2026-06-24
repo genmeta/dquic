@@ -365,52 +365,51 @@ fn agent_endpoint_is_current(
     address_book.has_local_endpoint(bind_uri, key, endpoint)
 }
 
-fn add_local_address_when_endpoint_present_locked(
-    address_book: &mut AddressBook,
-    bind_uri: &BindUri,
+struct LocalEndpointGuard<'a> {
+    bind_uri: &'a BindUri,
     key: InterfaceEndpointKey,
-    endpoint_addr: EndpointAddr,
-    advertise_bind_uri: BindUri,
-    local_addr: SocketAddr,
+    endpoint: EndpointAddr,
+}
+
+struct LocalAddressAdvertisement {
+    bind_uri: BindUri,
+    addr: SocketAddr,
     nat_type: NatType,
     tire: u32,
+}
+
+fn add_local_address_when_endpoint_present_locked(
+    address_book: &mut AddressBook,
+    guard: LocalEndpointGuard<'_>,
+    advertisement: LocalAddressAdvertisement,
 ) -> io::Result<AddAddressFrame> {
-    if !agent_endpoint_is_current(address_book, bind_uri, key, endpoint_addr) {
+    if !agent_endpoint_is_current(address_book, guard.bind_uri, guard.key, guard.endpoint) {
         tracing::trace!(
             target: "punch",
-            %bind_uri,
-            %endpoint_addr,
-            advertise_bind_uri = %advertise_bind_uri,
-            %local_addr,
-            ?nat_type,
+            bind_uri = %guard.bind_uri,
+            endpoint_addr = %guard.endpoint,
+            advertise_bind_uri = %advertisement.bind_uri,
+            local_addr = %advertisement.addr,
+            nat_type = ?advertisement.nat_type,
             "skipping local address advertisement for removed endpoint"
         );
         return Err(io::Error::other("local endpoint removed"));
     }
 
-    address_book.add_local_address(advertise_bind_uri, local_addr, tire, nat_type)
+    address_book.add_local_address(
+        advertisement.bind_uri,
+        advertisement.addr,
+        advertisement.tire,
+        advertisement.nat_type,
+    )
 }
 
 fn add_guarded_dynamic_local_address_locked(
     address_book: &mut AddressBook,
-    bind_uri: &BindUri,
-    key: InterfaceEndpointKey,
-    endpoint_addr: EndpointAddr,
-    dynamic_bind: BindUri,
-    local_addr: SocketAddr,
-    nat_type: NatType,
-    tire: u32,
+    guard: LocalEndpointGuard<'_>,
+    advertisement: LocalAddressAdvertisement,
 ) -> (io::Result<AddAddressFrame>, bool) {
-    let result = add_local_address_when_endpoint_present_locked(
-        address_book,
-        bind_uri,
-        key,
-        endpoint_addr,
-        dynamic_bind,
-        local_addr,
-        nat_type,
-        tire,
-    );
+    let result = add_local_address_when_endpoint_present_locked(address_book, guard, advertisement);
     let retain_dynamic_iface = result.is_ok();
     (result, retain_dynamic_iface)
 }
@@ -477,13 +476,17 @@ where
         let mut address_book = self.0.address_book.lock().unwrap();
         let frame = add_local_address_when_endpoint_present_locked(
             &mut address_book,
-            &bind_uri,
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-            bind_uri.clone(),
-            local_addr,
-            nat_type,
-            tire,
+            LocalEndpointGuard {
+                bind_uri: &bind_uri,
+                key: interface_endpoint_key(endpoint_addr),
+                endpoint: endpoint_addr,
+            },
+            LocalAddressAdvertisement {
+                bind_uri: bind_uri.clone(),
+                addr: local_addr,
+                nat_type,
+                tire,
+            },
         )?;
         tracing::trace!(
             target: "punch",
@@ -542,13 +545,17 @@ where
                             let mut address_book = puncher.0.address_book.lock().unwrap();
                             add_guarded_dynamic_local_address_locked(
                                 &mut address_book,
-                                &bind_uri,
-                                interface_endpoint_key(endpoint_addr),
-                                endpoint_addr,
-                                dynamic_bind.clone(),
-                                outer,
-                                nat_type,
-                                tire,
+                                LocalEndpointGuard {
+                                    bind_uri: &bind_uri,
+                                    key: interface_endpoint_key(endpoint_addr),
+                                    endpoint: endpoint_addr,
+                                },
+                                LocalAddressAdvertisement {
+                                    bind_uri: dynamic_bind.clone(),
+                                    addr: outer,
+                                    nat_type,
+                                    tire,
+                                },
                             )
                         };
 
@@ -724,13 +731,17 @@ where
                 let mut address_book = self.0.address_book.lock().unwrap();
                 add_local_address_when_endpoint_present_locked(
                     &mut address_book,
-                    &bind_uri,
-                    key,
-                    endpoint,
-                    advertised_bind.clone(),
-                    advertised_addr,
-                    nat_type,
-                    tire,
+                    LocalEndpointGuard {
+                        bind_uri: &bind_uri,
+                        key,
+                        endpoint,
+                    },
+                    LocalAddressAdvertisement {
+                        bind_uri: advertised_bind.clone(),
+                        addr: advertised_addr,
+                        nat_type,
+                        tire,
+                    },
                 )?
             };
             self.0
@@ -755,13 +766,17 @@ where
             let mut address_book = self.0.address_book.lock().unwrap();
             add_local_address_when_endpoint_present_locked(
                 &mut address_book,
-                &bind_uri,
-                key,
-                endpoint,
-                bind_uri.clone(),
-                local_addr,
-                nat_type,
-                tire,
+                LocalEndpointGuard {
+                    bind_uri: &bind_uri,
+                    key,
+                    endpoint,
+                },
+                LocalAddressAdvertisement {
+                    bind_uri: bind_uri.clone(),
+                    addr: local_addr,
+                    nat_type,
+                    tire,
+                },
             )?
         };
         self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
@@ -1794,13 +1809,17 @@ mod tests {
 
         let error = add_local_address_when_endpoint_present_locked(
             &mut address_book,
-            &bind_uri,
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-            bind_uri.clone(),
-            local_addr,
-            NatType::FullCone,
-            7,
+            LocalEndpointGuard {
+                bind_uri: &bind_uri,
+                key: interface_endpoint_key(endpoint_addr),
+                endpoint: endpoint_addr,
+            },
+            LocalAddressAdvertisement {
+                bind_uri: bind_uri.clone(),
+                addr: local_addr,
+                nat_type: NatType::FullCone,
+                tire: 7,
+            },
         )
         .expect_err("absent endpoint must be rejected");
 
@@ -1825,13 +1844,17 @@ mod tests {
 
         let frame = add_local_address_when_endpoint_present_locked(
             &mut address_book,
-            &bind_uri,
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-            advertised_bind_uri.clone(),
-            local_addr,
-            NatType::RestrictedCone,
-            7,
+            LocalEndpointGuard {
+                bind_uri: &bind_uri,
+                key: interface_endpoint_key(endpoint_addr),
+                endpoint: endpoint_addr,
+            },
+            LocalAddressAdvertisement {
+                bind_uri: advertised_bind_uri.clone(),
+                addr: local_addr,
+                nat_type: NatType::RestrictedCone,
+                tire: 7,
+            },
         )
         .expect("present endpoint must add local address");
 
@@ -1855,13 +1878,17 @@ mod tests {
 
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
             &mut address_book,
-            &bind_uri,
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-            dynamic_bind,
-            local_addr,
-            NatType::Dynamic,
-            7,
+            LocalEndpointGuard {
+                bind_uri: &bind_uri,
+                key: interface_endpoint_key(endpoint_addr),
+                endpoint: endpoint_addr,
+            },
+            LocalAddressAdvertisement {
+                bind_uri: dynamic_bind,
+                addr: local_addr,
+                nat_type: NatType::Dynamic,
+                tire: 7,
+            },
         );
 
         let error = result.expect_err("absent endpoint must be rejected");
@@ -1886,13 +1913,17 @@ mod tests {
 
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
             &mut address_book,
-            &bind_uri,
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-            dynamic_bind.clone(),
-            local_addr,
-            NatType::Dynamic,
-            7,
+            LocalEndpointGuard {
+                bind_uri: &bind_uri,
+                key: interface_endpoint_key(endpoint_addr),
+                endpoint: endpoint_addr,
+            },
+            LocalAddressAdvertisement {
+                bind_uri: dynamic_bind.clone(),
+                addr: local_addr,
+                nat_type: NatType::Dynamic,
+                tire: 7,
+            },
         );
 
         let frame = result.expect("present endpoint must add local address");

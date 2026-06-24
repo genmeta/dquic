@@ -40,11 +40,8 @@ impl ReceiveFrame<(BindUri, Pathway, Link, PunchHelloFrame)> for Components {
 impl Components {
     fn apply_local_endpoint_path_changes(&self, changes: LocalEndpointPathChanges) {
         for change in changes {
-            match change {
-                LocalEndpointPathChange::AddPath(way) => {
-                    let _ = self.add_path(way);
-                }
-                _ => {}
+            if let LocalEndpointPathChange::AddPath(way) = change {
+                let _ = self.add_path(way);
             }
         }
     }
