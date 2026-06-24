@@ -44,7 +44,10 @@ use tracing::Instrument as _;
 use crate::{
     PathWay,
     addr::{AddressBook, LocalEndpointEffect, LocalEndpointEffects},
-    nat::{client::StunClientComponent, router::StunRouterComponent},
+    nat::{
+        client::{StunClientComponent, StunClientsComponent},
+        router::StunRouterComponent,
+    },
     punch::{
         predictor::{PacketSendFn, PortPredictor},
         tx::{AsPunchId, PunchId, Transaction},
@@ -58,6 +61,83 @@ fn interface_endpoint_key(endpoint: EndpointAddr) -> InterfaceEndpointKey {
     match endpoint {
         EndpointAddr::Direct { .. } => InterfaceEndpointKey::Direct,
         EndpointAddr::Agent { agent, .. } => InterfaceEndpointKey::Agent(agent),
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct LocalEndpointAdvertisementResource {
+    bind_uri: BindUri,
+    key: InterfaceEndpointKey,
+    endpoint: EndpointAddr,
+    seq_num: u32,
+    advertised_bind: BindUri,
+    advertised_addr: SocketAddr,
+    temporary_iface: Option<Interface>,
+}
+
+impl LocalEndpointAdvertisementResource {
+    fn new(
+        bind_uri: BindUri,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
+        frame: &AddAddressFrame,
+        advertised_bind: BindUri,
+        temporary_iface: Option<Interface>,
+    ) -> Self {
+        Self {
+            bind_uri,
+            key,
+            endpoint,
+            seq_num: frame.seq_num(),
+            advertised_bind,
+            advertised_addr: *frame.deref(),
+            temporary_iface,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        bind_uri: BindUri,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
+        seq_num: u32,
+        advertised_bind: BindUri,
+        advertised_addr: SocketAddr,
+    ) -> Self {
+        Self {
+            bind_uri,
+            key,
+            endpoint,
+            seq_num,
+            advertised_bind,
+            advertised_addr,
+            temporary_iface: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn bind_uri(&self) -> &BindUri {
+        &self.bind_uri
+    }
+
+    #[cfg(test)]
+    fn key(&self) -> InterfaceEndpointKey {
+        self.key
+    }
+
+    #[cfg(test)]
+    fn endpoint(&self) -> EndpointAddr {
+        self.endpoint
+    }
+
+    #[cfg(test)]
+    fn seq_num(&self) -> u32 {
+        self.seq_num
+    }
+
+    fn advertised_addr(&self) -> SocketAddr {
+        self.advertised_addr
     }
 }
 // type StunProtocol<IO = WeakQuicInterface> = crate::nat::protocol::StunProtocol<I>;
@@ -159,6 +239,8 @@ pub struct Puncher<TX, PH, S> {
     quic_router: Arc<QuicRouter>,
     stun_servers: Arc<[SocketAddr]>,
     address_book: Mutex<AddressBook>,
+    local_endpoint_advertisements:
+        DashMap<(BindUri, InterfaceEndpointKey), LocalEndpointAdvertisementResource>,
     punch_ifaces: DashMap<BindUri, Interface>,
     broker: TX,
 }
@@ -188,6 +270,7 @@ where
             quic_router,
             stun_servers,
             address_book: Mutex::new(AddressBook::default()),
+            local_endpoint_advertisements: DashMap::new(),
             punch_ifaces: DashMap::new(),
             broker,
         }
@@ -279,20 +362,26 @@ impl<TX, PH, S> Drop for Puncher<TX, PH, S> {
     }
 }
 
+fn agent_endpoint_is_current(
+    address_book: &AddressBook,
+    bind_uri: &BindUri,
+    key: InterfaceEndpointKey,
+    endpoint: EndpointAddr,
+) -> bool {
+    address_book.has_local_endpoint(bind_uri, key, endpoint)
+}
+
 fn add_local_address_when_endpoint_present_locked(
     address_book: &mut AddressBook,
     bind_uri: &BindUri,
+    key: InterfaceEndpointKey,
     endpoint_addr: EndpointAddr,
     advertise_bind_uri: BindUri,
     local_addr: SocketAddr,
     nat_type: NatType,
     tire: u32,
 ) -> io::Result<AddAddressFrame> {
-    if !address_book.has_local_endpoint(
-        bind_uri,
-        interface_endpoint_key(endpoint_addr),
-        endpoint_addr,
-    ) {
+    if !agent_endpoint_is_current(address_book, bind_uri, key, endpoint_addr) {
         tracing::trace!(
             target: "punch",
             %bind_uri,
@@ -311,6 +400,7 @@ fn add_local_address_when_endpoint_present_locked(
 fn add_guarded_dynamic_local_address_locked(
     address_book: &mut AddressBook,
     bind_uri: &BindUri,
+    key: InterfaceEndpointKey,
     endpoint_addr: EndpointAddr,
     dynamic_bind: BindUri,
     local_addr: SocketAddr,
@@ -320,6 +410,7 @@ fn add_guarded_dynamic_local_address_locked(
     let result = add_local_address_when_endpoint_present_locked(
         address_book,
         bind_uri,
+        key,
         endpoint_addr,
         dynamic_bind,
         local_addr,
@@ -414,6 +505,7 @@ where
         let frame = add_local_address_when_endpoint_present_locked(
             &mut address_book,
             &bind_uri,
+            interface_endpoint_key(endpoint_addr),
             endpoint_addr,
             bind_uri.clone(),
             local_addr,
@@ -478,6 +570,7 @@ where
                             add_guarded_dynamic_local_address_locked(
                                 &mut address_book,
                                 &bind_uri,
+                                interface_endpoint_key(endpoint_addr),
                                 endpoint_addr,
                                 dynamic_bind.clone(),
                                 outer,
@@ -528,6 +621,245 @@ where
         );
     }
 
+    fn endpoint_path_changes(
+        &self,
+        added: Option<(BindUri, EndpointAddr)>,
+        remote_endpoints: Vec<(EndpointAddr, qresolve::Source)>,
+    ) -> LocalEndpointPathChanges {
+        let Some((bind_uri, local_endpoint)) = added else {
+            return LocalEndpointPathChanges::default();
+        };
+        let changes = remote_endpoints
+            .into_iter()
+            .filter_map(|(remote_endpoint, source)| {
+                self.resolve_punch_connection(&bind_uri, &local_endpoint, &remote_endpoint, &source)
+                    .ok()
+                    .map(|(bind_uri, link, pathway)| {
+                        LocalEndpointPathChange::AddPath((bind_uri, pathway, link))
+                    })
+            })
+            .collect();
+        LocalEndpointPathChanges::new(changes)
+    }
+
+    fn update_agent_advertisement_after_upsert(
+        &self,
+        bind_uri: BindUri,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
+    ) {
+        let InterfaceEndpointKey::Agent(agent) = key else {
+            return;
+        };
+        let EndpointAddr::Agent { .. } = endpoint else {
+            return;
+        };
+
+        self.remove_agent_advertisement(&bind_uri, key);
+
+        let Some(iface) = self.0.ifaces.borrow(&bind_uri) else {
+            tracing::debug!(target: "punch", %bind_uri, ?key, "cannot advertise agent endpoint without interface");
+            return;
+        };
+
+        let client = iface.with_component(|clients: &StunClientsComponent| {
+            clients.with_clients(|map| map.get(&agent).cloned())
+        });
+        let Some(Some(Some(client))) = client.ok() else {
+            tracing::debug!(target: "punch", %bind_uri, %agent, "cannot advertise agent endpoint without matching STUN client");
+            return;
+        };
+
+        let puncher = self.clone();
+        tokio::spawn(
+            async move {
+                let Ok(nat_type) = client.nat_type().await else {
+                    tracing::debug!(target: "punch", %bind_uri, %agent, "cannot advertise agent endpoint without NAT type");
+                    return;
+                };
+                if let Err(error) = puncher
+                    .publish_agent_advertisement_if_current(bind_uri, key, endpoint, nat_type, 0)
+                    .await
+                {
+                    tracing::debug!(target: "punch", ?error, %agent, "failed to advertise agent endpoint");
+                }
+            }
+            .instrument_in_current()
+            .in_current_span(),
+        );
+    }
+
+    fn remove_agent_advertisement(&self, bind_uri: &BindUri, key: InterfaceEndpointKey) {
+        let Some((_, resource)) = self
+            .0
+            .local_endpoint_advertisements
+            .remove(&(bind_uri.clone(), key))
+        else {
+            return;
+        };
+
+        if let Err(error) = self.remove_local_address(resource.advertised_addr()) {
+            tracing::debug!(
+                target: "punch",
+                ?error,
+                advertised_addr = %resource.advertised_addr(),
+                "failed to remove advertised local address"
+            );
+        }
+
+        if let Some(iface) = resource.temporary_iface {
+            let ifaces = self.0.ifaces.clone();
+            let advertised_bind = resource.advertised_bind.clone();
+            tokio::spawn(
+                async move {
+                    ifaces.unbind(advertised_bind).await;
+                    drop(iface);
+                }
+                .instrument_in_current()
+                .in_current_span(),
+            );
+        }
+    }
+
+    async fn publish_agent_advertisement_if_current(
+        &self,
+        bind_uri: BindUri,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
+        nat_type: NatType,
+        tire: u32,
+    ) -> io::Result<()> {
+        let local_addr = endpoint.addr();
+        if nat_type == NatType::Dynamic {
+            let (iface, stun_client) = dynamic_iface(
+                &bind_uri,
+                &self.0.ifaces,
+                &self.0.iface_factory,
+                &self.0.quic_router,
+                &self.0.stun_servers,
+            )
+            .await?;
+            let advertised_bind = iface.bind_uri();
+            let advertised_addr = match stun_client.outer_addr().await {
+                Ok(outer) => outer,
+                Err(error) => {
+                    self.0.ifaces.unbind(advertised_bind.clone()).await;
+                    return Err(io::Error::other(error));
+                }
+            };
+            let frame = {
+                let mut address_book = self.0.address_book.lock().unwrap();
+                add_local_address_when_endpoint_present_locked(
+                    &mut address_book,
+                    &bind_uri,
+                    key,
+                    endpoint,
+                    advertised_bind.clone(),
+                    advertised_addr,
+                    nat_type,
+                    tire,
+                )?
+            };
+            self.0
+                .punch_ifaces
+                .insert(advertised_bind.clone(), iface.clone());
+            self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
+            let resource = LocalEndpointAdvertisementResource::new(
+                bind_uri.clone(),
+                key,
+                endpoint,
+                &frame,
+                advertised_bind,
+                Some(iface),
+            );
+            self.0
+                .local_endpoint_advertisements
+                .insert((bind_uri, key), resource);
+            return Ok(());
+        }
+
+        let frame = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            add_local_address_when_endpoint_present_locked(
+                &mut address_book,
+                &bind_uri,
+                key,
+                endpoint,
+                bind_uri.clone(),
+                local_addr,
+                nat_type,
+                tire,
+            )?
+        };
+        self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
+        let resource = LocalEndpointAdvertisementResource::new(
+            bind_uri.clone(),
+            key,
+            endpoint,
+            &frame,
+            bind_uri.clone(),
+            None,
+        );
+        self.0
+            .local_endpoint_advertisements
+            .insert((bind_uri, key), resource);
+        Ok(())
+    }
+
+    pub fn upsert_local_endpoint(
+        &self,
+        bind: BindUri,
+        key: InterfaceEndpointKey,
+        endpoint: EndpointAddr,
+    ) -> LocalEndpointPathChanges {
+        let (delta, remote_endpoints) = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            let delta = address_book.upsert_local_endpoint(bind.clone(), key, endpoint);
+            let remote_endpoints = address_book
+                .remote_endpoint()
+                .iter()
+                .map(|(endpoint, source)| (*endpoint, source.clone()))
+                .collect();
+            (delta, remote_endpoints)
+        };
+
+        if delta.removed_endpoint().is_some() && matches!(key, InterfaceEndpointKey::Agent(_)) {
+            self.remove_agent_advertisement(&bind, key);
+        }
+        if delta.added_endpoint().is_some() {
+            self.update_agent_advertisement_after_upsert(bind, key, endpoint);
+        }
+        self.endpoint_path_changes(delta.added_endpoint(), remote_endpoints)
+    }
+
+    pub fn remove_local_endpoint(
+        &self,
+        bind: &BindUri,
+        key: &InterfaceEndpointKey,
+    ) -> LocalEndpointPathChanges {
+        let delta = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.remove_local_endpoint(bind, key)
+        };
+        if delta.removed_endpoint().is_some() && matches!(key, InterfaceEndpointKey::Agent(_)) {
+            self.remove_agent_advertisement(bind, *key);
+        }
+        LocalEndpointPathChanges::default()
+    }
+
+    pub fn close_local_endpoints(&self, bind: &BindUri) -> LocalEndpointPathChanges {
+        let removed = {
+            let mut address_book = self.0.address_book.lock().unwrap();
+            address_book.close_local_endpoints(bind)
+        };
+        for (key, _) in removed {
+            if matches!(key, InterfaceEndpointKey::Agent(_)) {
+                self.remove_agent_advertisement(bind, key);
+            }
+        }
+        LocalEndpointPathChanges::default()
+    }
+
     pub fn add_local_endpoint(
         &self,
         bind: BindUri,
@@ -554,7 +886,7 @@ where
         Ok(self.local_endpoint_changes(effects, remote_endpoints))
     }
 
-    pub fn remove_local_endpoint(&self, bind: &BindUri, addr: EndpointAddr) -> bool {
+    pub fn remove_local_endpoint_addr(&self, bind: &BindUri, addr: EndpointAddr) -> bool {
         self.remove_local_endpoint_changes(bind, addr)
             .effects
             .iter()
@@ -1567,6 +1899,7 @@ mod tests {
         let error = add_local_address_when_endpoint_present_locked(
             &mut address_book,
             &bind_uri,
+            interface_endpoint_key(endpoint_addr),
             endpoint_addr,
             bind_uri.clone(),
             local_addr,
@@ -1595,6 +1928,7 @@ mod tests {
         let frame = add_local_address_when_endpoint_present_locked(
             &mut address_book,
             &bind_uri,
+            interface_endpoint_key(endpoint_addr),
             endpoint_addr,
             advertised_bind_uri.clone(),
             local_addr,
@@ -1624,6 +1958,7 @@ mod tests {
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
             &mut address_book,
             &bind_uri,
+            interface_endpoint_key(endpoint_addr),
             endpoint_addr,
             dynamic_bind,
             local_addr,
@@ -1652,6 +1987,7 @@ mod tests {
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
             &mut address_book,
             &bind_uri,
+            interface_endpoint_key(endpoint_addr),
             endpoint_addr,
             dynamic_bind.clone(),
             local_addr,
@@ -1669,5 +2005,44 @@ mod tests {
             address_book.get_local_address(&0),
             Some((dynamic_bind, frame))
         );
+    }
+
+    #[test]
+    fn endpoint_advertisement_key_uses_bind_and_interface_endpoint_key() {
+        let bind = bind_uri();
+        let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
+        let outer: SocketAddr = "198.51.100.10:30000".parse().expect("outer addr");
+        let key = InterfaceEndpointKey::Agent(agent);
+        let endpoint = EndpointAddr::with_agent(agent, outer);
+        let resource = LocalEndpointAdvertisementResource::new_for_test(
+            bind.clone(),
+            key,
+            endpoint,
+            7,
+            bind.clone(),
+            outer,
+        );
+
+        assert_eq!(resource.bind_uri(), &bind);
+        assert_eq!(resource.key(), key);
+        assert_eq!(resource.endpoint(), endpoint);
+        assert_eq!(resource.seq_num(), 7);
+        assert_eq!(resource.advertised_addr(), outer);
+    }
+
+    #[test]
+    fn stale_agent_advertisement_guard_rejects_replaced_endpoint() {
+        let mut address_book = AddressBook::default();
+        let bind = bind_uri();
+        let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
+        let key = InterfaceEndpointKey::Agent(agent);
+        let first = EndpointAddr::with_agent(agent, "198.51.100.10:30000".parse().expect("outer"));
+        let second = EndpointAddr::with_agent(agent, "198.51.100.11:30001".parse().expect("outer"));
+
+        address_book.upsert_local_endpoint(bind.clone(), key, first);
+        address_book.upsert_local_endpoint(bind.clone(), key, second);
+
+        assert!(agent_endpoint_is_current(&address_book, &bind, key, second));
+        assert!(!agent_endpoint_is_current(&address_book, &bind, key, first));
     }
 }
