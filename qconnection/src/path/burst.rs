@@ -524,83 +524,77 @@ impl Burst {
             return Err(BurstError::PathDeactived);
         };
 
-        if buffers.len() < max_segments {
-            buffers.resize_with(max_segments, || vec![0; max_segment_size]);
+        let reversed_size = ForwardHeader::encoding_size(&self.path.pathway);
+        let mut segment_lengths = Vec::with_capacity(max_segments);
+
+        for segment_index in 0..max_segments {
+            if buffers.len() <= segment_index {
+                buffers.push(vec![0; max_segment_size]);
+            }
+
+            let segment = &mut buffers[segment_index];
+            if segment.len() < max_segment_size {
+                segment.resize(max_segment_size, 0);
+            }
+
+            let segment = &mut segment[..max_segment_size];
+            let buffer_size = segment.len().min(self.path.mtu() as _);
+            let buffer = &mut segment[..buffer_size][reversed_size..];
+            let load_result = self
+                .load_spaces(data_sources, buffer)
+                .inspect(|(_, packet_content)| {
+                    self.path.idle_timer.on_sent(*packet_content);
+                })
+                .or_else(|error| match error {
+                    BurstError::Signals(signals) => self.load_ping(buffer).map_err(|e| match e {
+                        BurstError::Signals(s) => BurstError::Signals(signals | s),
+                        e @ BurstError::PathDeactived => e,
+                    }),
+                    e @ BurstError::PathDeactived => Err(e),
+                })
+                .or_else(|error| match error {
+                    BurstError::Signals(signals) => {
+                        self.load_heartbeat(buffer).map_err(|e| match e {
+                            BurstError::Signals(s) => BurstError::Signals(signals | s),
+                            e @ BurstError::PathDeactived => e,
+                        })
+                    }
+                    e @ BurstError::PathDeactived => Err(e),
+                })
+                .map(|(packet_size, _)| {
+                    if reversed_size > 0 {
+                        let (mut header, payload) = segment.split_at_mut(reversed_size);
+                        let forward_hdr = ForwardHeader::new(
+                            0,
+                            // FIXME: unwrap
+                            &self.path.pathway,
+                            payload,
+                        );
+                        tracing::trace!(?forward_hdr, link=%self.path.link(),"put forward header");
+                        header.put_forward_header(&forward_hdr);
+                    }
+                    reversed_size + packet_size
+                });
+
+            match load_result {
+                Err(signals @ BurstError::Signals(_)) if segment_lengths.is_empty() => {
+                    return Err(signals);
+                }
+                Err(BurstError::Signals(_)) => break,
+                Err(error @ BurstError::PathDeactived) => return Err(error),
+                Ok(segment_length)
+                    if segment_length < segment_lengths.last().copied().unwrap_or_default() =>
+                {
+                    segment_lengths.push(segment_length);
+                    break;
+                }
+                Ok(segment_length) => {
+                    segment_lengths.push(segment_length);
+                }
+            }
         }
 
-        use core::ops::ControlFlow::*;
-
-        let reversed_size = ForwardHeader::encoding_size(&self.path.pathway);
-
-        let (Break(result) | Continue(result)) = buffers
-            .iter_mut()
-            .map(move |buffer| {
-                if buffer.len() < max_segment_size {
-                    buffer.resize(max_segment_size, 0);
-                }
-                &mut buffer[..max_segment_size]
-            })
-            .map(move |segment| {
-                let buffer_size = segment.len().min(self.path.mtu() as _);
-                let buffer = &mut segment[..buffer_size][reversed_size..];
-
-                self.load_spaces(data_sources, buffer)
-                    .inspect(|(_, packet_content)| {
-                        self.path.idle_timer.on_sent(*packet_content);
-                    })
-                    .or_else(|error| match error {
-                        BurstError::Signals(signals) => {
-                            self.load_ping(buffer).map_err(|e| match e {
-                                BurstError::Signals(s) => BurstError::Signals(signals | s),
-                                e @ BurstError::PathDeactived => e,
-                            })
-                        }
-                        e @ BurstError::PathDeactived => Err(e),
-                    })
-                    .or_else(|error| match error {
-                        BurstError::Signals(signals) => {
-                            self.load_heartbeat(buffer).map_err(|e| match e {
-                                BurstError::Signals(s) => BurstError::Signals(signals | s),
-                                e @ BurstError::PathDeactived => e,
-                            })
-                        }
-                        e @ BurstError::PathDeactived => Err(e),
-                    })
-                    .map(|(packet_size, _)| {
-                        if reversed_size > 0 {
-                            let (mut header, payload) = segment.split_at_mut(reversed_size);
-                            let forward_hdr = ForwardHeader::new(
-                                0,
-                                // FIXME: unwrap
-                                &self.path.pathway,
-                                payload,
-                            );
-                            tracing::trace!(?forward_hdr, link=%self.path.link(),"put forward header");
-                            header.put_forward_header(&forward_hdr);
-                        }
-                        io::IoSlice::new(&segment[..reversed_size + packet_size])
-                    })
-            })
-            .try_fold(
-                Ok(Vec::with_capacity(max_segments)),
-                |segments, load_result| match (segments, load_result) {
-                    (Ok(segments), Err(signals)) if segments.is_empty() => Break(Err(signals)),
-                    (Ok(segments), Err(_signals)) => Break(Ok(segments)),
-                    (Ok(mut segments), Ok(segment))
-                        if segment.len() < segments.last().copied().unwrap_or_default() =>
-                    {
-                        segments.push(segment.len());
-                        Break(Ok(segments))
-                    }
-                    (Ok(mut segments), Ok(segment)) => {
-                        segments.push(segment.len());
-                        Continue(Ok(segments))
-                    }
-                    (Err(_), _) => unreachable!("segments should not be Err in this context"),
-                },
-            );
-
-        Ok(result?
+        Ok(segment_lengths
             .iter()
             .zip(buffers)
             .map(|(&len, buffer)| io::IoSlice::new(&buffer[..len]))

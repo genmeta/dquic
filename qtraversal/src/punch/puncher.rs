@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use dashmap::{DashMap, DashSet, Entry};
+use dashmap::{DashMap, Entry};
 use qbase::{
     frame::{
         AddAddressFrame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame,
@@ -161,6 +161,7 @@ const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(8);
 // Quantity
 const MAX_RETRIES: usize = 5;
 const COLLISION_PORTS: u32 = 800;
+const PUNCHER_LOCAL_SHARDS: usize = 2;
 
 pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
 
@@ -225,7 +226,7 @@ where
 
 pub struct Puncher<TX, PH, S> {
     transaction: DashMap<PunchId, (AbortHandle, Arc<Transaction>)>,
-    punch_history: DashSet<PunchId>,
+    punch_history: DashMap<PunchId, ()>,
     product_header: PH,
     packet_space: Arc<S>,
     ifaces: Arc<InterfaceManager>,
@@ -255,8 +256,8 @@ where
         stun_servers: Arc<[SocketAddr]>,
     ) -> Self {
         Self {
-            transaction: DashMap::new(),
-            punch_history: DashSet::new(),
+            transaction: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
+            punch_history: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
             product_header,
             packet_space,
             ifaces,
@@ -265,7 +266,7 @@ where
             stun_servers,
             address_book: Mutex::new(AddressBook::default()),
             local_endpoint_advertisements: DashMap::new(),
-            punch_ifaces: DashMap::new(),
+            punch_ifaces: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
             broker,
         }
     }
@@ -893,7 +894,7 @@ where
         };
 
         let punch_id = (&local, &add_address_frame).punch_id();
-        if self.0.punch_history.contains(&punch_id) {
+        if self.0.punch_history.contains_key(&punch_id) {
             tracing::debug!(target: "punch", %punch_id, nat_pair = %format!("{:?}->{:?}", Some(local.nat_type()), Some(add_address_frame.nat_type())), "punch already completed, skipping");
             return Ok(());
         }
@@ -912,7 +913,7 @@ where
                             let result = puncher
                                 .punch_actively(bind, &local, &add_address_frame, tx)
                                 .await;
-                            puncher.0.punch_history.insert(punch_id);
+                            puncher.0.punch_history.insert(punch_id, ());
                             puncher.0.transaction.remove(&punch_id);
                             result
                         }
@@ -933,7 +934,7 @@ where
         punch_me_now_frame: PunchMeNowFrame,
     ) -> io::Result<()> {
         let punch_id = punch_me_now_frame.punch_id().flip();
-        if self.0.punch_history.contains(&punch_id) {
+        if self.0.punch_history.contains_key(&punch_id) {
             tracing::debug!(target: "punch", %punch_id, "punch already completed, skipping");
             return Ok(());
         }
@@ -954,7 +955,7 @@ where
                     let result = puncher
                         .punch_passively(bind, &local_address, &punch_me_now_frame, tx)
                         .await;
-                    puncher.0.punch_history.insert(punch_id);
+                    puncher.0.punch_history.insert(punch_id, ());
                     puncher.0.transaction.remove(&punch_id);
                     result
                 }
