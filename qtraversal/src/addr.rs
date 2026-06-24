@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
     ops::Deref,
 };
@@ -11,29 +11,6 @@ use qbase::{
 };
 use qinterface::{bind_uri::BindUri, component::local_endpoint::InterfaceEndpointKey};
 use qresolve::Source;
-
-/// Local endpoint membership effect emitted for transitional qconnection integration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalEndpointEffect {
-    AddEndpoint {
-        bind_uri: BindUri,
-        endpoint: EndpointAddr,
-    },
-    RemoveEndpoint {
-        bind_uri: BindUri,
-        endpoint: EndpointAddr,
-    },
-    AddPunchAddress {
-        bind_uri: BindUri,
-        endpoint: EndpointAddr,
-    },
-    RemovePunchAddress {
-        addr: SocketAddr,
-    },
-}
-
-/// Ordered local endpoint membership effects consumed by current qconnection code.
-pub type LocalEndpointEffects = Vec<LocalEndpointEffect>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEndpointDelta {
@@ -92,41 +69,6 @@ pub struct AddressBook {
     /// source-specific constraints (e.g. mDNS endpoints are tied to a NIC).
     remote_endpoint: HashMap<EndpointAddr, Source>,
     largest_seq_num: u32,
-}
-
-fn endpoint_key(endpoint: EndpointAddr) -> InterfaceEndpointKey {
-    match endpoint {
-        EndpointAddr::Direct { .. } => InterfaceEndpointKey::Direct,
-        EndpointAddr::Agent { agent, .. } => InterfaceEndpointKey::Agent(agent),
-    }
-}
-
-fn add_effects(
-    bind_uri: BindUri,
-    endpoint: EndpointAddr,
-) -> impl Iterator<Item = LocalEndpointEffect> {
-    let add_endpoint = LocalEndpointEffect::AddEndpoint {
-        bind_uri: bind_uri.clone(),
-        endpoint,
-    };
-    let add_punch = matches!(endpoint, EndpointAddr::Agent { .. })
-        .then_some(LocalEndpointEffect::AddPunchAddress { bind_uri, endpoint });
-    std::iter::once(add_endpoint).chain(add_punch)
-}
-
-fn remove_effects(
-    bind_uri: BindUri,
-    endpoint: EndpointAddr,
-) -> impl Iterator<Item = LocalEndpointEffect> {
-    let remove_punch = matches!(endpoint, EndpointAddr::Agent { .. }).then_some(
-        LocalEndpointEffect::RemovePunchAddress {
-            addr: endpoint.addr(),
-        },
-    );
-    let remove_endpoint = LocalEndpointEffect::RemoveEndpoint { bind_uri, endpoint };
-    remove_punch
-        .into_iter()
-        .chain(std::iter::once(remove_endpoint))
 }
 
 impl AddressBook {
@@ -210,101 +152,6 @@ impl AddressBook {
                 .copied()
                 .map(|endpoint| (bind.clone(), endpoint))
         })
-    }
-
-    pub(crate) fn add_local_endpoint_addr(
-        &mut self,
-        bind: BindUri,
-        addr: EndpointAddr,
-    ) -> io::Result<LocalEndpointEffects> {
-        let key = endpoint_key(addr);
-        if self
-            .local_endpoint
-            .get(&bind)
-            .and_then(|endpoints| endpoints.get(&key))
-            .is_some()
-        {
-            return Err(io::Error::other("Duplicate local endpoint"));
-        }
-        let delta = self.upsert_local_endpoint(bind.clone(), key, addr);
-        Ok(delta
-            .added_endpoint()
-            .into_iter()
-            .flat_map(|(bind_uri, endpoint)| add_effects(bind_uri, endpoint))
-            .collect())
-    }
-
-    pub(crate) fn remove_local_endpoint_addr(
-        &mut self,
-        bind: &BindUri,
-        addr: EndpointAddr,
-    ) -> LocalEndpointEffects {
-        let key = endpoint_key(addr);
-        if !self.has_local_endpoint(bind, key, addr) {
-            return Vec::new();
-        }
-        self.remove_local_endpoint(bind, &key)
-            .removed_endpoint()
-            .into_iter()
-            .flat_map(|(bind_uri, endpoint)| remove_effects(bind_uri, endpoint))
-            .collect()
-    }
-
-    pub(crate) fn upsert_local_endpoints(
-        &mut self,
-        bind: BindUri,
-        endpoints: impl IntoIterator<Item = EndpointAddr>,
-    ) -> LocalEndpointEffects {
-        let next = endpoints
-            .into_iter()
-            .map(|endpoint| (endpoint_key(endpoint), endpoint))
-            .collect::<BTreeMap<_, _>>();
-        let current = self
-            .local_endpoint
-            .get(&bind)
-            .map(|endpoints| {
-                endpoints
-                    .iter()
-                    .map(|(key, endpoint)| (*key, *endpoint))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut effects = Vec::new();
-
-        for (key, old_endpoint) in &current {
-            if next.get(key) != Some(old_endpoint) {
-                let delta = self.remove_local_endpoint(&bind, key);
-                effects.extend(
-                    delta
-                        .removed_endpoint()
-                        .into_iter()
-                        .flat_map(|(bind_uri, endpoint)| remove_effects(bind_uri, endpoint)),
-                );
-            }
-        }
-        for (key, endpoint) in next {
-            if current.get(&key) != Some(&endpoint) {
-                let delta = self.upsert_local_endpoint(bind.clone(), key, endpoint);
-                effects.extend(
-                    delta
-                        .added_endpoint()
-                        .into_iter()
-                        .flat_map(|(bind_uri, endpoint)| add_effects(bind_uri, endpoint)),
-                );
-            }
-        }
-
-        effects
-    }
-
-    pub(crate) fn remove_observed_local_endpoints(
-        &mut self,
-        bind: &BindUri,
-    ) -> LocalEndpointEffects {
-        self.close_local_endpoints(bind)
-            .into_iter()
-            .flat_map(|(_, endpoint)| remove_effects(bind.clone(), endpoint))
-            .collect()
     }
 
     pub(crate) fn add_peer_endpoint(

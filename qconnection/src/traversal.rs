@@ -130,10 +130,10 @@ mod local_endpoint_ingest_tests {
             .next()
             .expect("test module boundary");
 
-        assert!(!production.contains("AddressEvent"));
-        assert!(!production.contains("LocalEndpointSet"));
-        assert!(!production.contains("subscribe_local_address_events"));
-        assert!(!production.contains("add_local_punch_address"));
+        assert!(!production.contains(concat!("Address", "Event")));
+        assert!(!production.contains(concat!("LocalEndpoint", "Set")));
+        assert!(!production.contains(concat!("subscribe_local_", "address_events")));
+        assert!(!production.contains(concat!("add_local_", "punch_address")));
     }
 
     #[test]

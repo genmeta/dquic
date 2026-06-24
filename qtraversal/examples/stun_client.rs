@@ -2,7 +2,7 @@ use std::{io::Result, net::SocketAddr, sync::Arc};
 
 use clap::Parser;
 use qinterface::{
-    component::location::Locations,
+    component::local_endpoint::LocalEndpoints,
     io::{IO, ProductIO, handy::DEFAULT_IO_FACTORY},
 };
 use qtraversal::{
@@ -44,13 +44,14 @@ async fn main() -> Result<()> {
         .outer_addr()
         .await
         .expect("failed to get outer addr");
-    info!("Outer addr: {} Agent addr {}", outer_addr, stun_server);
+    info!("outer addr: {} agent addr {}", outer_addr, stun_server);
     // Ok(())
     let nat_type = stun_client.nat_type().await;
-    let mut observer = Locations::global().subscribe();
-    while let Some(event) = observer.recv().await {
-        info!("Location event: {:?}", event);
-        info!("Nat type: {:?}", nat_type);
+    let local_endpoints = std::sync::Arc::new(LocalEndpoints::new());
+    let mut subscriber = local_endpoints.subscribe();
+    while let Some(event) = subscriber.recv().await {
+        info!("local endpoint event: {:?}", event);
+        info!("nat type: {:?}", nat_type);
     }
     Ok(())
 

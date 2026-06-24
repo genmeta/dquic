@@ -10,7 +10,6 @@ use crate::Interface;
 
 pub mod alive;
 pub mod local_endpoint;
-pub mod location;
 pub mod route;
 
 pub trait Component: Any + Debug + Send + Sync {

@@ -43,7 +43,7 @@ use tracing::Instrument as _;
 
 use crate::{
     PathWay,
-    addr::{AddressBook, LocalEndpointEffect, LocalEndpointEffects},
+    addr::AddressBook,
     nat::{
         client::{StunClientComponent, StunClientsComponent},
         router::StunRouterComponent,
@@ -188,12 +188,6 @@ impl IntoIterator for LocalEndpointPathChanges {
     fn into_iter(self) -> Self::IntoIter {
         self.changes.into_iter()
     }
-}
-
-#[derive(Debug, Default)]
-pub struct LocalEndpointChanges {
-    pub effects: LocalEndpointEffects,
-    pub ways: Vec<(BindUri, Link, PathWay)>,
 }
 
 impl<TX, PH, S> Clone for ArcPuncher<TX, PH, S> {
@@ -430,27 +424,6 @@ where
     for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
     for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
 {
-    fn local_endpoint_changes(
-        &self,
-        effects: LocalEndpointEffects,
-        remote_endpoints: Vec<(EndpointAddr, qresolve::Source)>,
-    ) -> LocalEndpointChanges {
-        let mut ways = Vec::new();
-        for effect in &effects {
-            let LocalEndpointEffect::AddEndpoint { bind_uri, endpoint } = effect else {
-                continue;
-            };
-            for (remote_ep, source) in &remote_endpoints {
-                if let Ok(way) =
-                    self.resolve_punch_connection(bind_uri, endpoint, remote_ep, source)
-                {
-                    ways.push(way);
-                }
-            }
-        }
-        LocalEndpointChanges { effects, ways }
-    }
-
     pub fn add_local_address(
         &self,
         bind_uri: BindUri,
@@ -858,83 +831,6 @@ where
             }
         }
         LocalEndpointPathChanges::default()
-    }
-
-    pub fn add_local_endpoint(
-        &self,
-        bind: BindUri,
-        addr: EndpointAddr,
-    ) -> io::Result<Vec<(BindUri, Link, PathWay)>> {
-        Ok(self.add_local_endpoint_changes(bind, addr)?.ways)
-    }
-
-    pub fn add_local_endpoint_changes(
-        &self,
-        bind: BindUri,
-        addr: EndpointAddr,
-    ) -> io::Result<LocalEndpointChanges> {
-        let (effects, remote_endpoints) = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            let effects = address_book.add_local_endpoint_addr(bind, addr)?;
-            let remote_endpoints = address_book
-                .remote_endpoint()
-                .iter()
-                .map(|(endpoint, source)| (*endpoint, source.clone()))
-                .collect();
-            (effects, remote_endpoints)
-        };
-        Ok(self.local_endpoint_changes(effects, remote_endpoints))
-    }
-
-    pub fn remove_local_endpoint_addr(&self, bind: &BindUri, addr: EndpointAddr) -> bool {
-        self.remove_local_endpoint_changes(bind, addr)
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, LocalEndpointEffect::RemoveEndpoint { .. }))
-    }
-
-    pub fn remove_local_endpoint_changes(
-        &self,
-        bind: &BindUri,
-        addr: EndpointAddr,
-    ) -> LocalEndpointChanges {
-        let effects = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_local_endpoint_addr(bind, addr)
-        };
-        LocalEndpointChanges {
-            effects,
-            ways: Vec::new(),
-        }
-    }
-
-    pub fn upsert_local_endpoints(
-        &self,
-        bind: BindUri,
-        endpoints: impl IntoIterator<Item = EndpointAddr>,
-    ) -> LocalEndpointChanges {
-        let (effects, remote_endpoints) = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            let effects = address_book.upsert_local_endpoints(bind, endpoints);
-            let remote_endpoints = address_book
-                .remote_endpoint()
-                .iter()
-                .map(|(endpoint, source)| (*endpoint, source.clone()))
-                .collect();
-            (effects, remote_endpoints)
-        };
-        self.local_endpoint_changes(effects, remote_endpoints)
-    }
-
-    pub fn remove_observed_local_endpoints(&self, bind: &BindUri) -> LocalEndpointChanges {
-        let effects = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_observed_local_endpoints(bind)
-        };
-        LocalEndpointChanges {
-            effects,
-            ways: Vec::new(),
-        }
     }
 
     pub fn add_peer_endpoint(
@@ -1921,9 +1817,11 @@ mod tests {
             "inet://127.0.0.1:45678".parse().expect("valid bind uri");
         let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
 
-        address_book
-            .add_local_endpoint_addr(bind_uri.clone(), endpoint_addr)
-            .expect("local endpoint insert");
+        address_book.upsert_local_endpoint(
+            bind_uri.clone(),
+            interface_endpoint_key(endpoint_addr),
+            endpoint_addr,
+        );
 
         let frame = add_local_address_when_endpoint_present_locked(
             &mut address_book,
@@ -1980,9 +1878,11 @@ mod tests {
         let dynamic_bind: BindUri = "inet://127.0.0.1:45678".parse().expect("valid bind uri");
         let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
 
-        address_book
-            .add_local_endpoint_addr(bind_uri.clone(), endpoint_addr)
-            .expect("local endpoint insert");
+        address_book.upsert_local_endpoint(
+            bind_uri.clone(),
+            interface_endpoint_key(endpoint_addr),
+            endpoint_addr,
+        );
 
         let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
             &mut address_book,

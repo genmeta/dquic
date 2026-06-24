@@ -379,8 +379,11 @@ impl AuthClient for ServerAuther {
 
 // internal methods
 impl QuicListeners {
-    fn subscribe_connection_local_endpoints(&self, connection: Arc<Connection>) {
-        let mut subscriber = self.network.local_endpoints.subscribe();
+    fn subscribe_connection_local_endpoints(
+        local_endpoints: Arc<LocalEndpoints>,
+        connection: Arc<Connection>,
+    ) {
+        let mut subscriber = local_endpoints.subscribe();
         let weak = Arc::downgrade(&connection);
 
         // Inherent termination: this task exits when the connection drops,
@@ -475,9 +478,9 @@ impl QuicListeners {
             .with_qlog(self.qlogger.clone())
             .run();
 
-        let listeners = self.clone();
         let incomings = self.incomings.clone();
         let quic_router = self.network.quic_router.clone();
+        let local_endpoints = self.network.local_endpoints.clone();
 
         let try_accept_connection = async move {
             quic_router.deliver(packet, (bind_uri, pathway, link)).await;
@@ -485,7 +488,7 @@ impl QuicListeners {
             match connection.server_name().await {
                 Ok(server_name) => {
                     tracing::Span::current().record("server_name", &server_name);
-                    listeners.subscribe_connection_local_endpoints(connection.clone());
+                    Self::subscribe_connection_local_endpoints(local_endpoints, connection.clone());
                     let incoming = (connection, server_name, pathway, link);
                     match incomings.send((incoming, premit)).await {
                         Ok(..) => {
@@ -900,5 +903,7 @@ mod local_endpoint_subscription_tests {
         assert!(production.contains(concat!("local_endpoints", ".subscribe()")));
         assert!(production.contains(concat!("InterfaceEndpoint", "Update::Upsert")));
         assert!(!production.contains(concat!("subscribe_local_", "address_events")));
+        assert!(!production.contains("let listeners = self.clone();"));
+        assert!(!production.contains("listeners.subscribe_connection_local_endpoints"));
     }
 }
