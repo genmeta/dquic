@@ -577,11 +577,8 @@ impl Burst {
                 });
 
             match load_result {
-                Err(signals @ BurstError::Signals(_)) if segment_lengths.is_empty() => {
-                    return Err(signals);
-                }
-                Err(BurstError::Signals(_)) => break,
-                Err(error @ BurstError::PathDeactived) => return Err(error),
+                Err(error) if segment_lengths.is_empty() => return Err(error),
+                Err(_) => break,
                 Ok(segment_length)
                     if segment_length < segment_lengths.last().copied().unwrap_or_default() =>
                 {
