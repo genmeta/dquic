@@ -96,7 +96,7 @@ tracing-subscriber = "0.3"
 tracing-appender = "0.2"
 
 # members
-qmacro = { path = "./qmacro", version = "0.6.0" }
+qmacro = { path = "./qmacro", version = "0.5.1" }
 qbase = { path = "./qbase", version = "0.6.0" }
 qevent = { path = "./qevent", version = "0.6.0" }
 qudp = { path = "./qudp", version = "0.6.0" }

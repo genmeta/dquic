@@ -1,6 +1,6 @@
 [package]
 name = "qmacro"
-version = "0.6.0"
+version = "0.5.1"
 edition.workspace = true
 description = "dquic's proc macros"
 readme.workspace = true
