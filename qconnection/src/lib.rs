@@ -456,6 +456,32 @@ pub struct Connection {
 }
 
 impl Connection {
+    fn commit_transport_failure_locked(
+        conn_state: &ArcConnState,
+        conn: &mut Result<Components, Termination>,
+        error: QuicError,
+    ) -> Error {
+        let core_conn = match conn {
+            Ok(core_conn) => core_conn.clone(),
+            Err(termination) => return termination.error(),
+        };
+
+        let termination = if core_conn.send_lock.is_permitted() {
+            if conn_state.enter_closing(&error).is_none() {
+                return error.into();
+            }
+            core_conn.enter_closing(error.into())
+        } else {
+            if conn_state.enter_draining_with_error(&error).is_none() {
+                return error.into();
+            }
+            core_conn.enter_silent_draining(error.into())
+        };
+        let error = termination.error();
+        *conn = Err(termination);
+        error
+    }
+
     fn keep_alive_until_closed(&self) {
         let Some(connection) = self.weak_self.upgrade() else {
             return;
@@ -507,24 +533,11 @@ impl Connection {
     pub fn enter_closing(&self, error: QuicError) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
-        match conn.as_ref() {
-            Ok(core_conn) => {
-                let termination = if core_conn.send_lock.is_permitted() {
-                    if self.conn_state.enter_closing(&error).is_none() {
-                        return Err(error.into());
-                    }
-                    core_conn.clone().enter_closing(error.into())
-                } else {
-                    if self.conn_state.enter_draining_with_error(&error).is_none() {
-                        return Err(error.into());
-                    }
-                    core_conn.clone().enter_silent_draining(error.into())
-                };
-                *conn = Err(termination);
-                Ok(())
-            }
-            Err(termination) => Err(termination.error()),
+        if let Err(termination) = conn.as_ref() {
+            return Err(termination.error());
         }
+        let _ = Self::commit_transport_failure_locked(&self.conn_state, &mut conn, error);
+        Ok(())
     }
 
     /// Close the connection with application close frame.
@@ -583,21 +596,18 @@ impl Connection {
     pub fn validate(&self) -> Result<(), Error> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
         let mut conn = self.state.write().unwrap();
-        let core_conn = conn.as_ref().map_err(|e| e.error())?;
-        let validate = 'validate: {
-            if core_conn.paths.is_empty() {
-                let error =
-                    QuicError::with_default_fty(ErrorKind::NoViablePath, "No viable path exist");
-                break 'validate Err(error);
-            }
-            Ok(())
+        let no_viable_path = match conn.as_ref() {
+            Ok(core_conn) => core_conn.paths.is_empty(),
+            Err(termination) => return Err(termination.error()),
         };
-        if let Err(error) = validate {
-            core_conn.event_broker.emit(Event::Failed(error.clone()));
-            let termination = core_conn.clone().enter_closing(error.into());
-            let error = termination.error();
-            *conn = Err(termination);
-            return Err(error);
+        if no_viable_path {
+            let error =
+                QuicError::with_default_fty(ErrorKind::NoViablePath, "No viable path exist");
+            return Err(Self::commit_transport_failure_locked(
+                &self.conn_state,
+                &mut conn,
+                error,
+            ));
         }
         Ok(())
     }
@@ -753,5 +763,105 @@ impl Drop for Connection {
             #[cfg(not(debug_assertions))]
             tracing::debug!(target: "quic", "connection is still active when dropped, close it automatically.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+
+    use qbase::{error::ErrorKind, token::handy::NoopTokenRegistry};
+    use rustls::{
+        RootCertStore,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        version::TLS13,
+    };
+
+    use super::*;
+    use crate::state;
+
+    const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
+    const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
+    const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
+
+    fn install_crypto_provider() {
+        static CRYPTO_PROVIDER: Once = Once::new();
+        CRYPTO_PROVIDER.call_once(|| {
+            _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    fn test_client_tls_config() -> rustls::ClientConfig {
+        install_crypto_provider();
+        let mut roots = RootCertStore::empty();
+        roots
+            .add_parsable_certificates(CertificateDer::pem_slice_iter(CA_CERT).map(Result::unwrap));
+        rustls::ClientConfig::builder_with_protocol_versions(&[&TLS13])
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    }
+
+    fn test_server_tls_config() -> rustls::ServerConfig {
+        install_crypto_provider();
+        let certs = CertificateDer::pem_slice_iter(SERVER_CERT)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("server cert should parse");
+        let key = PrivateKeyDer::from_pem_slice(SERVER_KEY).expect("server key should parse");
+        rustls::ServerConfig::builder_with_protocol_versions(&[&TLS13])
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server cert/key should be valid")
+    }
+
+    fn test_client_connection() -> Arc<Connection> {
+        Connection::new_client("localhost".to_owned(), Arc::new(NoopTokenRegistry))
+            .with_tls_config(test_client_tls_config())
+            .with_cids(cid::ConnectionId::from_slice(b"validate-client"))
+            .run()
+    }
+
+    fn test_server_connection() -> Arc<Connection> {
+        Connection::new_server(Arc::new(NoopTokenRegistry))
+            .with_tls_config(test_server_tls_config())
+            .with_cids(cid::ConnectionId::from_slice(b"validate-server"))
+            .run()
+    }
+
+    #[tokio::test]
+    async fn validate_without_paths_latches_client_error_and_enters_closing() {
+        let connection = test_client_connection();
+
+        let first = connection
+            .validate()
+            .expect_err("pathless client connection should fail validation");
+        assert_eq!(first.kind(), ErrorKind::NoViablePath);
+        assert_eq!(connection.conn_state.current(), Some(state::CLOSING));
+
+        let second = connection
+            .validate()
+            .expect_err("terminal client error should be sticky");
+        assert_eq!(second, first);
+
+        let terminated = connection.terminated().await;
+        assert_eq!(terminated, first);
+    }
+
+    #[tokio::test]
+    async fn validate_without_send_permit_latches_server_error_and_enters_draining() {
+        let connection = test_server_connection();
+
+        let first = connection
+            .validate()
+            .expect_err("pathless server connection should fail validation");
+        assert_eq!(first.kind(), ErrorKind::NoViablePath);
+        assert_eq!(connection.conn_state.current(), Some(state::DRAINING));
+
+        let second = connection
+            .validate()
+            .expect_err("terminal server error should be sticky");
+        assert_eq!(second, first);
+
+        let terminated = connection.terminated().await;
+        assert_eq!(terminated, first);
     }
 }

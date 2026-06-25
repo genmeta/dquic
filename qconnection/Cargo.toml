@@ -48,3 +48,6 @@ qdatagram = { workspace = true, optional = true }
 default = ["datagram"]
 datagram = ["dep:qdatagram"]
 telemetry = ["qevent/telemetry"]
+
+[dev-dependencies]
+rustls = { workspace = true, features = ["ring"] }
