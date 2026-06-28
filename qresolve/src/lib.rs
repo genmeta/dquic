@@ -11,7 +11,11 @@ pub use qbase::net::{Family, addr::EndpointAddr};
 pub type PublishFuture<'a> = BoxFuture<'a, io::Result<()>>;
 
 pub trait Publish: Any + Send + Sync + Display + Debug {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a>;
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> PublishFuture<'a>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -96,9 +100,29 @@ mod tests {
     }
 
     impl Publish for TestPublisher {
-        fn publish<'a>(&'a self, _name: &'a str, _packet: &'a [u8]) -> PublishFuture<'a> {
-            async { Ok(()) }.boxed()
+        fn publish<'a>(
+            &'a self,
+            name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let endpoints: Vec<_> = endpoints.collect();
+            async move {
+                assert_eq!(name, "demo.dhttp.net");
+                assert_eq!(endpoints.len(), 1);
+                Ok(())
+            }
+            .boxed()
         }
+    }
+
+    #[test]
+    fn publish_trait_accepts_endpoint_iterator() {
+        let publisher: &dyn Publish = &TestPublisher;
+        let endpoint = EndpointAddr::direct("203.0.113.10:4433".parse().unwrap());
+        let mut endpoints = std::iter::once(endpoint);
+
+        futures::executor::block_on(publisher.publish("demo.dhttp.net", &mut endpoints))
+            .expect("publish succeeds");
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
