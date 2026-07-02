@@ -182,8 +182,15 @@ jobs:
             exit 0
           fi
 
+          release_args=()
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+ ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            --notes-file "$notes_file"
+            --notes-file "$notes_file" \
+            "${release_args[@]}"
