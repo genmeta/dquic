@@ -104,10 +104,10 @@ qinterface = { path = "./qinterface", version = "0.6.0" }
 qdatagram = { path = "./qdatagram", version = "0.6.0" }
 qresolve = { path = "./qresolve", version = "0.7.0-beta.1" }
 qrecovery = { path = "./qrecovery", version = "0.6.0" }
-qtraversal = { path = "./qtraversal", version = "0.7.0-beta.1" }
+qtraversal = { path = "./qtraversal", version = "0.7.0-beta.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.0" }
 qconnection = { path = "./qconnection", version = "0.7.0-beta.1" }
-dquic = { path = "./dquic", version = "0.7.0-beta.1" }
+dquic = { path = "./dquic", version = "0.7.0-beta.2" }
 h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
 
