@@ -11,6 +11,7 @@ use qbase::{
 };
 use qinterface::{bind_uri::BindUri, component::local_endpoint::InterfaceEndpointKey};
 use qresolve::Source;
+use smallvec::{SmallVec, smallvec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEndpointDelta {
@@ -60,6 +61,36 @@ impl IntoIterator for CloseLocalEndpointsDelta {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeerEndpointSources {
+    One(Source),
+    Many(SmallVec<[Source; 2]>),
+}
+
+impl PeerEndpointSources {
+    fn new(source: Source) -> Self {
+        Self::One(source)
+    }
+
+    fn insert(&mut self, source: Source) {
+        match self {
+            Self::One(current) if *current == source => {}
+            Self::One(current) => {
+                *self = Self::Many(smallvec![current.clone(), source]);
+            }
+            Self::Many(sources) if sources.contains(&source) => {}
+            Self::Many(sources) => sources.push(source),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Source> {
+        match self {
+            Self::One(source) => std::slice::from_ref(source).iter(),
+            Self::Many(sources) => sources.as_slice().iter(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AddressBook {
     local: HashMap<u32, (BindUri, AddAddressFrame)>,
@@ -67,7 +98,7 @@ pub struct AddressBook {
     local_endpoint: HashMap<BindUri, HashMap<InterfaceEndpointKey, EndpointAddr>>,
     /// Remote endpoints with their DNS [`Source`] so the puncher can enforce
     /// source-specific constraints (e.g. mDNS endpoints are tied to a NIC).
-    remote_endpoint: HashMap<EndpointAddr, Source>,
+    remote_endpoint: HashMap<EndpointAddr, PeerEndpointSources>,
     largest_seq_num: u32,
 }
 
@@ -160,16 +191,23 @@ impl AddressBook {
         source: Source,
     ) -> io::Result<()> {
         match self.remote_endpoint.entry(endpoint) {
-            Entry::Occupied(_) => return Ok(()),
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().insert(source);
+            }
             Entry::Vacant(e) => {
-                e.insert(source);
+                e.insert(PeerEndpointSources::new(source));
             }
         }
         Ok(())
     }
 
-    pub(crate) fn remote_endpoint(&self) -> &HashMap<EndpointAddr, Source> {
-        &self.remote_endpoint
+    pub(crate) fn remote_endpoint(&self) -> impl Iterator<Item = (EndpointAddr, Source)> + '_ {
+        self.remote_endpoint.iter().flat_map(|(endpoint, sources)| {
+            sources
+                .iter()
+                .cloned()
+                .map(move |source| (*endpoint, source))
+        })
     }
 
     pub(crate) fn remove_local_address(
@@ -256,6 +294,9 @@ impl AddressBook {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use qbase::net::Family;
     use qinterface::component::local_endpoint::InterfaceEndpointKey;
 
     use super::*;
@@ -340,7 +381,32 @@ mod tests {
         book.add_peer_endpoint(endpoint, Source::System)
             .expect("duplicate peer endpoint should be idempotent");
 
-        assert_eq!(book.remote_endpoint().len(), 1);
+        assert_eq!(book.remote_endpoint().count(), 1);
+    }
+
+    #[test]
+    fn same_peer_endpoint_keeps_distinct_sources() {
+        let mut book = AddressBook::default();
+        let endpoint = direct_endpoint(10005);
+        let mdns = Source::Mdns {
+            nic: Arc::from("wlan0"),
+            family: Family::V4,
+        };
+
+        book.add_peer_endpoint(endpoint, Source::System)
+            .expect("system peer endpoint insert");
+        book.add_peer_endpoint(endpoint, mdns.clone())
+            .expect("mdns peer endpoint insert");
+        book.add_peer_endpoint(endpoint, mdns.clone())
+            .expect("duplicate mdns peer endpoint should be idempotent");
+
+        let sources = book
+            .remote_endpoint()
+            .filter_map(|(remote_endpoint, source)| (remote_endpoint == endpoint).then_some(source))
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.contains(&Source::System));
+        assert!(sources.contains(&mdns));
     }
 
     #[test]

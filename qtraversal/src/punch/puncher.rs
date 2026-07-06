@@ -804,11 +804,7 @@ where
         let (delta, remote_endpoints) = {
             let mut address_book = self.0.address_book.lock().unwrap();
             let delta = address_book.upsert_local_endpoint(bind.clone(), key, endpoint);
-            let remote_endpoints = address_book
-                .remote_endpoint()
-                .iter()
-                .map(|(endpoint, source)| (*endpoint, source.clone()))
-                .collect();
+            let remote_endpoints = address_book.remote_endpoint().collect();
             (delta, remote_endpoints)
         };
 
