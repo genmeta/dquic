@@ -764,9 +764,9 @@ impl Drop for Connection {
         let error = AppError::new(0_u64.try_into().expect("zero app error code"), "");
         if self.application_close(error, false).is_ok() {
             #[cfg(debug_assertions)]
-            tracing::warn!(target: "quic", "connection is still active when dropped, close it automatically.");
+            tracing::warn!(target: "dquic", "connection is still active when dropped, closing it automatically");
             #[cfg(not(debug_assertions))]
-            tracing::debug!(target: "quic", "connection is still active when dropped, close it automatically.");
+            tracing::debug!(target: "dquic", "connection is still active when dropped, closing it automatically");
         }
     }
 }

@@ -163,7 +163,7 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
                 Err(unknown @ Error::UnknownParameterId(..)) => {
-                    tracing::warn!(target: "quic", "{unknown}, ignore");
+                    tracing::debug!(target: "dquic", %unknown, "ignore unknown transport parameter");
                     continue; // Ignore unknown parameters
                 }
                 Err(e) => return Err(e.into()),
@@ -196,7 +196,7 @@ impl ServerParameters {
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
                 Err(unknown @ Error::UnknownParameterId(..)) => {
-                    tracing::warn!(target: "quic", "{unknown}, ignore");
+                    tracing::debug!(target: "dquic", %unknown, "ignore unknown transport parameter");
                     continue; // Ignore unknown parameters
                 }
                 Err(e) => return Err(e.into()),

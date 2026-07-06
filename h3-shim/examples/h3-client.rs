@@ -109,7 +109,7 @@ async fn main() {
         )
         .init();
     if let Err(error) = run(options).await {
-        tracing::error!(?error);
+        tracing::error!(target: "dquic", ?error);
         std::process::exit(1);
     };
 }
@@ -123,10 +123,10 @@ async fn run(options: Options) -> Result<(), Error> {
     };
 
     let client_builder = if options.skip_verify {
-        tracing::warn!("skip server verify");
+        tracing::warn!(target: "dquic", "skip server verify");
         QuicClient::builder().without_verifier()
     } else {
-        tracing::info!("load ca certs");
+        tracing::info!(target: "dquic", "load ca certs");
         let mut roots = rustls::RootCertStore::empty();
         roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
         roots
@@ -228,7 +228,7 @@ async fn download_files_with_progress(
 ) -> Result<usize, Error> {
     let quic_connection = client.connect(authority.host()).await?;
     let odcid = quic_connection.origin_dcid()?;
-    let span = tracing::info_span!("requests", %odcid, host = authority.host());
+    let span = tracing::info_span!(target: "dquic", "requests", %odcid, host = authority.host());
 
     let (mut connection, send_request) =
         h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))

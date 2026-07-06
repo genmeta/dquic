@@ -144,7 +144,7 @@ impl SentPktState {
                 if expire_time > now {
                     true
                 } else {
-                    tracing::trace!(target: "quic", "retransmitted packet {pn} is expired without ack");
+                    tracing::trace!(target: "dquic", "retransmitted packet {pn} is expired without ack");
                     false
                 }
             }

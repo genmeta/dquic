@@ -135,12 +135,19 @@ async fn test_detect_case(case: usize) {
         .outer_addr()
         .await
         .expect("failed to get outer addr");
-    tracing::info!("outer addr: {} agent addr {}", outer_addr, stun_agent);
+    tracing::info!(target: "stun", %outer_addr, agent_addr = %stun_agent, "detected outer address");
     let nat_type = stun_client
         .nat_type()
         .await
         .expect("failed to get nat type");
-    tracing::info!(case.bind_addr, case.outer_addr, ?nat_type, ?case.nat_type);
+    tracing::info!(
+        target: "stun",
+        bind_addr = %case.bind_addr,
+        outer_addr = %case.outer_addr,
+        ?nat_type,
+        expected_nat_type = ?case.nat_type,
+        "NAT detection case result"
+    );
     assert!(nat_type == case.nat_type);
 }
 

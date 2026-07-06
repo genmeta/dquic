@@ -62,6 +62,8 @@ impl<T> BoundQueue<T> {
 #[cfg(test)]
 mod tests {
 
+    use tracing::Instrument as _;
+
     use super::*;
 
     #[tokio::test]
@@ -74,6 +76,7 @@ mod tests {
                 assert!(queue.send(1).await.is_ok());
                 assert!(queue.send(2).await.is_ok());
             }
+            .in_current_span()
         });
 
         assert_eq!(queue.recv().await, Some(1));

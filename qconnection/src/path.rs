@@ -179,7 +179,7 @@ impl Components {
                 Instrument::instrument(task, qevent::span!(@current, path=pathway.to_string()))
                     .in_current_span();
 
-            tracing::trace!(target: "quic", %pathway, %link, is_probed, is_initial_path, "add new path");
+            tracing::trace!(target: "dquic", %pathway, %link, is_probed, is_initial_path, "add new path");
 
             Ok((path, task))
         };

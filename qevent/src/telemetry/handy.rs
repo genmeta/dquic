@@ -135,7 +135,7 @@ impl<S: TelemetryStorage> QLog for LegacySeqLogger<S> {
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
-        tokio::spawn(async move {
+        tokio::spawn(tracing::Instrument::in_current_span(async move {
             let mut log_file = io::BufWriter::new(file.await);
 
             const RS: u8 = 0x1E;
@@ -157,7 +157,7 @@ impl<S: TelemetryStorage> QLog for LegacySeqLogger<S> {
             }
 
             log_file.shutdown().await
-        });
+        }));
 
         crate::span!(Arc::new(tx), group_id = group_id)
     }
@@ -169,8 +169,13 @@ impl QLog for TracingLogger {
     fn new_trace(&self, vantage_point: VantagePointType, group_id: GroupID) -> Span {
         use crate::legacy;
 
-        let span =
-            tracing::info_span!(parent: None,"qlog", role = %vantage_point, odcid = %group_id);
+        let span = tracing::info_span!(
+            target: "qlog",
+            parent: None,
+            "qlog",
+            role = %vantage_point,
+            odcid = %group_id
+        );
 
         let qlog_file_seq = crate::build!(legacy::QlogFileSeq {
             title: format!("{group_id}_{vantage_point}.sqlog"),

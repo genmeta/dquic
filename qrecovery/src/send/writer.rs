@@ -291,28 +291,28 @@ impl<TX> Drop for Writer<TX> {
                 Sender::Ready(s) => {
                     #[cfg(debug_assertions)]
                     tracing::warn!(
-                        target: "quic",
-                        "The sending {} is not closed before dropped!",
+                        target: "dquic",
+                        "sending stream {} is not closed before drop",
                         s.stream_id(),
                     );
                     #[cfg(not(debug_assertions))]
                     tracing::debug!(
-                        target: "quic",
-                        "The sending {} is not closed before dropped!",
+                        target: "dquic",
+                        "sending stream {} is not closed before drop",
                         s.stream_id(),
                     );
                 }
                 Sender::Sending(s) => {
                     #[cfg(debug_assertions)]
                     tracing::warn!(
-                        target: "quic",
-                        "The sending {} is not closed before dropped!",
+                        target: "dquic",
+                        "sending stream {} is not closed before drop",
                         s.stream_id(),
                     );
                     #[cfg(not(debug_assertions))]
                     tracing::debug!(
-                        target: "quic",
-                        "The sending {} is not closed before dropped!",
+                        target: "dquic",
+                        "sending stream {} is not closed before drop",
                         s.stream_id(),
                     );
                 }

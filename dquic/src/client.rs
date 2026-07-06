@@ -187,7 +187,7 @@ impl QuicClient {
         };
 
         if let Err(error) = result {
-            tracing::trace!(target: "quic", ?error, "failed to feed local endpoint update to client connection");
+            tracing::trace!(target: "dquic", ?error, "failed to feed local endpoint update to client connection");
         }
     }
 
@@ -469,6 +469,7 @@ impl QuicClient {
                     }
                 }
             }
+            .in_current_span()
         });
 
         Ok(connection)

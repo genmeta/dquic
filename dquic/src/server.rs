@@ -426,12 +426,12 @@ impl QuicListeners {
         };
 
         if let Err(error) = result {
-            tracing::trace!(target: "quic_listeners", ?error, "failed to feed local endpoint update to accepted connection");
+            tracing::trace!(target: "dquic", ?error, "failed to feed local endpoint update to accepted connection");
         }
     }
 
     #[tracing::instrument(
-        target = "quic_listeners", level = "debug", skip_all, 
+        target = "dquic", level = "debug", skip_all,
         fields(%bind_uri, %pathway, %link, odcid=tracing::field::Empty, server_name=tracing::field::Empty)
     )]
     pub(crate) fn try_accept_connection(&self, packet: Packet, (bind_uri, pathway, link): Way) {
@@ -446,13 +446,16 @@ impl QuicListeners {
         tracing::Span::current().record("odcid", origin_dcid.to_string());
 
         if origin_dcid.is_empty() {
-            tracing::debug!(target: "quic_listeners", "Received an initial/0rtt packet with empty destination CID, ignoring it");
+            tracing::debug!(
+                target: "dquic",
+                "received an initial/0rtt packet with empty destination CID, ignoring it"
+            );
             return;
         }
 
         // Acquire a permit from the backlog semaphore to limit the number of concurrent connections.
         let Ok(premit) = self.backlog.clone().try_acquire_owned() else {
-            tracing::debug!(target: "quic_listeners", "Backlog full, dropping incoming packet");
+            tracing::debug!(target: "dquic", "backlog full, dropping incoming packet");
             return;
         };
 
@@ -492,17 +495,21 @@ impl QuicListeners {
                     let incoming = (connection, server_name, pathway, link);
                     match incomings.send((incoming, premit)).await {
                         Ok(..) => {
-                            tracing::debug!(target: "quic_listeners", "Accepted incoming connection")
+                            tracing::debug!(target: "dquic", "accepted incoming connection")
                         }
                         Err(..) => {
-                            tracing::debug!(target: "quic_listeners", "Listeners is shutdown, closing incoming connection")
+                            tracing::debug!(
+                                target: "dquic",
+                                "listeners are shut down, closing incoming connection"
+                            )
                         }
                     }
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "quic_listeners",
-                        "Failed to accept connection: {error}",
+                        target: "dquic",
+                        %error,
+                        "failed to accept connection",
                     );
                 }
             }

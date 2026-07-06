@@ -110,6 +110,7 @@ macro_rules! test_punch_matrix {
         fn $test_name() {
             run(async move {
                 let span = tracing::info_span!(
+                    target: "dquic",
                     stringify!($test_name),
                     client = stringify!($client),
                     server = stringify!($server)
@@ -180,7 +181,7 @@ async fn launch_stun_test_server(server_case: TestCase) -> Arc<QuicListeners> {
         .await
         .unwrap();
 
-    info!("Server listening on {server_addr}");
+    info!(target: "dquic", %server_addr, "server listening");
 
     tokio::spawn(serve_echo(listeners.clone()));
 
@@ -217,7 +218,7 @@ async fn launch_stun_test_client(client_case: TestCase) -> Arc<QuicClient> {
         .with_qlog(qlogger())
         .build();
 
-    info!("Client bound on {client_addr}");
+    info!(target: "dquic", %client_addr, "client bound");
 
     Arc::new(client)
 }
@@ -237,15 +238,15 @@ async fn test_punch_case(client_nat: NatType, server_nat: NatType) {
     let client_case = CLIENT_CASES[&client_nat];
     let server_case = SERVER_CASES[&server_nat];
 
-    info!("Testing punch case: client {client_nat:?} <-> server {server_nat:?}",);
+    info!(target: "dquic", ?client_nat, ?server_nat, "testing punch case");
 
     if client_nat == NatType::Dynamic || server_nat == NatType::Dynamic {
-        warn!("Skipping Dynamic NAT test case");
+        warn!(target: "dquic", "skipping Dynamic NAT test case");
         // TODO: Dynamic NAT 模拟有问题
         return;
     }
     if client_nat == NatType::Symmetric && server_nat == NatType::Symmetric {
-        warn!("Skipping Symmetric NAT to Symmetric NAT test case");
+        warn!(target: "dquic", "skipping Symmetric NAT to Symmetric NAT test case");
         // Symmetric NAT 互穿不通
         return;
     }
@@ -326,7 +327,7 @@ async fn launch_client(client_case: TestCase, server_ep: EndpointAddr) {
         .await
         .unwrap();
     let odcid = connection.origin_dcid().expect("connection failed");
-    tracing::info!(%odcid, "connected to server");
+    tracing::info!(target: "dquic", %odcid, "connected to server");
     let test_data = Arc::new(TEST_DATA.to_vec());
 
     // 循环检查直连路径，每秒检查一次
@@ -347,12 +348,12 @@ async fn launch_client(client_case: TestCase, server_ep: EndpointAddr) {
             .any(|pathway| matches!(pathway.local(), EndpointAddr::Direct { .. }));
 
         if has_direct {
-            tracing::info!("Direct path established: {:?}", paths);
+            tracing::info!(target: "dquic", ?paths, "direct path established");
             return;
         }
 
         // 没有直连路径，执行 echo 测试确保连接正常
-        tracing::debug!("no direct path yet, verifying connection with echo test");
+        tracing::debug!(target: "dquic", "no direct path yet, verifying connection with echo test");
         send_and_verify_echo(&connection, &test_data)
             .await
             .expect("echo test failed");

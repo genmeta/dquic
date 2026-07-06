@@ -11,6 +11,7 @@ use qbase::net::route::{Line, Link, Route};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument as _;
 
 use crate::{
     Interface, RebindedError,
@@ -129,25 +130,28 @@ impl RebindOnNetworkChangedComponent {
         let device = device.to_owned();
         let weak_iface = iface.bind_interface().downgrade();
         let mut event_receiver = self.devices.event_receiver();
-        *task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-            let try_rebind = async move || {
-                if let Ok(iface) = weak_iface.upgrade()
-                    && let Err(error) = is_alive(&iface.borrow()).await
-                    && error.is_recoverable()
-                    && !RebindedError::is_source_of(&error)
-                {
-                    iface.rebind().await;
-                }
-            };
+        *task = Some(AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                let try_rebind = async move || {
+                    if let Ok(iface) = weak_iface.upgrade()
+                        && let Err(error) = is_alive(&iface.borrow()).await
+                        && error.is_recoverable()
+                        && !RebindedError::is_source_of(&error)
+                    {
+                        iface.rebind().await;
+                    }
+                };
 
-            try_rebind().await;
-            while let Some(event) = event_receiver.recv().await {
-                if event.device() != device {
-                    continue;
-                }
                 try_rebind().await;
+                while let Some(event) = event_receiver.recv().await {
+                    if event.device() != device {
+                        continue;
+                    }
+                    try_rebind().await;
+                }
             }
-        })));
+            .in_current_span(),
+        )));
     }
 }
 

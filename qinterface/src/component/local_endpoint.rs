@@ -578,7 +578,7 @@ impl<I: RefIO + 'static> CurrentInterfaceLocalEndpoints<I> {
         let mut direct = match publishers.direct_endpoint_publisher() {
             Ok(direct) => Some(direct),
             Err(error) => {
-                tracing::debug!(target: "quic", ?error, "failed to claim direct endpoint publisher");
+                tracing::debug!(target: "dquic", ?error, "failed to claim direct endpoint publisher");
                 None
             }
         };
@@ -588,6 +588,7 @@ impl<I: RefIO + 'static> CurrentInterfaceLocalEndpoints<I> {
             }
             (_, Err(error)) => {
                 tracing::trace!(
+                    target: "dquic",
                     bind_uri = %bind_uri,
                     ?error,
                     "local interface has no direct endpoint"
@@ -595,6 +596,7 @@ impl<I: RefIO + 'static> CurrentInterfaceLocalEndpoints<I> {
             }
             (None, Ok(addr)) => {
                 tracing::trace!(
+                    target: "dquic",
                     bind_uri = %bind_uri,
                     %addr,
                     "direct endpoint publisher unavailable"

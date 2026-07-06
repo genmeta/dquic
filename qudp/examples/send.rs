@@ -42,7 +42,9 @@ async fn main() {
     let payloads = vec![IoSlice::new(&payload[..]); args.msg_count];
 
     match socket.send(&payloads, send_hdr).await {
-        Ok(n) => tracing::info!("Sent {} packets, bytes: {}", n, n * args.msg_size),
-        Err(e) => tracing::error!("Send failed: {}", e),
+        Ok(n) => {
+            tracing::info!(target: "qudp", packets = n, bytes = n * args.msg_size, "sent packets")
+        }
+        Err(e) => tracing::error!(target: "qudp", error = %e, "send failed"),
     }
 }

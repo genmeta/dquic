@@ -218,7 +218,7 @@ where
             VarInt::from_u64(final_size).expect("final size must not exceed 2^62"),
         );
         tracing::debug!(
-            target: "quic",
+            target: "dquic",
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );
@@ -435,7 +435,7 @@ where
             VarInt::from_u64(final_size).expect("final size must not exceed 2^62"),
         );
         tracing::debug!(
-            target: "quic",
+            target: "dquic",
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );
@@ -578,7 +578,7 @@ where
             VarInt::from_u64(final_size).expect("final size must not exceed 2^62"),
         );
         tracing::debug!(
-            target: "quic",
+            target: "dquic",
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );

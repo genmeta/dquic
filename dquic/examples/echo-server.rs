@@ -78,7 +78,7 @@ async fn main() {
         .init();
 
     if let Err(error) = run(options).await {
-        tracing::info!(?error);
+        tracing::info!(target: "dquic", ?error);
         std::process::exit(1);
     }
 }
@@ -107,8 +107,8 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
         .await?;
 
     tracing::info!(
-        "Listening on {}",
-        listeners
+        target: "dquic",
+        listen_addr = %listeners
             .get_server(options.certs.server_name.as_str())
             .unwrap()
             .bind_interfaces()
@@ -117,7 +117,8 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
             .unwrap()
             .1
             .borrow()
-            .bound_addr()?
+            .bound_addr()?,
+        "listening"
     );
 
     serve_echo(listeners).await?;
@@ -128,14 +129,14 @@ async fn serve_echo(listeners: Arc<QuicListeners>) -> Result<(), ListenersShutdo
     async fn handle_stream(mut reader: StreamReader, mut writer: StreamWriter) -> io::Result<()> {
         io::copy(&mut reader, &mut writer).await?;
         writer.shutdown().await?;
-        tracing::debug!("stream copy done");
+        tracing::debug!(target: "dquic", "stream copy done");
 
         io::Result::Ok(())
     }
 
     loop {
         let (connection, _server, pathway, ..) = listeners.accept().await?;
-        info!(source = ?pathway.remote(), "accepted new connection");
+        info!(target: "dquic", source = ?pathway.remote(), "accepted new connection");
         tokio::spawn(async move {
             while let Ok((_sid, (reader, writer))) = connection.accept_bi_stream().await {
                 tokio::spawn(handle_stream(reader, writer));

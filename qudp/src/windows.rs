@@ -50,7 +50,7 @@ impl Io for UdpSocket {
             }
         }
         if let Err(e) = socket.bind(&addr.into()) {
-            tracing::error!(target: "qudp", "Failed to bind socket: {}", e);
+            tracing::error!(target: "qudp", error = %e, "failed to bind socket");
             return Err(io::Error::new(io::ErrorKind::AddrInUse, e));
         }
         Ok(())
@@ -401,8 +401,8 @@ fn wsarecvmsg_ptr() -> &'static WinSock::LPFN_WSARECVMSG {
         if s == WinSock::INVALID_SOCKET {
             tracing::warn!(
                 target: "qudp",
-                "Failed to create socket for WSARecvMsg function pointer: {}",
-                io::Error::last_os_error()
+                error = %io::Error::last_os_error(),
+                "failed to create socket for WSARecvMsg function pointer"
             );
             return None;
         }
@@ -430,15 +430,15 @@ fn wsarecvmsg_ptr() -> &'static WinSock::LPFN_WSARECVMSG {
         if ret == -1 {
             tracing::warn!(
                 target: "qudp",
-                "Failed to get WSARecvMsg function pointer: {}",
-                io::Error::last_os_error()
+                error = %io::Error::last_os_error(),
+                "failed to get WSARecvMsg function pointer"
             );
         } else if len as usize != mem::size_of::<WinSock::LPFN_WSARECVMSG>() {
             tracing::warn!(
                 target: "qudp",
-                "WSARecvMsg function pointer size mismatch: expected {}, got {}",
-                mem::size_of::<WinSock::LPFN_WSARECVMSG>(),
-                len
+                expected = mem::size_of::<WinSock::LPFN_WSARECVMSG>(),
+                len,
+                "WSARecvMsg function pointer size mismatch"
             );
             wsa_recvmsg_ptr = None;
         }

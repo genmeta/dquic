@@ -19,6 +19,7 @@ use tokio::{
     time::MissedTickBehavior,
 };
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument as _;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +354,7 @@ impl Devices {
                     state.check_network_changes();
                 }
             }
+            .in_current_span()
         }));
 
         let watcher = netwatcher::watch_interfaces_with_callback({

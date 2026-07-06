@@ -99,7 +99,7 @@ fn main() {
         .init();
 
     // 测试日志是否工作
-    tracing::info!("tracing initialized successfully");
+    tracing::info!(target: "dquic", "tracing initialized successfully");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -109,13 +109,13 @@ fn main() {
         .expect("failed to build tokio runtime");
 
     if let Err(error) = rt.block_on(run(options)) {
-        tracing::info!(?error);
+        tracing::info!(target: "dquic", ?error);
         std::process::exit(1);
     }
 }
 
 async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("Serving {}", options.root.display());
+    tracing::info!(target: "dquic", root = %options.root.display(), "serving files");
     let root = Arc::new(options.root);
     if !root.is_dir() {
         return Err(format!("{}: is not a readable directory", root.display()).into());
@@ -148,8 +148,8 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
         )
         .await?;
     tracing::info!(
-        "Listening on {}",
-        listeners
+        target: "dquic",
+        listen_addr = %listeners
             .get_server(server_name.as_str())
             .unwrap()
             .bind_interfaces()
@@ -158,7 +158,8 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
             .unwrap()
             .1
             .borrow()
-            .bound_addr()?
+            .bound_addr()?,
+        "listening"
     );
 
     // handle incoming connections and requests
@@ -166,11 +167,11 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
         let h3_conn =
             match h3::server::Connection::new(h3_shim::QuicConnection::new(new_conn)).await {
                 Ok(h3_conn) => {
-                    tracing::info!("accept a new quic connection");
+                    tracing::info!(target: "dquic", "accepted new QUIC connection");
                     h3_conn
                 }
                 Err(error) => {
-                    tracing::error!("failed to establish h3 connection: {}", error);
+                    tracing::error!(target: "dquic", %error, "failed to establish h3 connection");
                     continue;
                 }
             };
@@ -198,7 +199,7 @@ async fn handle_connection<T>(
                 };
                 tokio::spawn(async move {
                     if let Err(e) = handle_request.await {
-                        tracing::error!("handling request failed: {}", e);
+                        tracing::error!(target: "dquic", error = %e, "handling request failed");
                     }
                 });
             }
@@ -224,7 +225,7 @@ where
             match File::open(&to_serve).await {
                 Ok(file) => (StatusCode::OK, Some(file)),
                 Err(e) => {
-                    tracing::error!("failed to open: \"{}\": {}", to_serve.to_string_lossy(), e);
+                    tracing::error!(target: "dquic", path = %to_serve.to_string_lossy(), error = %e, "failed to open file");
                     (StatusCode::NOT_FOUND, None)
                 }
             }

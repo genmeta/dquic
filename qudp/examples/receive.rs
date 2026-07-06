@@ -23,15 +23,16 @@ async fn main() {
         match receiver.recv().await {
             Ok(n) => {
                 tracing::info!(
-                    "Received {} packets, dst {}, src {} len {}",
-                    n,
-                    receiver.lines[0].dst,
-                    receiver.lines[0].src,
-                    receiver.lines[0].seg_size
+                    target: "qudp",
+                    packets = n,
+                    dst = %receiver.lines[0].dst,
+                    src = %receiver.lines[0].src,
+                    len = receiver.lines[0].seg_size,
+                    "received packets"
                 );
             }
             Err(e) => {
-                tracing::error!("Receive failed: {}", e);
+                tracing::error!(target: "qudp", error = %e, "receive failed");
             }
         }
     }

@@ -16,7 +16,7 @@ impl IoExpoter {
         O: AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        tokio::spawn(tracing::Instrument::in_current_span(async move {
             let task = async {
                 const RS: u8 = 0x1E;
 
@@ -42,10 +42,10 @@ impl IoExpoter {
                     target: "qlog",
                     ?error,
                     ?qlog_file_seq,
-                    "Failed to write qlog, subsequent qlogs in this exporter will be ignored."
+                    "failed to write qlog, subsequent qlogs in this exporter will be ignored"
                 );
             }
-        });
+        }));
         Self(tx)
     }
 }

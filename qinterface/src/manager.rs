@@ -125,6 +125,7 @@ impl InterfaceManager {
                         }
 
                         tracing::debug!(
+                            target: "interface",
                             bind_uri = %bind_uri,
                             "replacing closed interface binding during bind"
                         );
@@ -230,6 +231,7 @@ impl Binding {
     fn new(io: Box<dyn IO>, id: UniqueId) -> Self {
         let bind_uri = io.bind_uri();
         let span = tracing::debug_span!(
+            target: "interface",
             parent: None,
             "interface",
             %bind_uri,
@@ -325,6 +327,7 @@ impl BindInterface {
             ready!(context.factory.poll_rebind(cx, &mut binding.io));
             binding.id = context.ifaces.bind_id_generator.generate();
             binding.span = tracing::debug_span!(
+                target: "interface",
                 parent: None,
                 "interface",
                 bind_uri = %binding.io.bind_uri(),

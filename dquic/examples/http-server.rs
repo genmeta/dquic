@@ -104,7 +104,7 @@ fn main() {
         .expect("failed to build tokio runtime");
 
     if let Err(error) = rt.block_on(run(options)) {
-        tracing::info!(?error);
+        tracing::info!(target: "dquic", ?error);
         std::process::exit(1);
     }
 }
@@ -132,8 +132,8 @@ async fn run(options: Options) -> Result<(), Error> {
         .await?;
 
     tracing::info!(
-        "Listening on {}",
-        listeners
+        target: "dquic",
+        listen_addr = %listeners
             .get_server(options.certs.server_name.as_str())
             .unwrap()
             .bind_interfaces()
@@ -142,7 +142,8 @@ async fn run(options: Options) -> Result<(), Error> {
             .unwrap()
             .1
             .borrow()
-            .bound_addr()?
+            .bound_addr()?,
+        "listening"
     );
 
     loop {
@@ -155,13 +156,13 @@ async fn serve_files(connection: Arc<Connection>) -> Result<(), Error> {
     async fn serve_file(mut reader: StreamReader, mut writer: StreamWriter) -> Result<(), Error> {
         let mut request = String::new();
         reader.read_to_string(&mut request).await?;
-        tracing::info!("received request: {request}");
+        tracing::info!(target: "dquic", %request, "received request");
 
         // HTTP/0.9 is very simple - just a GET request with a path
         let serve = async {
             match request.trim().strip_prefix("GET /") {
                 Some(path) => {
-                    tracing::debug!(?path, "Received HTTP/0.9 request");
+                    tracing::debug!(target: "dquic", ?path, "received HTTP/0.9 request");
                     let mut file = fs::File::open(PathBuf::from_iter(["./", path])).await?;
                     io::copy(&mut file, &mut writer).await.map(|_| ())
                 }
@@ -172,7 +173,7 @@ async fn serve_files(connection: Arc<Connection>) -> Result<(), Error> {
         };
 
         if let Err(error) = serve.await {
-            tracing::warn!("failed to serve request: {}", error);
+            tracing::warn!(target: "dquic", %error, "failed to serve request");
         }
 
         _ = writer.shutdown().await;

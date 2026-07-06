@@ -180,6 +180,8 @@ mod tests {
         }
     }
 
+    use tracing::Instrument as _;
+
     use super::*;
 
     #[tokio::test]
@@ -196,6 +198,7 @@ mod tests {
                     wake_times.fetch_add(1, Release);
                 }
             }
+            .in_current_span()
         });
 
         waker.wake_by(Signals::FLOW_CONTROL);
@@ -225,6 +228,7 @@ mod tests {
                     wake_times.fetch_add(1, Release);
                 }
             }
+            .in_current_span()
         });
 
         let wait_for_all_cond_state = !Signals::all().bits();
@@ -261,6 +265,7 @@ mod tests {
                     wake_times.fetch_add(1, Release);
                 }
             }
+            .in_current_span()
         });
 
         let wait_for_quota_state = !Signals::CONGESTION.bits();
@@ -293,6 +298,7 @@ mod tests {
                 wait_for(Signals::CONGESTION | Signals::TRANSPORT).await;
                 wait_for(Signals::TRANSPORT).await;
             }
+            .in_current_span()
         });
 
         let wait_for_all_cond_state = !Signals::all().bits();
@@ -343,6 +349,7 @@ mod tests {
                     waker.wait_for(Signals::TRANSPORT).await;
                 }
             }
+            .in_current_span()
         });
 
         tokio::task::yield_now().await;
@@ -374,6 +381,7 @@ mod tests {
                     waker.wait_for(Signals::CONGESTION).await;
                 }
             }
+            .in_current_span()
         });
 
         tokio::task::yield_now().await;

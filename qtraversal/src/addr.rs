@@ -84,7 +84,7 @@ impl AddressBook {
             .values()
             .any(|(_local, frame)| *frame.deref() == addr)
         {
-            tracing::debug!(target: "quic", %addr, "Duplicate local address");
+            tracing::debug!(target: "dquic", %addr, "duplicate local address");
             return Err(io::Error::other("Duplicate local address"));
         }
         let frame = AddAddressFrame::new(self.largest_seq_num, addr, tire, nat_type);
@@ -182,7 +182,7 @@ impl AddressBook {
             .find(|(_, (_local, frame))| *frame.deref() == addr)
             .map(|(key, _)| *key)
         else {
-            tracing::debug!(target: "quic", %addr, "No matching local address to remove");
+            tracing::debug!(target: "dquic", %addr, "no matching local address to remove");
             return Err(io::Error::other("No matching local address"));
         };
         self.local.remove(&seq_num).map(|(_local, _frame)| seq_num);
@@ -198,7 +198,7 @@ impl AddressBook {
     pub(crate) fn add_remote_address(&mut self, remote: AddAddressFrame) -> io::Result<()> {
         match self.remote.entry(remote.seq_num()) {
             Entry::Occupied(_) => {
-                tracing::debug!(target: "quic", remote_seq_num = remote.seq_num(), "Duplicate remote address");
+                tracing::debug!(target: "dquic", remote_seq_num = remote.seq_num(), "duplicate remote address");
                 return Err(io::Error::other("Duplicate remote address"));
             }
             Entry::Vacant(entry) => {
@@ -226,7 +226,7 @@ impl AddressBook {
             .collect();
 
         if addrs.is_empty() {
-            tracing::debug!(target: "quic", ?remote, "No matching local address for remote address");
+            tracing::debug!(target: "dquic", ?remote, "no matching local address for remote address");
             return Err(io::Error::other("No matching local address"));
         }
 

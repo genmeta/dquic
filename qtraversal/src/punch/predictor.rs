@@ -16,6 +16,7 @@ use qinterface::{
     io::{IO, ProductIO},
     manager::InterfaceManager,
 };
+use tracing::Instrument as _;
 
 use crate::{
     punch::{
@@ -153,7 +154,7 @@ impl PortPredictor {
             bind_uri = %bind_uri,
             dst = %dst,
             device = %device,
-            "Created port predictor"
+            "created port predictor"
         );
         Ok(Self {
             ifaces,
@@ -452,9 +453,12 @@ impl Drop for PortPredictor {
             .map(|bind_uri| self.ifaces.unbind(bind_uri))
             .collect();
         if !futures.is_empty() {
-            tokio::spawn(async move {
-                futures::future::join_all(futures).await;
-            });
+            tokio::spawn(
+                async move {
+                    futures::future::join_all(futures).await;
+                }
+                .in_current_span(),
+            );
         }
     }
 }

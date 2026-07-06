@@ -297,7 +297,7 @@ async fn send_and_verify_echo_with_sign_verify(
     let local = connection.local_authority().await.unwrap().unwrap();
     let remote = connection.remote_authority().await.unwrap().unwrap();
     let (_sid, (mut reader, mut writer)) = connection.open_bi_stream().await?.unwrap();
-    tracing::debug!("stream opened");
+    tracing::debug!(target: "dquic", "stream opened");
 
     let write = async {
         let data = data.to_vec();
@@ -305,7 +305,7 @@ async fn send_and_verify_echo_with_sign_verify(
         let message = postcard::to_stdvec(&Message { data, sign }).unwrap();
         writer.write_all(&message).await?;
         writer.shutdown().await?;
-        tracing::info!("write done");
+        tracing::info!(target: "dquic", "write done");
         Result::<(), BoxError>::Ok(())
     };
     let read = async {
@@ -316,7 +316,7 @@ async fn send_and_verify_echo_with_sign_verify(
             .verify(SIGNATURE_SCHEME, &message.data, &message.sign)
             .unwrap();
         assert_eq!(message.data, data);
-        tracing::info!("read done");
+        tracing::info!(target: "dquic", "read done");
         Result::<(), BoxError>::Ok(())
     };
 
@@ -333,13 +333,13 @@ async fn echo_stream_with_sign_verify(
     reader.read_to_end(&mut message).await.unwrap();
     let Message { data, sign } = postcard::from_bytes(&message).unwrap();
     remote.verify(SIGNATURE_SCHEME, &data, &sign).unwrap();
-    tracing::debug!("message received and verified");
+    tracing::debug!(target: "dquic", "message received and verified");
 
     let sign = local.sign(SIGNATURE_SCHEME, &data).unwrap();
     let message = postcard::to_stdvec(&Message { data, sign }).unwrap();
     writer.write_all(&message).await.unwrap();
     writer.shutdown().await.unwrap();
-    tracing::debug!("signed echo sent");
+    tracing::debug!(target: "dquic", "signed echo sent");
 }
 
 pub async fn serve_echo_with_sign_verify(listeners: Arc<QuicListeners>) {
@@ -347,7 +347,7 @@ pub async fn serve_echo_with_sign_verify(listeners: Arc<QuicListeners>) {
         assert_eq!(server, "localhost");
         let local = connection.local_authority().await.unwrap().unwrap();
         let remote = connection.remote_authority().await.unwrap().unwrap();
-        tracing::info!(source = ?pathway.remote(),"accepted new connection");
+        tracing::info!(target: "dquic", source = ?pathway.remote(), "accepted new connection");
         tokio::spawn(async move {
             while let Ok((_sid, (reader, writer))) = connection.accept_bi_stream().await {
                 tokio::spawn(echo_stream_with_sign_verify(

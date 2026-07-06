@@ -84,7 +84,7 @@ async fn main() {
         .init();
 
     if let Err(error) = run(options).await {
-        tracing::error!(?error);
+        tracing::error!(target: "dquic", ?error);
         std::process::exit(1);
     };
 }
@@ -218,7 +218,7 @@ async fn send_and_verify_echo(
     let connection = client.connect(auth.host()).await?;
 
     let (sid, (reader, writer)) = connection.open_bi_stream().await?.unwrap();
-    tracing::debug!(%sid, "opened stream");
+    tracing::debug!(target: "dquic", %sid, "opened stream");
 
     let mut reader = rx_pb.wrap_async_read(reader);
     let mut writer = tx_pb.wrap_async_write(writer);

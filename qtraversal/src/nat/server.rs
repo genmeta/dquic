@@ -8,7 +8,7 @@ use std::{
 
 use qinterface::{Interface, WeakInterface, component::Component, io::RefIO};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{info, trace};
+use tracing::{Instrument as _, info, trace};
 
 use super::{
     msg::{Attr, Request, Response},
@@ -61,9 +61,10 @@ impl<I: RefIO + 'static> StunServer<I> {
     }
 
     pub fn spawn(self) -> AbortOnDropHandle<io::Result<()>> {
-        AbortOnDropHandle::new(tokio::spawn(async move {
-            serve_loop(self.ref_iface, self.stun_router, self.config).await
-        }))
+        AbortOnDropHandle::new(tokio::spawn(
+            async move { serve_loop(self.ref_iface, self.stun_router, self.config).await }
+                .in_current_span(),
+        ))
     }
 }
 
@@ -72,7 +73,7 @@ async fn serve_loop<I: RefIO>(
     stun_router: StunRouter,
     config: StunServerConfig,
 ) -> io::Result<()> {
-    info!(target: "stun", "Server started");
+    info!(target: "stun", "server started");
     let local_addr = ref_iface.iface().local_addr()?;
 
     while let Some((request, txid, src)) = stun_router.receive_request().await {
@@ -126,7 +127,7 @@ async fn serve_loop<I: RefIO>(
         }
     }
 
-    trace!(target: "stun", "Request handler finished - no more requests");
+    trace!(target: "stun", "request handler finished with no more requests");
     Ok(())
 }
 

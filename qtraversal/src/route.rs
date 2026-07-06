@@ -28,6 +28,7 @@ use qinterface::{
 };
 use smallvec::SmallVec;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument as _;
 
 pub type ArcRecvQueue = ArcAsyncDeque<(BytesMut, PathWay, Link)>;
 
@@ -181,9 +182,10 @@ impl ReceiveAndDeliverPacketComponent {
         forwarder: Option<Forwarder<I>>,
         iface_ref: I,
     ) -> AbortOnDropHandle<io::Result<()>> {
-        AbortOnDropHandle::new(tokio::spawn(async move {
-            let iface = iface_ref.iface();
-            let bind_uri = iface.bind_uri();
+        AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                let iface = iface_ref.iface();
+                let bind_uri = iface.bind_uri();
 
             let deliver_quic_packet = async |pkt: BytesMut, route: Route| {
                 let Some(quic_router) = quic_router.as_ref() else {
@@ -241,24 +243,26 @@ impl ReceiveAndDeliverPacketComponent {
                 };
 
             let (mut bufs, mut hdrs) = (vec![], vec![]);
-            loop {
-                use crate::packet::{Header, be_header};
-                for (pkt, hdr) in iface.recvmmsg(&mut bufs, &mut hdrs).await? {
-                    match be_header(&pkt) {
-                        // quic
-                        Err(_) => deliver_quic_packet(pkt, hdr).await,
-                        // stun
-                        Ok((_remain, Header::Stun(_stun_header))) => {
-                            deliver_stun_packet(pkt, hdr).await
-                        }
-                        // forward
-                        Ok((_remain, Header::Forward(forward_header))) => {
-                            deliver_forward_packet(pkt, hdr, forward_header).await?
+                loop {
+                    use crate::packet::{Header, be_header};
+                    for (pkt, hdr) in iface.recvmmsg(&mut bufs, &mut hdrs).await? {
+                        match be_header(&pkt) {
+                            // quic
+                            Err(_) => deliver_quic_packet(pkt, hdr).await,
+                            // stun
+                            Ok((_remain, Header::Stun(_stun_header))) => {
+                                deliver_stun_packet(pkt, hdr).await
+                            }
+                            // forward
+                            Ok((_remain, Header::Forward(forward_header))) => {
+                                deliver_forward_packet(pkt, hdr, forward_header).await?
+                            }
                         }
                     }
                 }
             }
-        }))
+            .in_current_span(),
+        ))
     }
 }
 

@@ -194,6 +194,7 @@ async fn parse_normal_packet(
     let remote_cids = &components.cid_registry.remote;
 
     tracing::trace!(
+        target: "dquic",
         %bind_uri,
         %pathway,
         %link,

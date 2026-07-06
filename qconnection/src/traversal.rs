@@ -68,12 +68,12 @@ impl Components {
 
     // 添加对端直通地址，可以直接新建 path
     pub fn add_peer_endpoint(&self, addr: EndpointAddr, source: qresolve::Source) {
-        tracing::trace!(target: "quic", %addr, ?source, "add peer endpoint");
+        tracing::trace!(target: "dquic", %addr, ?source, "add peer endpoint");
         let source_for_log = source.clone();
         match self.puncher.add_peer_endpoint(addr, source) {
             Ok(ways) => {
                 tracing::trace!(
-                    target: "quic",
+                    target: "dquic",
                     %addr,
                     source = ?source_for_log,
                     path_count = ways.len(),
@@ -86,7 +86,7 @@ impl Components {
                 });
             }
             Err(error) => {
-                tracing::warn!(target: "quic", ?error, "add peer endpoint failed");
+                tracing::warn!(target: "dquic", ?error, "add peer endpoint failed");
             }
         }
     }

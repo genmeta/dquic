@@ -11,13 +11,13 @@ use crate::common::{BoxError, SERVER_CERT, SERVER_KEY, qlogger};
 pub async fn echo_stream(mut reader: StreamReader, mut writer: StreamWriter) {
     io::copy(&mut reader, &mut writer).await.unwrap();
     _ = writer.shutdown().await;
-    tracing::debug!("stream copy done");
+    tracing::debug!(target: "dquic", "stream copy done");
 }
 
 pub async fn serve_echo(listeners: Arc<QuicListeners>) {
     while let Ok((connection, server, pathway, _link)) = listeners.accept().await {
         assert_eq!(server, "localhost");
-        tracing::info!(source = ?pathway.remote(), "accepted new connection");
+        tracing::info!(target: "dquic", source = ?pathway.remote(), "accepted new connection");
         tokio::spawn(async move {
             while let Ok((_sid, (reader, writer))) = connection.accept_bi_stream().await {
                 tokio::spawn(echo_stream(reader, writer));
@@ -28,20 +28,20 @@ pub async fn serve_echo(listeners: Arc<QuicListeners>) {
 
 pub async fn send_and_verify_echo(connection: &Connection, data: &[u8]) -> Result<(), BoxError> {
     let (_sid, (mut reader, mut writer)) = connection.open_bi_stream().await?.unwrap();
-    tracing::debug!("stream opened");
+    tracing::debug!(target: "dquic", "stream opened");
 
     let mut back = Vec::new();
     tokio::try_join!(
         async {
             writer.write_all(data).await?;
             writer.shutdown().await?;
-            tracing::info!("write done");
+            tracing::info!(target: "dquic", "write done");
             Result::<(), BoxError>::Ok(())
         },
         async {
             reader.read_to_end(&mut back).await?;
             assert_eq!(back, data);
-            tracing::info!("read done");
+            tracing::info!(target: "dquic", "read done");
             Result::<(), BoxError>::Ok(())
         }
     )

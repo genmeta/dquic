@@ -188,7 +188,7 @@ impl Iterator for PacketReader {
         match io::be_packet(&mut self.raw_bytes, self.dcid_len) {
             Ok(packet) => Some(Ok(packet)),
             Err(error) => {
-                tracing::debug!(target: "quic", ?error, "dropped unparsed packet");
+                tracing::debug!(target: "dquic", ?error, "dropped unparsed packet");
                 self.raw_bytes.clear(); // no longer parsing
                 Some(Err(error))
             }

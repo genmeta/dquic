@@ -663,6 +663,7 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
                     tokio::time::sleep_until(deadline).await;
                 }
             }
+            .in_current_span()
         }));
 
         Self {
@@ -910,7 +911,7 @@ pub static VISUALIZE_NAT_DETECTION: AtomicBool = AtomicBool::new(false);
 macro_rules! visualize_nat_detection {
     ($($tt:tt)*) => {{
         if VISUALIZE_NAT_DETECTION.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!($($tt)*);
+            tracing::info!(target: "stun", $($tt)*);
         } else {
             tracing::trace!(target: "stun", $($tt)*);
         }
@@ -951,9 +952,9 @@ async fn detect_nat_type<I: RefIO>(
     .await?;
 
     let Some(response) = response else {
-        visualize_nat_detection!("Result: No response after {retry_times} attempts");
+        visualize_nat_detection!("result: no response after {retry_times} attempts");
         visualize_nat_detection!(
-            "Conclusion: The network feature is {:?}, NAT Type is {:?}\n",
+            "conclusion: The network feature is {:?}, NAT Type is {:?}\n",
             NetFeature::Blocked,
             NatType::Blocked
         );
@@ -974,14 +975,14 @@ async fn detect_nat_type<I: RefIO>(
         StunResponseAttribute::ChangedAddress,
         NatDetectionStep::Access,
     )?;
-    visualize_nat_detection!("Result: Received from {stun_agent1}, external addr: {mapped_addr1}");
+    visualize_nat_detection!("result: received from {stun_agent1}, external addr: {mapped_addr1}");
     if mapped_addr1 == local_addr {
         // Public IP
         visualize_nat_detection!(
-            "Conclusion: Address {local_addr} has public IP, Proceeding to filtering behavior test.\n"
+            "conclusion: Address {local_addr} has public IP, Proceeding to filtering behavior test.\n"
         );
         visualize_nat_detection!(
-            "Filtering Test: probing server {stun_agent2}. Request server to respond from a changed IP:port",
+            "filtering test: probing server {stun_agent2}. Request server to respond from a changed IP:port",
         );
         net_features |= NetFeature::Public;
         let request = Request::change_ip_and_port();
@@ -1011,14 +1012,14 @@ async fn detect_nat_type<I: RefIO>(
             visualize_nat_detection!(
                 "Result: received from {source_addr}, external addr: {mapped_addr2}",
             );
-            visualize_nat_detection!("Conclusion: Destination IP independent filtering\n");
+            visualize_nat_detection!("conclusion: Destination IP independent filtering\n");
         } else {
             net_features |= NetFeature::Restricted;
-            visualize_nat_detection!("Result: No response after {retry_times} attempts");
-            visualize_nat_detection!("Conclusion: Filters packets based on destination IP\n");
+            visualize_nat_detection!("result: no response after {retry_times} attempts");
+            visualize_nat_detection!("conclusion: Filters packets based on destination IP\n");
         }
         visualize_nat_detection!(
-            "Filtering Test: probing server {stun_agent2}. Request server to respond from a changed port",
+            "filtering test: probing server {stun_agent2}. Request server to respond from a changed port",
         );
         let request = Request::change_port();
         let response = nat_detection_request(
@@ -1047,11 +1048,11 @@ async fn detect_nat_type<I: RefIO>(
             visualize_nat_detection!(
                 "Result: received from {source_addr}, external addr: {mapped_addr2}",
             );
-            visualize_nat_detection!("Conclusion: Destination port independent filtering\n");
+            visualize_nat_detection!("conclusion: Destination port independent filtering\n");
         } else {
             net_features |= NetFeature::PortRestricted;
-            visualize_nat_detection!("Result: No response after {retry_times} attempts");
-            visualize_nat_detection!("Conclusion: Filters packets based on destination port\n");
+            visualize_nat_detection!("result: no response after {retry_times} attempts");
+            visualize_nat_detection!("conclusion: Filters packets based on destination port\n");
         }
         let nat_type = NatType::from(net_features);
         visualize_nat_detection!(
@@ -1062,7 +1063,7 @@ async fn detect_nat_type<I: RefIO>(
         Ok(nat_type)
     } else {
         // Private IP
-        visualize_nat_detection!("Conclusion: Address {local_addr} has private IP.\n");
+        visualize_nat_detection!("conclusion: Address {local_addr} has private IP.\n");
         visualize_nat_detection!("Mapping Test1: probing server {stun_agent2}");
         let request = Request::default();
         let response = required_nat_detection_request(
@@ -1091,14 +1092,14 @@ async fn detect_nat_type<I: RefIO>(
         if mapped_addr1 != mapped_addr2 {
             net_features |= NetFeature::Symmetric;
             visualize_nat_detection!(
-                "Result: Received from {stun_agent2}, external addr: {mapped_addr2}"
+                "result: received from {stun_agent2}, external addr: {mapped_addr2}"
             );
             visualize_nat_detection!(
-                "Conclusion: The mapped address is different and destination-dependent.\n"
+                "conclusion: The mapped address is different and destination-dependent.\n"
             );
 
             // 判断规律
-            visualize_nat_detection!("Mapping Test2: probing server {stun_agent3}");
+            visualize_nat_detection!("mapping test2: probing server {stun_agent3}");
             let request = Request::default();
             let response = nat_detection_request(
                 ref_iface.clone(),
@@ -1112,9 +1113,9 @@ async fn detect_nat_type<I: RefIO>(
             .await?;
 
             let Some(response) = response else {
-                visualize_nat_detection!("Result: No response after {retry_times} attempts");
+                visualize_nat_detection!("result: no response after {retry_times} attempts");
                 visualize_nat_detection!(
-                    "Conclusion: Unable to determine port mapping behavior due to lack of response from third server.\n"
+                    "conclusion: Unable to determine port mapping behavior due to lack of response from third server.\n"
                 );
                 return Ok(NatType::from(net_features));
             };
@@ -1128,14 +1129,14 @@ async fn detect_nat_type<I: RefIO>(
             let step1 = mapped_addr2.port() as i32 - mapped_addr1.port() as i32;
             let step2 = mapped_addr3.port() as i32 - mapped_addr2.port() as i32;
             visualize_nat_detection!(
-                "Result: Received from {stun_agent3}, external addr: {mapped_addr3}"
+                "result: received from {stun_agent3}, external addr: {mapped_addr3}"
             );
             if step1 == step2 {
                 visualize_nat_detection!(
-                    "Conclusion: The port changes regularly with step {step1}\n"
+                    "conclusion: The port changes regularly with step {step1}\n"
                 );
             } else {
-                visualize_nat_detection!("Conclusion: The Ports change randomly.\n");
+                visualize_nat_detection!("conclusion: The Ports change randomly.\n");
             }
             Ok(NatType::from(net_features))
         } else {
@@ -1149,7 +1150,7 @@ async fn detect_nat_type<I: RefIO>(
             // server5: ip2:port1
             // server6: ip3:port2
             visualize_nat_detection!(
-                "Filtering Test: probing server {stun_agent2}. Request server to respond from a changed IP and port",
+                "filtering test: probing server {stun_agent2}. Request server to respond from a changed IP and port",
             );
             let request = Request::change_ip_and_port();
             // 可能会不响应，超时太久会导致探测很久
@@ -1179,16 +1180,16 @@ async fn detect_nat_type<I: RefIO>(
                 visualize_nat_detection!(
                     "Result: received from {source_addr}, external addr: {mapped_addr2}",
                 );
-                visualize_nat_detection!("Conclusion: Destination IP independent filtering\n");
+                visualize_nat_detection!("conclusion: Destination IP independent filtering\n");
             } else {
                 net_features |= NetFeature::Restricted;
                 visualize_nat_detection!(
-                    "Result: No response after {RESTRICTED_RETRY_TIMES} attempts"
+                    "result: no response after {RESTRICTED_RETRY_TIMES} attempts"
                 );
-                visualize_nat_detection!("Conclusion: Filters packets based on destination IP\n");
+                visualize_nat_detection!("conclusion: Filters packets based on destination IP\n");
             }
             visualize_nat_detection!(
-                "Filtering Test: probing server {stun_agent2}. Request server to respond from a changed port",
+                "filtering test: probing server {stun_agent2}. Request server to respond from a changed port",
             );
             // Restricted test
             // server2 换 port 即 server5 回，可能不响应
@@ -1220,13 +1221,13 @@ async fn detect_nat_type<I: RefIO>(
                 visualize_nat_detection!(
                     "Result: received from {source_addr}, external addr: {mapped_addr2}",
                 );
-                visualize_nat_detection!("Conclusion: Destination port independent filtering\n");
+                visualize_nat_detection!("conclusion: Destination port independent filtering\n");
             } else {
                 net_features |= NetFeature::PortRestricted;
                 visualize_nat_detection!(
-                    "Result: No response after {RESTRICTED_RETRY_TIMES} attempts"
+                    "result: no response after {RESTRICTED_RETRY_TIMES} attempts"
                 );
-                visualize_nat_detection!("Conclusion: Filters packets based on destination port\n");
+                visualize_nat_detection!("conclusion: Filters packets based on destination port\n");
             }
             // dynamic test， 请求 server3
             visualize_nat_detection!("Dynamic Test: probing server {stun_agent3}",);
@@ -1262,19 +1263,19 @@ async fn detect_nat_type<I: RefIO>(
                 if mapped_addr1 != mapped_addr3 {
                     net_features |= NetFeature::Dynamic;
                     visualize_nat_detection!(
-                        "Conclusion: Mapping inconsistency indicates Address-Dependent Mapping, a Dynamic NAT type\n"
+                        "conclusion: Mapping inconsistency indicates Address-Dependent Mapping, a Dynamic NAT type\n"
                     );
                 } else {
                     visualize_nat_detection!(
-                        "Conclusion: The mapping address is consistent, not Dynamic\n"
+                        "conclusion: The mapping address is consistent, not Dynamic\n"
                     );
                 }
             } else {
                 // 不回包也视为动态型
                 net_features |= NetFeature::Dynamic;
-                visualize_nat_detection!("Result: No response after 3 attempts");
+                visualize_nat_detection!("result: no response after 3 attempts");
                 visualize_nat_detection!(
-                    "Conclusion: Absence of server response may indicates Dynamic NAT behavior\n"
+                    "conclusion: Absence of server response may indicates Dynamic NAT behavior\n"
                 );
             }
             let nat_type = NatType::from(net_features);

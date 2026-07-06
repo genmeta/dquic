@@ -82,7 +82,7 @@ fn shutdown() -> Result<(), BoxError> {
         async fn serve_only_one_stream(listeners: Arc<QuicListeners>) {
             while let Ok((connection, server, pathway, _link)) = listeners.accept().await {
                 assert_eq!(server, "localhost");
-                tracing::info!(source = ?pathway.remote(), "accepted new connection");
+                tracing::info!(target: "dquic", source = ?pathway.remote(), "accepted new connection");
                 tokio::spawn(async move {
                     let (_sid, (reader, writer)) = connection.accept_bi_stream().await?;
                     echo_stream(reader, writer).await;
@@ -250,7 +250,7 @@ fn double_connections() -> Result<(), BoxError> {
                 .await?;
             connections.spawn(
                 async move { send_and_verify_echo(&connection, TEST_DATA).await }
-                    .instrument(tracing::info_span!("stream", conn_idx)),
+                    .instrument(tracing::info_span!(target: "dquic", "stream", conn_idx)),
             );
         }
 
@@ -298,18 +298,19 @@ fn parallel_stream() -> Result<(), BoxError> {
         let mut streams = JoinSet::new();
 
         for conn_idx in 0..PARALLEL_ECHO_CONNS {
-            tracing::info!(conn_idx, "Starting connection");
+            tracing::info!(target: "dquic", conn_idx, "starting connection");
             let connection = Arc::new(
                 client
                     .connected_to_with_source("localhost", [(Source::System, server_addr.into())])
                     .await?,
             );
-            tracing::info!(conn_idx, "Connected");
+            tracing::info!(target: "dquic", conn_idx, "connected");
             for stream_idx in 0..PARALLEL_ECHO_STREAMS {
                 let connection = connection.clone();
                 streams.spawn(
-                    async move { send_and_verify_echo(&connection, TEST_DATA).await }
-                        .instrument(tracing::info_span!("stream", conn_idx, stream_idx)),
+                    async move { send_and_verify_echo(&connection, TEST_DATA).await }.instrument(
+                        tracing::info_span!(target: "dquic", "stream", conn_idx, stream_idx),
+                    ),
                 );
             }
         }
@@ -364,7 +365,7 @@ fn parallel_big_stream() -> Result<(), BoxError> {
             let test_data = test_data.clone();
             big_streams.spawn(
                 async move { send_and_verify_echo(&connection, &test_data).await }
-                    .instrument(tracing::info_span!("stream", conn_idx)),
+                    .instrument(tracing::info_span!(target: "dquic", "stream", conn_idx)),
             );
         }
 
@@ -438,8 +439,9 @@ fn limited_streams() -> Result<(), BoxError> {
             for stream_idx in 0..PARALLEL_ECHO_STREAMS / 2 {
                 let connection = connection.clone();
                 streams.spawn(
-                    async move { send_and_verify_echo(&connection, TEST_DATA).await }
-                        .instrument(tracing::info_span!("stream", conn_idx, stream_idx)),
+                    async move { send_and_verify_echo(&connection, TEST_DATA).await }.instrument(
+                        tracing::info_span!(target: "dquic", "stream", conn_idx, stream_idx),
+                    ),
                 );
             }
         }

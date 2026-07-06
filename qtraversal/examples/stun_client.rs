@@ -44,14 +44,14 @@ async fn main() -> Result<()> {
         .outer_addr()
         .await
         .expect("failed to get outer addr");
-    info!("outer addr: {} agent addr {}", outer_addr, stun_server);
+    info!(target: "stun", %outer_addr, agent_addr = %stun_server, "detected outer address");
     // Ok(())
     let nat_type = stun_client.nat_type().await;
     let local_endpoints = std::sync::Arc::new(LocalEndpoints::new());
     let mut subscriber = local_endpoints.subscribe();
     while let Some(event) = subscriber.recv().await {
-        info!("local endpoint event: {:?}", event);
-        info!("nat type: {:?}", nat_type);
+        info!(target: "stun", ?event, "local endpoint event");
+        info!(target: "stun", ?nat_type, "detected NAT type");
     }
     Ok(())
 

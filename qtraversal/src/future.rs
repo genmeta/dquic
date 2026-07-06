@@ -187,6 +187,7 @@ mod tests {
 
     use futures::future::join_all;
     use tokio::{sync::Notify, time::timeout};
+    use tracing::Instrument as _;
 
     use super::*;
 
@@ -220,6 +221,7 @@ mod tests {
 
                 assert_eq!(*future.get().await, "Hello world");
             }
+            .in_current_span()
         });
 
         write.notified().await;
@@ -247,6 +249,7 @@ mod tests {
                 assert_eq!(*future.get().await, "Hello world");
                 write.notify_one();
             }
+            .in_current_span()
         });
 
         write.notified().await;
@@ -266,6 +269,7 @@ mod tests {
                 let _ = timeout(Duration::from_millis(100), future.get()).await;
                 let _ = future.assign("Hello world");
             }
+            .in_current_span()
         });
 
         let task = tokio::spawn({
@@ -273,6 +277,7 @@ mod tests {
             async move {
                 assert_eq!(*future.get().await, "Hello world");
             }
+            .in_current_span()
         });
 
         join_all([task, timeout_task]).await;
@@ -290,6 +295,7 @@ mod tests {
             async move {
                 assert_eq!(*future.get().await, "New Hello world");
             }
+            .in_current_span()
         });
         future.assign("New Hello world");
         task.await.unwrap();

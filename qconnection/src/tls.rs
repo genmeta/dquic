@@ -353,7 +353,11 @@ impl ServerTlsSession {
         {
             ClientNameVerifyResult::Accept => {
                 self.send_lock.grant_permit();
-                tracing::debug!(?client_name);
+                tracing::debug!(
+                    target: "dquic",
+                    client_name = ?client_name.as_deref(),
+                    "client name verification accepted"
+                );
                 self.client_name = client_name.map(Arc::from);
                 parameters.lock_guard()?.recv_remote_params(client_params)?;
 
@@ -367,9 +371,9 @@ impl ServerTlsSession {
             ClientNameVerifyResult::Refuse(reason) => {
                 self.send_lock.grant_permit();
                 tracing::debug!(
-                    target: "quic",
+                    target: "dquic",
                     server_name = %server_authority.name(),
-                    client_name = ?self.client_name.as_deref(),
+                    client_name = ?client_name.as_deref(),
                     ?reason,
                     "client name verification failed, refusing connection"
                 );
@@ -380,9 +384,9 @@ impl ServerTlsSession {
             }
             ClientNameVerifyResult::SilentRefuse(reason) => {
                 tracing::debug!(
-                    target: "quic",
+                    target: "dquic",
                     server_name = %server_authority.name(),
-                    client_name = ?self.client_name.as_deref(),
+                    client_name = ?client_name.as_deref(),
                     ?reason,
                     "client name verification failed, refusing connection silently"
                 );
@@ -418,7 +422,7 @@ impl ServerTlsSession {
             }
             ClientAuthorityVerifyResult::Refuse(reason) => {
                 tracing::debug!(
-                    target: "quic",
+                    target: "dquic",
                     server_name = %server_authority.name(),
                     ?self.client_name,
                     ?reason,
@@ -621,7 +625,7 @@ impl ArcTlsHandshake {
 
         if tls_handshake.session.is_finished() && tls_handshake.info.get().is_none() {
             let info = Arc::new(tls_handshake.session.r#yield());
-            tracing::debug!(target: "quic", "tls handshake finished");
+            tracing::debug!(target: "dquic", "tls handshake finished");
             tls_handshake.info.set(info.clone());
             return Ok(Some(info));
         }

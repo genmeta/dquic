@@ -570,7 +570,12 @@ impl Burst {
                             &self.path.pathway,
                             payload,
                         );
-                        tracing::trace!(?forward_hdr, link=%self.path.link(),"put forward header");
+                        tracing::trace!(
+                            target: "dquic",
+                            ?forward_hdr,
+                            link = %self.path.link(),
+                            "put forward header"
+                        );
                         header.put_forward_header(&forward_hdr);
                     }
                     reversed_size + packet_size

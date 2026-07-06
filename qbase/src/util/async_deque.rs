@@ -323,6 +323,7 @@ impl<T> Extend<T> for &ArcAsyncDeque<T> {
 #[cfg(test)]
 mod tests {
     use futures::FutureExt;
+    use tracing::Instrument as _;
 
     use super::*;
 
@@ -410,10 +411,10 @@ mod tests {
     async fn racing() {
         let deque: ArcAsyncDeque<()> = ArcAsyncDeque::new();
 
-        let consumer = tokio::spawn(deque.pop());
+        let consumer = tokio::spawn(deque.pop().in_current_span());
         tokio::task::yield_now().await;
 
-        let abuse = tokio::spawn(deque.pop());
+        let abuse = tokio::spawn(deque.pop().in_current_span());
         tokio::task::yield_now().await;
 
         // willnot be waked up

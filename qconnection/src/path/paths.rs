@@ -93,6 +93,7 @@ impl ArcPathContexts {
         let mut state = self.state.write().unwrap();
         if !state.accepting_paths {
             tracing::trace!(
+                target: "dquic",
                 pathway = %path.pathway,
                 initial_dcid = %initial_dcid,
                 "ignored handshake path assignment after path contexts closed"
@@ -101,6 +102,7 @@ impl ArcPathContexts {
         }
         if state.initial_path.is_some() {
             tracing::trace!(
+                target: "dquic",
                 pathway = %path.pathway,
                 initial_dcid = %initial_dcid,
                 "handshake path already assigned"
@@ -110,6 +112,7 @@ impl ArcPathContexts {
         remote_cids.apply_initial_dcid(initial_dcid, &path.dcid_cell);
         state.initial_path = Some(Arc::downgrade(path));
         tracing::debug!(
+            target: "dquic",
             pathway = %path.pathway,
             initial_dcid = %initial_dcid,
             "assigned handshake path"
@@ -175,7 +178,7 @@ impl ArcPathContexts {
 
     pub fn remove(&self, pathway: &Pathway, reason: &PathDeactivated) {
         if self.paths.remove(pathway).is_some() {
-            tracing::debug!(target: "quic", %pathway, %reason, "path deactivated");
+            tracing::debug!(target: "dquic", %pathway, %reason, "path deactivated");
             if self.state.read().unwrap().accepting_paths && self.is_empty() {
                 let error = QuicError::with_default_fty(
                     ErrorKind::NoViablePath,
@@ -266,10 +269,13 @@ mod tests {
         let entry = PathSendWakerEntry::insert(pathway, &tx_wakers, &send_waker);
 
         let (done_tx, done_rx) = oneshot::channel();
-        let waiter = tokio::spawn(async move {
-            send_waker.wait_for(Signals::PING).await;
-            _ = done_tx.send(());
-        });
+        let waiter = tokio::spawn(
+            async move {
+                send_waker.wait_for(Signals::PING).await;
+                _ = done_tx.send(());
+            }
+            .in_current_span(),
+        );
         tokio::task::yield_now().await;
 
         drop(entry);
