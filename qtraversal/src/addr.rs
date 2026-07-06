@@ -160,7 +160,7 @@ impl AddressBook {
         source: Source,
     ) -> io::Result<()> {
         match self.remote_endpoint.entry(endpoint) {
-            Entry::Occupied(_) => return Err(io::Error::other("Duplicate remote endpoint")),
+            Entry::Occupied(_) => return Ok(()),
             Entry::Vacant(e) => {
                 e.insert(source);
             }
@@ -328,6 +328,19 @@ mod tests {
             vec![(InterfaceEndpointKey::Agent(agent_addr), agent)]
         );
         assert!(!book.has_local_endpoint(&bind, InterfaceEndpointKey::Agent(agent_addr), agent));
+    }
+
+    #[test]
+    fn duplicate_peer_endpoint_is_idempotent() {
+        let mut book = AddressBook::default();
+        let endpoint = direct_endpoint(10004);
+
+        book.add_peer_endpoint(endpoint, Source::System)
+            .expect("first peer endpoint insert");
+        book.add_peer_endpoint(endpoint, Source::System)
+            .expect("duplicate peer endpoint should be idempotent");
+
+        assert_eq!(book.remote_endpoint().len(), 1);
     }
 
     #[test]
