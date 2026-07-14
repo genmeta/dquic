@@ -47,6 +47,7 @@ qdatagram = { workspace = true, optional = true }
 [features]
 default = ["datagram"]
 datagram = ["dep:qdatagram"]
+netwatcher = ["qinterface/netwatcher"]
 telemetry = ["qevent/telemetry"]
 
 [dev-dependencies]

@@ -1,14 +1,18 @@
+#[cfg(feature = "netwatcher")]
+use std::sync::Mutex;
 use std::{
     collections::HashMap,
     fmt::Debug,
     net::IpAddr,
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
 use derive_more::{Deref, DerefMut};
 pub use netdev::Interface;
+#[cfg(feature = "netwatcher")]
 pub use netwatcher::Error as WatcherError;
+#[cfg(feature = "netwatcher")]
 use netwatcher::WatchHandle;
 use qbase::{
     net::Family,
@@ -321,6 +325,7 @@ impl State {
 
 pub struct Devices {
     state: Arc<State>,
+    #[cfg(feature = "netwatcher")]
     watcher: Mutex<Result<WatchHandle, WatcherError>>,
     _timer: AbortOnDropHandle<()>,
 }
@@ -329,7 +334,6 @@ impl Debug for Devices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Devices")
             .field("state", &self.state)
-            .field("watcher", &"...")
             .field("_timer", &self._timer)
             .finish()
     }
@@ -357,6 +361,7 @@ impl Devices {
             .in_current_span()
         }));
 
+        #[cfg(feature = "netwatcher")]
         let watcher = netwatcher::watch_interfaces_with_callback({
             let state = state.clone();
             move |_update| {
@@ -365,6 +370,7 @@ impl Devices {
             }
         });
 
+        #[cfg(feature = "netwatcher")]
         if let Err(initial_watcher_error) = &watcher {
             tracing::warn!(target: "interface", "failed to start interfaces watcher: {initial_watcher_error}");
         }
@@ -372,10 +378,12 @@ impl Devices {
         Self {
             state,
             _timer: timer,
+            #[cfg(feature = "netwatcher")]
             watcher: watcher.into(),
         }
     }
 
+    #[cfg(feature = "netwatcher")]
     #[inline]
     pub fn restart_watcher(&self) -> Result<(), WatcherError> {
         let new_watcher = netwatcher::watch_interfaces_with_callback({

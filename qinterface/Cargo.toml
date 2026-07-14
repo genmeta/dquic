@@ -16,7 +16,7 @@ derive_more = { workspace = true, features = ["deref"] }
 futures = { workspace = true }
 http = { workspace = true }
 netdev = { workspace = true }
-netwatcher = { workspace = true }
+netwatcher = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 qbase = { workspace = true }
 qevent = { workspace = true }
@@ -37,4 +37,5 @@ tokio = { workspace = true, features = [
 ] }
 
 [features]
+netwatcher = ["dep:netwatcher"]
 qudp = ["dep:qudp"]
