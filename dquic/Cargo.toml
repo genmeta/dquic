@@ -44,6 +44,7 @@ tracing-appender = { workspace = true }
 default = ["datagram"]
 telemetry = ["qconnection/telemetry"]
 datagram = ["qconnection/datagram"]
+netwatcher = ["qconnection/netwatcher"]
 
 [dev-dependencies.tracing-subscriber]
 workspace = true
