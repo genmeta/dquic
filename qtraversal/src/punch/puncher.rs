@@ -33,7 +33,7 @@ use qinterface::{
     bind_uri::BindUri,
     component::{
         local_endpoint::InterfaceEndpointKey,
-        route::{InvalidWay, QuicRouter, QuicRouterComponent, Way, validate_way},
+        route::{InvalidWay, QuicRouter, QuicRouterComponent, Way, resolve_way, validate_way},
     },
     io::{IO, IoExt, ProductIO},
     manager::InterfaceManager,
@@ -96,7 +96,7 @@ fn build_validated_way(
 ) -> Result<(BindUri, Link, PathWay), InvalidWay> {
     let link = Link::new(local_addr, remote_addr);
     let pathway = PathWay::new(local, remote);
-    let way = (bind.clone(), pathway, link);
+    let way = resolve_way((bind.clone(), pathway, link))?;
     validate_way(&way)?;
     Ok((way.0, way.2, way.1))
 }
