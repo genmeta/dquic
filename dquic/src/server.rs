@@ -436,9 +436,14 @@ impl QuicListeners {
     )]
     pub(crate) fn try_accept_connection(&self, packet: Packet, (bind_uri, pathway, link): Way) {
         if let Err(error) =
-            qinterface::component::route::validate_way(&(bind_uri.clone(), pathway, link))
+            qinterface::component::route::validate_received_way(&(bind_uri.clone(), pathway, link))
         {
-            tracing::trace!(target: "dquic", %error, "dropping connectless packet on inadmissible path");
+            tracing::trace!(
+                target: "dquic",
+                validation_context = "received_way",
+                %error,
+                "dropping connectless packet on inadmissible path"
+            );
             return;
         }
 
@@ -975,6 +980,27 @@ mod path_admissibility_tests {
             Pathway::from(link),
             link,
         );
+
+        listeners.try_accept_connection(initial_packet(dcid), way.clone());
+
+        assert_eq!(listeners.backlog.available_permits(), 1);
+        assert!(router.try_deliver(initial_packet(dcid), way).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn wildcard_received_initial_does_not_consume_backlog_or_register_odcid() {
+        install_crypto_provider();
+        let router = Arc::new(QuicRouter::new());
+        let listeners = QuicListeners::builder()
+            .with_router(router.clone())
+            .without_client_cert_verifier()
+            .listen(1)
+            .unwrap();
+        let dcid = ConnectionId::from_slice(b"wildcard-path");
+        let local = "0.0.0.0:4433".parse().unwrap();
+        let remote = "203.0.113.10:50000".parse().unwrap();
+        let link = Link::new(local, remote);
+        let way = (BindUri::from(local), Pathway::from(link), link);
 
         listeners.try_accept_connection(initial_packet(dcid), way.clone());
 
