@@ -234,6 +234,10 @@ async fn parse_normal_packet(
             packet.drop_on_conenction_closed();
             return Ok(());
         }
+        Err(CreatePathFailure::InvalidWay(error)) => {
+            tracing::trace!(target: "dquic", %error, "dropping Initial packet on inadmissible path");
+            return Ok(());
+        }
         Err(CreatePathFailure::NoInterface(..)) => {
             packet.drop_on_interface_not_found();
             return Ok(());

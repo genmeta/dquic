@@ -430,20 +430,7 @@ impl Components {
     }
 
     fn has_viable_path(&self) -> bool {
-        self.paths
-            .paths::<Vec<_>>()
-            .into_iter()
-            .any(|(pathway, _)| Self::pathway_is_viable(pathway))
-    }
-
-    fn pathway_is_viable(pathway: Pathway) -> bool {
-        if let (EndpointAddr::Direct { addr: local }, EndpointAddr::Direct { addr: remote }) =
-            (pathway.local(), pathway.remote())
-        {
-            local.ip().is_loopback() == remote.ip().is_loopback()
-        } else {
-            true
-        }
+        !self.paths.paths::<Vec<_>>().is_empty()
     }
 }
 
@@ -775,7 +762,11 @@ impl Drop for Connection {
 mod tests {
     use std::sync::Once;
 
-    use qbase::{error::ErrorKind, token::handy::NoopTokenRegistry};
+    use qbase::{
+        error::ErrorKind,
+        net::{addr::EndpointAddr, route::Link},
+        token::handy::NoopTokenRegistry,
+    };
     use rustls::{
         RootCertStore,
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -830,6 +821,29 @@ mod tests {
             .with_tls_config(test_server_tls_config())
             .with_cids(cid::ConnectionId::from_slice(b"validate-server"))
             .run()
+    }
+
+    #[tokio::test]
+    async fn add_path_rejects_loopback_scope_before_interface_lookup() {
+        let connection = test_client_connection();
+        let local = "127.0.0.1:50000".parse().unwrap();
+        let remote = "203.0.113.10:4433".parse().unwrap();
+        let way = (
+            "inet://127.0.0.1:50000".parse().unwrap(),
+            Pathway::new(EndpointAddr::direct(local), EndpointAddr::direct(remote)),
+            Link::new(local, remote),
+        );
+
+        let error = connection
+            .add_path(way)
+            .expect_err("mixed loopback scope must be rejected before interface lookup");
+        assert!(matches!(
+            error,
+            CreatePathFailure::InvalidWay(
+                qinterface::component::route::InvalidWay::LoopbackScopeMismatch
+            )
+        ));
+        assert!(!connection.has_viable_path().unwrap());
     }
 
     #[tokio::test]

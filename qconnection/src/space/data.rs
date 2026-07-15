@@ -433,6 +433,10 @@ async fn parse_normal_zero_rtt_packet(
             packet.drop_on_conenction_closed();
             return Ok(());
         }
+        Err(CreatePathFailure::InvalidWay(error)) => {
+            tracing::trace!(target: "dquic", %error, "dropping 0-RTT packet on inadmissible path");
+            return Ok(());
+        }
         Err(CreatePathFailure::NoInterface(..)) => {
             packet.drop_on_interface_not_found();
             return Ok(());
@@ -471,6 +475,10 @@ async fn parse_normal_one_rtt_packet(
         Ok(path) => path,
         Err(CreatePathFailure::ConnectionClosed(..)) => {
             packet.drop_on_conenction_closed();
+            return Ok(());
+        }
+        Err(CreatePathFailure::InvalidWay(error)) => {
+            tracing::trace!(target: "dquic", %error, "dropping 1-RTT packet on inadmissible path");
             return Ok(());
         }
         Err(CreatePathFailure::NoInterface(..)) => {
