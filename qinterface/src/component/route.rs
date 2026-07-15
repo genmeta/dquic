@@ -17,11 +17,13 @@ use qbase::{
 };
 
 use crate::{BindUri, Interface, component::Component};
+mod admissibility;
 mod handler;
 mod packet;
 mod queue;
 pub type Way = (BindUri, Pathway, Link);
 
+pub use admissibility::{EndpointSide, InvalidWay, validate_way};
 pub use handler::PacketHandler;
 pub use packet::{CipherPacket, PlainPacket};
 pub use qbase::packet::Packet;
