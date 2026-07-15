@@ -1,6 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
-use qbase::net::Family;
+use qbase::net::{Family, addr::EndpointAddr, route::Pathway};
 use thiserror::Error;
 
 use super::Way;
@@ -33,11 +33,49 @@ pub enum InvalidWay {
     LinkLocalScopeMismatch,
     #[error("bind URI cannot currently resolve to an interface")]
     BindUnavailable,
+    #[error("kernel route lookup could not select a concrete local address")]
+    LocalAddressUnavailable,
     #[error("concrete local address {local} does not match bind address {bound}")]
     BindAddressMismatch {
         bound: SocketAddr,
         local: SocketAddr,
     },
+}
+
+fn route_local_addr(remote: SocketAddr, port: u16) -> Result<SocketAddr, InvalidWay> {
+    let wildcard = match remote {
+        SocketAddr::V4(..) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+        SocketAddr::V6(..) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+    };
+    let socket = UdpSocket::bind(wildcard).map_err(|_| InvalidWay::LocalAddressUnavailable)?;
+    socket
+        .connect(remote)
+        .map_err(|_| InvalidWay::LocalAddressUnavailable)?;
+    let selected = socket
+        .local_addr()
+        .map_err(|_| InvalidWay::LocalAddressUnavailable)?;
+    Ok(SocketAddr::new(selected.ip(), port))
+}
+
+pub fn resolve_way((bind, pathway, mut link): Way) -> Result<Way, InvalidWay> {
+    if !link.src.ip().is_unspecified() {
+        return Ok((bind, pathway, link));
+    }
+
+    let binding = bind
+        .resolve_binding()
+        .map_err(|_| InvalidWay::BindUnavailable)?;
+    let resolved_local = if binding.addr.ip().is_unspecified() {
+        route_local_addr(link.dst, link.src.port())?
+    } else {
+        SocketAddr::new(binding.addr.ip(), link.src.port())
+    };
+    let local_endpoint = match pathway.local() {
+        EndpointAddr::Direct { addr } if addr == link.src => EndpointAddr::direct(resolved_local),
+        endpoint => endpoint,
+    };
+    link.src = resolved_local;
+    Ok((bind, Pathway::new(local_endpoint, pathway.remote()), link))
 }
 
 fn validate_endpoint(side: EndpointSide, addr: SocketAddr) -> Result<(), InvalidWay> {
@@ -173,6 +211,19 @@ mod tests {
         ] {
             assert_eq!(validate_way(&candidate), Ok(()), "{candidate:?}");
         }
+    }
+
+    #[test]
+    fn resolves_wildcard_local_address_using_the_remote_route() {
+        let candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "127.0.0.1:4433");
+
+        let resolved = resolve_way(candidate).expect("loopback route should resolve locally");
+        assert_eq!(resolved.2.src, "127.0.0.1:50000".parse().unwrap());
+        assert_eq!(
+            resolved.1.local(),
+            EndpointAddr::direct("127.0.0.1:50000".parse().unwrap())
+        );
+        assert_eq!(validate_way(&resolved), Ok(()));
     }
 
     #[test]

@@ -71,6 +71,8 @@ impl Components {
         way: Way,
         is_probed: bool,
     ) -> Result<Arc<Path>, CreatePathFailure> {
+        let way = qinterface::component::route::resolve_way(way)
+            .map_err(CreatePathFailure::InvalidWay)?;
         qinterface::component::route::validate_way(&way).map_err(CreatePathFailure::InvalidWay)?;
         let (bind_uri, pathway, link) = way;
         let try_create = || {
