@@ -33,9 +33,7 @@ use qinterface::{
     bind_uri::BindUri,
     component::{
         local_endpoint::InterfaceEndpointKey,
-        route::{
-            InvalidWay, QuicRouter, QuicRouterComponent, Way, resolve_outbound_way, validate_way,
-        },
+        route::{InvalidWay, QuicRouter, QuicRouterComponent, Way, validate_outbound_candidate},
     },
     io::{IO, IoExt, ProductIO},
     manager::InterfaceManager,
@@ -98,8 +96,8 @@ fn build_validated_way(
 ) -> Result<(BindUri, Link, PathWay), InvalidWay> {
     let link = Link::new(local_addr, remote_addr);
     let pathway = PathWay::new(local, remote);
-    let way = resolve_outbound_way((bind.clone(), pathway, link))?;
-    validate_way(&way)?;
+    let way = (bind.clone(), pathway, link);
+    validate_outbound_candidate(&way)?;
     Ok((way.0, way.2, way.1))
 }
 
@@ -1872,6 +1870,21 @@ mod tests {
 
         let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
             .expect("matching loopback scope must be retained");
+        assert_eq!(link, Link::new(local_addr, remote_addr));
+        assert_eq!(pathway, PathWay::new(local, remote));
+    }
+
+    #[test]
+    fn direct_pairing_preserves_a_wildcard_local_link() {
+        let bind: BindUri = "inet://0.0.0.0:50000".parse().unwrap();
+        let local_addr: SocketAddr = "0.0.0.0:50000".parse().unwrap();
+        let remote_addr: SocketAddr = "203.0.113.10:4433".parse().unwrap();
+        let local = EndpointAddr::direct("192.0.2.10:50000".parse().unwrap());
+        let remote = EndpointAddr::direct(remote_addr);
+
+        let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
+            .expect("wildcard source selection belongs to IO");
+
         assert_eq!(link, Link::new(local_addr, remote_addr));
         assert_eq!(pathway, PathWay::new(local, remote));
     }
