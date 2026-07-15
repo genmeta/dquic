@@ -13,7 +13,7 @@ pub mod qudp {
 
     use bytes::BytesMut;
     use qbase::{
-        net::route::{Line, Link, Pathway},
+        net::route::{Line, Pathway},
         util::Wakers,
     };
     use qudp::BATCH_SIZE;
@@ -130,7 +130,6 @@ pub mod qudp {
         ) -> Poll<io::Result<usize>> {
             let io = self.usc()?;
             self.recv_wakers.combine_with(cx, |cx| {
-                let dst = io.local_addr()?;
                 let len = route.len().min(pkts.len());
                 let mut rcvd_lines = Vec::with_capacity(len);
                 rcvd_lines.resize_with(route.len(), Line::default);
@@ -142,9 +141,10 @@ pub mod qudp {
                 let nrcvd = ready!(io.poll_recv(cx, &mut bufs, &mut rcvd_lines))?;
 
                 for (idx, mut line) in rcvd_lines.into_iter().take(nrcvd).enumerate() {
-                    let pathway = Pathway::new(line.link.src.into(), dst.into());
-                    line.link = Link::new(line.src, io.local_addr()?).flip();
-                    route[idx] = Route::new(pathway.flip(), line);
+                    let link = line.link.flip();
+                    let pathway = Pathway::from(link);
+                    line.link = link;
+                    route[idx] = Route::new(pathway, line);
                 }
 
                 Poll::Ready(Ok(nrcvd))
@@ -157,6 +157,42 @@ pub mod qudp {
             self.recv_wakers.wake_all();
             self.io = Ok(Err(Closed(())));
             Poll::Ready(Ok(()))
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod tests {
+        use std::net::Ipv4Addr;
+
+        use super::*;
+        use crate::io::IoExt as _;
+
+        #[tokio::test]
+        async fn wildcard_receive_preserves_packet_destination() {
+            let controller =
+                UdpSocketController::bind("inet://0.0.0.0:0".parse().expect("bind URI"));
+            let mut destination = controller.bound_addr().expect("bound address");
+            destination.set_ip(Ipv4Addr::LOCALHOST.into());
+
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender socket");
+            let sender_addr = sender.local_addr().expect("sender address");
+            sender
+                .send_to(b"route", destination)
+                .expect("send datagram");
+
+            let mut bufs = Vec::new();
+            let mut routes = Vec::new();
+            let (_, route) = controller
+                .recvmmsg(&mut bufs, &mut routes)
+                .await
+                .expect("receive datagram")
+                .next()
+                .expect("one datagram");
+
+            assert_eq!(route.line.link.src, destination);
+            assert_eq!(route.line.link.dst, sender_addr);
+            assert_eq!(route.pathway.local().addr(), destination);
+            assert_eq!(route.pathway.remote().addr(), sender_addr);
         }
     }
 }
