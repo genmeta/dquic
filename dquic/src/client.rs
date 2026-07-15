@@ -354,9 +354,14 @@ impl QuicClient {
         //   Direct → select/bind interface, construct Link & Pathway, return paths.
         //   Agent  → ensure an interface is bound, return empty paths.
         let paths = self.probe([(source, server_ep)]).await?;
-        let has_direct_path = !paths.is_empty();
+        let mut has_direct_path = false;
         for (iface, link, pathway) in paths {
-            _ = connection.add_path((iface.bind_uri(), pathway, link));
+            match connection.add_path((iface.bind_uri(), pathway, link)) {
+                Ok(()) => has_direct_path = true,
+                Err(error) => {
+                    tracing::trace!(target: "dquic", %error, "skipping probed path candidate");
+                }
+            }
         }
         Ok(has_direct_path)
     }
