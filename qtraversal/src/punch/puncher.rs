@@ -16,7 +16,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     net::{
-        AddrFamily, NatType,
+        NatType,
         addr::EndpointAddr,
         route::{Line, Link, Route},
         tx::Signals,
@@ -33,7 +33,7 @@ use qinterface::{
     bind_uri::BindUri,
     component::{
         local_endpoint::InterfaceEndpointKey,
-        route::{QuicRouter, QuicRouterComponent, Way},
+        route::{InvalidWay, QuicRouter, QuicRouterComponent, Way, validate_way},
     },
     io::{IO, IoExt, ProductIO},
     manager::InterfaceManager,
@@ -62,6 +62,43 @@ fn interface_endpoint_key(endpoint: EndpointAddr) -> InterfaceEndpointKey {
         EndpointAddr::Direct { .. } => InterfaceEndpointKey::Direct,
         EndpointAddr::Agent { agent, .. } => InterfaceEndpointKey::Agent(agent),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ResolvePathError {
+    #[error(transparent)]
+    InvalidWay(#[from] InvalidWay),
+    #[error("bind URI does not match resolver source constraint")]
+    SourceConstraint,
+    #[error("unsupported endpoint type combination for punching")]
+    UnsupportedEndpointPair,
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+fn validate_endpoint_pair(
+    local: EndpointAddr,
+    remote: EndpointAddr,
+) -> Result<(), ResolvePathError> {
+    match (local, remote) {
+        (EndpointAddr::Direct { .. }, EndpointAddr::Direct { .. })
+        | (EndpointAddr::Agent { .. }, EndpointAddr::Agent { .. }) => Ok(()),
+        _ => Err(ResolvePathError::UnsupportedEndpointPair),
+    }
+}
+
+fn build_validated_way(
+    bind: &BindUri,
+    local: EndpointAddr,
+    remote: EndpointAddr,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+) -> Result<(BindUri, Link, PathWay), InvalidWay> {
+    let link = Link::new(local_addr, remote_addr);
+    let pathway = PathWay::new(local, remote);
+    let way = (bind.clone(), pathway, link);
+    validate_way(&way)?;
+    Ok((way.0, way.2, way.1))
 }
 
 #[allow(dead_code)]
@@ -613,11 +650,28 @@ where
         let changes = remote_endpoints
             .into_iter()
             .filter_map(|(remote_endpoint, source)| {
-                self.resolve_punch_connection(&bind_uri, &local_endpoint, &remote_endpoint, &source)
-                    .ok()
-                    .map(|(bind_uri, link, pathway)| {
-                        LocalEndpointPathChange::AddPath((bind_uri, pathway, link))
-                    })
+                match self.resolve_punch_connection(
+                    &bind_uri,
+                    &local_endpoint,
+                    &remote_endpoint,
+                    &source,
+                ) {
+                    Ok((bind_uri, link, pathway)) => {
+                        Some(LocalEndpointPathChange::AddPath((bind_uri, pathway, link)))
+                    }
+                    Err(error) => {
+                        tracing::trace!(
+                            target: "dquic",
+                            %bind_uri,
+                            %local_endpoint,
+                            %remote_endpoint,
+                            ?source,
+                            %error,
+                            "skipping incompatible peer endpoint candidate"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
         LocalEndpointPathChanges::new(changes)
@@ -857,8 +911,19 @@ where
         };
         let mut ways = Vec::new();
         for (bind, local_ep) in local_endpoints {
-            if let Ok(way) = self.resolve_punch_connection(&bind, &local_ep, &endpoint, &source) {
-                ways.push(way);
+            match self.resolve_punch_connection(&bind, &local_ep, &endpoint, &source) {
+                Ok(way) => ways.push(way),
+                Err(error) => {
+                    tracing::trace!(
+                        target: "dquic",
+                        %bind,
+                        %local_ep,
+                        remote_endpoint = %endpoint,
+                        ?source,
+                        %error,
+                        "skipping incompatible peer endpoint candidate"
+                    );
+                }
             }
         }
         Ok(ways)
@@ -1590,33 +1655,25 @@ where
         local: &EndpointAddr,
         remote: &EndpointAddr,
         source: &qresolve::Source,
-    ) -> io::Result<(BindUri, Link, PathWay)> {
+    ) -> Result<(BindUri, Link, PathWay), ResolvePathError> {
         if let qresolve::Source::Mdns { nic, family } = source {
             let matches_iface = bind
                 .as_iface_bind_uri()
                 .is_some_and(|(lf, ln, _)| lf == *family && ln == nic.as_ref());
             if !matches_iface {
-                return Err(io::Error::other(
-                    "Bind URI does not match source constraint",
-                ));
+                return Err(ResolvePathError::SourceConstraint);
             }
         }
-        if local == remote {
-            return Err(io::Error::other("Local and remote endpoints are identical"));
-        }
+        validate_endpoint_pair(*local, *remote)?;
 
         let (local_addr, remote_addr) = self.extract_addresses(bind, local, remote)?;
-
-        if local_addr.family() != remote_addr.family() {
-            return Err(io::Error::other(
-                "Local and remote addresses must be in the same address family",
-            ));
-        }
-
-        let link = Link::new(local_addr, remote_addr);
-        let pathway = PathWay::new(*local, *remote);
-
-        Ok((bind.clone(), link, pathway))
+        Ok(build_validated_way(
+            bind,
+            *local,
+            *remote,
+            local_addr,
+            remote_addr,
+        )?)
     }
 
     fn extract_addresses(
@@ -1639,9 +1696,7 @@ where
                 })?;
                 Ok((iface.bound_addr()?, *agent))
             }
-            _ => Err(io::Error::other(
-                "Unsupported endpoint type combination for punching",
-            )),
+            _ => unreachable!("endpoint kinds were validated before address extraction"),
         }
     }
 }
@@ -1788,6 +1843,49 @@ async fn dynamic_iface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_pairing_rejects_loopback_to_non_loopback() {
+        let bind: BindUri = "inet://127.0.0.1:50000".parse().unwrap();
+        let local_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let remote_addr: SocketAddr = "203.0.113.10:4433".parse().unwrap();
+        let local = EndpointAddr::direct(local_addr);
+        let remote = EndpointAddr::direct(remote_addr);
+
+        let error = build_validated_way(&bind, local, remote, local_addr, remote_addr)
+            .expect_err("mixed loopback scope must be rejected");
+        assert_eq!(
+            error,
+            qinterface::component::route::InvalidWay::LoopbackScopeMismatch
+        );
+    }
+
+    #[test]
+    fn direct_pairing_accepts_loopback_to_loopback() {
+        let bind: BindUri = "inet://127.0.0.1:50000".parse().unwrap();
+        let local_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let local = EndpointAddr::direct(local_addr);
+        let remote = EndpointAddr::direct(remote_addr);
+
+        let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
+            .expect("matching loopback scope must be retained");
+        assert_eq!(link, Link::new(local_addr, remote_addr));
+        assert_eq!(pathway, PathWay::new(local, remote));
+    }
+
+    #[test]
+    fn mixed_direct_agent_pair_is_rejected() {
+        let direct = EndpointAddr::direct("127.0.0.1:50000".parse().unwrap());
+        let agent = EndpointAddr::with_agent(
+            "127.0.0.1:20004".parse().unwrap(),
+            "198.51.100.10:40000".parse().unwrap(),
+        );
+        assert!(matches!(
+            validate_endpoint_pair(direct, agent),
+            Err(ResolvePathError::UnsupportedEndpointPair)
+        ));
+    }
 
     fn bind_uri() -> BindUri {
         "inet://127.0.0.1:0".parse().expect("valid bind uri")
