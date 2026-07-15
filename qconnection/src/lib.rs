@@ -847,6 +847,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn received_path_does_not_infer_an_unspecified_packet_destination() {
+        let connection = test_client_connection();
+        let local = "0.0.0.0:50000".parse().unwrap();
+        let remote = "127.0.0.1:4433".parse().unwrap();
+        let way = (
+            "inet://0.0.0.0:50000".parse().unwrap(),
+            Pathway::new(EndpointAddr::direct(local), EndpointAddr::direct(remote)),
+            Link::new(local, remote),
+        );
+
+        let result = connection
+            .try_map_components(|components| components.get_or_try_create_path(way, true))
+            .expect("connection should remain active");
+        let error = match result {
+            Ok(_) => panic!("received paths must carry a concrete packet destination"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            CreatePathFailure::InvalidWay(qinterface::component::route::InvalidWay::Unspecified {
+                side: qinterface::component::route::EndpointSide::Local
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn validate_without_paths_latches_client_error_and_enters_closing() {
         let connection = test_client_connection();
 
