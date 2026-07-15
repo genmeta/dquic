@@ -99,7 +99,7 @@ tracing-appender = "0.2"
 qmacro = { path = "./qmacro", version = "0.5.1" }
 qbase = { path = "./qbase", version = "0.6.0" }
 qevent = { path = "./qevent", version = "0.6.0" }
-qudp = { path = "./qudp", version = "0.6.1" }
+qudp = { path = "./qudp", version = "0.7.0-beta.1" }
 qinterface = { path = "./qinterface", version = "0.7.0-beta.2" }
 qdatagram = { path = "./qdatagram", version = "0.6.0" }
 qresolve = { path = "./qresolve", version = "0.7.0-beta.1" }
