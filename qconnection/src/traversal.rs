@@ -38,10 +38,16 @@ impl ReceiveFrame<(BindUri, Pathway, Link, PunchHelloFrame)> for Components {
 }
 
 impl Components {
+    fn add_resolved_path(&self, way: Way) {
+        if let Err(error) = self.add_path(way) {
+            tracing::trace!(target: "dquic", %error, "skipping resolved path candidate");
+        }
+    }
+
     fn apply_local_endpoint_path_changes(&self, changes: LocalEndpointPathChanges) {
         for change in changes {
             if let LocalEndpointPathChange::AddPath(way) = change {
-                let _ = self.add_path(way);
+                self.add_resolved_path(way);
             }
         }
     }
@@ -82,7 +88,7 @@ impl Components {
                 );
                 ways.into_iter().for_each(|(bind_uri, link, pathway)| {
                     let way: Way = (bind_uri, pathway, link);
-                    let _ = self.add_path(way);
+                    self.add_resolved_path(way);
                 });
             }
             Err(error) => {

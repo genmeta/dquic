@@ -8,6 +8,8 @@ use crate::path::validate::ValidateFailure;
 
 #[derive(Debug, From, Error)]
 pub enum CreatePathFailure {
+    #[error(transparent)]
+    InvalidWay(qinterface::component::route::InvalidWay),
     #[error("Network interface not found for bind URI: {0}")]
     NoInterface(BindUri),
     #[error("Connection is closed")]

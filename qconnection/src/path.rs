@@ -68,9 +68,11 @@ pub struct Path {
 impl Components {
     pub fn get_or_try_create_path(
         &self,
-        (bind_uri, pathway, link): Way,
+        way: Way,
         is_probed: bool,
     ) -> Result<Arc<Path>, CreatePathFailure> {
+        qinterface::component::route::validate_way(&way).map_err(CreatePathFailure::InvalidWay)?;
+        let (bind_uri, pathway, link) = way;
         let try_create = || {
             let interface = self
                 .interfaces
