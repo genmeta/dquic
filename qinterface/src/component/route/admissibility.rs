@@ -29,6 +29,8 @@ pub enum InvalidWay {
     Broadcast { side: EndpointSide },
     #[error("local and remote concrete endpoints are identical")]
     IdenticalEndpoints,
+    #[error("{side:?} direct endpoint does not match the concrete path address")]
+    DirectEndpointMismatch { side: EndpointSide },
     #[error("link-local peer is missing a compatible interface scope")]
     LinkLocalScopeMismatch,
     #[error("bind URI cannot currently resolve to an interface")]
@@ -57,7 +59,7 @@ fn route_local_addr(remote: SocketAddr, port: u16) -> Result<SocketAddr, Invalid
     Ok(SocketAddr::new(selected.ip(), port))
 }
 
-pub fn resolve_way((bind, pathway, mut link): Way) -> Result<Way, InvalidWay> {
+pub fn resolve_outbound_way((bind, pathway, mut link): Way) -> Result<Way, InvalidWay> {
     if !link.src.ip().is_unspecified() {
         return Ok((bind, pathway, link));
     }
@@ -79,16 +81,22 @@ pub fn resolve_way((bind, pathway, mut link): Way) -> Result<Way, InvalidWay> {
 }
 
 fn validate_endpoint(side: EndpointSide, addr: SocketAddr) -> Result<(), InvalidWay> {
-    if addr.ip().is_unspecified() {
+    let mapped_ipv4 = match addr.ip() {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+        IpAddr::V4(..) => None,
+    };
+    if addr.ip().is_unspecified() || mapped_ipv4.is_some_and(|ip| ip.is_unspecified()) {
         return Err(InvalidWay::Unspecified { side });
     }
     if addr.port() == 0 {
         return Err(InvalidWay::ZeroPort { side });
     }
-    if addr.ip().is_multicast() {
+    if addr.ip().is_multicast() || mapped_ipv4.is_some_and(|ip| ip.is_multicast()) {
         return Err(InvalidWay::Multicast { side });
     }
-    if matches!(addr.ip(), IpAddr::V4(ip) if ip == Ipv4Addr::BROADCAST) {
+    if matches!(addr.ip(), IpAddr::V4(ip) if ip == Ipv4Addr::BROADCAST)
+        || mapped_ipv4 == Some(Ipv4Addr::BROADCAST)
+    {
         return Err(InvalidWay::Broadcast { side });
     }
     Ok(())
@@ -97,11 +105,22 @@ fn validate_endpoint(side: EndpointSide, addr: SocketAddr) -> Result<(), Invalid
 fn is_link_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.is_link_local(),
-        IpAddr::V6(ip) => ip.is_unicast_link_local(),
+        IpAddr::V6(ip) => {
+            ip.is_unicast_link_local() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_link_local())
+        }
     }
 }
 
-pub fn validate_way((bind, _pathway, link): &Way) -> Result<(), InvalidWay> {
+fn is_loopback(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback(),
+        IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
+        }
+    }
+}
+
+pub fn validate_way((bind, pathway, link): &Way) -> Result<(), InvalidWay> {
     let local = link.src;
     let remote = link.dst;
 
@@ -121,7 +140,17 @@ pub fn validate_way((bind, _pathway, link): &Way) -> Result<(), InvalidWay> {
     if local == remote {
         return Err(InvalidWay::IdenticalEndpoints);
     }
-    if local.ip().is_loopback() != remote.ip().is_loopback() {
+    if matches!(pathway.local(), EndpointAddr::Direct { addr } if addr != local) {
+        return Err(InvalidWay::DirectEndpointMismatch {
+            side: EndpointSide::Local,
+        });
+    }
+    if matches!(pathway.remote(), EndpointAddr::Direct { addr } if addr != remote) {
+        return Err(InvalidWay::DirectEndpointMismatch {
+            side: EndpointSide::Remote,
+        });
+    }
+    if is_loopback(local.ip()) != is_loopback(remote.ip()) {
         return Err(InvalidWay::LoopbackScopeMismatch);
     }
 
@@ -150,9 +179,7 @@ pub fn validate_way((bind, _pathway, link): &Way) -> Result<(), InvalidWay> {
                 if let (SocketAddr::V6(local), SocketAddr::V6(remote)) = (local, remote) {
                     let local_scope = local.scope_id();
                     let remote_scope = remote.scope_id();
-                    if (local_scope == 0 && remote_scope == 0)
-                        || (local_scope != 0 && remote_scope != 0 && local_scope != remote_scope)
-                    {
+                    if remote_scope == 0 || (local_scope != 0 && local_scope != remote_scope) {
                         return Err(InvalidWay::LinkLocalScopeMismatch);
                     }
                 }
@@ -217,7 +244,8 @@ mod tests {
     fn resolves_wildcard_local_address_using_the_remote_route() {
         let candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "127.0.0.1:4433");
 
-        let resolved = resolve_way(candidate).expect("loopback route should resolve locally");
+        let resolved =
+            resolve_outbound_way(candidate).expect("loopback route should resolve locally");
         assert_eq!(resolved.2.src, "127.0.0.1:50000".parse().unwrap());
         assert_eq!(
             resolved.1.local(),
@@ -238,6 +266,11 @@ mod tests {
                 "inet://203.0.113.10:50000",
                 "203.0.113.10:50000",
                 "127.0.0.1:4433",
+            ),
+            way(
+                "inet://[::ffff:127.0.0.1]:50000",
+                "[::ffff:127.0.0.1]:50000",
+                "[::ffff:203.0.113.10]:4433",
             ),
         ] {
             assert_eq!(
@@ -324,6 +357,33 @@ mod tests {
                 "[fe80::2]:4433"
             )),
             Err(InvalidWay::LinkLocalScopeMismatch)
+        );
+        assert_eq!(
+            validate_way(&way(
+                "inet://[::]:50000",
+                "[fe80::1%3]:50000",
+                "[fe80::2]:4433"
+            )),
+            Err(InvalidWay::LinkLocalScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_direct_endpoint_and_link_mismatches() {
+        let mut candidate = way(
+            "inet://127.0.0.1:50000",
+            "127.0.0.1:50000",
+            "127.0.0.1:4433",
+        );
+        candidate.1 = Pathway::new(
+            EndpointAddr::direct("127.0.0.1:50001".parse().unwrap()),
+            candidate.1.remote(),
+        );
+        assert_eq!(
+            validate_way(&candidate),
+            Err(InvalidWay::DirectEndpointMismatch {
+                side: EndpointSide::Local
+            })
         );
     }
 
