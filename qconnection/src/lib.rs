@@ -760,12 +760,25 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Once;
+    use std::{
+        io,
+        sync::{Arc, Once},
+        task::{Context, Poll},
+    };
 
+    use bytes::BytesMut;
     use qbase::{
         error::ErrorKind,
-        net::{addr::EndpointAddr, route::Link},
+        net::{
+            addr::EndpointAddr,
+            route::{Link, Route},
+        },
         token::handy::NoopTokenRegistry,
+    };
+    use qinterface::{
+        bind_uri::BindUri,
+        io::{IO, ProductIO},
+        manager::InterfaceManager,
     };
     use rustls::{
         RootCertStore,
@@ -823,6 +836,91 @@ mod tests {
             .run()
     }
 
+    struct PendingTestIo {
+        bind_uri: BindUri,
+    }
+
+    impl IO for PendingTestIo {
+        fn bind_uri(&self) -> BindUri {
+            self.bind_uri.clone()
+        }
+
+        fn bound_addr(&self) -> io::Result<std::net::SocketAddr> {
+            self.bind_uri.resolve()
+        }
+
+        fn max_segment_size(&self) -> io::Result<usize> {
+            Ok(1200)
+        }
+
+        fn max_segments(&self) -> io::Result<usize> {
+            Ok(1)
+        }
+
+        fn poll_send(
+            &self,
+            _cx: &mut Context<'_>,
+            _pkts: &[io::IoSlice<'_>],
+            _route: Route,
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_recv(
+            &self,
+            _cx: &mut Context<'_>,
+            _pkts: &mut [BytesMut],
+            _route: &mut [Route],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_close(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PendingTestIoFactory;
+
+    impl ProductIO for PendingTestIoFactory {
+        fn bind(&self, bind_uri: BindUri) -> Box<dyn IO> {
+            Box::new(PendingTestIo { bind_uri })
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_wildcard_path_preserves_the_io_owned_source() {
+        let bind_uri: BindUri = "inet://0.0.0.0:50000".parse().unwrap();
+        let interfaces = Arc::new(InterfaceManager::new());
+        let _binding = interfaces
+            .bind(bind_uri.clone(), Arc::new(PendingTestIoFactory))
+            .await;
+        let connection =
+            Connection::new_client("localhost".to_owned(), Arc::new(NoopTokenRegistry))
+                .with_tls_config(test_client_tls_config())
+                .with_iface_manager(interfaces)
+                .with_cids(cid::ConnectionId::from_slice(b"wildcard-source"))
+                .run();
+        let local = "0.0.0.0:50000".parse().unwrap();
+        let remote = "203.0.113.10:4433".parse().unwrap();
+        let way = (
+            bind_uri,
+            Pathway::new(
+                EndpointAddr::direct("192.0.2.10:50000".parse().unwrap()),
+                EndpointAddr::direct(remote),
+            ),
+            Link::new(local, remote),
+        );
+
+        let path = connection
+            .try_map_components(|components| components.get_or_try_create_path(way, false))
+            .expect("connection should remain active")
+            .expect("wildcard outbound candidate should create a path");
+
+        assert_eq!(path.link().src, local);
+        assert!(!path.is_validated_for_test());
+    }
+
     #[tokio::test]
     async fn add_path_rejects_loopback_scope_before_interface_lookup() {
         let connection = test_client_connection();
@@ -869,6 +967,37 @@ mod tests {
             CreatePathFailure::InvalidWay(qinterface::component::route::InvalidWay::Unspecified {
                 side: qinterface::component::route::EndpointSide::Local
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn received_path_rejects_direct_endpoint_link_mismatch() {
+        let connection = test_client_connection();
+        let local = "127.0.0.1:50000".parse().unwrap();
+        let remote = "127.0.0.1:4433".parse().unwrap();
+        let way = (
+            "inet://127.0.0.1:50000".parse().unwrap(),
+            Pathway::new(
+                EndpointAddr::direct("127.0.0.1:50001".parse().unwrap()),
+                EndpointAddr::direct(remote),
+            ),
+            Link::new(local, remote),
+        );
+
+        let result = connection
+            .try_map_components(|components| components.get_or_try_create_path(way, true))
+            .expect("connection should remain active");
+        let error = match result {
+            Ok(_) => panic!("received Direct endpoint must match its physical Link"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            CreatePathFailure::InvalidWay(
+                qinterface::component::route::InvalidWay::DirectEndpointMismatch {
+                    side: qinterface::component::route::EndpointSide::Local
+                }
+            )
         ));
     }
 
