@@ -416,6 +416,11 @@ fn parse_cmsg(cmsg: ControlMessageOwned, line: &mut Line) {
         ControlMessageOwned::Ipv6PacketInfo(pktinfo6) => {
             let ip = IpAddr::V6(Ipv6Addr::from(pktinfo6.ipi6_addr.s6_addr));
             line.link.dst.set_ip(ip);
+            if let SocketAddr::V6(dst) = &mut line.link.dst
+                && dst.ip().is_unicast_link_local()
+            {
+                dst.set_scope_id(pktinfo6.ipi6_ifindex);
+            }
         }
         _ => {}
     }
@@ -445,5 +450,30 @@ impl ToSocketAddr for SockaddrStorage {
             }
             _ => panic!("Unsupported address family"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_link_local_packet_info_preserves_the_interface_scope() {
+        let mut line = Line::default();
+        let address = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let packet_info = libc::in6_pktinfo {
+            ipi6_addr: libc::in6_addr {
+                s6_addr: address.octets(),
+            },
+            ipi6_ifindex: 7,
+        };
+
+        parse_cmsg(ControlMessageOwned::Ipv6PacketInfo(packet_info), &mut line);
+
+        let SocketAddr::V6(destination) = line.link.dst else {
+            panic!("IPv6 packet info must produce an IPv6 destination");
+        };
+        assert_eq!(*destination.ip(), address);
+        assert_eq!(destination.scope_id(), 7);
     }
 }
