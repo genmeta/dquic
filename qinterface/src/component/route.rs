@@ -23,7 +23,9 @@ mod packet;
 mod queue;
 pub type Way = (BindUri, Pathway, Link);
 
-pub use admissibility::{EndpointSide, InvalidWay, resolve_outbound_way, validate_way};
+pub use admissibility::{
+    EndpointSide, InvalidWay, validate_outbound_candidate, validate_received_way,
+};
 pub use handler::PacketHandler;
 pub use packet::{CipherPacket, PlainPacket};
 pub use qbase::packet::Packet;

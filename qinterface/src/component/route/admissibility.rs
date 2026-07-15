@@ -1,6 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use qbase::net::{Family, addr::EndpointAddr, route::Pathway};
+use qbase::net::{Family, addr::EndpointAddr};
 use thiserror::Error;
 
 use super::Way;
@@ -33,51 +33,11 @@ pub enum InvalidWay {
     DirectEndpointMismatch { side: EndpointSide },
     #[error("link-local peer is missing a compatible interface scope")]
     LinkLocalScopeMismatch,
-    #[error("bind URI cannot currently resolve to an interface")]
-    BindUnavailable,
-    #[error("kernel route lookup could not select a concrete local address")]
-    LocalAddressUnavailable,
     #[error("concrete local address {local} does not match bind address {bound}")]
     BindAddressMismatch {
         bound: SocketAddr,
         local: SocketAddr,
     },
-}
-
-fn route_local_addr(remote: SocketAddr, port: u16) -> Result<SocketAddr, InvalidWay> {
-    let wildcard = match remote {
-        SocketAddr::V4(..) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
-        SocketAddr::V6(..) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-    };
-    let socket = UdpSocket::bind(wildcard).map_err(|_| InvalidWay::LocalAddressUnavailable)?;
-    socket
-        .connect(remote)
-        .map_err(|_| InvalidWay::LocalAddressUnavailable)?;
-    let selected = socket
-        .local_addr()
-        .map_err(|_| InvalidWay::LocalAddressUnavailable)?;
-    Ok(SocketAddr::new(selected.ip(), port))
-}
-
-pub fn resolve_outbound_way((bind, pathway, mut link): Way) -> Result<Way, InvalidWay> {
-    if !link.src.ip().is_unspecified() {
-        return Ok((bind, pathway, link));
-    }
-
-    let binding = bind
-        .resolve_binding()
-        .map_err(|_| InvalidWay::BindUnavailable)?;
-    let resolved_local = if binding.addr.ip().is_unspecified() {
-        route_local_addr(link.dst, link.src.port())?
-    } else {
-        SocketAddr::new(binding.addr.ip(), link.src.port())
-    };
-    let local_endpoint = match pathway.local() {
-        EndpointAddr::Direct { addr } if addr == link.src => EndpointAddr::direct(resolved_local),
-        endpoint => endpoint,
-    };
-    link.src = resolved_local;
-    Ok((bind, Pathway::new(local_endpoint, pathway.remote()), link))
 }
 
 fn validate_endpoint(side: EndpointSide, addr: SocketAddr) -> Result<(), InvalidWay> {
@@ -120,9 +80,24 @@ fn is_loopback(ip: IpAddr) -> bool {
     }
 }
 
-pub fn validate_way((bind, pathway, link): &Way) -> Result<(), InvalidWay> {
+#[derive(Clone, Copy)]
+enum Evidence {
+    OutboundCandidate,
+    Received,
+}
+
+pub fn validate_outbound_candidate(way: &Way) -> Result<(), InvalidWay> {
+    validate(way, Evidence::OutboundCandidate)
+}
+
+pub fn validate_received_way(way: &Way) -> Result<(), InvalidWay> {
+    validate(way, Evidence::Received)
+}
+
+fn validate((bind, pathway, link): &Way, evidence: Evidence) -> Result<(), InvalidWay> {
     let local = link.src;
     let remote = link.dst;
+    let local_is_unspecified = local.ip().is_unspecified();
 
     if local.is_ipv4() != remote.is_ipv4() {
         return Err(InvalidWay::AddressFamilyMismatch);
@@ -135,12 +110,26 @@ pub fn validate_way((bind, pathway, link): &Way) -> Result<(), InvalidWay> {
     if bind.family() != link_family {
         return Err(InvalidWay::BindFamilyMismatch);
     }
-    validate_endpoint(EndpointSide::Local, local)?;
+
     validate_endpoint(EndpointSide::Remote, remote)?;
-    if local == remote {
-        return Err(InvalidWay::IdenticalEndpoints);
+    if !matches!(evidence, Evidence::OutboundCandidate) || !local_is_unspecified {
+        validate_endpoint(EndpointSide::Local, local)?;
+    } else if local.port() == 0 {
+        return Err(InvalidWay::ZeroPort {
+            side: EndpointSide::Local,
+        });
     }
-    if matches!(pathway.local(), EndpointAddr::Direct { addr } if addr != local) {
+
+    if let Some(bound) = bind.as_inet_bind_uri()
+        && !bound.ip().is_unspecified()
+        && !local_is_unspecified
+        && bound.ip() != local.ip()
+    {
+        return Err(InvalidWay::BindAddressMismatch { bound, local });
+    }
+
+    if matches!(pathway.local(), EndpointAddr::Direct { addr } if !local_is_unspecified && addr != local)
+    {
         return Err(InvalidWay::DirectEndpointMismatch {
             side: EndpointSide::Local,
         });
@@ -150,39 +139,38 @@ pub fn validate_way((bind, pathway, link): &Way) -> Result<(), InvalidWay> {
             side: EndpointSide::Remote,
         });
     }
-    if is_loopback(local.ip()) != is_loopback(remote.ip()) {
+
+    if !local_is_unspecified {
+        if local == remote {
+            return Err(InvalidWay::IdenticalEndpoints);
+        }
+        if is_loopback(local.ip()) != is_loopback(remote.ip()) {
+            return Err(InvalidWay::LoopbackScopeMismatch);
+        }
+    }
+
+    if let (EndpointAddr::Direct { addr: local }, EndpointAddr::Direct { addr: remote }) =
+        (pathway.local(), pathway.remote())
+        && !local.ip().is_unspecified()
+        && !remote.ip().is_unspecified()
+        && is_loopback(local.ip()) != is_loopback(remote.ip())
+    {
         return Err(InvalidWay::LoopbackScopeMismatch);
     }
 
-    let binding = bind
-        .resolve_binding()
-        .map_err(|_| InvalidWay::BindUnavailable)?;
-    let bound = binding.addr;
-    if !bound.ip().is_unspecified() && bound.ip() != local.ip() {
-        return Err(InvalidWay::BindAddressMismatch { bound, local });
-    }
-
     if is_link_local(remote.ip()) {
-        match binding.device {
-            Some(device) => {
-                if let SocketAddr::V6(remote) = remote
-                    && remote.scope_id() != 0
-                    && remote.scope_id() != device.index
-                {
-                    return Err(InvalidWay::LinkLocalScopeMismatch);
-                }
+        if !local_is_unspecified && !is_link_local(local.ip()) {
+            return Err(InvalidWay::LinkLocalScopeMismatch);
+        }
+        if let SocketAddr::V6(remote) = remote {
+            if remote.scope_id() == 0 {
+                return Err(InvalidWay::LinkLocalScopeMismatch);
             }
-            None => {
-                if !is_link_local(local.ip()) {
-                    return Err(InvalidWay::LinkLocalScopeMismatch);
-                }
-                if let (SocketAddr::V6(local), SocketAddr::V6(remote)) = (local, remote) {
-                    let local_scope = local.scope_id();
-                    let remote_scope = remote.scope_id();
-                    if remote_scope == 0 || (local_scope != 0 && local_scope != remote_scope) {
-                        return Err(InvalidWay::LinkLocalScopeMismatch);
-                    }
-                }
+            if let SocketAddr::V6(local) = local
+                && local.scope_id() != 0
+                && local.scope_id() != remote.scope_id()
+            {
+                return Err(InvalidWay::LinkLocalScopeMismatch);
             }
         }
     }
@@ -236,22 +224,67 @@ mod tests {
                 "[2001:db8::2]:4433",
             ),
         ] {
-            assert_eq!(validate_way(&candidate), Ok(()), "{candidate:?}");
+            assert_eq!(
+                validate_outbound_candidate(&candidate),
+                Ok(()),
+                "{candidate:?}"
+            );
+            assert_eq!(validate_received_way(&candidate), Ok(()), "{candidate:?}");
         }
     }
 
     #[test]
-    fn resolves_wildcard_local_address_using_the_remote_route() {
-        let candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "127.0.0.1:4433");
+    fn outbound_wildcard_local_is_preserved() {
+        let candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "203.0.113.10:4433");
 
-        let resolved =
-            resolve_outbound_way(candidate).expect("loopback route should resolve locally");
-        assert_eq!(resolved.2.src, "127.0.0.1:50000".parse().unwrap());
+        assert_eq!(validate_outbound_candidate(&candidate), Ok(()));
+        assert_eq!(candidate.2.src, "0.0.0.0:50000".parse().unwrap());
+    }
+
+    #[test]
+    fn received_wildcard_local_is_rejected() {
+        let received = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "203.0.113.10:4433");
+
         assert_eq!(
-            resolved.1.local(),
-            EndpointAddr::direct("127.0.0.1:50000".parse().unwrap())
+            validate_received_way(&received),
+            Err(InvalidWay::Unspecified {
+                side: EndpointSide::Local,
+            })
         );
-        assert_eq!(validate_way(&resolved), Ok(()));
+    }
+
+    #[test]
+    fn outbound_wildcard_link_accepts_concrete_direct_intent() {
+        let mut candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "203.0.113.10:4433");
+        candidate.1 = Pathway::new(
+            EndpointAddr::direct("192.0.2.10:50000".parse().unwrap()),
+            candidate.1.remote(),
+        );
+
+        assert_eq!(validate_outbound_candidate(&candidate), Ok(()));
+        assert_eq!(
+            validate_received_way(&candidate),
+            Err(InvalidWay::Unspecified {
+                side: EndpointSide::Local,
+            })
+        );
+    }
+
+    #[test]
+    fn neither_context_accepts_a_wildcard_remote() {
+        let candidate = way("inet://0.0.0.0:50000", "0.0.0.0:50000", "0.0.0.0:4433");
+
+        for result in [
+            validate_outbound_candidate(&candidate),
+            validate_received_way(&candidate),
+        ] {
+            assert_eq!(
+                result,
+                Err(InvalidWay::Unspecified {
+                    side: EndpointSide::Remote,
+                })
+            );
+        }
     }
 
     #[test]
@@ -273,17 +306,19 @@ mod tests {
                 "[::ffff:203.0.113.10]:4433",
             ),
         ] {
-            assert_eq!(
-                validate_way(&candidate),
-                Err(InvalidWay::LoopbackScopeMismatch)
-            );
+            for result in [
+                validate_outbound_candidate(&candidate),
+                validate_received_way(&candidate),
+            ] {
+                assert_eq!(result, Err(InvalidWay::LoopbackScopeMismatch));
+            }
         }
     }
 
     #[test]
     fn rejects_non_path_endpoints() {
         assert!(matches!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://0.0.0.0:50000",
                 "0.0.0.0:50000",
                 "203.0.113.10:4433"
@@ -293,7 +328,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.10:50000",
                 "192.168.1.10:50000",
                 "224.0.0.1:4433"
@@ -303,7 +338,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.10:50000",
                 "192.168.1.10:50000",
                 "255.255.255.255:4433"
@@ -313,7 +348,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.10:50000",
                 "192.168.1.10:50000",
                 "203.0.113.10:0"
@@ -327,7 +362,7 @@ mod tests {
     #[test]
     fn rejects_family_identity_bind_and_link_local_scope_mismatches() {
         assert_eq!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.10:50000",
                 "192.168.1.10:50000",
                 "[2001:db8::2]:4433"
@@ -335,7 +370,7 @@ mod tests {
             Err(InvalidWay::AddressFamilyMismatch)
         );
         assert_eq!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.10:4433",
                 "192.168.1.10:4433",
                 "192.168.1.10:4433"
@@ -343,7 +378,7 @@ mod tests {
             Err(InvalidWay::IdenticalEndpoints)
         );
         assert!(matches!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://192.168.1.11:50000",
                 "192.168.1.10:50000",
                 "203.0.113.10:4433"
@@ -351,7 +386,7 @@ mod tests {
             Err(InvalidWay::BindAddressMismatch { .. })
         ));
         assert_eq!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://[2001:db8::1]:50000",
                 "[2001:db8::1]:50000",
                 "[fe80::2]:4433"
@@ -359,7 +394,7 @@ mod tests {
             Err(InvalidWay::LinkLocalScopeMismatch)
         );
         assert_eq!(
-            validate_way(&way(
+            validate_received_way(&way(
                 "inet://[::]:50000",
                 "[fe80::1%3]:50000",
                 "[fe80::2]:4433"
@@ -379,25 +414,28 @@ mod tests {
             EndpointAddr::direct("127.0.0.1:50001".parse().unwrap()),
             candidate.1.remote(),
         );
-        assert_eq!(
-            validate_way(&candidate),
-            Err(InvalidWay::DirectEndpointMismatch {
-                side: EndpointSide::Local
-            })
-        );
+        for result in [
+            validate_outbound_candidate(&candidate),
+            validate_received_way(&candidate),
+        ] {
+            assert_eq!(
+                result,
+                Err(InvalidWay::DirectEndpointMismatch {
+                    side: EndpointSide::Local
+                })
+            );
+        }
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn iface_bind_rejects_an_address_not_owned_by_that_device() {
+    #[test]
+    fn iface_bind_validation_does_not_resolve_the_device() {
         let candidate = way(
-            "iface://v4.lo:50000",
+            "iface://v4.nonexistent:50000",
             "203.0.113.10:50000",
             "198.51.100.10:4433",
         );
-        assert!(matches!(
-            validate_way(&candidate),
-            Err(InvalidWay::BindAddressMismatch { .. })
-        ));
+
+        assert_eq!(validate_outbound_candidate(&candidate), Ok(()));
+        assert_eq!(validate_received_way(&candidate), Ok(()));
     }
 }
