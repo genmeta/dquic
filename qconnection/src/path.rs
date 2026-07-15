@@ -71,13 +71,12 @@ impl Components {
         way: Way,
         is_probed: bool,
     ) -> Result<Arc<Path>, CreatePathFailure> {
-        let way = if is_probed {
-            way
+        let validate = if is_probed {
+            qinterface::component::route::validate_received_way
         } else {
-            qinterface::component::route::resolve_outbound_way(way)
-                .map_err(CreatePathFailure::InvalidWay)?
+            qinterface::component::route::validate_outbound_candidate
         };
-        qinterface::component::route::validate_way(&way).map_err(CreatePathFailure::InvalidWay)?;
+        validate(&way).map_err(CreatePathFailure::InvalidWay)?;
         let (bind_uri, pathway, link) = way;
         let try_create = || {
             let interface = self
@@ -288,6 +287,11 @@ impl Path {
 
     pub fn link(&self) -> &Link {
         &self.link
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_validated_for_test(&self) -> bool {
+        self.validated.load(Ordering::Acquire)
     }
 
     pub fn pathway(&self) -> &Pathway {
