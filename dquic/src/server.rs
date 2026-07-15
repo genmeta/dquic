@@ -435,6 +435,13 @@ impl QuicListeners {
         fields(%bind_uri, %pathway, %link, odcid=tracing::field::Empty, server_name=tracing::field::Empty)
     )]
     pub(crate) fn try_accept_connection(&self, packet: Packet, (bind_uri, pathway, link): Way) {
+        if let Err(error) =
+            qinterface::component::route::validate_way(&(bind_uri.clone(), pathway, link))
+        {
+            tracing::trace!(target: "dquic", %error, "dropping connectless packet on inadmissible path");
+            return;
+        }
+
         let origin_dcid = match &packet {
             Packet::Data(data_packet) => match &data_packet.header {
                 DataHeader::Long(LongHeader::Initial(hdr)) => *hdr.dcid(),
@@ -912,5 +919,66 @@ mod local_endpoint_subscription_tests {
         assert!(!production.contains(concat!("subscribe_local_", "address_events")));
         assert!(!production.contains("let listeners = self.clone();"));
         assert!(!production.contains("listeners.subscribe_connection_local_endpoints"));
+    }
+}
+
+#[cfg(test)]
+mod path_admissibility_tests {
+    use std::sync::{Arc, Once};
+
+    use qconnection::{
+        qbase::{
+            cid::ConnectionId,
+            net::route::{Link, Pathway},
+            packet::{
+                DataHeader, DataPacket, LongHeaderBuilder, Packet, long::DataHeader as LongHeader,
+            },
+        },
+        qinterface::{bind_uri::BindUri, component::route::QuicRouter},
+    };
+    use tokio_util::bytes::BytesMut;
+
+    use super::QuicListeners;
+
+    fn install_crypto_provider() {
+        static CRYPTO_PROVIDER: Once = Once::new();
+        CRYPTO_PROVIDER.call_once(|| {
+            _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    fn initial_packet(dcid: ConnectionId) -> Packet {
+        let header = LongHeaderBuilder::with_cid(dcid, ConnectionId::from_slice(b"server-test"))
+            .initial(Vec::new());
+        Packet::Data(DataPacket {
+            header: DataHeader::Long(LongHeader::Initial(header)),
+            bytes: BytesMut::new(),
+            offset: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn invalid_connectless_initial_does_not_consume_backlog_or_register_odcid() {
+        install_crypto_provider();
+        let router = Arc::new(QuicRouter::new());
+        let listeners = QuicListeners::builder()
+            .with_router(router.clone())
+            .without_client_cert_verifier()
+            .listen(1)
+            .unwrap();
+        let dcid = ConnectionId::from_slice(b"invalid-path");
+        let local = "203.0.113.10:4433".parse().unwrap();
+        let remote = "127.0.0.1:50000".parse().unwrap();
+        let link = Link::new(local, remote);
+        let way = (
+            BindUri::from("0.0.0.0:4433".parse::<std::net::SocketAddr>().unwrap()),
+            Pathway::from(link),
+            link,
+        );
+
+        listeners.try_accept_connection(initial_packet(dcid), way.clone());
+
+        assert_eq!(listeners.backlog.available_permits(), 1);
+        assert!(router.try_deliver(initial_packet(dcid), way).await.is_err());
     }
 }
