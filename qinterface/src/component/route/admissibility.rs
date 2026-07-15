@@ -85,6 +85,39 @@ fn is_loopback(ip: IpAddr) -> bool {
     }
 }
 
+fn validate_link_local_pair(
+    local: SocketAddr,
+    remote: SocketAddr,
+    allow_unspecified_local: bool,
+) -> Result<(), InvalidWay> {
+    if !is_link_local(remote.ip()) {
+        return Ok(());
+    }
+
+    let local_is_unspecified = is_unspecified(local.ip());
+    if local_is_unspecified {
+        if !allow_unspecified_local {
+            return Err(InvalidWay::LinkLocalScopeMismatch);
+        }
+    } else if !is_link_local(local.ip()) {
+        return Err(InvalidWay::LinkLocalScopeMismatch);
+    }
+
+    if let SocketAddr::V6(remote) = remote {
+        if remote.scope_id() == 0 {
+            return Err(InvalidWay::LinkLocalScopeMismatch);
+        }
+        if let SocketAddr::V6(local) = local
+            && !local_is_unspecified
+            && (local.scope_id() == 0 || local.scope_id() != remote.scope_id())
+        {
+            return Err(InvalidWay::LinkLocalScopeMismatch);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Evidence {
     OutboundCandidate,
@@ -125,12 +158,13 @@ fn validate((bind, pathway, link): &Way, evidence: Evidence) -> Result<(), Inval
         });
     }
 
-    if let Some(bound) = bind.as_inet_bind_uri()
-        && !bound.ip().is_unspecified()
-        && !local_is_unspecified
-        && (bound.ip() != local.ip() || (bound.port() != 0 && bound.port() != local.port()))
-    {
-        return Err(InvalidWay::BindAddressMismatch { bound, local });
+    if let Some(bound) = bind.as_inet_bind_uri() {
+        let ip_mismatch =
+            !bound.ip().is_unspecified() && !local_is_unspecified && bound.ip() != local.ip();
+        let port_mismatch = bound.port() != 0 && bound.port() != local.port();
+        if ip_mismatch || port_mismatch {
+            return Err(InvalidWay::BindAddressMismatch { bound, local });
+        }
     }
 
     if matches!(pathway.local(), EndpointAddr::Direct { addr } if !local_is_unspecified && addr != local)
@@ -171,24 +205,18 @@ fn validate((bind, pathway, link): &Way, evidence: Evidence) -> Result<(), Inval
                 return Err(InvalidWay::LoopbackScopeMismatch);
             }
         }
+        validate_link_local_pair(
+            local,
+            remote,
+            matches!(evidence, Evidence::OutboundCandidate),
+        )?;
     }
 
-    if is_link_local(remote.ip()) {
-        if !local_is_unspecified && !is_link_local(local.ip()) {
-            return Err(InvalidWay::LinkLocalScopeMismatch);
-        }
-        if let SocketAddr::V6(remote) = remote {
-            if remote.scope_id() == 0 {
-                return Err(InvalidWay::LinkLocalScopeMismatch);
-            }
-            if let SocketAddr::V6(local) = local
-                && !local_is_unspecified
-                && (local.scope_id() == 0 || local.scope_id() != remote.scope_id())
-            {
-                return Err(InvalidWay::LinkLocalScopeMismatch);
-            }
-        }
-    }
+    validate_link_local_pair(
+        local,
+        remote,
+        matches!(evidence, Evidence::OutboundCandidate),
+    )?;
 
     Ok(())
 }
@@ -493,6 +521,30 @@ mod tests {
 
         assert_eq!(
             validate_received_way(&candidate),
+            Err(InvalidWay::LinkLocalScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn wildcard_inet_bind_port_still_constrains_the_candidate() {
+        let candidate = way("inet://0.0.0.0:50001", "0.0.0.0:50000", "203.0.113.10:4433");
+
+        assert!(matches!(
+            validate_outbound_candidate(&candidate),
+            Err(InvalidWay::BindAddressMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn outbound_direct_link_local_intent_requires_compatible_scopes() {
+        let mut candidate = way("inet://[::]:50000", "[::]:50000", "[fe80::2%3]:4433");
+        candidate.1 = Pathway::new(
+            EndpointAddr::direct("[fe80::1]:50000".parse().unwrap()),
+            candidate.1.remote(),
+        );
+
+        assert_eq!(
+            validate_outbound_candidate(&candidate),
             Err(InvalidWay::LinkLocalScopeMismatch)
         );
     }
