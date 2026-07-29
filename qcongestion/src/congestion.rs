@@ -110,12 +110,11 @@ impl CongestionController {
                     self.need_send_ack_eliciting_packets[epoch].saturating_sub(1);
             }
             self.algorithm.on_packet_sent_cc(&sent);
-            self.packet_spaces[epoch]
-                .loss_time
-                .get_or_insert_with(|| now + self.rtt.loss_delay());
-            self.set_loss_detection_timer();
         }
         self.packet_spaces[epoch].sent_packets.push_back(sent);
+        if in_flight {
+            self.set_loss_detection_timer();
+        }
         self.pacer.on_sent(sent_bytes);
     }
 
@@ -606,4 +605,46 @@ impl super::Transport for ArcCC {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::sync::{Arc, atomic::AtomicU16};
+
+    use qbase::net::tx::ArcSendWaker;
+
+    use super::*;
+    use crate::HandshakeStatus;
+
+    struct NoopFeedback;
+
+    impl Feedback for NoopFeedback {
+        fn may_loss(&self, _trigger: PacketLostTrigger, _pns: &mut dyn Iterator<Item = u64>) {}
+    }
+
+    fn controller() -> CongestionController {
+        let feedback: Arc<dyn Feedback> = Arc::new(NoopFeedback);
+        let handshake = Arc::new(HandshakeStatus::new(false));
+        handshake.handshake_confirmed();
+        let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
+        path_status.release_anti_amplification_limit();
+
+        CongestionController::init(
+            Algorithm::NewReno,
+            Duration::from_millis(25),
+            [feedback.clone(), feedback.clone(), feedback],
+            path_status,
+            ArcSendWaker::new(),
+        )
+    }
+
+    #[test]
+    fn sending_without_ack_arms_pto_not_loss_timer() {
+        let mut controller = controller();
+
+        controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
+
+        let space = &controller.packet_spaces[Epoch::Data];
+        let last_sent = space.time_of_last_ack_eliciting_packet.unwrap();
+        let pto = controller.get_pto(Epoch::Data);
+        assert_eq!(space.loss_time, None);
+        assert_eq!(controller.loss_detection_timer, Some(last_sent + pto));
+    }
+}
