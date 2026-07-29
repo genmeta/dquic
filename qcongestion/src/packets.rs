@@ -145,7 +145,6 @@ pub(crate) struct PacketSpace {
     pub(crate) loss_time: Option<Instant>,
     pub(crate) sent_packets: VecDeque<SentPacket>,
     pub(crate) rcvd_packets: RcvdRecords,
-    pub(crate) max_ack_delay: Duration,
 }
 
 pub(crate) struct NewlyAckedPackets {
@@ -161,7 +160,6 @@ impl PacketSpace {
             loss_time: None,
             sent_packets: VecDeque::with_capacity(4),
             rcvd_packets: RcvdRecords::new(epoch, max_ack_delay),
-            max_ack_delay,
         }
     }
 
@@ -234,24 +232,26 @@ impl PacketSpace {
         packet_threshold: usize,
         algorithm: &mut Box<dyn Control>,
     ) -> impl Iterator<Item = u64> + use<> {
-        // assert!(self.largest_acked_packet.is_some());
         self.loss_time = None;
+        let Some(largest_acked) = self.largest_acked_packet else {
+            return Vec::new().into_iter();
+        };
 
         let now = Instant::now();
-        let lost_sent_time = now - loss_delay - self.max_ack_delay;
-        let largest_acked = self.largest_acked_packet.unwrap_or(0);
-        let largest_index = self
-            .sent_packets
-            .binary_search_by(|p| p.packet_number.cmp(&largest_acked))
-            .unwrap_or_else(|i| i.saturating_sub(1));
+        let lost_sent_time = now - loss_delay;
 
         let loss: Vec<_> = self
             .sent_packets
             .iter_mut()
             .enumerate()
-            .filter(|(_, pkt)| pkt.state == State::Inflight)
+            .filter(|(_, pkt)| pkt.state == State::Inflight && pkt.packet_number <= largest_acked)
             .map(move |(idx, unacked)| {
-                if unacked.time_sent < lost_sent_time || largest_index >= idx + packet_threshold {
+                if unacked.time_sent <= lost_sent_time
+                    || largest_acked
+                        >= unacked
+                            .packet_number
+                            .saturating_add(packet_threshold as u64)
+                {
                     unacked.state = State::Retransmitted;
                     Ok((idx, &*unacked))
                 } else {
@@ -314,6 +314,10 @@ mod tests {
     use super::*;
     use crate::algorithm::new_reno::NewReno;
 
+    fn new_reno() -> Box<dyn Control> {
+        Box::new(NewReno::new(Arc::new(AtomicU16::new(1200))))
+    }
+
     #[test]
     fn test_packet_space() {
         let mut packet_space = PacketSpace::with_epoch(Epoch::Initial, Duration::from_millis(100));
@@ -338,7 +342,7 @@ mod tests {
             None,
         );
 
-        let mut reno: Box<dyn Control> = Box::new(NewReno::new(Arc::new(AtomicU16::new(1200))));
+        let mut reno = new_reno();
         packet_space.on_ack_rcvd(&ack_frame, &mut reno);
         // init 12000, ack 8 packet 12000 + 8 * MSS = 21600
         assert_eq!(reno.congestion_window(), 21600);
@@ -384,6 +388,79 @@ mod tests {
         let loss = packet_space.detect_lost_packets(Duration::from_millis(100), 3, &mut reno);
         assert_eq!(loss.collect::<Vec<_>>(), vec![10, 11, 12, 14]);
         assert_eq!(reno.congestion_window(), (20817 - 1200) / 2);
+    }
+
+    #[test]
+    fn does_not_detect_loss_before_any_ack() {
+        let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
+        packet_space.sent_packets.push_back(SentPacket::new(
+            0,
+            Instant::now() - Duration::from_secs(1),
+            true,
+            true,
+            1200,
+        ));
+        let mut reno = new_reno();
+
+        let lost = packet_space
+            .detect_lost_packets(Duration::from_millis(10), 3, &mut reno)
+            .collect::<Vec<_>>();
+
+        assert!(lost.is_empty());
+        assert_eq!(packet_space.loss_time, None);
+        assert_eq!(packet_space.sent_packets[0].state, State::Inflight);
+    }
+
+    #[test]
+    fn only_detects_packets_sent_before_largest_ack() {
+        let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
+        let now = Instant::now();
+        packet_space.sent_packets.push_back(SentPacket::new(
+            10,
+            now - Duration::from_secs(3),
+            true,
+            true,
+            1200,
+        ));
+        let mut acknowledged = SentPacket::new(100, now - Duration::from_secs(2), true, true, 1200);
+        acknowledged.state = State::Acked;
+        packet_space.sent_packets.push_back(acknowledged);
+        packet_space.sent_packets.push_back(SentPacket::new(
+            101,
+            now - Duration::from_secs(1),
+            true,
+            true,
+            1200,
+        ));
+        packet_space.largest_acked_packet = Some(100);
+        let mut reno = new_reno();
+
+        let lost = packet_space
+            .detect_lost_packets(Duration::from_millis(500), 3, &mut reno)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lost, vec![10]);
+        assert_eq!(packet_space.sent_packets[2].state, State::Inflight);
+    }
+
+    #[test]
+    fn packet_threshold_uses_packet_numbers_not_queue_indexes() {
+        let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
+        let now = Instant::now();
+        packet_space
+            .sent_packets
+            .push_back(SentPacket::new(10, now, true, true, 1200));
+        let mut acknowledged = SentPacket::new(100, now, true, true, 1200);
+        acknowledged.state = State::Acked;
+        packet_space.sent_packets.push_back(acknowledged);
+        packet_space.largest_acked_packet = Some(100);
+        let mut reno = new_reno();
+
+        let lost = packet_space
+            .detect_lost_packets(Duration::from_secs(1), 3, &mut reno)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lost, vec![10]);
     }
 
     #[tokio::test(flavor = "current_thread")]
