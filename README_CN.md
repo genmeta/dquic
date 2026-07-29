@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://github.com/genmeta/dquic" title="DQuic">
-    <img src="images/dquic-logo.svg" width="348" height="96" alt="DQuic">
+    <img src="images/dquic-logo.svg" width="300" alt="DQuic">
   </a>
 </p>
-<h3 align="center">支持点到点通信和多路径传输的 QUIC 扩展实现。</h3>
+<h3 align="center">支持点到点通信和多路径传输的 QUIC 扩展实现</h3>
 
 [![License: Apache-2.0](https://img.shields.io/github/license/genmeta/dquic)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/genmeta/dquic/rust.yml)](https://github.com/genmeta/dquic/actions/workflows/rust.yml)
@@ -22,14 +22,14 @@
 DQuic 正是利用了上述让私网端点和公网搭档配对的思路，使普通端点也能进行网络监听并建立对等连接。注意公网搭档所做的不是复杂的 coturn 服务器，就仅仅是按新的“地址指示“转发给目标私网端点而已，**公网搭档不必是固定部署的基础设施，也不必是长期在线的中心服务器**，这使得在连接层达成去中心化的完全互联成为可能，这才是**真正的互联网**。
 
 <p align="center">
-  <img src="images/dquic-connectivity.png" alt="DQuic 从以云为中心的半互联扩展到端点之间的全互联">
+  <img src="images/dquic-connectivity-cn.png" alt="DQuic 从以云为中心的半互联扩展到端点之间的全互联">
 </p>
 
 ## Endpoint 地址
 
 在 DQuic 中，**连接的对端不再局限于服务端**，任何拥有新型 Endpoint 地址的端点皆可对等地互联。Endpoint 地址结构如下：
 
-```Rust
+```rust,ignore
 pub enum EndpointAddr {
     Direct {
         addr: SocketAddr,
