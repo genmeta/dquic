@@ -70,6 +70,18 @@ pub struct Burst {
     tls_handshake: ArcTlsHandshake,
 }
 
+fn datagram_capacity(
+    max_segment_size: usize,
+    mtu: usize,
+    forward_header_size: usize,
+    remaining_credit: usize,
+) -> Result<usize, Signals> {
+    let capacity = max_segment_size.min(mtu).min(remaining_credit);
+    (capacity > forward_header_size)
+        .then_some(capacity)
+        .ok_or(Signals::CREDIT)
+}
+
 impl super::Path {
     pub fn new_burst(self: &Arc<Self>, components: &Components) -> Burst {
         Burst {
@@ -526,6 +538,9 @@ impl Burst {
 
         let reversed_size = ForwardHeader::encoding_size(&self.path.pathway);
         let mut segment_lengths = Vec::with_capacity(max_segments);
+        let Some(mut remaining_credit) = self.path.anti_amplifier.balance()? else {
+            return Err(BurstError::PathDeactived);
+        };
 
         for segment_index in 0..max_segments {
             if buffers.len() <= segment_index {
@@ -538,7 +553,18 @@ impl Burst {
             }
 
             let segment = &mut segment[..max_segment_size];
-            let buffer_size = segment.len().min(self.path.mtu() as _);
+            let buffer_size = match datagram_capacity(
+                segment.len(),
+                self.path.mtu() as _,
+                reversed_size,
+                remaining_credit,
+            ) {
+                Ok(capacity) => capacity,
+                Err(error) if segment_lengths.is_empty() => {
+                    return Err(BurstError::Signals(error));
+                }
+                Err(_) => break,
+            };
             let buffer = &mut segment[..buffer_size][reversed_size..];
             let load_result = self
                 .load_spaces(data_sources, buffer)
@@ -581,18 +607,17 @@ impl Burst {
                     reversed_size + packet_size
                 });
 
-            match load_result {
+            let segment_length = match load_result {
                 Err(error) if segment_lengths.is_empty() => return Err(error),
                 Err(_) => break,
-                Ok(segment_length)
-                    if segment_length < segment_lengths.last().copied().unwrap_or_default() =>
-                {
-                    segment_lengths.push(segment_length);
-                    break;
-                }
-                Ok(segment_length) => {
-                    segment_lengths.push(segment_length);
-                }
+                Ok(segment_length) => segment_length,
+            };
+            remaining_credit = remaining_credit.saturating_sub(segment_length);
+            let final_segment =
+                segment_length < segment_lengths.last().copied().unwrap_or_default();
+            segment_lengths.push(segment_length);
+            if final_segment {
+                break;
             }
         }
 
@@ -601,5 +626,36 @@ impl Burst {
             .zip(buffers)
             .map(|(&len, buffer)| io::IoSlice::new(&buffer[..len]))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn amplification_credit_is_shared_by_all_segments() {
+        let mut remaining_credit = 3_600;
+        let mut total = 0;
+
+        for _ in 0..64 {
+            let Ok(capacity) = datagram_capacity(1_500, 1_200, 0, remaining_credit) else {
+                break;
+            };
+            remaining_credit -= capacity;
+            total += capacity;
+        }
+
+        assert_eq!(total, 3_600);
+        assert_eq!(remaining_credit, 0);
+    }
+
+    #[test]
+    fn forwarding_header_is_part_of_the_datagram_credit() {
+        assert_eq!(datagram_capacity(1_500, 1_200, 50, 1_200), Ok(1_200));
+        assert_eq!(
+            datagram_capacity(1_500, 1_200, 50, 50),
+            Err(Signals::CREDIT)
+        );
     }
 }
