@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/genmeta/dquic" title="DQuic">
-    <img src="images/dquic-logo.svg" width="300" alt="DQuic">
+    <img src="images/dquic-logo.svg" width="348" height="96" alt="DQuic">
   </a>
 </p>
 <h3 align="center">支持点到点通信和多路径传输的 QUIC 扩展实现</h3>

@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/genmeta/dquic" title="DQuic">
-    <img src="images/dquic-logo.svg" width="300" alt="DQuic">
+    <img src="images/dquic-logo.svg" width="348" height="96" alt="DQuic">
   </a>
 </p>
 <h3 align="center">A QUIC implementation extended for peer-to-peer communication and multipath transport</h3>
@@ -15,11 +15,20 @@
 
 **English** | [简体中文](README_CN.md)
 
-**Is the Internet truly omniconnectible?** At the level of underlying network topology, paths exist; at the connection layer, connectivity is still only partial. Being reachable requires listening for incoming connections, and that capability has largely remained a server-side privilege. This is why phones rarely connect directly to one another: direct communication between clients still relies on server-side assistance.
+**Is the Internet really interconnected?** At the data-link layer, many paths exist between any two endpoints; at the transport layer, it is not quite so — not all such paths are traversable, leaving the Internet only partially interconnected.
+Reachability is predicated on listening for inbound connections — a capability the architecture has systematically reserved for servers alone.
+If two phones cannot open a channel without some server in between, the architecture hardly deserves to be called an "inter" network.
 
-**Why?** Most client endpoints reside behind private networks or NATs and have no public IP address on which to listen. Yet a private-network endpoint can also gain that capability when it is paired with a public delegate endpoint that forwards packets on its behalf. The cost is simply that the receiving address is no longer the private endpoint's IP address alone: it is a compound endpoint address that contains the private endpoint's publicly mapped address and the address of its public delegate endpoint.
+Most clients reside in private networks and have no public IP address on which to listen.
+Yet what is rarely noted is that such clients, simply by pairing with a public delegate endpoint, can gain the capability to listen as well.
+The result is that the network address is no longer the endpoint's IP address alone: it is a compound endpoint address that contains the private endpoint's publicly mapped address and the address of its public delegate endpoint.
 
-DQuic applies this `ep-&EP` pairing model so that ordinary endpoints can listen for incoming connections and establish peer-to-peer connectivity. A public delegate endpoint is not a full-featured TURN server such as coturn; it only forwards packets to the intended private-network endpoint according to the extended endpoint address. **It need not be permanently deployed infrastructure or a central server that remains online indefinitely.** This makes decentralized, connection-layer omniconnectivity possible. This is **the Omniconnectible Internet**.
+DQuic applies this `ep-&EP` pairing model so that every endpoint can listen.
+And, with the help of their &EP, any two endpoints try to establish a peer-to-peer connection, without permanently relying on the &EP's relay.
+Public delegate endpoints are not heavy TURN servers such as coturn: rather than relaying traffic indefinitely, they simply forward packets at the IP layer to the intended endpoint in the private network until a direct path is established.
+They need not be fixed central servers or clusters that stay online permanently; they can be self-organized and autonomous.
+This makes decentralized, transport-layer interconnection possible.
+That is the true **"inter"**-net.
 
 <p align="center">
   <img src="images/dquic-connectivity-en.png" alt="DQuic extends cloud-centric partial connectivity into omniconnectivity between endpoints">
@@ -27,7 +36,8 @@ DQuic applies this `ep-&EP` pairing model so that ordinary endpoints can listen 
 
 ## Endpoint Addresses
 
-In DQuic, **a connection peer is no longer limited to a server**. Any endpoint with an Endpoint Address can communicate as a peer. An Endpoint Address has the following form:
+In DQuic, accepting connections is no longer a privilege of servers: any endpoint with an Endpoint Address can be the callee.
+An Endpoint Address has the following form:
 
 ```rust,ignore
 pub enum EndpointAddr {
@@ -43,35 +53,59 @@ pub enum EndpointAddr {
 
 > [!NOTE]
 >
-> An Endpoint Address describes an endpoint's currently reachable network address. A public endpoint uses `EndpointAddr::Direct`, consisting of an IP address and port. A private-network endpoint uses `EndpointAddr::Agent`, which combines the public delegate endpoint's reachable address with the private endpoint's own publicly mapped address. DDns uses E records (Endpoint Address Records) to resolve a name to one or more current `EndpointAddr` values. See the [DDns Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/ddns) and the [open-source DDns implementation](https://github.com/genmeta/ddns).
+> An Endpoint Address describes an endpoint's currently reachable network address. A public endpoint uses `EndpointAddr::Direct`, consisting of its IP address and port. A private-network endpoint uses `EndpointAddr::Agent`, which combines the public delegate endpoint's address with its own publicly mapped address.
+> DDns uses E records (Endpoint Address Records) to resolve a name to one or more current `EndpointAddr` values. See the [DDns Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/ddns) and the [open-source DDns implementation](https://github.com/genmeta/ddns).
 
 ## Peer-to-Peer Communication
 
-Building on the [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/draft-seemann-quic-nat-traversal-02) draft, DQuic implements a complete NAT traversal capability for DQuic connections. The draft remains at an early stage: it defines relevant extension frames but does not fully specify how NAT traversal coordinates with QUIC. With the `ep-&EP` pair model, DQuic uses the `Agent` form of an Endpoint Address to represent the delegate route and integrates STUN, relay, and signaling capabilities into the DQuic connection workflow to establish peer-to-peer connections between private-network endpoints.
+Building on the [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/draft-seemann-quic-nat-traversal-02) draft, DQuic provide full NAT traversal support for its connections.
+The draft remains at an early stage: it defines the relevant extension frames but does not fully specify how NAT traversal coordinates with QUIC.
+With the `ep-&EP` pairing model, DQuic uses the `Agent` form of an Endpoint Address to represent the delegate route and integrates STUN, relay, and signaling into the connection workflow to establish peer-to-peer connections between private-network endpoints.
 
-In this model, a private-network endpoint `ep` pairs with at least one public endpoint `EP`; `&EP` serves as `ep`'s public delegate endpoint. The two communicating endpoints first use their respective Endpoint Addresses to establish an initial reachable path, then exchange candidate addresses and attempt to establish a peer-to-peer path.
+In this model, a private-network endpoint `ep` pairs with at least one public endpoint, denoted `&EP`, serves as `ep`'s public delegate endpoint. The two communicating endpoints first use their respective Endpoint Addresses to establish an initial reachable path, then exchange candidate addresses and try to establish a direct peer-to-peer path.
 
-A validated peer-to-peer path is added to the current connection and can become the preferred transport path. If a direct path cannot be established, the connection can continue over the relayed path through the public delegate endpoint.
+A validated peer-to-peer path is added to the connection and becomes the preferred transport path. If a direct path cannot be established, the connection can continue over the relayed path through the public delegate endpoint.
 
 > For more information, see the [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic).
 
 ## Multipath Transport
 
-An endpoint may simultaneously use Wi-Fi, cellular, and Ethernet networks and may have both IPv4 and IPv6 protocol stacks. Two endpoints can therefore have multiple transport paths between them. Rather than directly following the MP-QUIC draft, DQuic implements a hybrid multipath transport scheme. It relies on independent packet transmission on each path and partial ordering among packet numbers, and schedules packets according to path priority and send-buffer trends.
+An endpoint may simultaneously use Wi-Fi, cellular, and Ethernet networks and may have both IPv4 and IPv6 protocol stacks.
+Two endpoints can therefore have multiple transport paths between them.
+Instead of following the [MP-QUIC draft](https://datatracker.ietf.org/doc/html/draft-ietf-quic-multipath), DQuic implements a hybrid multipath transport scheme.
+It relies on independent packet transmission on each path and partial ordering of packet numbers, and schedules packets according to path priority and send-buffer occupancy.
 
-Standard QUIC establishes a connection handshake over a single initial path. A DQuic connection can instead attempt multiple paths in parallel and complete the handshake over the fastest responding path, improving both connection establishment latency and the likelihood of success. Each path can subsequently attempt NAT traversal independently, further increasing the chance that the connection establishes a peer-to-peer path. When the network changes, QUIC connection migration allows NAT traversal to be retried over new paths without tearing down the overall connection.
+Standard QUIC performs the handshake over a single initial path.
+DQuic can instead attempt multiple paths in parallel and complete the handshake over the fastest-responding path, reducing both connection establishment latency and resource consumption.
+Each path can subsequently attempt NAT traversal independently, increasing the odds of establishing a peer-to-peer path.
+When the network changes, QUIC connection migration allows NAT traversal to be retried over new paths without interrupting the connection.
 
-As IPv6 adoption expands, DQuic can use a direct IPv6 path whenever both endpoints can communicate over IPv6, without NAT traversal on that path.
+> [!NOTE]
+>
+> As network communication infrastructure continues to evolve, IPv6 will become increasingly widespread.
+> By then, most endpoints will have a publicly routable IPv6 address of their own, further reducing the already low overhead of NAT traversal to near zero.
+> We look forward to broader IPv6 adoption and smoother connectivity.
 
 > For more information, see the [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic).
 
-## Open Connectivity and Security
+## Openness and Security
 
-You may reasonably worry that exposing private-network devices to the public Internet through `EndpointAddr` and DQuic is unsafe. Exposing a private device's SSH port to the public Internet through VPN-style solutions and protecting it with a weak password is indeed dangerous. DQuic addresses a different model. Its security does not come merely from avoiding VPN-style network exposure, nor only from QUIC's secure transport design. DQuic, DDns, and DHttp assign each endpoint a name and a PKI-backed certificate, so endpoints authenticate one another with mTLS instead of relying on weak passwords.
+You may reasonably worry that exposing private-network devices to the public Internet through EndpointAddr and DQuic is unsafe.
+And it is true that exposing a private device's SSH port with a weak password is dangerous.
+But DQuic is built on a different security model:
+its security comes neither from staying hidden,
+nor merely from QUIC's encrypted transport.
+Through DQuic, DDns, and DHttp,
+every endpoint is given a domain name and a PKI certificate — endpoints authenticate one another with mTLS and cryptographic certainty.
 
-Private-network devices must become publicly reachable to participate in open connectivity, but public reachability does not itself mean unrestricted access. It also requires firewall and access-policy controls. Open connectivity does not mean that every endpoint may access every other endpoint: only authorized identities should be accepted. After DQuic establishes a connection, name-centered mTLS identity verification and access policies can provide finer-grained and more stable protection than policies based on IP addresses alone.
+For decades, we have grown accustomed to the sense of security that comes from hiding inside private networks — yet few have noticed what this invisibility costs: an endpoint stripped of the ability to accept incoming connections is condemned to passivity.
+That ability matters, because only an endpoint that can both call and answer can interconnect as an equal.
+And interconnection does not mean unfettered access: DQuic enforces name-centered mTLS identity verification together with access policies — a mechanism far more robust and secure than traditional IP-address-based firewalls.
 
-> IP addresses carry some identity information, but they are highly variable, and address spoofing remains possible. By comparison, PKI-backed certificates provide stronger verifiable identity, and certificate forgery is much rarer in practice.
+**Openness and security are not a trade-off — we can have both.**
+
+> IP addresses do carry identity information, but they are frequently reassigned and can be spoofed.
+> By comparison, PKI certificates provide stronger verifiable identity, and certificate forgery is much rarer in practice.
 
 ## Quick Start
 
@@ -84,8 +118,8 @@ dquic = "0.7.0-beta.4"
 
 For complete usage instructions and runnable examples, see:
 
-- [DQuic Usage Documentation](https://docs.dhttp.net/en/docs/protocol/dquic)
-- [Client, server, and Stream examples](dquic/examples)
+- [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic)
+- [Client and Server examples](dquic/examples)
 - [HTTP/3 examples](h3-shim/examples)
 
 ## Contributing
