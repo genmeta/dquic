@@ -3,17 +3,16 @@ use std::{
     fmt,
     io::{self},
     net::SocketAddr,
-    ops::{ControlFlow, Deref},
-    pin::pin,
+    ops::Deref,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU8, Ordering::SeqCst},
+        atomic::{AtomicBool, Ordering::SeqCst},
     },
     task::{Context, Poll, ready},
     time::Duration,
 };
 
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt};
 use qbase::net::{Family, addr::EndpointAddr};
 pub use qbase::net::{NatType, NetFeature};
 use qinterface::{
@@ -29,7 +28,7 @@ use qinterface::{
 };
 use qresolve::Resolve;
 use snafu::{OptionExt, ResultExt, Snafu};
-use tokio::{sync::Notify, task::JoinSet};
+use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
@@ -44,6 +43,7 @@ use crate::{
 };
 
 const NAT_MAPPING_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+const MAX_STUN_AGENTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatDetectionStep {
@@ -166,79 +166,6 @@ impl From<DetectNatTypeError> for io::Error {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClientState {
-    Active = 0,
-    Inactive = 1,
-    Closing = 2,
-}
-
-#[derive(Debug, Clone)]
-struct ArcClientState {
-    state: Arc<AtomicU8>,
-    observers: [Arc<Notify>; 3],
-}
-
-impl ArcClientState {
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(AtomicU8::new(ClientState::Active as u8)),
-            observers: <[_; 3]>::default(),
-        }
-    }
-
-    pub fn try_update(&self, old_state: ClientState, new_state: ClientState) -> bool {
-        match self
-            .state
-            .compare_exchange(old_state as u8, new_state as u8, SeqCst, SeqCst)
-        {
-            Ok(_old) => {
-                self.observers[new_state as usize].notify_waiters();
-                true
-            }
-            Err(_current) => false,
-        }
-    }
-
-    pub fn get(&self) -> ClientState {
-        match self.state.load(SeqCst) {
-            0 => ClientState::Active,
-            1 => ClientState::Inactive,
-            2 => ClientState::Closing,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn set(&self, new_state: ClientState) -> ClientState {
-        let old_state = self.state.swap(new_state as u8, SeqCst);
-        if old_state != new_state as u8 {
-            self.observers[new_state as usize].notify_waiters();
-        }
-        match old_state {
-            0 => ClientState::Active,
-            1 => ClientState::Inactive,
-            2 => ClientState::Closing,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn wait(&self, expect: ClientState) -> impl futures::Future<Output = ()> + use<> {
-        let notify = self.observers[expect as usize].clone();
-        let state = self.state.clone();
-        async move {
-            let mut notified = pin!(notify.notified());
-            loop {
-                notified.as_mut().enable();
-                if state.load(SeqCst) == expect as u8 {
-                    return;
-                }
-                notified.as_mut().await;
-                notified.set(notify.notified());
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct StunClient<I: RefIO + 'static> {
     #[allow(clippy::type_complexity)]
@@ -250,7 +177,7 @@ pub struct StunClient<I: RefIO + 'static> {
     stun_agent: SocketAddr,
     endpoint_publisher: Arc<Mutex<Option<InterfaceAgentEndpointPublisher>>>,
 
-    state: ArcClientState,
+    closing: Arc<AtomicBool>,
     tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
@@ -277,7 +204,7 @@ impl<I: RefIO + 'static> StunClient<I> {
             ref_iface,
             stun_router,
             endpoint_publisher: Arc::new(Mutex::new(endpoint_publisher)),
-            state: ArcClientState::new(),
+            closing: Arc::new(AtomicBool::new(false)),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
         };
         tracing::debug!(target: "stun", %stun_agent, "created new STUN client");
@@ -304,8 +231,6 @@ impl<I: RefIO + 'static> StunClient<I> {
         let bind_uri = ref_iface.iface().bind_uri();
 
         let endpoint_publisher = self.endpoint_publisher.clone();
-
-        let client_state = self.state.clone();
 
         let keep_alive_task = async move {
             let log_detect_result = |detect_result: &Result<SocketAddr, DetectOuterAddrError>| {
@@ -344,11 +269,6 @@ impl<I: RefIO + 'static> StunClient<I> {
                     Duration::from_millis(300),
                 )
                 .await;
-
-                match &detect_result {
-                    Ok(_) => client_state.try_update(ClientState::Inactive, ClientState::Active),
-                    Err(_) => client_state.try_update(ClientState::Active, ClientState::Inactive),
-                };
 
                 log_detect_result(&detect_result);
 
@@ -390,7 +310,7 @@ impl<I: RefIO + 'static> StunClient<I> {
         &self,
         cx: &mut Context,
     ) -> Poll<Result<SocketAddr, DetectOuterAddrError>> {
-        if self.state.get() == ClientState::Closing {
+        if self.closing.load(SeqCst) {
             return Poll::Ready(Err(DetectOuterAddrError::Rebinded {
                 bind_uri: self.ref_iface.iface().bind_uri(),
             }));
@@ -407,7 +327,7 @@ impl<I: RefIO + 'static> StunClient<I> {
     }
 
     pub fn get_outer_addr(&self) -> Option<Result<SocketAddr, DetectOuterAddrError>> {
-        if self.state.get() == ClientState::Closing {
+        if self.closing.load(SeqCst) {
             return Some(Err(DetectOuterAddrError::Rebinded {
                 bind_uri: self.ref_iface.iface().bind_uri(),
             }));
@@ -445,7 +365,7 @@ impl<I: RefIO + 'static> StunClient<I> {
     }
 
     pub fn poll_nat_type(&self, cx: &mut Context) -> Poll<Result<NatType, DetectNatTypeError>> {
-        if self.state.get() == ClientState::Closing {
+        if self.closing.load(SeqCst) {
             return Poll::Ready(Err(DetectNatTypeError::Rebinded {
                 bind_uri: self.ref_iface.iface().bind_uri(),
             }));
@@ -458,7 +378,7 @@ impl<I: RefIO + 'static> StunClient<I> {
     }
 
     pub fn get_nat_type(&self) -> Option<Result<NatType, DetectNatTypeError>> {
-        if self.state.get() == ClientState::Closing {
+        if self.closing.load(SeqCst) {
             return Some(Err(DetectNatTypeError::Rebinded {
                 bind_uri: self.ref_iface.iface().bind_uri(),
             }));
@@ -477,7 +397,7 @@ impl<I: RefIO + 'static> StunClient<I> {
     // }
 
     pub fn poll_close(&self, cx: &mut Context) -> Poll<()> {
-        if self.state.set(ClientState::Closing) == ClientState::Closing {
+        if self.closing.swap(true, SeqCst) {
             return Poll::Ready(());
         }
         self.lock_tasks().abort_all();
@@ -554,6 +474,35 @@ impl Component for StunClientComponent {
 
 type StunClientsMap<I> = HashMap<SocketAddr, StunClient<I>>;
 
+async fn resolve_stun_agents(
+    resolver: &(dyn Resolve + Send + Sync),
+    server: &str,
+    family: Family,
+) -> Vec<SocketAddr> {
+    let Ok(mut records) = resolver.lookup(server).await else {
+        return Vec::new();
+    };
+    let mut agents = Vec::with_capacity(MAX_STUN_AGENTS);
+
+    while let Some((_, endpoint)) = records.next().await {
+        let EndpointAddr::Direct { addr } = endpoint else {
+            continue;
+        };
+        let matches_family = match family {
+            Family::V4 => addr.is_ipv4(),
+            Family::V6 => addr.is_ipv6(),
+        };
+        if matches_family && !agents.contains(&addr) {
+            agents.push(addr);
+            if agents.len() == MAX_STUN_AGENTS {
+                break;
+            }
+        }
+    }
+
+    agents
+}
+
 #[derive(Debug)]
 struct StunClientsInner<I: RefIO + 'static> {
     ref_iface: I,
@@ -566,8 +515,6 @@ struct StunClientsInner<I: RefIO + 'static> {
 pub const DEFAULT_STUN_SERVER: &str = "nat.genmeta.net:20004";
 
 impl<I: RefIO + 'static> StunClientsInner<I> {
-    pub const MIN_AGENTS: usize = 3;
-
     pub fn new(
         ref_iface: I,
         router: StunRouter,
@@ -606,61 +553,21 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
             let clients = clients.clone();
             let resolver = resolver.clone();
             let server = server.clone();
-            let ref_iface = ref_iface.clone();
+            let family = ref_iface.iface().bind_uri().family();
             async move {
-                let lock_clients = || clients.lock().expect("StunClients mutex poisoned");
-
-                let should_lookup_agents = |clients: &StunClientsMap<I>| match clients
-                    .values()
-                    .try_fold((0, 0), |(active, inactive), client| {
-                        match client.state.get() {
-                            ClientState::Active => ControlFlow::Continue((active + 1, inactive)),
-                            ClientState::Inactive => ControlFlow::Continue((active, inactive + 1)),
-                            ClientState::Closing => ControlFlow::Break(()),
-                        }
-                    }) {
-                    ControlFlow::Continue((active, _inactive)) => active < Self::MIN_AGENTS,
-                    ControlFlow::Break(_) => false,
-                };
-
-                let wait_too_few_agents = |clients: &StunClientsMap<I>| {
-                    let clients_len = clients.len();
-                    debug_assert!(clients_len >= Self::MIN_AGENTS);
-                    let mut stream = clients
-                        .iter()
-                        .map(|(.., client)| client.state.wait(ClientState::Inactive))
-                        .collect::<FuturesUnordered<_>>()
-                        .skip(clients_len.saturating_sub(Self::MIN_AGENTS));
-                    async move { _ = stream.next().await }
-                };
-
-                loop {
-                    while !{ should_lookup_agents(&lock_clients()) } {
-                        { wait_too_few_agents(&lock_clients()) }.await;
+                for addr in resolve_stun_agents(resolver.as_ref(), server.as_ref(), family).await {
+                    let mut clients = clients.lock().expect("StunClients mutex poisoned");
+                    if clients.len() >= MAX_STUN_AGENTS {
+                        break;
                     }
-
-                    // 保证两次 lookup 至少间隔 10s，同时限时 10s 防止 resolver 卡住
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    _ = tokio::time::timeout_at(deadline, async {
-                        let Ok(stream) = resolver.lookup(server.as_ref()).await else { return };
-                        let is_ipv4 = ref_iface.iface().bind_uri().family() == Family::V4;
-                        let mut stream = std::pin::pin!(stream);
-                        while let Some((_, addr)) = stream.next().await {
-                            let EndpointAddr::Direct { addr } = addr else { continue };
-                            if addr.is_ipv4() != is_ipv4 { continue }
-                            let done = {
-                                let mut clients = lock_clients();
-                                if clients.contains_key(&addr) { continue }
-                                if let Some(client) = new_stun_client(addr) {
-                                    tracing::debug!(target: "stun", %addr, "discovered new STUN agent");
-                                    clients.insert(addr, client);
-                                    !should_lookup_agents(&clients)
-                                } else { false }
-                            };
-                            if done { break }
-                        }
-                    }).await;
-                    tokio::time::sleep_until(deadline).await;
+                    if clients.contains_key(&addr) {
+                        continue;
+                    }
+                    let Some(client) = new_stun_client(addr) else {
+                        continue;
+                    };
+                    tracing::debug!(target: "stun", %addr, "discovered new STUN agent");
+                    clients.insert(addr, client);
                 }
             }
             .in_current_span()
@@ -767,7 +674,7 @@ impl Component for StunClientsComponent {
                 router,
                 clients.resolver.clone(),
                 clients.server.clone(),
-                clients.lock_clients().keys().copied(),
+                std::iter::empty(),
                 local_endpoints,
             );
             *clients = new_clinets;
@@ -1288,3 +1195,6 @@ async fn detect_nat_type<I: RefIO>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -71,7 +71,7 @@ impl Network {
                     let stun_router = components
                         .init_with(|| StunRouterComponent::new(iface.downgrade()))
                         .router();
-                    // initial stun clients (DNS 解析推迟到后台 lookup 任务)
+                    // initial stun clients (DNS is resolved once by a background task)
                     let stun_server = stun_server.clone();
                     let clients = components
                         .init_with(|| {
@@ -131,9 +131,8 @@ impl Network {
             self.stun_server.clone()
         };
 
-        // STUN agent 的 DNS 解析推迟到 StunClientsComponent 的后台任务（它会在
-        // clients < MIN_AGENTS 时自动触发 lookup，且自带超时保护）。bind 自身
-        // 不再在关键路径上等待 DNS，避免 resolver 挂起导致整个绑定流程锁死。
+        // STUN agent DNS resolution runs once in StunClientsComponent's background task.
+        // Binding itself never waits for DNS.
 
         let factory = self.iface_factory.clone();
         let bind_iface = self.iface_manager.bind(bind_uri, factory).await;
