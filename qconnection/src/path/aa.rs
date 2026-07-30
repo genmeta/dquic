@@ -31,11 +31,16 @@ impl<const N: usize> AntiAmplifier<N> {
     }
 
     /// Store N * amount of credit
+    #[allow(deprecated)] // `try_update` is not available on the crate's MSRV.
     pub fn on_rcvd(&self, amount: usize) {
         if self.state.load(Ordering::Acquire) != Self::NORMAL {
             return;
         }
-        self.credit.fetch_add(amount * N, Ordering::AcqRel);
+        _ = self
+            .credit
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |credit| {
+                Some(credit.saturating_add(amount.saturating_mul(N)))
+            });
         self.tx_waker.wake_by(Signals::CREDIT);
     }
 
@@ -68,9 +73,14 @@ impl<const N: usize> AntiAmplifier<N> {
         }
     }
 
+    #[allow(deprecated)] // `try_update` is not available on the crate's MSRV.
     pub fn on_sent(&self, amount: usize) {
         if self.state.load(Ordering::Acquire) == Self::NORMAL {
-            self.credit.fetch_sub(amount, Ordering::AcqRel);
+            _ = self
+                .credit
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |credit| {
+                    Some(credit.saturating_sub(amount))
+                });
         }
     }
 
@@ -149,5 +159,25 @@ mod tests {
         // Post sent 5 units, should reduce credit by 5
         anti_amplifier.on_sent(5);
         assert_eq!(anti_amplifier.credit.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn sent_amount_larger_than_credit_does_not_underflow() {
+        let anti_amplifier = AntiAmplifier::<3>::new(ArcSendWaker::new());
+        anti_amplifier.on_rcvd(1);
+
+        anti_amplifier.on_sent(4);
+
+        assert_eq!(anti_amplifier.credit.load(Ordering::Acquire), 0);
+        assert_eq!(anti_amplifier.balance(), Err(Signals::CREDIT));
+    }
+
+    #[test]
+    fn received_credit_saturates_instead_of_wrapping() {
+        let anti_amplifier = AntiAmplifier::<3>::new(ArcSendWaker::new());
+
+        anti_amplifier.on_rcvd(usize::MAX);
+
+        assert_eq!(anti_amplifier.credit.load(Ordering::Acquire), usize::MAX);
     }
 }
