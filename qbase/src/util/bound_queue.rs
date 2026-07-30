@@ -8,7 +8,7 @@ use futures::{SinkExt, StreamExt, channel::mpsc};
 
 #[derive(Debug)]
 struct BoundQueueInner<T> {
-    tx: mpsc::Sender<T>,
+    tx: Mutex<mpsc::Sender<T>>,
     rx: Mutex<mpsc::Receiver<T>>,
 }
 
@@ -25,17 +25,21 @@ impl<T> BoundQueue<T> {
     #[inline]
     pub fn new(size: usize) -> Self {
         let (tx, rx) = mpsc::channel(size);
-        Self(Arc::new(BoundQueueInner { tx, rx: rx.into() }))
+        Self(Arc::new(BoundQueueInner {
+            tx: tx.into(),
+            rx: rx.into(),
+        }))
     }
 
     #[inline]
     pub fn try_send(&self, item: T) -> Result<(), mpsc::TrySendError<T>> {
-        self.0.tx.clone().try_send(item)
+        self.0.tx.lock().unwrap().try_send(item)
     }
 
     #[inline]
     pub async fn send(&self, item: T) -> Result<(), mpsc::SendError> {
-        self.0.tx.clone().send(item).await
+        let mut tx = self.0.tx.lock().unwrap().clone();
+        tx.send(item).await
     }
 
     #[inline]
@@ -45,12 +49,12 @@ impl<T> BoundQueue<T> {
 
     #[inline]
     pub fn close(&self) {
-        self.0.tx.clone().close_channel();
+        self.0.tx.lock().unwrap().close_channel();
     }
 
     #[inline]
     pub fn is_closed(&self) -> bool {
-        self.0.tx.is_closed()
+        self.0.tx.lock().unwrap().is_closed()
     }
 
     #[inline]
@@ -81,5 +85,20 @@ mod tests {
 
         assert_eq!(queue.recv().await, Some(1));
         assert_eq!(queue.recv().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn try_send_remains_bounded() {
+        let queue = BoundQueue::new(2);
+
+        assert!(queue.try_send(1).is_ok());
+        assert!(queue.try_send(2).is_ok());
+        // futures gives each persistent sender one guaranteed slot in addition to the buffer.
+        assert!(queue.try_send(3).is_ok());
+        assert!(queue.try_send(4).is_err_and(|error| error.is_full()));
+
+        assert_eq!(queue.recv().await, Some(1));
+        assert_eq!(queue.recv().await, Some(2));
+        assert_eq!(queue.recv().await, Some(3));
     }
 }
