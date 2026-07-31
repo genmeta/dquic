@@ -69,6 +69,7 @@ pub struct ArcPathContexts {
 struct State {
     accepting_paths: bool,
     initial_path: Option<Weak<Path>>,
+    last_path_pto: Option<Duration>,
 }
 
 impl ArcPathContexts {
@@ -80,6 +81,7 @@ impl ArcPathContexts {
             state: Arc::new(RwLock::new(State {
                 accepting_paths: true,
                 initial_path: None,
+                last_path_pto: None,
             })),
         }
     }
@@ -177,15 +179,20 @@ impl ArcPathContexts {
     }
 
     pub fn remove(&self, pathway: &Pathway, reason: &PathDeactivated) {
-        if self.paths.remove(pathway).is_some() {
-            tracing::debug!(target: "dquic", %pathway, %reason, "path deactivated");
-            if self.state.read().unwrap().accepting_paths && self.is_empty() {
-                let error = QuicError::with_default_fty(
-                    ErrorKind::NoViablePath,
-                    format!("No viable path exist, last path removed because: {reason}"),
-                );
-                self.broker.emit(Event::Failed(error));
-            }
+        let Some((_, path)) = self.paths.remove(pathway) else {
+            return;
+        };
+        tracing::debug!(target: "dquic", %pathway, %reason, "path deactivated");
+
+        let mut state = self.state.write().unwrap();
+        if state.accepting_paths && self.is_empty() {
+            state.last_path_pto = Some(path.cc().get_pto(Epoch::Data));
+            let error = QuicError::with_default_fty(
+                ErrorKind::NoViablePath,
+                format!("No viable path exist, last path removed because: {reason}"),
+            );
+            drop(state);
+            self.broker.emit(Event::Failed(error));
         }
     }
 
@@ -194,7 +201,11 @@ impl ArcPathContexts {
     }
 
     pub fn max_pto_duration(&self) -> Option<Duration> {
-        self.paths.iter().map(|p| p.cc().get_pto(Epoch::Data)).max()
+        self.paths
+            .iter()
+            .map(|p| p.cc().get_pto(Epoch::Data))
+            .max()
+            .or_else(|| self.state.read().unwrap().last_path_pto)
     }
 
     pub fn paths<C: FromIterator<(Pathway, Arc<Path>)>>(&self) -> C {

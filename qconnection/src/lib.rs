@@ -764,19 +764,23 @@ mod tests {
         io,
         sync::{Arc, Once},
         task::{Context, Poll},
+        time::Duration,
     };
 
     use bytes::BytesMut;
     use qbase::{
+        cid::ConnectionId,
         error::ErrorKind,
         net::{
             addr::EndpointAddr,
             route::{Link, Route},
         },
+        packet::{LongHeaderBuilder, Packet},
         token::handy::NoopTokenRegistry,
     };
     use qinterface::{
         bind_uri::BindUri,
+        component::route::QuicRouter,
         io::{IO, ProductIO},
         manager::InterfaceManager,
     };
@@ -888,6 +892,17 @@ mod tests {
         }
     }
 
+    fn test_routed_packet(dcid: ConnectionId) -> Packet {
+        Packet::VN(LongHeaderBuilder::with_cid(dcid, ConnectionId::from_slice(b"scid")).vn(vec![1]))
+    }
+
+    async fn route_exists(router: &Arc<QuicRouter>, dcid: ConnectionId, way: Way) -> bool {
+        router
+            .try_deliver(test_routed_packet(dcid), way)
+            .await
+            .is_ok()
+    }
+
     #[tokio::test]
     async fn outbound_wildcard_path_preserves_the_io_owned_source() {
         let bind_uri: BindUri = "inet://0.0.0.0:50000".parse().unwrap();
@@ -919,6 +934,47 @@ mod tests {
 
         assert_eq!(path.link().src, local);
         assert!(!path.is_validated_for_test());
+    }
+
+    #[tokio::test]
+    async fn path_loss_retains_server_odcid_during_draining() {
+        let bind_uri: BindUri = "inet://127.0.0.1:50000".parse().unwrap();
+        let interfaces = Arc::new(InterfaceManager::new());
+        let _binding = interfaces
+            .bind(bind_uri.clone(), Arc::new(PendingTestIoFactory))
+            .await;
+        let router = Arc::new(QuicRouter::new());
+        let odcid = ConnectionId::from_slice(b"drain-odcid");
+        let connection = Connection::new_server(Arc::new(NoopTokenRegistry))
+            .with_tls_config(test_server_tls_config())
+            .with_iface_manager(interfaces)
+            .with_quic_router(router.clone())
+            .with_cids(odcid)
+            .run();
+        let local = "127.0.0.1:50000".parse().unwrap();
+        let remote = "127.0.0.1:4433".parse().unwrap();
+        let way = (
+            bind_uri,
+            Pathway::new(EndpointAddr::direct(local), EndpointAddr::direct(remote)),
+            Link::new(local, remote),
+        );
+
+        connection
+            .try_map_components(|components| components.get_or_try_create_path(way.clone(), false))
+            .expect("connection should remain active")
+            .expect("test path should be created");
+        connection.del_path(&way.1).unwrap();
+        tokio::task::yield_now().await;
+
+        assert_eq!(connection.conn_state.current(), Some(state::DRAINING));
+        assert!(route_exists(&router, odcid, way.clone()).await);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), connection.conn_state.closed())
+                .await
+                .is_err(),
+            "server ODCID route must survive the draining period"
+        );
+        assert!(route_exists(&router, odcid, way).await);
     }
 
     #[tokio::test]
