@@ -97,17 +97,17 @@ tracing-appender = "0.2"
 
 # members
 qmacro = { path = "./qmacro", version = "0.5.1" }
-qbase = { path = "./qbase", version = "0.6.0" }
+qbase = { path = "./qbase", version = "0.6.1" }
 qevent = { path = "./qevent", version = "0.6.0" }
 qudp = { path = "./qudp", version = "0.7.0-beta.1" }
-qinterface = { path = "./qinterface", version = "0.7.0-beta.2" }
+qinterface = { path = "./qinterface", version = "0.7.0-beta.3" }
 qdatagram = { path = "./qdatagram", version = "0.6.0" }
 qresolve = { path = "./qresolve", version = "0.7.0-beta.1" }
 qrecovery = { path = "./qrecovery", version = "0.6.0" }
-qtraversal = { path = "./qtraversal", version = "0.7.0-beta.4" }
+qtraversal = { path = "./qtraversal", version = "0.7.0-beta.5" }
 qcongestion = { path = "./qcongestion", version = "0.6.0" }
-qconnection = { path = "./qconnection", version = "0.8.0-beta.1" }
-dquic = { path = "./dquic", version = "0.7.0-beta.4" }
+qconnection = { path = "./qconnection", version = "0.8.0-beta.2" }
+dquic = { path = "./dquic", version = "0.7.0-beta.5" }
 h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
 
