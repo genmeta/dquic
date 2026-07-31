@@ -34,7 +34,7 @@ use crate::{
 
 pub type CipherHanshakePacket = CipherPacket<HandshakeHeader>;
 pub type PlainHandshakePacket = PlainPacket<HandshakeHeader>;
-pub type ReceivedFrom = (CipherHanshakePacket, Way);
+pub type ReceivedFrom = ((CipherHanshakePacket, usize), Way);
 
 pub struct HandshakeSpace {
     keys: ArcKeys,
@@ -182,7 +182,7 @@ fn frame_dispathcer<'a>(
 }
 
 async fn parse_normal_packet(
-    (packet, (bind_uri, pathway, link)): ReceivedFrom,
+    ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedFrom,
     space: &HandshakeSpace,
     components: &Components,
     dispatch_frame: impl Fn(Frame, &Path),
@@ -224,7 +224,7 @@ async fn parse_normal_packet(
         packet_content.is_ack_eliciting(),
         path.cc().get_pto(Epoch::Handshake),
     );
-    path.on_packet_rcvd(Epoch::Handshake, packet.pn(), packet.size(), packet_content);
+    path.on_packet_rcvd(Epoch::Handshake, packet.pn(), datagram_size, packet_content);
 
     Result::<(), Error>::Ok(())
 }
@@ -290,7 +290,7 @@ pub async fn deliver_and_parse_packets(
     // Release the primary connection state
     drop(components);
 
-    while let Some((packet, (_bind_uri, pathway, _link))) = packets.recv().await {
+    while let Some(((packet, _), (_bind_uri, pathway, _link))) = packets.recv().await {
         if let Some(ccf) = parse_closing_packet(&space, packet) {
             event_broker.emit(Event::Closed(ccf));
         }

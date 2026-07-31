@@ -903,5 +903,27 @@ mod tests {
             ]
             .as_slice()
         );
+
+        let mut padded = BytesMut::from(&buffer[..sent_bytes]);
+        padded.resize(1200, 0);
+        let (Packet::Data(packet), datagram_size) =
+            PacketReader::new(padded, 8).next().unwrap().unwrap()
+        else {
+            panic!("expected Initial packet");
+        };
+        assert_eq!(packet.bytes.len(), sent_bytes);
+        assert_eq!(datagram_size, 1200);
+
+        let mut coalesced = BytesMut::from(&buffer[..sent_bytes]);
+        coalesced.extend_from_slice(&buffer[..sent_bytes]);
+        let mut packets = PacketReader::new(coalesced, 8);
+        let (Packet::Data(_first), first_datagram_size) = packets.next().unwrap().unwrap() else {
+            panic!("expected first Initial packet");
+        };
+        let (Packet::Data(_second), second_datagram_size) = packets.next().unwrap().unwrap() else {
+            panic!("expected second Initial packet");
+        };
+        assert_eq!(first_datagram_size, sent_bytes * 2);
+        assert_eq!(second_datagram_size, 0);
     }
 }

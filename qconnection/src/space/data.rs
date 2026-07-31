@@ -50,11 +50,11 @@ use crate::{
 
 pub type CipherZeroRttPacket = CipherPacket<ZeroRttHeader>;
 pub type PlainZeroRttPacket = PlainPacket<ZeroRttHeader>;
-pub type ReceivedZeroRttFrom = (CipherZeroRttPacket, (BindUri, Pathway, Link));
+pub type ReceivedZeroRttFrom = ((CipherZeroRttPacket, usize), (BindUri, Pathway, Link));
 
 pub type CipherOneRttPacket = CipherPacket<OneRttHeader>;
 pub type PlainOneRttPacket = PlainPacket<OneRttHeader>;
-pub type ReceivedOneRttFrom = (CipherOneRttPacket, (BindUri, Pathway, Link));
+pub type ReceivedOneRttFrom = ((CipherOneRttPacket, usize), (BindUri, Pathway, Link));
 
 pub struct DataSpace {
     zero_rtt_keys: ArcZeroRttKeys,
@@ -418,7 +418,7 @@ fn frame_dispathcer(
 }
 
 async fn parse_normal_zero_rtt_packet(
-    (packet, (bind_uri, pathway, link)): ReceivedZeroRttFrom,
+    ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedZeroRttFrom,
     space: &DataSpace,
     components: &Components,
     dispatch_frame: impl Fn(Frame, Type, &Path),
@@ -456,13 +456,13 @@ async fn parse_normal_zero_rtt_packet(
         packet_content.is_ack_eliciting(),
         path.cc().get_pto(Epoch::Data),
     );
-    path.on_packet_rcvd(Epoch::Data, packet.pn(), packet.size(), packet_content);
+    path.on_packet_rcvd(Epoch::Data, packet.pn(), datagram_size, packet_content);
 
     Result::<(), Error>::Ok(())
 }
 
 async fn parse_normal_one_rtt_packet(
-    (packet, (bind_uri, pathway, link)): ReceivedOneRttFrom,
+    ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedOneRttFrom,
     space: &DataSpace,
     components: &Components,
     dispatch_frame: impl Fn(Frame, Type, &Path),
@@ -503,7 +503,7 @@ async fn parse_normal_one_rtt_packet(
         packet_content.is_ack_eliciting(),
         path.cc().get_pto(Epoch::Data),
     );
-    path.on_packet_rcvd(Epoch::Data, packet.pn(), packet.size(), packet_content);
+    path.on_packet_rcvd(Epoch::Data, packet.pn(), datagram_size, packet_content);
 
     Result::<(), Error>::Ok(())
 }
@@ -605,7 +605,7 @@ pub async fn deliver_and_parse_packets(
     drop(components);
     zeor_rtt_packets.close();
 
-    while let Some((packet, (_bind_uri, pathway, _link))) = one_rtt_packets.recv().await {
+    while let Some(((packet, _), (_bind_uri, pathway, _link))) = one_rtt_packets.recv().await {
         if let Some(ccf) = parse_closing_one_rtt_packet(&space, packet) {
             event_broker.emit(Event::Closed(ccf));
         }

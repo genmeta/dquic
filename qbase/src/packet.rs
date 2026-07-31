@@ -161,24 +161,34 @@ pub enum Packet {
 ///
 /// The received packet is a BytesMut, in order to be decrypted in future, and make as few
 /// copies cheaply until it is read by the application layer.
+///
+/// Each item also carries the size of its containing UDP datagram. For a coalesced datagram,
+/// only the first item carries the size; later items carry zero so receive accounting happens once.
 #[derive(Debug)]
 pub struct PacketReader {
     raw_bytes: BytesMut,
     dcid_len: usize,
+    datagram_size: usize,
     // TODO: 添加level，各种包类型顺序不能错乱，否则失败
 }
 
 impl PacketReader {
     pub fn new(raw_bytes: BytesMut, dcid_len: usize) -> Self {
+        let datagram_size = raw_bytes.len();
+        Self::with_datagram_size(raw_bytes, dcid_len, datagram_size)
+    }
+
+    pub fn with_datagram_size(raw_bytes: BytesMut, dcid_len: usize, datagram_size: usize) -> Self {
         Self {
             raw_bytes,
             dcid_len,
+            datagram_size,
         }
     }
 }
 
 impl Iterator for PacketReader {
-    type Item = Result<Packet, error::Error>;
+    type Item = Result<(Packet, usize), error::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.raw_bytes.is_empty() {
@@ -186,7 +196,7 @@ impl Iterator for PacketReader {
         }
 
         match io::be_packet(&mut self.raw_bytes, self.dcid_len) {
-            Ok(packet) => Some(Ok(packet)),
+            Ok(packet) => Some(Ok((packet, std::mem::take(&mut self.datagram_size)))),
             Err(error) => {
                 tracing::debug!(target: "dquic", ?error, "dropped unparsed packet");
                 self.raw_bytes.clear(); // no longer parsing
