@@ -29,6 +29,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 clap = { workspace = true }
+rustls = { workspace = true }
 tokio = { features = ["fs", "rt-multi-thread"], workspace = true }
 
 [dev-dependencies.tracing-subscriber]

@@ -24,7 +24,7 @@ use qbase::{
     packet::{
         Package, PacketSpace, ProductHeader,
         header::short::OneRttHeader,
-        io::{AssemblePacket, Packages, PadTo20},
+        io::{AssemblePacket, Packages, PadToFull},
     },
 };
 use qevent::telemetry::Instrument;
@@ -198,6 +198,27 @@ const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_RETRIES: usize = 5;
 const COLLISION_PORTS: u32 = 800;
 const PUNCHER_LOCAL_SHARDS: usize = 2;
+// A received punch must fund at least one full-size PATH_CHALLENGE and PATH_RESPONSE
+// exchange under QUIC's three-times anti-amplification limit.
+const PUNCH_DATAGRAM_SIZE: usize = 1_200;
+
+fn assemble_punch_packet<PH, S, P>(
+    product_header: &PH,
+    packet_space: &S,
+    buffer: &mut [u8],
+    packages: P,
+) -> Result<usize, Signals>
+where
+    PH: ProductHeader<OneRttHeader>,
+    S: PacketSpace<OneRttHeader>,
+    P: for<'b> Package<S::PacketAssembler<'b>>,
+    PadToFull: for<'b> Package<S::PacketAssembler<'b>>,
+{
+    let mut packet = packet_space.new_packet(product_header.new_header()?, buffer)?;
+    packet.assemble_packet(&mut Packages((packages, PadToFull)))?;
+    let (sent_bytes, _props) = packet.encrypt_and_protect_packet();
+    Ok(sent_bytes)
+}
 
 pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
 
@@ -316,17 +337,15 @@ where
     ) -> io::Result<()>
     where
         P: for<'b> Package<S::PacketAssembler<'b>>,
-        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
+        PadToFull: for<'b> Package<S::PacketAssembler<'b>>,
     {
-        let mut buffer = [0; 128];
-        let sent_bytes = (|| {
-            let mut packet = self
-                .packet_space
-                .new_packet(self.product_header.new_header()?, &mut buffer)?;
-            packet.assemble_packet(&mut Packages((packages, PadTo20)))?;
-            let (sent_bytes, _props) = packet.encrypt_and_protect_packet();
-            Result::<_, Signals>::Ok(sent_bytes)
-        })()
+        let mut buffer = [0; PUNCH_DATAGRAM_SIZE];
+        let sent_bytes = assemble_punch_packet(
+            &self.product_header,
+            self.packet_space.as_ref(),
+            &mut buffer,
+            packages,
+        )
         .map_err(|s| io::Error::other(format!("Failed to assemble packet: {s:?}")))?;
 
         let line = Line::new(link, ttl, None, sent_bytes as u16);
@@ -344,7 +363,7 @@ where
         ttl: u8,
     ) -> io::Result<()>
     where
-        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
+        PadToFull: for<'b> Package<S::PacketAssembler<'b>>,
         PunchHelloFrame: for<'b> Package<S::PacketAssembler<'b>>,
     {
         tracing::debug!(target: "punch", %punch_id, %link, ttl, "starting collision attack");
@@ -458,7 +477,7 @@ where
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
     for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
     for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
+    for<'b> PadToFull: Package<S::PacketAssembler<'b>>,
 {
     pub fn add_local_address(
         &self,
@@ -1707,7 +1726,7 @@ where
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
     for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
     for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
+    for<'b> PadToFull: Package<S::PacketAssembler<'b>>,
 {
     type Output = ();
 
@@ -1754,7 +1773,7 @@ where
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
     for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
     for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
+    for<'b> PadToFull: Package<S::PacketAssembler<'b>>,
 {
     type Output = ();
 
@@ -1841,7 +1860,170 @@ async fn dynamic_iface(
 
 #[cfg(test)]
 mod tests {
+    use bytes::{BufMut, buf::UninitSlice};
+    use qbase::{
+        cid::ConnectionId,
+        packet::{
+            KeyPhaseBit, PacketInfo, PacketNumber, PacketWriter, RecordFrame, keys::DirectionalKeys,
+        },
+        util::ContinuousData,
+    };
+
     use super::*;
+
+    struct TransparentKeys;
+
+    impl rustls::quic::PacketKey for TransparentKeys {
+        fn decrypt_in_place<'a>(
+            &self,
+            _packet_number: u64,
+            _header: &[u8],
+            payload: &'a mut [u8],
+        ) -> Result<&'a [u8], rustls::Error> {
+            Ok(&payload[..payload.len() - self.tag_len()])
+        }
+
+        fn encrypt_in_place(
+            &self,
+            _packet_number: u64,
+            _header: &[u8],
+            _payload: &mut [u8],
+        ) -> Result<rustls::quic::Tag, rustls::Error> {
+            Ok(rustls::quic::Tag::from([0; 16].as_slice()))
+        }
+
+        fn confidentiality_limit(&self) -> u64 {
+            0
+        }
+
+        fn integrity_limit(&self) -> u64 {
+            0
+        }
+
+        fn tag_len(&self) -> usize {
+            16
+        }
+    }
+
+    impl rustls::quic::HeaderProtectionKey for TransparentKeys {
+        fn decrypt_in_place(
+            &self,
+            _sample: &[u8],
+            _first_byte: &mut u8,
+            _payload: &mut [u8],
+        ) -> Result<(), rustls::Error> {
+            Ok(())
+        }
+
+        fn encrypt_in_place(
+            &self,
+            _sample: &[u8],
+            _first_byte: &mut u8,
+            _payload: &mut [u8],
+        ) -> Result<(), rustls::Error> {
+            Ok(())
+        }
+
+        fn sample_len(&self) -> usize {
+            20
+        }
+    }
+
+    struct TestHeader;
+
+    impl ProductHeader<OneRttHeader> for TestHeader {
+        fn new_header(&self) -> Result<OneRttHeader, Signals> {
+            Ok(OneRttHeader::new(false.into(), ConnectionId::default()))
+        }
+    }
+
+    struct TestPacketSpace {
+        keys: DirectionalKeys,
+    }
+
+    struct TestPacketWriter<'b>(PacketWriter<'b>);
+
+    impl<'b> AsRef<PacketWriter<'b>> for TestPacketWriter<'b> {
+        fn as_ref(&self) -> &PacketWriter<'b> {
+            &self.0
+        }
+    }
+
+    unsafe impl BufMut for TestPacketWriter<'_> {
+        fn remaining_mut(&self) -> usize {
+            self.0.remaining_mut()
+        }
+
+        unsafe fn advance_mut(&mut self, cnt: usize) {
+            unsafe { self.0.advance_mut(cnt) };
+        }
+
+        fn chunk_mut(&mut self) -> &mut UninitSlice {
+            self.0.chunk_mut()
+        }
+
+        fn put_bytes(&mut self, val: u8, cnt: usize) {
+            self.0.put_bytes(val, cnt);
+        }
+    }
+
+    impl AssemblePacket for TestPacketWriter<'_> {
+        fn encrypt_and_protect_packet(self) -> (usize, PacketInfo) {
+            self.0.encrypt_and_protect_packet()
+        }
+    }
+
+    impl<'b, F, D: ContinuousData> RecordFrame<F, D> for TestPacketWriter<'b>
+    where
+        PacketWriter<'b>: RecordFrame<F, D>,
+    {
+        fn record_frame(&mut self, frame: &F) {
+            self.0.record_frame(frame);
+        }
+    }
+
+    impl TestPacketSpace {
+        fn new() -> Self {
+            let keys = Arc::new(TransparentKeys);
+            Self {
+                keys: DirectionalKeys {
+                    header: keys.clone(),
+                    packet: keys,
+                },
+            }
+        }
+    }
+
+    impl PacketSpace<OneRttHeader> for TestPacketSpace {
+        type PacketAssembler<'b> = TestPacketWriter<'b>;
+
+        fn new_packet<'b>(
+            &'b self,
+            header: OneRttHeader,
+            buffer: &'b mut [u8],
+        ) -> Result<Self::PacketAssembler<'b>, Signals> {
+            PacketWriter::new_short(
+                &header,
+                buffer,
+                (0, PacketNumber::U16(0)),
+                self.keys.clone(),
+                KeyPhaseBit::Zero,
+            )
+            .map(TestPacketWriter)
+        }
+    }
+
+    #[test]
+    fn punch_hello_funds_full_size_path_validation() {
+        let mut buffer = [0; PUNCH_DATAGRAM_SIZE];
+        let frame = PunchHelloFrame::new(0, 0, DEFAULT_PROBE_ID);
+
+        let sent_bytes =
+            assemble_punch_packet(&TestHeader, &TestPacketSpace::new(), &mut buffer, frame)
+                .expect("PunchHello packet should assemble");
+
+        assert_eq!(sent_bytes, PUNCH_DATAGRAM_SIZE);
+    }
 
     #[test]
     fn direct_pairing_rejects_loopback_to_non_loopback() {
