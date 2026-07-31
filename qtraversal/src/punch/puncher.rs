@@ -191,13 +191,19 @@ const KNOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(3);
 const PUNCH_ME_NOW_TIMEOUT: Duration = Duration::from_secs(1);
 const COLLISION_TIMEOUT: Duration = Duration::from_secs(3);
+const PUNCH_DONE_CONFIRM_INTERVAL: Duration = Duration::from_millis(30);
 // Birthday attack timeout: must exceed PortPredictor's full run time (~6s for 300 probes × 20ms)
 const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(8);
 
 // Quantity
 const MAX_RETRIES: usize = 5;
+const PUNCH_DONE_CONFIRM_RETRIES: usize = 3;
 const COLLISION_PORTS: u32 = 800;
 const PUNCHER_LOCAL_SHARDS: usize = 2;
+
+fn direct_punch_done_response(link: Link, hello: &PunchHelloFrame) -> (Link, PunchDoneFrame) {
+    (link, PunchDoneFrame::respond_to(hello))
+}
 
 pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
 
@@ -334,6 +340,25 @@ where
         iface
             .sendmmsg(&[io::IoSlice::new(&buffer[..sent_bytes])], route)
             .await
+    }
+
+    async fn send_direct_punch_done_with_retry(
+        &self,
+        iface: &(impl IO + ?Sized),
+        link: Link,
+        frame: PunchDoneFrame,
+    ) where
+        PunchDoneFrame: for<'b> Package<S::PacketAssembler<'b>>,
+        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
+    {
+        for attempt in 0..PUNCH_DONE_CONFIRM_RETRIES {
+            if let Err(error) = self.send_packet(iface, link, HELLO_TTL, frame).await {
+                tracing::debug!(target: "punch", %link, ?error, "failed to send direct PunchDone confirmation");
+            }
+            if attempt + 1 < PUNCH_DONE_CONFIRM_RETRIES {
+                tokio::time::sleep(PUNCH_DONE_CONFIRM_INTERVAL).await;
+            }
+        }
     }
 
     async fn collision(
@@ -1760,10 +1785,30 @@ where
 
     fn recv_frame(
         &self,
-        (_bind, pathway, link, frame): (BindUri, Pathway, Link, PunchHelloFrame),
+        (bind, pathway, link, frame): (BindUri, Pathway, Link, PunchHelloFrame),
     ) -> Result<Self::Output, qbase::error::Error> {
         tracing::debug!(target: "punch", %pathway, %link, frame = ?frame, "received punch hello frame");
         let punch_id = frame.punch_id().flip();
+
+        // A broker confirmation alone does not prove that the peer can receive on this path.
+        // Reply on the observed link so simultaneous active punches establish path evidence at
+        // both endpoints even if one side's first Hello arrived before the NAT hole was open.
+        if let Some(iface) = self.0.ifaces.borrow(&bind) {
+            let puncher = self.0.clone();
+            let (response_link, response_frame) = direct_punch_done_response(link, &frame);
+            tokio::spawn(
+                async move {
+                    puncher
+                        .send_direct_punch_done_with_retry(&iface, response_link, response_frame)
+                        .await;
+                }
+                .instrument_in_current()
+                .in_current_span(),
+            );
+        } else {
+            tracing::debug!(target: "punch", %bind, %link, %punch_id, "cannot send direct PunchDone without interface");
+        }
+
         match self.0.transaction.entry(punch_id) {
             Entry::Occupied(mut entry) => {
                 let tx = entry.get_mut().1.clone();
@@ -1842,6 +1887,22 @@ async fn dynamic_iface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_active_punch_confirms_on_the_observed_link() {
+        let link = Link::new(
+            "192.0.2.10:50000".parse().unwrap(),
+            "198.51.100.20:60000".parse().unwrap(),
+        );
+        let hello = PunchHelloFrame::new(7, 11, 13);
+
+        let (response_link, response) = direct_punch_done_response(link, &hello);
+
+        assert_eq!(response_link, link);
+        assert_eq!(response.local_seq(), 11);
+        assert_eq!(response.remote_seq(), 7);
+        assert_eq!(response.probe_id(), 13);
+    }
 
     #[test]
     fn direct_pairing_rejects_loopback_to_non_loopback() {
