@@ -71,14 +71,14 @@ impl Network {
                     let stun_router = components
                         .init_with(|| StunRouterComponent::new(iface.downgrade()))
                         .router();
-                    // initial stun clients (DNS is resolved once by a background task)
+                    // STUN bootstrap names use system DNS.
                     let stun_server = stun_server.clone();
                     let clients = components
                         .init_with(|| {
                             StunClientsComponent::new(
                                 iface.downgrade(),
                                 stun_router.clone(),
-                                self.resolver.clone(),
+                                Arc::new(SystemResolver),
                                 stun_server,
                                 iter::empty(),
                                 Some(local_endpoints.clone()),
@@ -131,8 +131,8 @@ impl Network {
             self.stun_server.clone()
         };
 
-        // STUN agent DNS resolution runs once in StunClientsComponent's background task.
-        // Binding itself never waits for DNS.
+        // STUN agent discovery and interface readiness are retried in the background.
+        // Binding itself never waits for DNS or a usable local address.
 
         let factory = self.iface_factory.clone();
         let bind_iface = self.iface_manager.bind(bind_uri, factory).await;
