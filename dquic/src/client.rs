@@ -542,6 +542,7 @@ impl QuicClient {
 }
 
 impl<T> QuicClientBuilder<T> {
+    /// Configure the resolver used for connection target names.
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolve + Send + Sync>) -> Self {
         self.network.resolver = resolver;
         self
