@@ -40,6 +40,12 @@ use crate::{
     packet::{ForwardHeader, StunHeader},
 };
 
+const INITIAL_MINIMUM_DATAGRAM_SIZE: usize = 1_200;
+// The QUIC packet is measured after the forwarding header is removed. Keep a
+// 100-byte budget for that header so an Initial still represents a minimum-size
+// datagram on the wire.
+const INITIAL_MINIMUM_PACKET_SIZE: usize = INITIAL_MINIMUM_DATAGRAM_SIZE - 100;
+
 #[derive(Debug, Clone)]
 pub enum Forwarder<I: RefIO + 'static> {
     Clients { stun_clients: StunClients<I> },
@@ -186,7 +192,8 @@ impl ReceiveAndDeliverPacketComponent {
                 let iface = iface_ref.iface();
                 let bind_uri = iface.bind_uri();
 
-            let deliver_quic_packet = async |pkt: BytesMut, route: Route| {
+            let deliver_quic_packet =
+                async |pkt: BytesMut, route: Route, datagram_size: usize| {
                 let Some(quic_router) = quic_router.as_ref() else {
                     return;
                 };
@@ -196,14 +203,20 @@ impl ReceiveAndDeliverPacketComponent {
                     matches!(pkt, Packet::Data(packet) if matches!(packet.header, packet::DataHeader::Long(packet::long::DataHeader::Initial(..))))
                 }
 
-                let size = pkt.len();
                 let bind_uri = bind_uri.clone();
-                for (packet, way) in PacketReader::new(pkt, 8)
+                let packet_size = pkt.len();
+                let mut datagram_size = Some(datagram_size);
+                for (received, way) in PacketReader::new(pkt, 8)
                     .flatten()
-                    .filter(move |pkt| !(is_initial_packet(pkt) && size < 1100))
-                    .map(move |pkt| (pkt, (bind_uri.clone(), route.pathway(), route.link())))
+                    .map(|packet| (packet, datagram_size.take()))
+                    .filter(move |(packet, _)| {
+                        !(is_initial_packet(packet) && packet_size < INITIAL_MINIMUM_PACKET_SIZE)
+                    })
+                    .map(move |received| {
+                        (received, (bind_uri.clone(), route.pathway(), route.link()))
+                    })
                 {
-                    quic_router.deliver(packet, way).await;
+                    quic_router.deliver(received, way).await;
                 }
             };
 
@@ -234,10 +247,11 @@ impl ReceiveAndDeliverPacketComponent {
                     };
 
                     // split_off forward header, deliver the rest as quic packet
+                    let datagram_size = pkt.len();
                     let pkt = pkt.split_off(ForwardHeader::encoding_size(&fhdr.pathway()));
                     route.seg_size = pkt.len() as _;
                     let new_route = Route::new(fhdr.pathway().flip().map(Into::into), route.line);
-                    deliver_quic_packet(pkt, new_route).await;
+                    deliver_quic_packet(pkt, new_route, datagram_size).await;
                     Ok(())
                 };
 
@@ -247,7 +261,10 @@ impl ReceiveAndDeliverPacketComponent {
                     for (pkt, hdr) in iface.recvmmsg(&mut bufs, &mut hdrs).await? {
                         match be_header(&pkt) {
                             // quic
-                            Err(_) => deliver_quic_packet(pkt, hdr).await,
+                            Err(_) => {
+                                let datagram_size = pkt.len();
+                                deliver_quic_packet(pkt, hdr, datagram_size).await
+                            }
                             // stun
                             Ok((_remain, Header::Stun(_stun_header))) => {
                                 deliver_stun_packet(pkt, hdr).await

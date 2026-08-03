@@ -30,11 +30,13 @@ pub use handler::PacketHandler;
 pub use packet::{CipherPacket, PlainPacket};
 pub use qbase::packet::Packet;
 pub use queue::RcvdPacketQueue;
+/// A parsed QUIC packet paired with its UDP datagram size when it owns receive accounting.
+pub type ReceivedPacket<P = Packet> = (P, Option<usize>);
 
 #[derive(Debug)]
 pub struct QuicRouter {
     table: DashMap<Signpost, Arc<RcvdPacketQueue>>,
-    on_unrouted: handler::PacketHandler<Packet>,
+    on_unrouted: handler::PacketHandler<ReceivedPacket>,
 }
 
 impl QuicRouter {
@@ -90,18 +92,22 @@ impl QuicRouter {
     }
 
     #[allow(clippy::result_large_err)]
-    pub async fn try_deliver(&self, packet: Packet, way: Way) -> Result<(), (Packet, Way)> {
-        match self.find_entry(&packet, &way.2) {
+    pub async fn try_deliver(
+        &self,
+        received: ReceivedPacket,
+        way: Way,
+    ) -> Result<(), (ReceivedPacket, Way)> {
+        match self.find_entry(&received.0, &way.2) {
             Some(rcvd_pkt_q) => {
-                rcvd_pkt_q.deliver(packet, way).await;
+                rcvd_pkt_q.deliver(received, way).await;
                 Ok(())
             }
-            None => Err((packet, way)),
+            None => Err((received, way)),
         }
     }
 
-    pub async fn deliver(&self, packet: Packet, way: Way) {
-        let rcvd_pkt_q = match self.find_entry(&packet, &way.2) {
+    pub async fn deliver(&self, received: ReceivedPacket, way: Way) {
+        let rcvd_pkt_q = match self.find_entry(&received.0, &way.2) {
             Some(rcvd_pkt_q) => rcvd_pkt_q,
             None => {
                 // For packets that cannot be routed, this likely indicates a new connection.
@@ -114,21 +120,21 @@ impl QuicRouter {
                 };
                 // Therefore, we retry routing here to allow thread B to route its packet
                 // to the connection created by thread A, instead of creating another new connection.
-                match self.find_entry(&packet, &way.2) {
+                match self.find_entry(&received.0, &way.2) {
                     Some(rcvd_pkt_q) => rcvd_pkt_q,
                     None => {
-                        (on_unrouted)(packet, way);
+                        (on_unrouted)(received, way);
                         return;
                     }
                 }
             }
         };
-        rcvd_pkt_q.deliver(packet, way).await;
+        rcvd_pkt_q.deliver(received, way).await;
     }
 
     pub fn on_connectless_packets<S>(&self, sink: S) -> bool
     where
-        S: Fn(Packet, Way) + Send + 'static,
+        S: Fn(ReceivedPacket, Way) + Send + 'static,
     {
         let mut on_unrouted = self.on_unrouted.lock();
         if on_unrouted.is_some() {

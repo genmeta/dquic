@@ -30,7 +30,7 @@ use qconnection::{
 use qevent::telemetry::QLog;
 use qinterface::{
     BindInterface,
-    component::route::{QuicRouter, Way},
+    component::route::{QuicRouter, ReceivedPacket, Way},
     io::ProductIO,
     manager::InterfaceManager,
 };
@@ -434,7 +434,11 @@ impl QuicListeners {
         target = "dquic", level = "debug", skip_all,
         fields(%bind_uri, %pathway, %link, odcid=tracing::field::Empty, server_name=tracing::field::Empty)
     )]
-    pub(crate) fn try_accept_connection(&self, packet: Packet, (bind_uri, pathway, link): Way) {
+    pub(crate) fn try_accept_connection(
+        &self,
+        (packet, datagram_size): ReceivedPacket,
+        (bind_uri, pathway, link): Way,
+    ) {
         if let Err(error) =
             qinterface::component::route::validate_received_way(&(bind_uri.clone(), pathway, link))
         {
@@ -498,7 +502,9 @@ impl QuicListeners {
         let local_endpoints = self.network.local_endpoints.clone();
 
         let try_accept_connection = async move {
-            quic_router.deliver(packet, (bind_uri, pathway, link)).await;
+            quic_router
+                .deliver((packet, datagram_size), (bind_uri, pathway, link))
+                .await;
 
             match connection.server_name().await {
                 Ok(server_name) => {
@@ -981,10 +987,15 @@ mod path_admissibility_tests {
             link,
         );
 
-        listeners.try_accept_connection(initial_packet(dcid), way.clone());
+        listeners.try_accept_connection((initial_packet(dcid), Some(1200)), way.clone());
 
         assert_eq!(listeners.backlog.available_permits(), 1);
-        assert!(router.try_deliver(initial_packet(dcid), way).await.is_err());
+        assert!(
+            router
+                .try_deliver((initial_packet(dcid), None), way)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1002,9 +1013,14 @@ mod path_admissibility_tests {
         let link = Link::new(local, remote);
         let way = (BindUri::from(local), Pathway::from(link), link);
 
-        listeners.try_accept_connection(initial_packet(dcid), way.clone());
+        listeners.try_accept_connection((initial_packet(dcid), Some(1200)), way.clone());
 
         assert_eq!(listeners.backlog.available_permits(), 1);
-        assert!(router.try_deliver(initial_packet(dcid), way).await.is_err());
+        assert!(
+            router
+                .try_deliver((initial_packet(dcid), None), way)
+                .await
+                .is_err()
+        );
     }
 }

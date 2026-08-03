@@ -903,5 +903,23 @@ mod tests {
             ]
             .as_slice()
         );
+
+        let mut padded = BytesMut::from(&buffer[..sent_bytes]);
+        padded.resize(1200, 0);
+        let Packet::Data(packet) = PacketReader::new(padded, 8).next().unwrap().unwrap() else {
+            panic!("expected Initial packet");
+        };
+        assert_eq!(packet.bytes.len(), sent_bytes);
+
+        let mut coalesced = BytesMut::from(&buffer[..sent_bytes]);
+        coalesced.extend_from_slice(&buffer[..sent_bytes]);
+        let mut packets = PacketReader::new(coalesced, 8);
+        let Packet::Data(_first) = packets.next().unwrap().unwrap() else {
+            panic!("expected first Initial packet");
+        };
+        let Packet::Data(_second) = packets.next().unwrap().unwrap() else {
+            panic!("expected second Initial packet");
+        };
+        assert!(packets.next().is_none());
     }
 }
