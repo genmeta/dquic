@@ -245,11 +245,11 @@ impl Path {
         &self,
         epoch: Epoch,
         pn: u64,
-        size: usize,
+        datagram_size: Option<usize>,
         packet_content: PacketContent,
     ) {
-        self.anti_amplifier.on_rcvd(size);
-        if size > 0 {
+        if let Some(datagram_size) = datagram_size {
+            self.anti_amplifier.on_rcvd(datagram_size);
             self.status.release_anti_amplification_limit();
         }
         self.idle_timer.on_rcvd(packet_content);

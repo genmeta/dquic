@@ -117,7 +117,56 @@ impl<const N: usize> AntiAmplifier<N> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+    use qbase::packet::{Packet, PacketReader};
+
     use super::*;
+
+    #[test]
+    fn udp_bytes_after_initial_length_count_toward_amplification_credit() {
+        const INITIAL_PACKET_SIZE: usize = 290;
+        const DATAGRAM_SIZE: usize = 1200;
+
+        // The two-byte Length field is 272 (0x110 with the 01 varint prefix).
+        // With the 18-byte long header, only the first 290 bytes belong to the
+        // Initial packet. The remaining UDP payload is deliberately outside it.
+        let mut datagram = BytesMut::from(
+            &[
+                0xc0, // Initial, packet number length 1
+                0x00, 0x00, 0x00, 0x01, // QUIC v1
+                8,    // DCID length
+                0, 1, 2, 3, 4, 5, 6, 7, // DCID
+                0, // SCID length
+                0, // token length
+                0x41, 0x10, // Length = 272
+            ][..],
+        );
+        datagram.resize(INITIAL_PACKET_SIZE, 0);
+        datagram.resize(DATAGRAM_SIZE, 0);
+        let datagram_size = datagram.len();
+
+        let Packet::Data(initial) = PacketReader::new(datagram, 8)
+            .next()
+            .expect("datagram contains an Initial packet")
+            .expect("Initial packet is parseable")
+        else {
+            panic!("expected an Initial packet");
+        };
+
+        assert_eq!(initial.bytes.len(), INITIAL_PACKET_SIZE);
+        assert_eq!(datagram_size, DATAGRAM_SIZE);
+
+        let anti_amplifier = AntiAmplifier::<3>::new(ArcSendWaker::new());
+        anti_amplifier.on_rcvd(datagram_size);
+
+        assert_eq!(anti_amplifier.balance(), Ok(Some(DATAGRAM_SIZE * 3)));
+        assert_ne!(
+            anti_amplifier.balance(),
+            Ok(Some(INITIAL_PACKET_SIZE * 3)),
+            "credit must not be derived from the Initial packet Length field"
+        );
+    }
+
     #[test]
     fn test_deposit_and_poll_apply() {
         let waker = ArcSendWaker::new();

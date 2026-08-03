@@ -898,7 +898,7 @@ mod tests {
 
     async fn route_exists(router: &Arc<QuicRouter>, dcid: ConnectionId, way: Way) -> bool {
         router
-            .try_deliver(test_routed_packet(dcid), way)
+            .try_deliver((test_routed_packet(dcid), None), way)
             .await
             .is_ok()
     }

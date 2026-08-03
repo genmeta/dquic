@@ -6,9 +6,9 @@ use qbase::{
     util::BoundQueue,
 };
 
-use crate::component::route::{CipherPacket, Way};
+use crate::component::route::{CipherPacket, ReceivedPacket, Way};
 
-type PacketQueue<P> = BoundQueue<(CipherPacket<P>, Way)>;
+type PacketQueue<P> = BoundQueue<(ReceivedPacket<CipherPacket<P>>, Way)>;
 
 // 需要一个四元组，pathway + src + dst
 #[derive(Debug)]
@@ -60,24 +60,24 @@ impl RcvdPacketQueue {
     }
 
     /// A per-connection queue must never backpressure the shared UDP receive loop.
-    pub async fn deliver(&self, packet: Packet, way: Way) {
+    pub async fn deliver(&self, (packet, datagram_size): ReceivedPacket, way: Way) {
         match packet {
             Packet::Data(packet) => match packet.header {
                 DataHeader::Long(long::DataHeader::Initial(header)) => {
                     let packet = CipherPacket::new(header, packet.bytes, packet.offset);
-                    _ = self.initial.try_send((packet, way));
+                    _ = self.initial.try_send(((packet, datagram_size), way));
                 }
                 DataHeader::Long(long::DataHeader::Handshake(header)) => {
                     let packet = CipherPacket::new(header, packet.bytes, packet.offset);
-                    _ = self.handshake.try_send((packet, way));
+                    _ = self.handshake.try_send(((packet, datagram_size), way));
                 }
                 DataHeader::Long(long::DataHeader::ZeroRtt(header)) => {
                     let packet = CipherPacket::new(header, packet.bytes, packet.offset);
-                    _ = self.zero_rtt.try_send((packet, way));
+                    _ = self.zero_rtt.try_send(((packet, datagram_size), way));
                 }
                 DataHeader::Short(header) => {
                     let packet = CipherPacket::new(header, packet.bytes, packet.offset);
-                    _ = self.one_rtt.try_send((packet, way));
+                    _ = self.one_rtt.try_send(((packet, datagram_size), way));
                 }
             },
             Packet::VN(_vn) => {}
@@ -124,9 +124,10 @@ mod tests {
     async fn deliver_enqueues_when_capacity_is_available() {
         let queue = RcvdPacketQueue::new();
 
-        queue.deliver(initial_packet(), way()).await;
+        queue.deliver((initial_packet(), Some(1200)), way()).await;
 
-        assert!(queue.initial().recv().await.is_some());
+        let ((_packet, datagram_size), _) = queue.initial().recv().await.unwrap();
+        assert_eq!(datagram_size, Some(1200));
     }
 
     #[tokio::test]
@@ -140,7 +141,7 @@ mod tests {
                 unreachable!()
             };
             let packet = CipherPacket::new(header, packet.bytes, packet.offset);
-            match queue.initial.try_send((packet, way())) {
+            match queue.initial.try_send(((packet, Some(1200)), way())) {
                 Ok(()) => {}
                 Err(error) if error.is_full() => break,
                 Err(error) => panic!("queue closed while filling it: {error}"),
@@ -149,7 +150,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(25),
-            queue.deliver(initial_packet(), way()),
+            queue.deliver((initial_packet(), Some(1200)), way()),
         )
         .await
         .expect("routing must not wait for one connection's full queue");
