@@ -1,4 +1,4 @@
-use std::{iter, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use futures::{Stream, stream::FuturesUnordered};
 use qconnection::{
@@ -17,7 +17,7 @@ use qconnection::{
         manager::InterfaceManager,
     },
     qtraversal::{
-        nat::{client::StunClientsComponent, router::StunRouterComponent},
+        nat::{client::StunClientComponent, router::StunRouterComponent},
         route::{ForwardersComponent, ReceiveAndDeliverPacketComponent},
     },
 };
@@ -73,14 +73,14 @@ impl Network {
                         .router();
                     // STUN bootstrap names use system DNS.
                     let stun_server = stun_server.clone();
-                    let clients = components
+                    let stun_client = components
                         .init_with(|| {
-                            StunClientsComponent::new(
+                            StunClientComponent::new(
                                 iface.downgrade(),
                                 stun_router.clone(),
                                 Arc::new(SystemResolver),
                                 stun_server,
-                                iter::empty(),
+                                None,
                                 Some(local_endpoints.clone()),
                             )
                         })
@@ -97,7 +97,7 @@ impl Network {
                             .forwarder()
                     } else {
                         components
-                            .init_with(|| ForwardersComponent::new_client(clients))
+                            .init_with(|| ForwardersComponent::new_client(stun_client))
                             .forwarder()
                     };
 

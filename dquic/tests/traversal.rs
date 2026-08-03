@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    io,
     net::SocketAddr,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -10,14 +9,13 @@ use dquic::{
     prelude::{handy::*, *},
     qinterface::{component::local_endpoint::LocalEndpoints, manager::InterfaceManager},
     qresolve::Source,
-    qtraversal::nat::client::{NatType, StunClientsComponent},
+    qtraversal::nat::client::{NatType, StunClientComponent},
 };
 use futures::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
 use rustls::RootCertStore;
-use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 mod common;
@@ -256,47 +254,33 @@ async fn test_punch_case(client_nat: NatType, server_nat: NatType) {
         .borrow(&(server_case.bind_addr.parse::<SocketAddr>().unwrap().into()))
         .unwrap();
 
-    let server_ep = get_stun_data(server_iface).await[0].0;
+    let server_ep = get_stun_data(server_iface).await.0;
     launch_client(client_case, server_ep).await;
 }
 
 const STUN_DATA_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const STUN_DATA_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-async fn get_stun_data(server_iface: dquic::qinterface::Interface) -> Vec<(EndpointAddr, NatType)> {
+async fn get_stun_data(server_iface: dquic::qinterface::Interface) -> (EndpointAddr, NatType) {
     let deadline = tokio::time::Instant::now() + STUN_DATA_WAIT_TIMEOUT;
 
     loop {
-        let mut outer_addresses = server_iface
-            .with_component(|clients: &StunClientsComponent| {
-                clients.with_clients(|clients| {
-                    // workaround. clippy issue: https://github.com/rust-lang/rust-clippy/issues/16428
-                    #[allow(clippy::redundant_iter_cloned)]
-                    clients
-                        .values()
-                        .cloned()
-                        .map(|client| async move {
-                            let agent = client.agent_addr();
-                            let outer = client.outer_addr().await?;
-                            let ep = EndpointAddr::with_agent(agent, outer);
-                            let nat_type = client.nat_type().await?;
-                            io::Result::Ok((ep, nat_type))
-                        })
-                        .collect::<JoinSet<_>>()
-                })
+        let client = server_iface
+            .with_component(|component: &StunClientComponent| {
+                component.with_client(|client| client.cloned())
             })
             .expect("interface rebinded too quickly")
             .expect("traversal components missing");
-        let mut datas = vec![];
 
-        while let Some(join_result) = outer_addresses.join_next().await {
-            let result = join_result.expect("detect panic");
-            let data = result.expect("detect outer addr or nat type failed");
-            datas.push(data);
-        }
-
-        if !datas.is_empty() {
-            return datas;
+        if let Some(client) = client {
+            let agent = client.agent_addr();
+            let outer = client
+                .outer_addr()
+                .await
+                .expect("failed to detect outer address");
+            let endpoint = EndpointAddr::with_agent(agent, outer);
+            let nat_type = client.nat_type().await.expect("failed to detect NAT type");
+            return (endpoint, nat_type);
         }
 
         let now = tokio::time::Instant::now();
