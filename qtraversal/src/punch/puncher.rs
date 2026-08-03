@@ -43,10 +43,7 @@ use tracing::Instrument as _;
 
 use crate::{
     addr::AddressBook,
-    nat::{
-        client::{StunClientComponent, StunClientsComponent},
-        router::StunRouterComponent,
-    },
+    nat::{client::StunClientComponent, router::StunRouterComponent},
     punch::{
         predictor::{PacketSendFn, PortPredictor},
         tx::{AsPunchId, PunchId, Transaction},
@@ -721,10 +718,14 @@ where
             return;
         };
 
-        let client = iface.with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|map| map.get(&agent).cloned())
+        let client = iface.with_component(|component: &StunClientComponent| {
+            component.with_client(|client| {
+                client
+                    .filter(|client| client.agent_addr() == agent)
+                    .cloned()
+            })
         });
-        let Some(Some(Some(client))) = client.ok() else {
+        let Some(client) = client.ok().flatten().flatten() else {
             tracing::debug!(target: "punch", %bind_uri, %agent, "cannot advertise agent endpoint without matching STUN client");
             return;
         };
@@ -1869,11 +1870,9 @@ async fn dynamic_iface(
                 .router();
             let stun_client = components
                 .init_with(|| {
-                    let client =
-                        StunClient::new(iface.downgrade(), stun_router.clone(), stun_server, None);
-                    StunClientComponent::new(client)
+                    StunClient::new(iface.downgrade(), stun_router.clone(), stun_server, None)
                 })
-                .client();
+                .clone();
             components.init_with(|| {
                 ReceiveAndDeliverPacket::builder(iface.downgrade())
                     .quic_router(quic_router.clone())

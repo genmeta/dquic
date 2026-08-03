@@ -1,9 +1,12 @@
 use std::{
     fmt,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 
-use futures::{FutureExt, StreamExt, stream};
+use futures::{FutureExt, StreamExt, stream, task::noop_waker_ref};
 use qresolve::{ResolveFuture, Source};
 
 use super::*;
@@ -63,40 +66,30 @@ fn direct(addr: &str) -> EndpointAddr {
 }
 
 #[tokio::test]
-async fn single_dns_result_is_a_complete_snapshot() {
+async fn single_dns_result_is_selected() {
     let resolver = TestResolver::new(LookupResult::Records(vec![direct("192.0.2.1:20004")]));
 
-    let agents = resolve_stun_agents(&resolver, "stun.example:20004", Family::V4)
+    let agent = resolve_stun_agent(&resolver, "stun.example:20004", Family::V4, None)
         .await
         .unwrap();
 
-    assert_eq!(agents, vec!["192.0.2.1:20004".parse().unwrap()]);
+    assert_eq!(agent, Some("192.0.2.1:20004".parse().unwrap()));
     assert_eq!(resolver.lookup_count(), 1);
 }
 
 #[tokio::test]
-async fn dns_snapshot_is_filtered_deduplicated_and_bounded() {
+async fn dns_lookup_selects_first_compatible_agent() {
     let resolver = TestResolver::new(LookupResult::Records(vec![
-        direct("192.0.2.1:20004"),
-        direct("192.0.2.1:20004"),
         direct("[2001:db8::1]:20004"),
+        direct("192.0.2.1:20004"),
         direct("192.0.2.2:20004"),
-        direct("192.0.2.3:20004"),
-        direct("192.0.2.4:20004"),
     ]));
 
-    let agents = resolve_stun_agents(&resolver, "stun.example:20004", Family::V4)
+    let agent = resolve_stun_agent(&resolver, "stun.example:20004", Family::V4, None)
         .await
         .unwrap();
 
-    assert_eq!(
-        agents,
-        vec![
-            "192.0.2.1:20004".parse().unwrap(),
-            "192.0.2.2:20004".parse().unwrap(),
-            "192.0.2.3:20004".parse().unwrap(),
-        ]
-    );
+    assert_eq!(agent, Some("192.0.2.1:20004".parse().unwrap()));
     assert_eq!(resolver.lookup_count(), 1);
 }
 
@@ -104,9 +97,52 @@ async fn dns_snapshot_is_filtered_deduplicated_and_bounded() {
 async fn dns_failure_is_reported_to_discovery_loop() {
     let resolver = TestResolver::new(LookupResult::Error);
 
-    let result = resolve_stun_agents(&resolver, "stun.example:20004", Family::V4).await;
+    let result = resolve_stun_agent(&resolver, "stun.example:20004", Family::V4, None).await;
 
     assert!(result.is_err());
+    assert_eq!(resolver.lookup_count(), 1);
+}
+
+#[tokio::test]
+async fn dns_lookup_skips_the_failed_active_agent() {
+    let failed_agent = "192.0.2.1:20004".parse().unwrap();
+    let replacement_agent = "192.0.2.2:20004".parse().unwrap();
+    let resolver = TestResolver::new(LookupResult::Records(vec![
+        EndpointAddr::direct(failed_agent),
+        EndpointAddr::direct(replacement_agent),
+    ]));
+
+    let agent = resolve_stun_agent(
+        &resolver,
+        "stun.example:20004",
+        Family::V4,
+        Some(failed_agent),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(agent, Some(replacement_agent));
+    assert_eq!(resolver.lookup_count(), 1);
+}
+
+#[tokio::test]
+async fn dns_lookup_returns_none_when_only_the_failed_agent_remains() {
+    let failed_agent = "192.0.2.1:20004".parse().unwrap();
+    let resolver = TestResolver::new(LookupResult::Records(vec![
+        EndpointAddr::direct(failed_agent),
+        EndpointAddr::direct(failed_agent),
+    ]));
+
+    let agent = resolve_stun_agent(
+        &resolver,
+        "stun.example:20004",
+        Family::V4,
+        Some(failed_agent),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(agent, None);
     assert_eq!(resolver.lookup_count(), 1);
 }
 
@@ -118,52 +154,187 @@ async fn stun_discovery_is_dormant_when_local_address_is_unavailable() {
     let iface = Arc::new(Unsupported::bind("inet://0.0.0.0:0".into()));
     assert!(iface.bound_addr().is_err());
     let resolver = TestResolver::new(LookupResult::Error);
-    let clients = StunClients::new(
+    let component = StunClientComponent::new(
         iface,
         StunRouter::new(),
         Arc::new(resolver.clone()),
         "stun.example:20004",
-        std::iter::once(agent),
+        Some(agent),
         None,
     );
 
-    assert!(clients.with_clients(|clients| clients.is_empty()));
+    assert!(component.with_client(|client| client.is_none()));
     tokio::task::yield_now().await;
     assert_eq!(resolver.lookup_count(), 0);
 }
 
 #[tokio::test]
-async fn existing_clients_are_refreshed_from_dns() {
+async fn known_agent_is_installed_immediately() {
+    use qinterface::io::{ProductIO, handy::DEFAULT_IO_FACTORY};
+
+    let first_agent = "192.0.2.1:20004".parse().unwrap();
+    let iface: Arc<dyn IO> = Arc::from(DEFAULT_IO_FACTORY.bind("inet://127.0.0.1:0".into()));
+    let component = StunClientComponent::new(
+        iface,
+        StunRouter::new(),
+        Arc::new(TestResolver::new(LookupResult::Error)),
+        "stun.example:20004",
+        Some(first_agent),
+        None,
+    );
+
+    assert!(
+        component.with_client(|client| {
+            client.is_some_and(|client| client.agent_addr() == first_agent)
+        })
+    );
+}
+
+#[tokio::test]
+async fn failed_client_is_replaced_from_a_fresh_dns_lookup() {
     use qinterface::io::{ProductIO, handy::DEFAULT_IO_FACTORY};
 
     let old_agent = "192.0.2.1:20004".parse().unwrap();
     let new_agent = "192.0.2.2:20004".parse().unwrap();
     let iface: Arc<dyn IO> = Arc::from(DEFAULT_IO_FACTORY.bind("inet://127.0.0.1:0".into()));
     assert!(iface.bound_addr().is_ok());
-    let resolver = TestResolver::new(LookupResult::Records(vec![EndpointAddr::direct(new_agent)]));
-    let clients = StunClients::new(
+    let resolver = TestResolver::new(LookupResult::Records(vec![
+        EndpointAddr::direct(old_agent),
+        EndpointAddr::direct(new_agent),
+    ]));
+    let component = StunClientComponent::new(
         iface,
         StunRouter::new(),
         Arc::new(resolver.clone()),
         "stun.example:20004",
-        std::iter::once(old_agent),
+        Some(old_agent),
         None,
     );
 
-    assert!(clients.with_clients(|clients| clients.contains_key(&old_agent)));
+    assert!(
+        component.with_client(|client| {
+            client.is_some_and(|client| client.agent_addr() == old_agent)
+        })
+    );
+    component.with_client(|client| {
+        client
+            .expect("old STUN client missing")
+            .refresh_agent
+            .notify_one();
+    });
     tokio::time::timeout(Duration::from_secs(3), async {
-        while !clients.with_clients(|clients| clients.contains_key(&new_agent)) {
+        while !component
+            .with_client(|client| client.is_some_and(|client| client.agent_addr() == new_agent))
+        {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("refreshed STUN agent was not installed");
 
-    assert_eq!(resolver.lookup_count(), 1);
-    clients.with_clients(|clients| {
-        assert_eq!(clients.len(), 1);
-        assert!(!clients.contains_key(&old_agent));
+    assert!(resolver.lookup_count() >= 1);
+    assert!(
+        component.with_client(|client| {
+            client.is_some_and(|client| client.agent_addr() == new_agent)
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_close_stays_pending_until_all_tasks_exit() {
+    use qinterface::io::{ProductIO, handy::DEFAULT_IO_FACTORY};
+
+    let iface: Arc<dyn IO> = Arc::from(DEFAULT_IO_FACTORY.bind("inet://127.0.0.1:0".into()));
+    let client = StunClient::new(
+        iface,
+        StunRouter::new(),
+        "192.0.2.1:20004".parse().unwrap(),
+        None,
+    );
+
+    let (task_started_tx, task_started_rx) = mpsc::channel();
+    let (release_task_tx, release_task_rx) = mpsc::channel();
+    client.lock_tasks().spawn(async move {
+        task_started_tx.send(()).unwrap();
+        let _ = release_task_rx.recv();
     });
+    task_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("blocking STUN task did not start");
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+    assert!(client.poll_close(&mut cx).is_pending());
+    assert!(client.poll_close(&mut cx).is_pending());
+
+    release_task_tx.send(()).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core::future::poll_fn(|cx| client.poll_close(cx)),
+    )
+    .await
+    .expect("STUN client did not finish closing");
+    assert!(client.lock_tasks().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_generation_cannot_finish_an_inflight_replacement() {
+    use qinterface::io::{ProductIO, handy::DEFAULT_IO_FACTORY};
+
+    let old_agent = "192.0.2.1:20004".parse().unwrap();
+    let new_agent = "192.0.2.2:20004".parse().unwrap();
+    let iface: Arc<dyn IO> = Arc::from(DEFAULT_IO_FACTORY.bind("inet://127.0.0.1:0".into()));
+    let old_client = StunClient::new(iface, StunRouter::new(), old_agent, None);
+
+    let (task_started_tx, task_started_rx) = mpsc::channel();
+    let (release_task_tx, release_task_rx) = mpsc::channel();
+    old_client.lock_tasks().spawn(async move {
+        task_started_tx.send(()).unwrap();
+        let _ = release_task_rx.recv();
+    });
+    task_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("blocking STUN task did not start");
+
+    let client = Arc::new(Mutex::new(Some(old_client)));
+    let active = Arc::new(AtomicBool::new(true));
+    let replacement = tokio::spawn({
+        let client = client.clone();
+        let active = active.clone();
+        async move {
+            replace_stun_client(&client, &active, new_agent, |_| {
+                panic!("inactive generation installed a replacement client")
+            })
+            .await
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !client
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .closing
+            .load(Ordering::SeqCst)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement did not begin closing the old client");
+
+    active.store(false, Ordering::SeqCst);
+    release_task_tx.send(()).unwrap();
+    let replaced = tokio::time::timeout(Duration::from_secs(3), replacement)
+        .await
+        .expect("replacement did not finish")
+        .expect("replacement task panicked");
+
+    assert!(!replaced);
+    assert_eq!(
+        client.lock().unwrap().as_ref().unwrap().agent_addr(),
+        old_agent
+    );
 }
 
 #[test]

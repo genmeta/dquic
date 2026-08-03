@@ -26,7 +26,6 @@ use qinterface::{
     },
     io::{IO, IoExt, RefIO},
 };
-use smallvec::SmallVec;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument as _;
 
@@ -34,7 +33,7 @@ pub type ArcRecvQueue = ArcAsyncDeque<(BytesMut, Pathway, Link)>;
 
 use crate::{
     nat::{
-        client::{StunClients, StunClientsComponent},
+        client::StunClientComponent,
         router::{StunRouter, StunRouterComponent},
     },
     packet::{ForwardHeader, StunHeader},
@@ -42,29 +41,21 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum Forwarder<I: RefIO + 'static> {
-    Clients { stun_clients: StunClients<I> },
+    Client { stun_client: StunClientComponent<I> },
     Server { outer_addr: SocketAddr },
 }
 
 impl<I: RefIO> Forwarder<I> {
-    pub fn outers(&self) -> SmallVec<[SocketAddr; 8]> {
+    pub fn outer(&self) -> Option<SocketAddr> {
         match self {
-            Forwarder::Clients { stun_clients } => stun_clients.with_clients(|clients| {
-                clients
-                    .values()
-                    .filter_map(|client| client.get_outer_addr()?.ok())
-                    .collect()
-            }),
-            Forwarder::Server { outer_addr } => SmallVec::from_iter([*outer_addr]),
+            Forwarder::Client { stun_client } => stun_client
+                .with_client(|client| client.and_then(|client| client.get_outer_addr()?.ok())),
+            Forwarder::Server { outer_addr } => Some(*outer_addr),
         }
     }
 
     pub fn should_forward(&self, dst: EndpointAddr) -> Option<SocketAddr> {
-        let outers = self.outers();
-
-        if outers.is_empty() {
-            return None;
-        }
+        let outer = self.outer()?;
 
         let EndpointAddr::Agent {
             agent,
@@ -74,17 +65,11 @@ impl<I: RefIO> Forwarder<I> {
             return None;
         };
 
-        for outer in outers {
-            if outer == dst_outer {
-                return None;
-            }
-
-            if outer == agent {
-                return Some(dst_outer);
-            }
+        if outer == dst_outer {
+            return None;
         }
 
-        Some(agent)
+        Some(if outer == agent { dst_outer } else { agent })
     }
 }
 
@@ -100,8 +85,8 @@ impl ForwardersComponent {
         }
     }
 
-    pub fn new_client(stun_clients: StunClients<WeakInterface>) -> Self {
-        Self::new(Forwarder::Clients { stun_clients })
+    pub fn new_client(stun_client: StunClientComponent<WeakInterface>) -> Self {
+        Self::new(Forwarder::Client { stun_client })
     }
 
     pub fn new_server(outer_addr: SocketAddr) -> Self {
@@ -123,10 +108,10 @@ impl Component for ForwardersComponent {
     }
 
     fn reinit(&self, iface: &Interface) {
-        _ = iface.with_component(|clients: &StunClientsComponent| {
-            clients.reinit(iface);
-            *self.lock_forwarders() = Forwarder::Clients {
-                stun_clients: clients.clone(),
+        _ = iface.with_component(|component: &StunClientComponent| {
+            component.reinit(iface);
+            *self.lock_forwarders() = Forwarder::Client {
+                stun_client: component.clone(),
             };
         });
     }

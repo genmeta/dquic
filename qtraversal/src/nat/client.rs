@@ -1,9 +1,7 @@
 use std::{
-    collections::HashMap,
     fmt,
     io::{self},
     net::SocketAddr,
-    ops::Deref,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering::SeqCst},
@@ -43,7 +41,6 @@ use crate::{
 };
 
 const NAT_MAPPING_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
-const MAX_STUN_AGENTS: usize = 3;
 const STUN_AGENT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 const STUN_DISCOVERY_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const STUN_DISCOVERY_RETRY_MAX: Duration = Duration::from_secs(300);
@@ -172,6 +169,7 @@ struct StunKeepAliveState {
     outer_addr: Arc<Future<Result<SocketAddr, DetectOuterAddrError>>>,
     endpoint_publisher: Arc<Mutex<Option<InterfaceAgentEndpointPublisher>>>,
     outer_addr_ready: Arc<Notify>,
+    refresh_agent: Arc<Notify>,
     publish_endpoint: bool,
     retry_interval: Duration,
     last_success: Option<Instant>,
@@ -182,12 +180,14 @@ impl StunKeepAliveState {
         outer_addr: Arc<Future<Result<SocketAddr, DetectOuterAddrError>>>,
         endpoint_publisher: Arc<Mutex<Option<InterfaceAgentEndpointPublisher>>>,
         outer_addr_ready: Arc<Notify>,
+        refresh_agent: Arc<Notify>,
         publish_endpoint: bool,
     ) -> Self {
         Self {
             outer_addr,
             endpoint_publisher,
             outer_addr_ready,
+            refresh_agent,
             publish_endpoint,
             retry_interval: STUN_PROBE_RETRY_INITIAL,
             last_success: None,
@@ -220,6 +220,12 @@ impl StunKeepAliveState {
                 );
             }
             Err(error) => {
+                let refresh_agent = matches!(
+                    &error,
+                    DetectOuterAddrError::Probe {
+                        source: StunProbeError::NoResponse { .. }
+                    } | DetectOuterAddrError::Response { .. }
+                );
                 if self.last_success.take().is_some() {
                     tracing::debug!(
                         target: "stun",
@@ -227,6 +233,9 @@ impl StunKeepAliveState {
                     );
                 }
                 self.outer_addr.assign(Err(error));
+                if refresh_agent {
+                    self.refresh_agent.notify_one();
+                }
             }
         }
 
@@ -317,6 +326,7 @@ pub struct StunClient<I: RefIO + 'static> {
     stun_agent: SocketAddr,
     endpoint_publisher: Arc<Mutex<Option<InterfaceAgentEndpointPublisher>>>,
     outer_addr_ready: Arc<Notify>,
+    refresh_agent: Arc<Notify>,
 
     closing: Arc<AtomicBool>,
     tasks: Arc<Mutex<JoinSet<()>>>,
@@ -346,6 +356,7 @@ impl<I: RefIO + 'static> StunClient<I> {
             stun_router,
             endpoint_publisher: Arc::new(Mutex::new(endpoint_publisher)),
             outer_addr_ready: Arc::new(Notify::new()),
+            refresh_agent: Arc::new(Notify::new()),
             closing: Arc::new(AtomicBool::new(false)),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
         };
@@ -375,6 +386,7 @@ impl<I: RefIO + 'static> StunClient<I> {
             self.outer_addr.clone(),
             self.endpoint_publisher.clone(),
             self.outer_addr_ready.clone(),
+            self.refresh_agent.clone(),
             !bind_uri.is_temporary(),
         );
 
@@ -501,12 +513,7 @@ impl<I: RefIO + 'static> StunClient<I> {
     //     Ok(())
     // }
 
-    pub fn poll_close(&self, cx: &mut Context) -> Poll<()> {
-        if self.closing.swap(true, SeqCst) {
-            return Poll::Ready(());
-        }
-        self.lock_tasks().abort_all();
-        while ready!(self.lock_tasks().poll_join_next(cx)).is_some() {}
+    fn clear_outputs(&self) {
         if let Some(publisher) = self
             .endpoint_publisher
             .lock()
@@ -517,109 +524,73 @@ impl<I: RefIO + 'static> StunClient<I> {
         }
         self.nat_type.clear();
         self.outer_addr.clear();
+    }
+
+    fn begin_close(&self) {
+        if self.closing.swap(true, SeqCst) {
+            return;
+        }
+        self.lock_tasks().abort_all();
+        self.clear_outputs();
+    }
+
+    pub fn poll_close(&self, cx: &mut Context) -> Poll<()> {
+        self.begin_close();
+        while ready!(self.lock_tasks().poll_join_next(cx)).is_some() {}
+        self.clear_outputs();
         Poll::Ready(())
     }
 }
 
-#[derive(Debug)]
-pub struct StunClientComponent {
-    client: Mutex<StunClient<WeakInterface>>,
-}
-
-impl StunClientComponent {
-    pub fn new(client: StunClient<WeakInterface>) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
-    }
-
-    fn lock_client(&self) -> MutexGuard<'_, StunClient<WeakInterface>> {
-        self.client.lock().expect("StunClient lock poisoned")
-    }
-
-    pub fn client(&self) -> StunClient<WeakInterface> {
-        self.lock_client().clone()
-    }
-}
-
-impl Component for StunClientComponent {
+impl Component for StunClient<WeakInterface> {
     fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
-        self.lock_client().poll_close(cx)
+        self.poll_close(cx)
     }
 
     fn reinit(&self, iface: &Interface) {
-        let mut client = self.lock_client();
-        if client.ref_iface.same_io(&iface.downgrade()) {
-            return;
-        }
-
-        let Ok(Some((router, local_endpoints))) = iface.with_components(|components| {
-            let router = components.with(|router: &StunRouterComponent| {
-                router.reinit(iface);
-                router.router()
-            })?;
-            let local_endpoints = components.with(|local_endpoints: &LocalEndpointsComponent| {
-                local_endpoints.reinit(iface);
-                local_endpoints.clone()
-            });
-            Some((router, local_endpoints))
-        }) else {
-            return;
-        };
-
-        let new_client = StunClient::new(
-            iface.downgrade(),
-            router,
-            client.stun_agent,
-            local_endpoints,
-        );
-        *client = new_client;
+        debug_assert!(iface.bind_uri().is_temporary());
     }
 }
 
-type StunClientsMap<I> = HashMap<SocketAddr, StunClient<I>>;
-
-async fn resolve_stun_agents(
+async fn resolve_stun_agent(
     resolver: &(dyn Resolve + Send + Sync),
     server: &str,
     family: Family,
-) -> io::Result<Vec<SocketAddr>> {
+    excluded_agent: Option<SocketAddr>,
+) -> io::Result<Option<SocketAddr>> {
     let mut records = resolver.lookup(server).await?;
-    let mut agents = Vec::with_capacity(MAX_STUN_AGENTS);
 
     while let Some((_, endpoint)) = records.next().await {
         let EndpointAddr::Direct { addr } = endpoint else {
             continue;
         };
-        if addr.family() == family && !agents.contains(&addr) {
-            agents.push(addr);
-            if agents.len() == MAX_STUN_AGENTS {
-                break;
-            }
+        if addr.family() == family && Some(addr) != excluded_agent {
+            return Ok(Some(addr));
         }
     }
 
-    Ok(agents)
+    Ok(None)
 }
 
-async fn lookup_stun_agents(
+async fn lookup_stun_agent(
     resolver: &(dyn Resolve + Send + Sync),
     server: &str,
     family: Family,
-) -> Option<Vec<SocketAddr>> {
+    excluded_agent: Option<SocketAddr>,
+) -> Option<SocketAddr> {
     match tokio::time::timeout(
         STUN_AGENT_DNS_LOOKUP_TIMEOUT,
-        resolve_stun_agents(resolver, server, family),
+        resolve_stun_agent(resolver, server, family, excluded_agent),
     )
     .await
     {
-        Ok(Ok(discovered)) if !discovered.is_empty() => Some(discovered),
-        Ok(Ok(_)) => {
+        Ok(Ok(Some(agent))) => Some(agent),
+        Ok(Ok(None)) => {
             tracing::debug!(
                 target: "stun",
                 %server,
                 ?family,
-                "STUN agent lookup returned no compatible addresses"
+                "STUN agent lookup returned no compatible address"
             );
             None
         }
@@ -659,56 +630,59 @@ async fn wait_for_stun_interface<I: RefIO>(ref_iface: &I, family: Family) {
     }
 }
 
-async fn discover_stun_agents(
+async fn discover_stun_agent(
     resolver: &(dyn Resolve + Send + Sync),
     server: &str,
     family: Family,
-) -> Vec<SocketAddr> {
+) -> SocketAddr {
     let mut retry_interval = STUN_DISCOVERY_RETRY_INITIAL;
     loop {
-        if let Some(discovered) = lookup_stun_agents(resolver, server, family).await {
-            return discovered;
+        if let Some(agent) = lookup_stun_agent(resolver, server, family, None).await {
+            return agent;
         }
         tokio::time::sleep(retry_delay(&mut retry_interval, STUN_DISCOVERY_RETRY_MAX)).await;
     }
 }
 
-fn refresh_stun_clients<I, F>(
-    clients: &Mutex<StunClientsMap<I>>,
-    discovered: Vec<SocketAddr>,
+async fn replace_stun_client<I, F>(
+    client: &Mutex<Option<StunClient<I>>>,
+    active: &AtomicBool,
+    agent: SocketAddr,
     new_stun_client: F,
-) -> Vec<StunClient<I>>
+) -> bool
 where
     I: RefIO + 'static,
     F: Fn(SocketAddr) -> StunClient<I>,
 {
-    let mut clients = clients.lock().expect("StunClients mutex poisoned");
-    let mut refreshed = HashMap::with_capacity(discovered.len());
-    for agent in discovered {
-        let client = clients
-            .remove(&agent)
-            .unwrap_or_else(|| new_stun_client(agent));
-        refreshed.insert(agent, client);
+    let stale_client = {
+        let client = client.lock().expect("STUN client mutex poisoned");
+        if !active.load(SeqCst) {
+            return false;
+        }
+        if client
+            .as_ref()
+            .is_some_and(|client| client.agent_addr() == agent)
+        {
+            return false;
+        }
+        client.clone()
+    };
+    if let Some(stale_client) = stale_client {
+        core::future::poll_fn(|cx| stale_client.poll_close(cx)).await;
     }
-
-    let stale_clients = clients
-        .drain()
-        .map(|(_, client)| client)
-        .collect::<Vec<_>>();
-    *clients = refreshed;
-    stale_clients
-}
-
-async fn close_stun_clients<I: RefIO + 'static>(clients: Vec<StunClient<I>>) {
-    for client in clients {
-        core::future::poll_fn(|cx| client.poll_close(cx)).await;
+    let mut client = client.lock().expect("STUN client mutex poisoned");
+    if !active.load(SeqCst) {
+        return false;
     }
+    *client = Some(new_stun_client(agent));
+    true
 }
 
 #[derive(Debug)]
-struct StunClientsInner<I: RefIO + 'static> {
+struct StunClientState<I: RefIO + 'static> {
     ref_iface: I,
-    clients: Arc<Mutex<StunClientsMap<I>>>,
+    client: Arc<Mutex<Option<StunClient<I>>>>,
+    active: Arc<AtomicBool>,
     resolver: Arc<dyn Resolve + Send + Sync>,
     server: Arc<str>,
     task: Option<AbortOnDropHandle<()>>,
@@ -716,93 +690,129 @@ struct StunClientsInner<I: RefIO + 'static> {
 
 pub const DEFAULT_STUN_SERVER: &str = "nat.genmeta.net:20004";
 
-impl<I: RefIO + 'static> StunClientsInner<I> {
+impl<I: RefIO + 'static> StunClientState<I> {
     pub fn new(
         ref_iface: I,
         router: StunRouter,
         resolver: Arc<dyn Resolve + Send + Sync>,
         server: Arc<str>,
-        agents: impl IntoIterator<Item = SocketAddr>,
+        agent: Option<SocketAddr>,
         local_endpoints: Option<IfaceLocalEndpoints<I>>,
     ) -> Self {
         let family = ref_iface.iface().bind_uri().family();
         let interface_ready = stun_interface_ready(&ref_iface, family);
-        let new_stun_client = {
+        let known_agent = agent.filter(|agent| agent.family() == family);
+        let initial_client = known_agent.filter(|_| interface_ready).map(|agent| {
+            StunClient::new(
+                ref_iface.clone(),
+                router.clone(),
+                agent,
+                local_endpoints.clone(),
+            )
+        });
+        let client = Arc::new(Mutex::new(initial_client));
+        let active = Arc::new(AtomicBool::new(true));
+        let task = {
             let ref_iface = ref_iface.clone();
-            move |agent_addr: SocketAddr| {
-                let stun_router = router.clone();
-                StunClient::new(
-                    ref_iface.clone(),
-                    stun_router,
-                    agent_addr,
-                    local_endpoints.clone(),
-                )
-            }
-        };
-
-        let mut known_agents = Vec::with_capacity(MAX_STUN_AGENTS);
-        for agent in agents {
-            if known_agents.len() == MAX_STUN_AGENTS {
-                break;
-            }
-            if agent.family() == family && !known_agents.contains(&agent) {
-                known_agents.push(agent);
-            }
-        }
-        let mut initial_clients = HashMap::new();
-        if interface_ready {
-            for agent in &known_agents {
-                initial_clients.insert(*agent, new_stun_client(*agent));
-            }
-        }
-        let clients: Arc<Mutex<StunClientsMap<I>>> = Arc::new(Mutex::new(initial_clients));
-        let task = AbortOnDropHandle::new(tokio::spawn({
-            let clients = clients.clone();
-            let ref_iface = ref_iface.clone();
+            let client = client.clone();
+            let active = active.clone();
             let resolver = resolver.clone();
             let server = server.clone();
-            async move {
-                wait_for_stun_interface(&ref_iface, family).await;
+            AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    wait_for_stun_interface(&ref_iface, family).await;
 
-                if !interface_ready {
-                    let stale_clients =
-                        refresh_stun_clients(&clients, known_agents, &new_stun_client);
-                    close_stun_clients(stale_clients).await;
+                    let new_stun_client = |agent| {
+                        StunClient::new(
+                            ref_iface.clone(),
+                            router.clone(),
+                            agent,
+                            local_endpoints.clone(),
+                        )
+                    };
+
+                    if client.lock().expect("STUN client mutex poisoned").is_none() {
+                        let agent = match known_agent {
+                            Some(agent) => agent,
+                            None => {
+                                discover_stun_agent(resolver.as_ref(), server.as_ref(), family)
+                                    .await
+                            }
+                        };
+                        if replace_stun_client(&client, &active, agent, &new_stun_client).await {
+                            tracing::debug!(target: "stun", %agent, "installed STUN client");
+                        } else {
+                            return;
+                        }
+                    }
+
+                    loop {
+                        let active_client = client
+                            .lock()
+                            .expect("STUN client mutex poisoned")
+                            .clone()
+                            .expect("STUN client must be installed before monitoring");
+                        active_client.refresh_agent.notified().await;
+
+                        let previous_agent = active_client.agent_addr();
+                        let Some(agent) = lookup_stun_agent(
+                            resolver.as_ref(),
+                            server.as_ref(),
+                            family,
+                            Some(previous_agent),
+                        )
+                        .await
+                        else {
+                            continue;
+                        };
+                        if replace_stun_client(&client, &active, agent, &new_stun_client).await {
+                            tracing::debug!(
+                                target: "stun",
+                                %previous_agent,
+                                active_agent = %agent,
+                                "replaced failed STUN client after DNS refresh"
+                            );
+                        }
+                    }
                 }
-
-                let discovered =
-                    discover_stun_agents(resolver.as_ref(), server.as_ref(), family).await;
-                let stale_clients = refresh_stun_clients(&clients, discovered, new_stun_client);
-                close_stun_clients(stale_clients).await;
-                let count = clients.lock().expect("StunClients mutex poisoned").len();
-                tracing::debug!(target: "stun", count, "installed STUN clients");
-            }
-            .in_current_span()
-        }));
+                .in_current_span(),
+            ))
+        };
 
         Self {
             ref_iface,
-            clients,
+            client,
+            active,
             resolver,
             server,
             task: Some(task),
         }
     }
 
-    fn lock_clients(&self) -> MutexGuard<'_, StunClientsMap<I>> {
-        self.clients
-            .lock()
-            .expect("StunClientsComponentInner lock poisoned")
+    fn lock_client(&self) -> MutexGuard<'_, Option<StunClient<I>>> {
+        self.client.lock().expect("STUN client mutex poisoned")
+    }
+
+    fn begin_close(&mut self) {
+        self.active.store(false, SeqCst);
+        if let Some(task) = self.task.as_mut() {
+            task.abort();
+        }
+
+        let client = self.lock_client().clone();
+        if let Some(client) = client {
+            client.begin_close();
+        }
     }
 
     pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.begin_close();
         if let Some(task) = self.task.as_mut() {
-            task.abort();
             _ = ready!(task.poll_unpin(cx));
             self.task.take();
         }
 
-        for (.., client) in self.lock_clients().iter() {
+        if let Some(client) = self.lock_client().as_ref() {
             ready!(client.poll_close(cx))
         }
 
@@ -811,81 +821,77 @@ impl<I: RefIO + 'static> StunClientsInner<I> {
 }
 
 #[derive(Debug, Clone)]
-pub struct StunClients<I: RefIO + 'static> {
-    clients: Arc<Mutex<StunClientsInner<I>>>,
+pub struct StunClientComponent<I: RefIO + 'static = WeakInterface> {
+    state: Arc<Mutex<StunClientState<I>>>,
 }
 
-impl<I: RefIO + 'static> StunClients<I> {
+impl<I: RefIO + 'static> StunClientComponent<I> {
     pub fn new(
         ref_iface: I,
         router: StunRouter,
         resolver: Arc<dyn Resolve + Send + Sync>,
         server: impl Into<Arc<str>>,
-        agents: impl IntoIterator<Item = SocketAddr>,
+        agent: Option<SocketAddr>,
         local_endpoints: Option<IfaceLocalEndpoints<I>>,
     ) -> Self {
         Self {
-            clients: Arc::new(Mutex::new(StunClientsInner::new(
+            state: Arc::new(Mutex::new(StunClientState::new(
                 ref_iface,
                 router,
                 resolver,
                 server.into(),
-                agents,
+                agent,
                 local_endpoints,
             ))),
         }
     }
 
-    fn lock_clients(&self) -> MutexGuard<'_, StunClientsInner<I>> {
-        self.clients
-            .lock()
-            .expect("StunClientsComponent lock poisoned")
+    fn lock_state(&self) -> MutexGuard<'_, StunClientState<I>> {
+        self.state.lock().expect("STUN client state mutex poisoned")
     }
 
-    pub fn with_clients<T>(&self, f: impl FnOnce(&StunClientsMap<I>) -> T) -> T {
-        f(self.lock_clients().lock_clients().deref())
+    pub fn with_client<T>(&self, f: impl FnOnce(Option<&StunClient<I>>) -> T) -> T {
+        let state = self.lock_state();
+        f(state.lock_client().as_ref())
     }
 
     pub fn poll_close(&self, cx: &mut Context<'_>) -> Poll<()> {
-        self.lock_clients().poll_close(cx)
+        self.lock_state().poll_close(cx)
     }
 }
 
-pub type StunClientsComponent = StunClients<WeakInterface>;
-
-impl Component for StunClientsComponent {
+impl Component for StunClientComponent<WeakInterface> {
     fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
-        self.lock_clients().poll_close(cx)
+        self.lock_state().poll_close(cx)
     }
 
     fn reinit(&self, iface: &Interface) {
-        let mut clients = self.lock_clients();
-        if clients.ref_iface.same_io(&iface.downgrade()) {
+        let mut state = self.lock_state();
+        if state.ref_iface.same_io(&iface.downgrade()) {
             return;
         }
 
         _ = iface.with_components(|components| {
-            let Some(router) = components.with(|router: &StunRouterComponent| {
-                router.reinit(iface);
-                router.router()
-            }) else {
+            let Some(router_component) = components.get::<StunRouterComponent>() else {
                 return;
             };
+            state.begin_close();
+            router_component.reinit(iface);
+            let router = router_component.router();
             let local_endpoints = components.with(|local_endpoints: &LocalEndpointsComponent| {
                 local_endpoints.reinit(iface);
                 local_endpoints.clone()
             });
 
-            let known_agents = clients.lock_clients().keys().copied().collect::<Vec<_>>();
-            let new_clients = StunClientsInner::new(
+            let new_state = StunClientState::new(
                 iface.downgrade(),
                 router,
-                clients.resolver.clone(),
-                clients.server.clone(),
-                known_agents,
+                state.resolver.clone(),
+                state.server.clone(),
+                None,
                 local_endpoints,
             );
-            *clients = new_clients;
+            *state = new_state;
         });
     }
 }
