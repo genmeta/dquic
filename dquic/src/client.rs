@@ -412,7 +412,7 @@ impl QuicClient {
         let mut server_eps = self
             .network
             .resolver
-            .lookup(server)
+            .lookup(server, "443", None)
             .await
             .map_err(|source| ConnectServerError::Dns { source })?;
 

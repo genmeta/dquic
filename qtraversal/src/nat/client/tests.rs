@@ -21,6 +21,7 @@ enum LookupResult {
 struct TestResolver {
     lookups: Arc<AtomicUsize>,
     result: LookupResult,
+    expected_servname: &'static str,
 }
 
 impl TestResolver {
@@ -28,7 +29,13 @@ impl TestResolver {
         Self {
             lookups: Arc::new(AtomicUsize::new(0)),
             result,
+            expected_servname: "20004",
         }
+    }
+
+    fn with_expected_servname(mut self, expected_servname: &'static str) -> Self {
+        self.expected_servname = expected_servname;
+        self
     }
 
     fn lookup_count(&self) -> usize {
@@ -43,7 +50,15 @@ impl fmt::Display for TestResolver {
 }
 
 impl Resolve for TestResolver {
-    fn lookup<'l>(&'l self, _name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
+        assert_eq!(hostname, "stun.example");
+        assert_eq!(servname, self.expected_servname);
+        assert_eq!(family, Some(Family::V4));
         self.lookups.fetch_add(1, Ordering::SeqCst);
         let result = self.result.clone();
         async move {
@@ -74,6 +89,19 @@ async fn single_dns_result_is_selected() {
         .unwrap();
 
     assert_eq!(agent, Some("192.0.2.1:20004".parse().unwrap()));
+    assert_eq!(resolver.lookup_count(), 1);
+}
+
+#[tokio::test]
+async fn missing_stun_service_uses_the_default() {
+    let resolver = TestResolver::new(LookupResult::Records(vec![direct("192.0.2.1:443")]))
+        .with_expected_servname("");
+
+    let agent = resolve_stun_agent(&resolver, "stun.example", Family::V4, None)
+        .await
+        .unwrap();
+
+    assert_eq!(agent, Some("192.0.2.1:443".parse().unwrap()));
     assert_eq!(resolver.lookup_count(), 1);
 }
 

@@ -41,7 +41,7 @@ use crate::{
 };
 
 const NAT_MAPPING_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
-const STUN_AGENT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+const STUN_AGENT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STUN_DISCOVERY_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const STUN_DISCOVERY_RETRY_MAX: Duration = Duration::from_secs(300);
 const STUN_PROBE_RETRY_INITIAL: Duration = Duration::from_secs(1);
@@ -558,7 +558,8 @@ async fn resolve_stun_agent(
     family: Family,
     excluded_agent: Option<SocketAddr>,
 ) -> io::Result<Option<SocketAddr>> {
-    let mut records = resolver.lookup(server).await?;
+    let (hostname, servname) = server.rsplit_once(':').unwrap_or((server, ""));
+    let mut records = resolver.lookup(hostname, servname, Some(family)).await?;
 
     while let Some((_, endpoint)) = records.next().await {
         let EndpointAddr::Direct { addr } = endpoint else {
