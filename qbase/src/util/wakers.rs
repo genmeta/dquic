@@ -2,7 +2,6 @@ use std::{
     mem,
     sync::{Arc, Mutex, MutexGuard},
     task::{Context, Poll, Wake, Waker},
-    usize,
 };
 
 use smallvec::SmallVec;

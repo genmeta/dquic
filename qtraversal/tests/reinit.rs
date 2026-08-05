@@ -70,7 +70,12 @@ impl fmt::Display for RecoveringResolver {
 }
 
 impl Resolve for RecoveringResolver {
-    fn lookup<'l>(&'l self, _name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        _hostname: &'l str,
+        _servname: &'l str,
+        _family: Option<qbase::net::Family>,
+    ) -> ResolveFuture<'l> {
         let lookup = self.lookups.fetch_add(1, Ordering::SeqCst);
         let agent = self.agent;
         async move {
@@ -90,7 +95,12 @@ impl fmt::Display for TimeoutThenRecoveringResolver {
 }
 
 impl Resolve for TimeoutThenRecoveringResolver {
-    fn lookup<'l>(&'l self, _name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        _hostname: &'l str,
+        _servname: &'l str,
+        _family: Option<qbase::net::Family>,
+    ) -> ResolveFuture<'l> {
         let lookup = self.lookups.fetch_add(1, Ordering::SeqCst);
         let agent = self.agent;
         async move {
@@ -408,7 +418,7 @@ async fn stun_client_retries_lookup_after_timeout() {
     tokio::task::yield_now().await;
     assert_eq!(resolver.lookup_count(), 1);
 
-    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     wait_for_client(&stun_component).await.unwrap();
