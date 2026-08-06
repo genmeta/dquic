@@ -12,6 +12,10 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
+    datagram::{
+        Datagram, TransactionId, be_datagram, forward::Payload as ForwardPayload,
+        stun::Message as StunMessage,
+    },
     net::{
         addr::EndpointAddr,
         route::{Line, Link, Pathway, Route},
@@ -31,17 +35,15 @@ use tracing::Instrument as _;
 
 pub type ArcRecvQueue = ArcAsyncDeque<(BytesMut, Pathway, Link)>;
 
-use crate::{
-    nat::{
-        client::StunClientComponent,
-        router::{StunRouter, StunRouterComponent},
-    },
-    packet::{ForwardHeader, StunHeader},
+use crate::nat::{
+    client::StunClientComponent,
+    msg::Packet as StunPacket,
+    router::{StunRouter, StunRouterComponent},
 };
 
 const INITIAL_MINIMUM_DATAGRAM_SIZE: usize = 1_200;
-// The QUIC packet is measured after the forwarding header is removed. Keep a
-// 100-byte budget for that header so an Initial still represents a minimum-size
+// The QUIC packet is measured after the Forward envelope is removed. Keep a
+// 100-byte budget for that envelope so an Initial still represents a minimum-size
 // datagram on the wire.
 const INITIAL_MINIMUM_PACKET_SIZE: usize = INITIAL_MINIMUM_DATAGRAM_SIZE - 100;
 
@@ -205,59 +207,60 @@ impl ReceiveAndDeliverPacketComponent {
                 }
             };
 
-            let deliver_stun_packet = async |mut pkt: BytesMut, route: Route| {
+            let deliver_stun_datagram =
+                async |transaction_id: TransactionId, message: StunMessage, route: Route| {
                 let Some(stun_router) = stun_router.as_ref() else {
                     return;
                 };
 
-                use crate::nat::msg::be_packet;
-                let pkt = pkt.split_off(StunHeader::encoding_size());
-                let Ok((.., (txid, packet))) = be_packet(&pkt) else {
-                    return;
+                let packet = match message {
+                    StunMessage::Request(body) => StunPacket::Request(body),
+                    StunMessage::Response(body) => StunPacket::Response(body),
                 };
 
-                stun_router.deliver_stun_packet(txid, packet, route.link());
+                stun_router.deliver_stun_packet(transaction_id, packet, route.link());
             };
 
-            let deliver_forward_packet =
-                async |mut pkt: BytesMut, mut route: Route, fhdr: ForwardHeader| {
+            let deliver_forward_datagram = async |pathway: Pathway,
+                                                   payload: ForwardPayload,
+                                                   mut route: Route,
+                                                   datagram_size: usize| {
                     if let Some(forwarder) = forwarder.as_ref()
-                        && let Some(target) = forwarder.should_forward(fhdr.pathway().remote())
+                        && let Some(target) = forwarder.should_forward(pathway.remote())
                     {
-                        let bufs = &[io::IoSlice::new(&pkt)];
+                        let encoded = payload.as_ref();
+                        let bufs = &[io::IoSlice::new(encoded)];
                         let new_link = Link::new(iface.bound_addr()?, target);
-                        let new_line = Line::new(new_link, 64, None, pkt.len() as u16);
+                        let new_line = Line::new(new_link, 64, None, encoded.len() as u16);
                         let new_route = Route::new(route.link.into(), new_line);
                         return iface.sendmmsg(bufs, new_route).await;
                     };
 
-                    // split_off forward header, deliver the rest as quic packet
-                    let datagram_size = pkt.len();
-                    let pkt = pkt.split_off(ForwardHeader::encoding_size(&fhdr.pathway()));
+                    // Remove the Forward envelope and deliver the restored raw QUIC packet.
+                    let pkt = payload.into_raw();
                     route.seg_size = pkt.len() as _;
-                    let new_route = Route::new(fhdr.pathway().flip().map(Into::into), route.line);
+                    let new_route = Route::new(pathway.flip().map(Into::into), route.line);
                     deliver_quic_packet(pkt, new_route, datagram_size).await;
                     Ok(())
                 };
 
             let (mut bufs, mut hdrs) = (vec![], vec![]);
                 loop {
-                    use crate::packet::{Header, be_header};
                     for (pkt, hdr) in iface.recvmmsg(&mut bufs, &mut hdrs).await? {
-                        match be_header(&pkt) {
-                            // quic
-                            Err(_) => {
+                        let datagram_size = pkt.len();
+                        match be_datagram(pkt) {
+                            Ok(Datagram::Raw(pkt)) => {
                                 let datagram_size = pkt.len();
                                 deliver_quic_packet(pkt, hdr, datagram_size).await
                             }
-                            // stun
-                            Ok((_remain, Header::Stun(_stun_header))) => {
-                                deliver_stun_packet(pkt, hdr).await
+                            Ok(Datagram::Stun(transaction_id, message)) => {
+                                deliver_stun_datagram(transaction_id, message, hdr).await
                             }
-                            // forward
-                            Ok((_remain, Header::Forward(forward_header))) => {
-                                deliver_forward_packet(pkt, hdr, forward_header).await?
+                            Ok(Datagram::Forward(pathway, datagram)) => {
+                                deliver_forward_datagram(pathway, datagram, hdr, datagram_size)
+                                    .await?
                             }
+                            Err(_) => continue,
                         }
                     }
                 }

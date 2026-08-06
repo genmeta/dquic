@@ -5,7 +5,7 @@ use qbase::{
     net::tx::Signals,
     packet::{
         AssemblePacket, PacketInfo, PacketWriter as BasePacketWriter, RecordFrame,
-        header::{HeaderSize, GetType, io::WriteHeader, long::LongHeader, short::OneRttHeader},
+        header::{GetType, HeaderSize, io::WriteHeader, long::LongHeader, short::OneRttHeader},
         keys::DirectionalKeys,
         signal::KeyPhaseBit,
     },

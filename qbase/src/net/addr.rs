@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 use crate::net::{Family, be_socket_addr};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    Direct = 0,
+    Mediate = 1,
+}
+
+impl From<u8> for Kind {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Kind::Direct,
+            _ => Kind::Mediate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EndpointAddr {
     Direct {
         addr: SocketAddr,
@@ -39,6 +54,13 @@ impl EndpointAddr {
         match self {
             EndpointAddr::Direct { addr } => *addr,
             EndpointAddr::Agent { outer, .. } => *outer,
+        }
+    }
+
+    pub fn kind(&self) -> Kind {
+        match self {
+            EndpointAddr::Direct { .. } => Kind::Direct,
+            EndpointAddr::Agent { .. } => Kind::Mediate,
         }
     }
 
@@ -85,16 +107,19 @@ impl<T: BufMut> WriteEndpointAddr for T {
 
 pub fn be_endpoint_addr(
     input: &[u8],
-    relay: u8,
     family: Family,
+    kind: Kind,
 ) -> nom::IResult<&[u8], EndpointAddr> {
-    if relay != 0 {
-        let (remain, agent) = be_socket_addr(input, family)?;
-        let (remain, outer) = be_socket_addr(remain, family)?;
-        Ok((remain, EndpointAddr::with_agent(agent, outer)))
-    } else {
-        let (remain, addr) = be_socket_addr(input, family)?;
-        Ok((remain, EndpointAddr::direct(addr)))
+    match kind {
+        Kind::Direct => {
+            let (remain, addr) = be_socket_addr(input, family)?;
+            Ok((remain, EndpointAddr::direct(addr)))
+        }
+        Kind::Mediate => {
+            let (remain, agent) = be_socket_addr(input, family)?;
+            let (remain, outer) = be_socket_addr(remain, family)?;
+            Ok((remain, EndpointAddr::with_agent(agent, outer)))
+        }
     }
 }
 

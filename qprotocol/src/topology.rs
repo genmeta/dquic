@@ -1,14 +1,12 @@
 use std::{io, sync::Arc};
 
 use bytes::BytesMut;
-use qbase::net::route::{Line, Pathway};
-
-use crate::{
-    UdpSocket,
-    forward::{ForwardProtocol, decode_forward, looks_like_forward},
-    quic::QuicProtocol,
-    stun::{StunProtocol, decode_stun_header, looks_like_stun},
+use qbase::{
+    datagram::{Datagram, be_datagram},
+    net::route::{Line, Pathway},
 };
+
+use crate::{UdpSocket, forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol};
 
 const MAX_DATAGRAM_SIZE: usize = 65_535;
 
@@ -52,30 +50,26 @@ impl Topology {
         loop {
             let received = socket.receive(&mut packets, &mut lines).await?;
             for index in 0..received {
-                let mut packet = packets[index].split_to(lines[index].seg_size as usize);
+                let packet = packets[index].split_to(lines[index].seg_size as usize);
                 packets[index].resize(MAX_DATAGRAM_SIZE, 0);
                 let link = lines[index].link.flip();
 
-                if looks_like_stun(&packet) {
-                    let Ok((_, header_len)) = decode_stun_header(&packet) else {
-                        continue;
-                    };
-                    let payload = packet.split_off(header_len);
-                    self.stun.on_packet(&socket, payload, link).await?;
-                    continue;
+                match be_datagram(packet) {
+                    Ok(Datagram::Stun(transaction_id, message)) => {
+                        self.stun
+                            .on_datagram(&socket, transaction_id, message, link)
+                            .await?;
+                    }
+                    Ok(Datagram::Forward(pathway, datagram)) => {
+                        self.forward
+                            .on_datagram(&socket, pathway, datagram, link)
+                            .await?;
+                    }
+                    Ok(Datagram::Raw(packet)) => {
+                        self.quic.on_packet(packet, Pathway::from(link), link);
+                    }
+                    Err(_) => continue,
                 }
-
-                if looks_like_forward(&packet) {
-                    let Ok((header, header_len)) = decode_forward(&packet) else {
-                        continue;
-                    };
-                    self.forward
-                        .on_packet(&socket, packet, link, header, header_len)
-                        .await?;
-                    continue;
-                }
-
-                self.quic.on_packet(packet, Pathway::from(link), link);
             }
         }
     }

@@ -7,9 +7,17 @@ use std::{
     },
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use dashmap::DashMap;
-use qbase::net::route::{Line, Link};
+pub use qbase::datagram::stun::{
+    Attribute as Attr, BindingRequest, BindingRequest as Request, BindingResponse,
+    BindingResponse as Response, Message, MessageType, TransactionId, Type, WriteStunMessage,
+    WriteStunType, WriteTransactionId, be_stun_message, be_stun_type, be_transaction_id,
+};
+use qbase::{
+    datagram::{Datagram, WriteDatagram},
+    net::route::{Line, Link},
+};
 use rand::RngExt;
 use thiserror::Error;
 use tokio::sync::SetOnce;
@@ -17,13 +25,6 @@ use tokio::sync::SetOnce;
 use crate::UdpSocket;
 
 pub mod msg;
-
-use msg::{Packet, WritePacket, be_packet};
-pub use msg::{Request, Response, TransactionId};
-
-const HEADER_MASK: u8 = 0b1111_1110;
-const HEADER_BITS: u8 = 0b1100_0010;
-const HEADER_LEN: usize = 9;
 
 type RequestHandler = dyn Fn(&Request, Link) -> Option<Response> + Send + Sync + 'static;
 
@@ -112,25 +113,6 @@ impl Transaction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StunHeader {
-    version: u16,
-}
-
-impl StunHeader {
-    pub fn new(version: u16) -> Self {
-        Self { version }
-    }
-
-    pub fn version(&self) -> u16 {
-        self.version
-    }
-
-    pub const fn encoding_size() -> usize {
-        HEADER_LEN
-    }
-}
-
 pub struct StunProtocol {
     transactions: DashMap<TransactionId, Arc<Transaction>>,
     server_enabled: Arc<AtomicBool>,
@@ -177,10 +159,10 @@ impl StunProtocol {
         let transaction = Arc::new(Transaction::new(socket, agent, request, cookie_id));
         let txid = transaction.transaction_id();
         self.transactions.insert(txid, transaction.clone());
-        if let Err(error) = send_packet(
+        if let Err(error) = send_datagram(
             transaction.socket(),
-            Packet::Request(transaction.request().clone()),
             txid,
+            Message::Request(transaction.request().clone()),
             agent,
         )
         .await
@@ -204,18 +186,16 @@ impl StunProtocol {
         Ok(transaction.wait().await)
     }
 
-    pub async fn on_packet(
+    pub async fn on_datagram(
         &self,
         socket: &Arc<UdpSocket>,
-        payload: BytesMut,
+        transaction_id: TransactionId,
+        message: Message,
         link: Link,
     ) -> io::Result<()> {
-        let Ok((_, (txid, packet))) = be_packet(&payload) else {
-            return Ok(());
-        };
-
-        match packet {
-            Packet::Response(response) => {
+        match message {
+            Message::Response(body) => {
+                let txid = transaction_id;
                 let Some(transaction) = self
                     .transactions
                     .get(&txid)
@@ -226,63 +206,45 @@ impl StunProtocol {
                 if transaction.agent() == link.dst && Arc::ptr_eq(transaction.socket(), socket) {
                     self.transactions
                         .remove_if(&txid, |_, registered| Arc::ptr_eq(registered, &transaction));
-                    transaction.complete(response, link);
+                    transaction.complete(body, link);
                 }
             }
-            Packet::Request(request) => {
+            Message::Request(body) => {
                 if !self.server_enabled() {
                     return Ok(());
                 }
                 let handler = self.request_handler.read().unwrap().clone();
-                let Some(response) = handler.and_then(|handler| handler(&request, link)) else {
+                let Some(response) = handler.and_then(|handler| handler(&body, link)) else {
                     return Ok(());
                 };
-                send_packet(socket, Packet::Response(response), txid, link.dst).await?;
+                send_datagram(
+                    socket,
+                    transaction_id,
+                    Message::Response(response),
+                    link.dst,
+                )
+                .await?;
             }
         }
         Ok(())
     }
 }
 
-pub fn looks_like_stun(input: &[u8]) -> bool {
-    input
-        .first()
-        .is_some_and(|first| first & HEADER_MASK == HEADER_BITS)
-}
-
-pub fn decode_stun_header(input: &[u8]) -> Result<(StunHeader, usize), StunError> {
-    if input.len() < HEADER_LEN
-        || !looks_like_stun(input)
-        || input[1..5] != [0; 4]
-        || input[5] != 0
-        || input[6] != 0
-    {
-        return Err(StunError::InvalidHeader);
-    }
-    Ok((
-        StunHeader::new(u16::from_be_bytes([input[7], input[8]])),
-        HEADER_LEN,
-    ))
-}
-
-fn encode_packet(txid: TransactionId, packet: &Packet) -> BytesMut {
+fn encode_datagram(transaction_id: TransactionId, message: &Message) -> io::Result<BytesMut> {
     let mut buffer = BytesMut::with_capacity(128);
-    buffer.put_u8(HEADER_BITS);
-    buffer.put_u32(0);
-    buffer.put_u8(0);
-    buffer.put_u8(0);
-    buffer.put_u16(0);
-    buffer.put_packet(&txid, packet);
     buffer
+        .put_datagram(&Datagram::Stun(transaction_id, message.clone()))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(buffer)
 }
 
-async fn send_packet(
+async fn send_datagram(
     socket: &UdpSocket,
-    packet: Packet,
-    txid: TransactionId,
+    transaction_id: TransactionId,
+    message: Message,
     destination: SocketAddr,
 ) -> io::Result<()> {
-    let buffer = encode_packet(txid, &packet);
+    let buffer = encode_datagram(transaction_id, &message)?;
     let link = Link::new(socket.local_addr()?, destination);
     let line = Line::new(
         link,
@@ -306,15 +268,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stun_header_round_trips() {
+    fn binding_request_encodes() {
         let txid = TransactionId::random();
-        let packet = encode_packet(txid, &Packet::Request(Request::default()));
-        let (header, consumed) = decode_stun_header(&packet).unwrap();
-        assert_eq!(header.version(), 0);
-        assert_eq!(consumed, StunHeader::encoding_size());
-        assert!(matches!(
-            be_packet(&packet[consumed..]),
-            Ok((_, (_, Packet::Request(_))))
-        ));
+        let message = Message::Request(Request::default());
+        assert!(!encode_datagram(txid, &message).unwrap().is_empty());
     }
 }

@@ -9,8 +9,14 @@ use derive_more::From;
 use qbase::{
     Epoch, GetEpoch,
     cid::{BorrowedCid, ConnectionId},
+    datagram::{Type as DatagramType, WriteDatagramType, r#type::v0},
     frame::PingFrame,
-    net::tx::{ArcSendWaker, Signals},
+    net::{
+        AddrFamily,
+        addr::{EndpointAddr, WriteEndpointAddr},
+        route::Pathway,
+        tx::{ArcSendWaker, Signals},
+    },
     packet::{
         AssemblePacket, Package, PacketContent, PacketInfo, ProductHeader,
         header::{
@@ -26,7 +32,6 @@ use qbase::{
 use qcongestion::{ArcCC, Transport};
 use qinterface::io::IO;
 use qrecovery::journal::{AckPackege, ArcRcvdJournal, Journal};
-use qtraversal::packet::{ForwardHeader, WriteForwardHeader};
 
 use crate::{
     ArcDcidCell, ArcReliableFrameDeque, CidRegistry, Components,
@@ -73,13 +78,40 @@ pub struct Burst {
 fn datagram_capacity(
     max_segment_size: usize,
     mtu: usize,
-    forward_header_size: usize,
+    forward_overhead: usize,
     remaining_credit: usize,
 ) -> Result<usize, Signals> {
     let capacity = max_segment_size.min(mtu).min(remaining_credit);
-    (capacity > forward_header_size)
+    (capacity > forward_overhead)
         .then_some(capacity)
         .ok_or(Signals::CREDIT)
+}
+
+fn forward_reserved_overhead(pathway: Pathway) -> usize {
+    if matches!(pathway.local(), EndpointAddr::Direct { .. })
+        && matches!(pathway.remote(), EndpointAddr::Direct { .. })
+    {
+        0
+    } else {
+        2 + pathway.local().encoding_size() + pathway.remote().encoding_size()
+    }
+}
+
+fn encode_forward_in_place(buffer: &mut [u8], raw_len: usize, pathway: Pathway) -> usize {
+    let family = pathway.local().addr().family();
+    let source = pathway.local().kind();
+    let destination = pathway.remote().kind();
+    let ty = v0::Type::Forward(family, source, destination);
+    let prefix_len = 2 + pathway.local().encoding_size() + pathway.remote().encoding_size();
+    let encoded_len = prefix_len + raw_len;
+    debug_assert!(encoded_len <= buffer.len());
+
+    let mut prefix = &mut buffer[..prefix_len];
+    prefix.put_datagram_type(&DatagramType::V0(ty));
+    prefix.put_endpoint_addr(pathway.local());
+    prefix.put_endpoint_addr(pathway.remote());
+    debug_assert!(prefix.is_empty());
+    encoded_len
 }
 
 impl super::Path {
@@ -536,7 +568,7 @@ impl Burst {
             return Err(BurstError::PathDeactived);
         };
 
-        let reversed_size = ForwardHeader::encoding_size(&self.path.pathway);
+        let reversed_size = forward_reserved_overhead(self.path.pathway);
         let mut segment_lengths = Vec::with_capacity(max_segments);
         let Some(mut remaining_credit) = self.path.anti_amplifier.balance()? else {
             return Err(BurstError::PathDeactived);
@@ -589,22 +621,17 @@ impl Burst {
                 })
                 .map(|(packet_size, _)| {
                     if reversed_size > 0 {
-                        let (mut header, payload) = segment.split_at_mut(reversed_size);
-                        let forward_hdr = ForwardHeader::new(
-                            0,
-                            // FIXME: unwrap
-                            &self.path.pathway,
-                            payload,
-                        );
+                        let encoded_size =
+                            encode_forward_in_place(segment, packet_size, self.path.pathway);
                         tracing::trace!(
                             target: "dquic",
-                            ?forward_hdr,
+                            pathway = %self.path.pathway,
                             link = %self.path.link(),
-                            "put forward header"
+                            "put forward envelope"
                         );
-                        header.put_forward_header(&forward_hdr);
+                        return encoded_size;
                     }
-                    reversed_size + packet_size
+                    packet_size
                 });
 
             let segment_length = match load_result {
@@ -631,7 +658,32 @@ impl Burst {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+    use qbase::datagram::{Datagram, be_datagram};
+
     use super::*;
+
+    fn forwarding_round_trip(raw: &[u8]) {
+        let pathway = Pathway::new(
+            EndpointAddr::with_agent(
+                "198.51.100.1:3478".parse().unwrap(),
+                "192.0.2.1:50000".parse().unwrap(),
+            ),
+            EndpointAddr::direct("203.0.113.1:4433".parse().unwrap()),
+        );
+        let raw_offset = forward_reserved_overhead(pathway);
+        let mut buffer = vec![0; raw_offset + raw.len()];
+        buffer[raw_offset..].copy_from_slice(raw);
+
+        let encoded_len = encode_forward_in_place(&mut buffer, raw.len(), pathway);
+        let Datagram::Forward(decoded_pathway, forward) =
+            be_datagram(BytesMut::from(&buffer[..encoded_len])).unwrap()
+        else {
+            panic!("expected Forward datagram");
+        };
+        assert_eq!(decoded_pathway, pathway);
+        assert_eq!(forward.into_raw(), raw);
+    }
 
     #[test]
     fn amplification_credit_is_shared_by_all_segments() {
@@ -651,11 +703,17 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_header_is_part_of_the_datagram_credit() {
+    fn forwarding_overhead_is_part_of_the_datagram_credit() {
         assert_eq!(datagram_capacity(1_500, 1_200, 50, 1_200), Ok(1_200));
         assert_eq!(
             datagram_capacity(1_500, 1_200, 50, 50),
             Err(Signals::CREDIT)
         );
+    }
+
+    #[test]
+    fn in_place_forwarding_preserves_any_raw_datagram() {
+        forwarding_round_trip(&[0x45, 1, 2, 3]);
+        forwarding_round_trip(&[0xc1, 0, 0, 0, 1, 1, 2, 3]);
     }
 }

@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     frame::EncodeSize,
-    net::{Family, addr::EndpointAddr, be_socket_addr},
+    net::{
+        Family,
+        addr::{EndpointAddr, Kind, WriteEndpointAddr, be_endpoint_addr},
+        be_socket_addr,
+    },
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -52,6 +56,28 @@ impl<E> Pathway<E> {
             local: self.remote,
             remote: self.local,
         }
+    }
+}
+
+pub fn be_pathway(
+    input: &[u8],
+    family: Family,
+    local_kind: Kind,
+    remote_kind: Kind,
+) -> nom::IResult<&[u8], Pathway> {
+    let (remain, local) = be_endpoint_addr(input, family, local_kind)?;
+    let (remain, remote) = be_endpoint_addr(remain, family, remote_kind)?;
+    Ok((remain, Pathway::new(local, remote)))
+}
+
+pub trait WritePathway<E> {
+    fn put_pathway(&mut self, pathway: &Pathway<E>);
+}
+
+impl<T: BufMut> WritePathway<EndpointAddr> for T {
+    fn put_pathway(&mut self, pathway: &Pathway<EndpointAddr>) {
+        self.put_endpoint_addr(pathway.local.clone());
+        self.put_endpoint_addr(pathway.remote.clone());
     }
 }
 
