@@ -35,7 +35,7 @@ pub trait GetType {
 /// However, the length field of the packet payload is variable-length encoded and
 /// requires special encoding, which is not considered here.
 #[enum_dispatch]
-pub trait EncodeHeader {
+pub trait HeaderSize {
     /// Returns the length of the encoded packet header.
     fn size(&self) -> usize {
         0

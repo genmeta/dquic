@@ -569,7 +569,7 @@ impl<'b> PacketWriter<'b> {
         keys: DirectionalKeys,
     ) -> Result<Self, Signals>
     where
-        S: EncodeHeader,
+        S: HeaderSize,
         LongHeader<S>: GetType,
         for<'a> &'a mut [u8]: WriteHeader<LongHeader<S>>,
     {

@@ -9,7 +9,7 @@ use crate::{cid::ConnectionId, packet::SpinBit};
 ///      |     +---key phase bits
 ///      |     |
 /// +----+-----+----+------+--------------+----......---+
-/// |1|1|S 0 0 K 0 0| DCIL | DCID(0..160) | Payload ... |
+/// |1|1|S r r K PN | DCIL | DCID(0..160) | Payload ... |
 /// +-----+---+-+---+------+--------------+----......---+
 ///       |<->| |<->|
 ///         |     |
@@ -38,7 +38,7 @@ impl OneRttHeader {
     }
 }
 
-impl EncodeHeader for OneRttHeader {
+impl HeaderSize for OneRttHeader {
     fn size(&self) -> usize {
         1 + self.dcid.len()
     }

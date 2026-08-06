@@ -5,7 +5,7 @@ use qbase::{
     net::tx::Signals,
     packet::{
         AssemblePacket, PacketInfo, PacketWriter as BasePacketWriter, RecordFrame,
-        header::{EncodeHeader, GetType, io::WriteHeader, long::LongHeader, short::OneRttHeader},
+        header::{HeaderSize, GetType, io::WriteHeader, long::LongHeader, short::OneRttHeader},
         keys::DirectionalKeys,
         signal::KeyPhaseBit,
     },
@@ -49,7 +49,7 @@ impl<'b, 's, F> PacketWriter<'b, 's, F> {
         expire_timeout: Duration,
     ) -> Result<Self, Signals>
     where
-        S: EncodeHeader + 'static,
+        S: HeaderSize + 'static,
         LongHeader<S>: GetType,
         for<'a> &'a mut [u8]: WriteHeader<LongHeader<S>>,
     {
@@ -163,7 +163,7 @@ impl<'b, 's, F> TrivialPacketWriter<'b, 's, F> {
         journal: &'s ArcSentJournal<F>,
     ) -> Result<Self, Signals>
     where
-        S: EncodeHeader + 'static,
+        S: HeaderSize + 'static,
         LongHeader<S>: GetType,
         for<'a> &'a mut [u8]: WriteHeader<LongHeader<S>>,
     {
