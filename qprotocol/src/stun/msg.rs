@@ -3,6 +3,7 @@ use std::{io, net::SocketAddr};
 use bytes::BufMut;
 use nom::{
     Err, IResult, Parser,
+    bytes::streaming::take,
     combinator::map,
     error::{Error, ErrorKind},
     multi::many0,
@@ -311,7 +312,7 @@ impl Response {
 
 pub fn be_packet(input: &[u8]) -> IResult<&[u8], (TransactionId, Packet)> {
     let (remain, typ) = be_u16(input)?;
-    let (txid, remain) = remain.split_at(16);
+    let (remain, txid) = take(16usize).parse(remain)?;
     let (remain, packet) = match typ {
         BINDING_REQUEST => map(be_request, Packet::Request).parse(remain)?,
         BINDING_RESPONSE => map(be_response, Packet::Response).parse(remain)?,
