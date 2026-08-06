@@ -14,11 +14,10 @@ bytes = { workspace = true }
 nom = { workspace = true }
 dashmap = { workspace = true }
 qbase = { workspace = true }
-qinterface = { workspace = true }
 qudp = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [features]
 # Enable shorter TTL only for tests (especially integration tests in other crates).
