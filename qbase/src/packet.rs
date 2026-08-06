@@ -32,7 +32,7 @@ pub use r#type::{
 pub mod header;
 #[doc(hidden)]
 pub use header::{
-    EncodeHeader, GetDcid, GetScid, GetType, HandshakeHeader, Header, InitialHeader,
+    GetDcid, GetScid, GetType, HandshakeHeader, Header, HeaderSize, InitialHeader,
     LongHeaderBuilder, OneRttHeader, RetryHeader, VersionNegotiationHeader, ZeroRttHeader, long,
 };
 

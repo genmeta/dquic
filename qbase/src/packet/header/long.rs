@@ -145,7 +145,7 @@ pub struct ZeroRtt;
 #[derive(Debug, Default, Clone)]
 pub struct Handshake;
 
-impl EncodeHeader for Initial {
+impl HeaderSize for Initial {
     fn size(&self) -> usize {
         VarInt::try_from(self.token.len())
             .expect("token length can not be more than 2^62")
@@ -154,8 +154,8 @@ impl EncodeHeader for Initial {
     }
 }
 
-impl EncodeHeader for ZeroRtt {}
-impl EncodeHeader for Handshake {}
+impl HeaderSize for ZeroRtt {}
+impl HeaderSize for Handshake {}
 
 /// Version negotiation packet, which is a long header packet.
 ///
@@ -187,7 +187,7 @@ pub type HandshakeHeader = LongHeader<Handshake>;
 /// in [RFC9000](https://www.rfc-editor.org/rfc/rfc9000.html) for more details.
 pub type ZeroRttHeader = LongHeader<ZeroRtt>;
 
-impl<S: EncodeHeader> EncodeHeader for LongHeader<S> {
+impl<S: HeaderSize> HeaderSize for LongHeader<S> {
     fn size(&self) -> usize {
         1 + 4 +
         1 + self.dcid.len()       // dcid长度最多20字节，长度编码只占1字节，加上cid本身的长度
