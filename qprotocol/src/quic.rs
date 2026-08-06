@@ -5,16 +5,16 @@ use std::{
 
 use bytes::BytesMut;
 use dashmap::DashMap;
-use qbase::net::{
-    addr::EndpointAddr,
-    route::{Line, Link, Pathway},
+use qbase::{
+    datagram::forward::Payload as ForwardPayload,
+    net::{
+        addr::EndpointAddr,
+        route::{Line, Link, Pathway},
+    },
 };
 use thiserror::Error;
 
-use crate::{
-    UdpSocket,
-    forward::{ForwardHeader, WriteForwardHeader},
-};
+use crate::UdpSocket;
 
 type DatagramHandler = dyn Fn(BytesMut, Arc<QuicSocket>, Pathway, Link) + Send + Sync + 'static;
 
@@ -58,18 +58,18 @@ impl QuicSocket {
             return send_all(&self.udp, packets, line(link, packets[0].len())).await;
         }
 
-        let mut datagrams = Vec::with_capacity(packets.len());
+        let mut payloads = Vec::with_capacity(packets.len());
         for packet in packets {
-            let header = ForwardHeader::new(0, pathway, packet)
+            let raw_offset = 2 + pathway.local().encoding_size() + pathway.remote().encoding_size();
+            let mut bytes = BytesMut::zeroed(raw_offset + packet.len());
+            bytes[raw_offset..].copy_from_slice(packet);
+            let payload = ForwardPayload::from_raw(&pathway, bytes, raw_offset)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let mut datagram = BytesMut::with_capacity(header.encoded_len() + packet.len());
-            datagram.put_forward_header(&header);
-            datagram.extend_from_slice(packet);
-            datagrams.push(datagram);
+            payloads.push(payload);
         }
-        let slices = datagrams
+        let slices = payloads
             .iter()
-            .map(|datagram| IoSlice::new(datagram))
+            .map(|payload| IoSlice::new(payload.as_ref()))
             .collect::<Vec<_>>();
         send_all(&self.udp, &slices, line(link, slices[0].len())).await
     }
@@ -170,6 +170,8 @@ async fn send_all(socket: &UdpSocket, packets: &[IoSlice<'_>], line: Line) -> io
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use qbase::datagram::{Datagram, WriteDatagram};
+
     use super::*;
 
     #[tokio::test]
@@ -197,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_endpoint_paths_require_forward_header() {
+    fn mixed_endpoint_paths_can_be_encoded() {
         let direct = EndpointAddr::direct("203.0.113.1:4433".parse().unwrap());
         let agent = EndpointAddr::with_agent(
             "198.51.100.1:3478".parse().unwrap(),
@@ -205,13 +207,19 @@ mod tests {
         );
         let payload = [0x40, 1, 2, 3];
 
-        assert_eq!(
-            ForwardHeader::encoding_size(Pathway::new(direct, direct)),
-            0
-        );
-        assert!(ForwardHeader::encoding_size(Pathway::new(direct, agent)) > 0);
-        assert!(ForwardHeader::encoding_size(Pathway::new(agent, direct)) > 0);
-        assert!(ForwardHeader::encoding_size(Pathway::new(agent, agent)) > 0);
-        assert!(ForwardHeader::new(0, Pathway::new(agent, direct), &payload).is_ok());
+        for pathway in [
+            Pathway::new(direct, agent),
+            Pathway::new(agent, direct),
+            Pathway::new(agent, agent),
+        ] {
+            let raw_offset = 2 + pathway.local().encoding_size() + pathway.remote().encoding_size();
+            let mut bytes = BytesMut::zeroed(raw_offset + payload.len());
+            bytes[raw_offset..].copy_from_slice(&payload);
+            let forward = ForwardPayload::from_raw(&pathway, bytes, raw_offset).unwrap();
+            let datagram = Datagram::Forward(pathway, forward);
+            let mut encoded = BytesMut::new();
+            encoded.put_datagram(&datagram).unwrap();
+            assert!(!encoded.is_empty());
+        }
     }
 }

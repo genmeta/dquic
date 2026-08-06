@@ -25,7 +25,7 @@ pub use nat::{NatType, NetFeature};
 /// IP protocol family
 ///
 /// Represents IPv4 or IPv6 protocol family.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Family {
     /// IPv4 protocol family
     V4 = 0,
@@ -42,23 +42,32 @@ impl Display for Family {
     }
 }
 
+impl From<u8> for Family {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Family::V4,
+            _ => Family::V6,
+        }
+    }
+}
+
 /// Invalid IP protocol family error
 ///
 /// Returned when attempting to parse an unsupported IP protocol family string.
 ///
 /// Supported values: `v4`, `V4`, `v6`, `V6`
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
-#[error("Invalid ip family")]
-pub struct UnknownFamily;
+#[error("Invalid address family")]
+pub struct InvalidFamily;
 
 impl FromStr for Family {
-    type Err = UnknownFamily;
+    type Err = InvalidFamily;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "v4" => Ok(Family::V4),
             "v6" => Ok(Family::V6),
-            _ => Err(UnknownFamily),
+            _ => Err(InvalidFamily),
         }
     }
 }
@@ -152,6 +161,6 @@ mod tests {
         assert_eq!("v6".parse::<Family>().unwrap(), Family::V6);
         assert_eq!("V6".parse::<Family>().unwrap(), Family::V6);
 
-        assert!(matches!("v7".parse::<Family>(), Err(UnknownFamily)));
+        assert!(matches!("v7".parse::<Family>(), Err(InvalidFamily)));
     }
 }

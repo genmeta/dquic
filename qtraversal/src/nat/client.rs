@@ -941,7 +941,7 @@ fn response_attr(
     attribute: StunResponseAttribute,
 ) -> Result<SocketAddr, StunResponseError> {
     response
-        .0
+        .attributes()
         .iter()
         .find_map(|attr| match (attribute, attr) {
             (StunResponseAttribute::MappedAddress, Attr::MappedAddress(addr))

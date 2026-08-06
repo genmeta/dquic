@@ -1,13 +1,13 @@
 use std::{io, net::SocketAddr};
 
-use bytes::{BufMut, BytesMut};
-use qbase::net::route::{Line, Link, Route};
+use bytes::BytesMut;
+use qbase::{
+    datagram::{Datagram, WriteDatagram, stun::Message},
+    net::route::{Line, Link, Route},
+};
 use qinterface::io::{IO, IoExt};
 
-use crate::{
-    nat::msg::{Packet, TransactionId, WritePacket},
-    packet::{StunHeader, WriteStunHeader},
-};
+use crate::nat::msg::{Packet, TransactionId};
 
 pub trait StunIO: IO {
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -21,17 +21,13 @@ pub trait StunIO: IO {
         dst: SocketAddr,
     ) -> impl Future<Output = io::Result<()>> + Send {
         async move {
-            let mut buf = BytesMut::zeroed(128);
-            let (mut stun_hdr, mut stun_body) = buf.split_at_mut(StunHeader::encoding_size());
-
-            // put stun header
-            stun_hdr.put_stun_header(&StunHeader::new(0));
-
-            // put stun body
-            let origin = stun_body.remaining_mut();
-            stun_body.put_packet(&txid, &packet);
-            let consumed = origin - stun_body.remaining_mut();
-            buf.truncate(StunHeader::encoding_size() + consumed);
+            let datagram = match packet {
+                Packet::Request(body) => Datagram::Stun(txid, Message::Request(body)),
+                Packet::Response(body) => Datagram::Stun(txid, Message::Response(body)),
+            };
+            let mut buf = BytesMut::with_capacity(128);
+            buf.put_datagram(&datagram)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
             let bufs = &[io::IoSlice::new(&buf)];
 

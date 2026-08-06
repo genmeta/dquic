@@ -5,7 +5,7 @@ use qbase::{
     packet::{
         RecordFrame,
         header::{
-            HeaderSize, GetDcid, GetScid, GetType, io::WriteHeader, long::LongHeader,
+            GetDcid, GetScid, GetType, HeaderSize, io::WriteHeader, long::LongHeader,
             short::OneRttHeader,
         },
         io::{AssemblePacket, PacketInfo, PacketWriter as BasePacketWriter},
