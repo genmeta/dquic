@@ -44,7 +44,7 @@ pub enum EndpointAddr {
     Direct {
         addr: SocketAddr,
     },
-    Agent {
+    Mediate {
         agent: SocketAddr,
         outer: SocketAddr,
     },
@@ -53,14 +53,14 @@ pub enum EndpointAddr {
 
 > [!NOTE]
 >
-> An Endpoint Address describes an endpoint's currently reachable network address. A public endpoint uses `EndpointAddr::Direct`, consisting of its IP address and port. A private-network endpoint uses `EndpointAddr::Agent`, which combines the public delegate endpoint's address with its own publicly mapped address.
+> An Endpoint Address describes an endpoint's currently reachable network address. A public endpoint uses `EndpointAddr::Direct`, consisting of its IP address and port. A private-network endpoint uses `EndpointAddr::Mediate`, which combines the public delegate endpoint's address with its own publicly mapped address.
 > DDns uses E records (Endpoint Address Records) to resolve a name to one or more current `EndpointAddr` values. See the [DDns Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/ddns) and the [open-source DDns implementation](https://github.com/genmeta/ddns).
 
 ## Peer-to-Peer Communication
 
 Building on the [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/draft-seemann-quic-nat-traversal-02) draft, DQuic provide full NAT traversal support for its connections.
 The draft remains at an early stage: it defines the relevant extension frames but does not fully specify how NAT traversal coordinates with QUIC.
-With the `ep-&EP` pairing model, DQuic uses the `Agent` form of an Endpoint Address to represent the delegate route and integrates STUN, relay, and signaling into the connection workflow to establish peer-to-peer connections between private-network endpoints.
+With the `ep-&EP` pairing model, DQuic uses the `Mediate` form of an Endpoint Address to represent the delegate route and integrates STUN, relay, and signaling into the connection workflow to establish peer-to-peer connections between private-network endpoints.
 
 In this model, a private-network endpoint `ep` pairs with at least one public endpoint, denoted `&EP`, serves as `ep`'s public delegate endpoint. The two communicating endpoints first use their respective Endpoint Addresses to establish an initial reachable path, then exchange candidate addresses and try to establish a direct peer-to-peer path.
 
