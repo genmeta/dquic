@@ -278,7 +278,7 @@ async fn get_stun_data(server_iface: dquic::qinterface::Interface) -> (EndpointA
                 .outer_addr()
                 .await
                 .expect("failed to detect outer address");
-            let endpoint = EndpointAddr::with_agent(agent, outer);
+            let endpoint = EndpointAddr::mediate(agent, outer);
             let nat_type = client.nat_type().await.expect("failed to detect NAT type");
             return (endpoint, nat_type);
         }

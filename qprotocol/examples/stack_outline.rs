@@ -77,7 +77,7 @@ async fn main() -> Result<(), Error> {
     // A successful STUN agent is published independently of the Direct endpoints.
     let agent = Arc::new(QuicSocket::new(
         raw.clone(),
-        EndpointAddr::with_agent(
+        EndpointAddr::mediate(
             "198.51.100.1:3478".parse().unwrap(),
             "203.0.113.10:50000".parse().unwrap(),
         ),
@@ -104,7 +104,7 @@ async fn main() -> Result<(), Error> {
         .map_err(|_| io::Error::other("QUIC example receive task stopped"))?;
 
     let direct_path = Pathway::new(inner.endpoint_addr(), peer.endpoint_addr());
-    let remote_agent = EndpointAddr::with_agent(
+    let remote_agent = EndpointAddr::mediate(
         "198.51.100.2:3478".parse().unwrap(),
         "192.0.2.20:50000".parse().unwrap(),
     );

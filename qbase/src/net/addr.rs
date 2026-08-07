@@ -85,7 +85,7 @@ impl EndpointAddr {
         EndpointAddr::Direct { addr }
     }
 
-    pub fn with_agent(agent: SocketAddr, outer: SocketAddr) -> Self {
+    pub fn mediate(agent: SocketAddr, outer: SocketAddr) -> Self {
         EndpointAddr::Mediate { agent, outer }
     }
 
@@ -176,7 +176,7 @@ pub fn be_endpoint_addr(
         Kind::Mediate => {
             let (remain, agent) = be_socket_addr(input, family)?;
             let (remain, outer) = be_socket_addr(remain, family)?;
-            Ok((remain, EndpointAddr::with_agent(agent, outer)))
+            Ok((remain, EndpointAddr::mediate(agent, outer)))
         }
     }
 }
@@ -209,7 +209,7 @@ impl FromStr for EndpointAddr {
             // Agent format: "inet:1.12.124.56:1234-inet:202.106.68.43:6080"
             let agent = first.trim().parse()?;
             let outer = second.trim().parse()?;
-            Ok(EndpointAddr::with_agent(agent, outer))
+            Ok(EndpointAddr::mediate(agent, outer))
         } else {
             // Direct format: "1.12.124.56:1234"
             let addr = s.trim().parse()?;
@@ -226,7 +226,7 @@ impl From<SocketAddr> for EndpointAddr {
 
 impl From<(SocketAddr, SocketAddr)> for EndpointAddr {
     fn from((agent, outer): (SocketAddr, SocketAddr)) -> Self {
-        EndpointAddr::with_agent(agent, outer)
+        EndpointAddr::mediate(agent, outer)
     }
 }
 
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn mediate_endpoint_is_publicly_reachable_through_its_agent() {
         assert!(
-            EndpointAddr::with_agent(
+            EndpointAddr::mediate(
                 "8.8.8.8:3478".parse().unwrap(),
                 "192.168.1.2:50000".parse().unwrap(),
             )

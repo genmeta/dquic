@@ -347,7 +347,7 @@ mod tests {
         let bind = bind_uri();
         let direct = direct_endpoint(10003);
         let agent_addr = socket(20004);
-        let agent = EndpointAddr::with_agent(agent_addr, socket(30004));
+        let agent = EndpointAddr::mediate(agent_addr, socket(30004));
 
         book.upsert_local_endpoint(bind.clone(), InterfaceEndpointKey::Direct, direct);
         book.upsert_local_endpoint(bind.clone(), InterfaceEndpointKey::Agent(agent_addr), agent);

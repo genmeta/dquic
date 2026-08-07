@@ -93,7 +93,7 @@ mod tests {
     fn pathway() -> Pathway {
         Pathway::new(
             EndpointAddr::direct("203.0.113.1:4433".parse().unwrap()),
-            EndpointAddr::with_agent(
+            EndpointAddr::mediate(
                 "198.51.100.1:3478".parse().unwrap(),
                 "192.0.2.1:50000".parse().unwrap(),
             ),
