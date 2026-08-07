@@ -34,7 +34,7 @@ pub enum EndpointAddr {
     Direct {
         addr: SocketAddr,
     },
-    Agent {
+    Mediate {
         agent: SocketAddr,
         outer: SocketAddr,
     },
@@ -43,11 +43,11 @@ pub enum EndpointAddr {
 
 > [!NOTE]
 >
-> EndpointAddr 描述一个端点的网络可达地址：公网端点使用 EndpointAddr::Direct 形式的地址，即 IP 地址和端口；私网端点则使用 EndpointAddr::Agent 形式的地址，由公网搭档的可达地址和私网端点自身的公网映射地址组成。DDns 使用 E 记录（EndpointAddress Record）将名字解析到端点当前的一个或多个 EndpointAddr。详见 [DDns 协议文档](https://docs.dhttp.net/zh/docs/protocol/ddns) 和 [DDns 开源实现](https://github.com/genmeta/ddns)。
+> EndpointAddr 描述一个端点的网络可达地址：公网端点使用 EndpointAddr::Direct 形式的地址，即 IP 地址和端口；私网端点则使用 EndpointAddr::Mediate 形式的地址，由公网搭档的可达地址和私网端点自身的公网映射地址组成。DDns 使用 E 记录（EndpointAddress Record）将名字解析到端点当前的一个或多个 EndpointAddr。详见 [DDns 协议文档](https://docs.dhttp.net/zh/docs/protocol/ddns) 和 [DDns 开源实现](https://github.com/genmeta/ddns)。
 
 ## 点到点通信
 
-DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/draft-seemann-quic-nat-traversal-02) 草案的基础上，实现了完整的 NAT 穿越能力。尽管该草案仍处于早期阶段，只定义了相关扩展帧，没有完整说明 NAT 穿越过程如何与 QUIC 协同工作；DQuic 借助上述新引入的 `ep-&EP` 搭档模型，将 STUN、TURN、Signaling 融入 Endpoint 地址中的 Agent 端点，成功地完成了私网端点之间的 P2P 建连过程。
+DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/draft-seemann-quic-nat-traversal-02) 草案的基础上，实现了完整的 NAT 穿越能力。尽管该草案仍处于早期阶段，只定义了相关扩展帧，没有完整说明 NAT 穿越过程如何与 QUIC 协同工作；DQuic 借助上述新引入的 `ep-&EP` 搭档模型，将 STUN、TURN、Signaling 融入 Endpoint 地址中的 Mediate 端点，成功地完成了私网端点之间的 P2P 建连过程。
 
 在该模型中，私网端点 `ep` 与至少一个公网端点 `EP` 配对搭档，由 `&EP` 作为 `ep` 的公网搭档。两个通信端点首先利用各自的 EndpointAddr 中的公网搭档中转数据包建立初始路径，随后交换各自的候选地址，并据此建立 P2P 路径。
 
