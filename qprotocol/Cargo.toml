@@ -18,6 +18,7 @@ qudp = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tracing = { workspace = true }
 
 [features]
 # Enable shorter TTL only for tests (especially integration tests in other crates).

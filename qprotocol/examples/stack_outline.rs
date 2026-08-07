@@ -53,8 +53,8 @@ async fn main() -> Result<(), Error> {
         }
     });
 
-    let forward = Arc::new(ForwardProtocol::new(quic.clone()));
-    let topology = Arc::new(Topology::new(stun.clone(), forward, quic.clone()));
+    let forward = Arc::new(ForwardProtocol::new());
+    let topology = Arc::new(Topology::new(stun.clone(), forward.clone(), quic.clone()));
     let dock = Dock::new(topology);
     let addresses = AddressBook::new();
 
@@ -67,6 +67,7 @@ async fn main() -> Result<(), Error> {
     ));
     quic.register(&inner)?;
     addresses.insert_inner(inner.clone())?;
+    forward.serve(inner.endpoint_addr().addr(), inner.udp_socket());
 
     // A FullCone result would add Direct(outer), while retaining the same raw socket.
     let outer = Arc::new(QuicSocket::new(
@@ -75,6 +76,7 @@ async fn main() -> Result<(), Error> {
     ));
     quic.register(&outer)?;
     addresses.insert_outer(outer.clone())?;
+    forward.serve(outer.endpoint_addr().addr(), outer.udp_socket());
 
     // A successful STUN agent is published independently of the Direct endpoints.
     let agent = Arc::new(QuicSocket::new(
