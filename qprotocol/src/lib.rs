@@ -1,15 +1,10 @@
-pub mod address;
+pub mod addr_book;
 pub mod dock;
-pub mod ephemeral;
-pub mod forward;
-pub mod quic;
-pub mod stun;
+pub mod protocol;
+pub mod socket;
 pub mod topology;
 
-pub use address::AddressBook;
+pub use addr_book::AddressBook;
 pub use dock::Dock;
-pub use ephemeral::EphemeralSocket;
-pub use forward::ForwardProtocol;
-pub use qudp::UdpSocket;
-pub use quic::{QuicProtocol, QuicSocket};
-pub use stun::StunProtocol;
+pub use protocol::{ForwardProtocol, QuicProtocol, StunProtocol};
+pub use socket::{EphemeralSocket, QuicSocket, UdpSocket};

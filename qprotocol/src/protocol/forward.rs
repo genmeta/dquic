@@ -14,7 +14,7 @@ use qbase::net::{
     route::{Line, Link, Pathway},
 };
 
-use crate::{UdpSocket, quic::QuicProtocol};
+use crate::{protocol::quic::QuicProtocol, socket::UdpSocket};
 
 pub struct ForwardProtocol {
     enabled: Arc<AtomicBool>,

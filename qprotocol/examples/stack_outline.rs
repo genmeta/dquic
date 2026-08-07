@@ -9,11 +9,13 @@ use qbase::net::{
 };
 use qprotocol::{
     AddressBook, Dock, UdpSocket,
-    address::AddressBookError,
-    ephemeral::EphemeralSocket,
-    forward::ForwardProtocol,
-    quic::{EndpointInUse, QuicProtocol, QuicSocket},
-    stun::{Response, StunProtocol},
+    addr_book::AddressBookError,
+    protocol::{
+        forward::ForwardProtocol,
+        quic::{EndpointInUse, QuicProtocol},
+        stun::{Response, StunProtocol},
+    },
+    socket::{ephemeral::EphemeralSocket, quic::QuicSocket},
     topology::Topology,
 };
 
@@ -26,7 +28,7 @@ enum Error {
     #[error(transparent)]
     EndpointInUse(#[from] EndpointInUse),
     #[error(transparent)]
-    Promote(#[from] qprotocol::ephemeral::PromoteError),
+    Promote(#[from] qprotocol::socket::ephemeral::PromoteError),
 }
 
 #[tokio::main(flavor = "current_thread")]

@@ -6,7 +6,10 @@ use qbase::{
     net::route::{Line, Pathway},
 };
 
-use crate::{UdpSocket, forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol};
+use crate::{
+    protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol},
+    socket::UdpSocket,
+};
 
 const MAX_DATAGRAM_SIZE: usize = 65_535;
 

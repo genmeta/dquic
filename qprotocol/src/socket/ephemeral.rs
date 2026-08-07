@@ -7,11 +7,10 @@ use std::{
 use qbase::net::{addr::EndpointAddr, route::Link};
 use thiserror::Error;
 
+use super::{UdpSocket, quic::QuicSocket};
 use crate::{
-    UdpSocket,
     dock::Dock,
-    quic::QuicSocket,
-    stun::{CookieId, Request, StunProtocol},
+    protocol::stun::{CookieId, Request, StunProtocol},
 };
 
 #[derive(Debug, Error)]
