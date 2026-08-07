@@ -36,7 +36,7 @@ pub enum EndpointAddr {
     },
 }
 
-fn is_publicly_reachable_ipv4(addr: Ipv4Addr) -> bool {
+fn is_globally_routable_ipv4(addr: Ipv4Addr) -> bool {
     let [first, second, third, fourth] = addr.octets();
 
     !(first == 0
@@ -52,7 +52,7 @@ fn is_publicly_reachable_ipv4(addr: Ipv4Addr) -> bool {
         || first >= 240)
 }
 
-fn is_publicly_reachable_ipv6(addr: Ipv6Addr) -> bool {
+fn is_globally_routable_ipv6(addr: Ipv6Addr) -> bool {
     let segments = addr.segments();
 
     if matches!(segments, [0x0064, 0xff9b, 0, 0, 0, 0, _, _]) {
@@ -112,11 +112,11 @@ impl EndpointAddr {
     ///
     /// A direct endpoint must contain a globally reachable unicast address. A mediated endpoint
     /// is considered publicly reachable through its validated agent.
-    pub fn is_publicly_reachable(&self) -> bool {
+    pub fn is_globally_routable(&self) -> bool {
         match self {
             EndpointAddr::Direct { addr } => match addr.ip() {
-                IpAddr::V4(addr) => is_publicly_reachable_ipv4(addr),
-                IpAddr::V6(addr) => is_publicly_reachable_ipv6(addr),
+                IpAddr::V4(addr) => is_globally_routable_ipv4(addr),
+                IpAddr::V6(addr) => is_globally_routable_ipv6(addr),
             },
             EndpointAddr::Mediate { .. } => true,
         }
@@ -243,7 +243,7 @@ mod tests {
             "192.31.196.1:443",
         ] {
             assert!(
-                EndpointAddr::direct(addr.parse().unwrap()).is_publicly_reachable(),
+                EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
                 "{addr} should be publicly reachable"
             );
         }
@@ -267,7 +267,7 @@ mod tests {
             "255.255.255.255:443",
         ] {
             assert!(
-                !EndpointAddr::direct(addr.parse().unwrap()).is_publicly_reachable(),
+                !EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
                 "{addr} should not be publicly reachable"
             );
         }
@@ -287,7 +287,7 @@ mod tests {
             "[2001:4860:4860::8888]:443",
         ] {
             assert!(
-                EndpointAddr::direct(addr.parse().unwrap()).is_publicly_reachable(),
+                EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
                 "{addr} should be publicly reachable"
             );
         }
@@ -315,7 +315,7 @@ mod tests {
             "[ff02::1]:443",
         ] {
             assert!(
-                !EndpointAddr::direct(addr.parse().unwrap()).is_publicly_reachable(),
+                !EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
                 "{addr} should not be publicly reachable"
             );
         }
@@ -328,7 +328,7 @@ mod tests {
                 "8.8.8.8:3478".parse().unwrap(),
                 "192.168.1.2:50000".parse().unwrap(),
             )
-            .is_publicly_reachable()
+            .is_globally_routable()
         );
     }
 }
