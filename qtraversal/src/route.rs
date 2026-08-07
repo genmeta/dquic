@@ -65,7 +65,7 @@ impl<I: RefIO> Forwarder<I> {
     pub fn should_forward(&self, dst: EndpointAddr) -> Option<SocketAddr> {
         let outer = self.outer()?;
 
-        let EndpointAddr::Agent {
+        let EndpointAddr::Mediate {
             agent,
             outer: dst_outer,
         } = dst
