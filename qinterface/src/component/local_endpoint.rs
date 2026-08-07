@@ -550,7 +550,7 @@ impl InterfaceAgentEndpointPublisher {
 
     pub fn upsert(&mut self, outer: SocketAddr) -> bool {
         self.lease
-            .upsert(EndpointAddr::with_agent(self.agent(), outer))
+            .upsert(EndpointAddr::mediate(self.agent(), outer))
     }
 
     pub fn remove(&mut self) -> bool {

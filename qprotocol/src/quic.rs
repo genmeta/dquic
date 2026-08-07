@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn mixed_endpoint_paths_can_be_encoded() {
         let direct = EndpointAddr::direct("203.0.113.1:4433".parse().unwrap());
-        let agent = EndpointAddr::with_agent(
+        let agent = EndpointAddr::mediate(
             "198.51.100.1:3478".parse().unwrap(),
             "192.0.2.1:50000".parse().unwrap(),
         );

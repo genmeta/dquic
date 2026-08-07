@@ -229,7 +229,7 @@ mod tests {
         ));
         let agent = Arc::new(QuicSocket::new(
             raw.clone(),
-            EndpointAddr::with_agent(
+            EndpointAddr::mediate(
                 "198.51.100.1:3478".parse().unwrap(),
                 "203.0.113.10:50000".parse().unwrap(),
             ),

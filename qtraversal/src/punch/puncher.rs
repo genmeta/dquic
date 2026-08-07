@@ -1951,7 +1951,7 @@ mod tests {
     #[test]
     fn mixed_direct_agent_pair_is_rejected() {
         let direct = EndpointAddr::direct("127.0.0.1:50000".parse().unwrap());
-        let agent = EndpointAddr::with_agent(
+        let agent = EndpointAddr::mediate(
             "127.0.0.1:20004".parse().unwrap(),
             "198.51.100.10:40000".parse().unwrap(),
         );
@@ -2113,7 +2113,7 @@ mod tests {
         let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
         let outer: SocketAddr = "198.51.100.10:30000".parse().expect("outer addr");
         let key = InterfaceEndpointKey::Agent(agent);
-        let endpoint = EndpointAddr::with_agent(agent, outer);
+        let endpoint = EndpointAddr::mediate(agent, outer);
         let resource = LocalEndpointAdvertisementResource::new_for_test(
             bind.clone(),
             key,
@@ -2136,8 +2136,8 @@ mod tests {
         let bind = bind_uri();
         let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
         let key = InterfaceEndpointKey::Agent(agent);
-        let first = EndpointAddr::with_agent(agent, "198.51.100.10:30000".parse().expect("outer"));
-        let second = EndpointAddr::with_agent(agent, "198.51.100.11:30001".parse().expect("outer"));
+        let first = EndpointAddr::mediate(agent, "198.51.100.10:30000".parse().expect("outer"));
+        let second = EndpointAddr::mediate(agent, "198.51.100.11:30001".parse().expect("outer"));
 
         address_book.upsert_local_endpoint(bind.clone(), key, first);
         address_book.upsert_local_endpoint(bind.clone(), key, second);

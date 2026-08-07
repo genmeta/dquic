@@ -665,7 +665,7 @@ mod tests {
 
     fn forwarding_round_trip(raw: &[u8]) {
         let pathway = Pathway::new(
-            EndpointAddr::with_agent(
+            EndpointAddr::mediate(
                 "198.51.100.1:3478".parse().unwrap(),
                 "192.0.2.1:50000".parse().unwrap(),
             ),
