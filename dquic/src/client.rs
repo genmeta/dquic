@@ -315,7 +315,7 @@ impl QuicClient {
 
         let mut paths = vec![];
         for (source, server_ep) in server_eps {
-            if matches!(server_ep, EndpointAddr::Mediate { .. }) {
+            if server_ep.kind() == Kind::Mediate {
                 self.ensure_iface_for(&source, &server_ep).await;
             } else {
                 let ifaces = self.select_or_bind_ifaces(&source, &server_ep).await?;
