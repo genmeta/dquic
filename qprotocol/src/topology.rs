@@ -64,9 +64,15 @@ impl Topology {
                             .await?;
                     }
                     Ok(Datagram::Forward(pathway, datagram)) => {
-                        self.forward
-                            .on_datagram(&socket, pathway, datagram, link)
-                            .await?;
+                        let remote = pathway.remote();
+                        if self.forward.agent_socket(remote.addr()).is_some()
+                            || self.quic.socket(remote).is_some()
+                        {
+                            self.quic
+                                .on_packet(datagram.into_raw(), pathway.flip(), link);
+                        } else {
+                            self.forward.on_datagram(pathway, datagram, link).await?;
+                        }
                     }
                     Ok(Datagram::Raw(packet)) => {
                         self.quic.on_packet(packet, Pathway::from(link), link);

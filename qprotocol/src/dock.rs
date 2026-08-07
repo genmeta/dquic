@@ -110,7 +110,7 @@ mod tests {
         let quic = Arc::new(QuicProtocol::new());
         let topology = Arc::new(Topology::new(
             Arc::new(StunProtocol::new()),
-            Arc::new(ForwardProtocol::new(quic.clone())),
+            Arc::new(ForwardProtocol::new()),
             quic,
         ));
         let dock = Dock::new(topology);
