@@ -255,13 +255,13 @@ mod tests {
         let addr = "127.0.0.1:8080-192.168.1.1:9000"
             .parse::<EndpointAddr>()
             .unwrap();
-        assert!(matches!(addr, EndpointAddr::Agent { .. }));
+        assert!(matches!(addr, EndpointAddr::Mediate { .. }));
 
         // Test with whitespace
         let addr = "  127.0.0.1:8080  -  192.168.1.1:9000  "
             .parse::<EndpointAddr>()
             .unwrap();
-        assert!(matches!(addr, EndpointAddr::Agent { .. }));
+        assert!(matches!(addr, EndpointAddr::Mediate { .. }));
 
         // Test invalid format
         assert!("invalid".parse::<EndpointAddr>().is_err());

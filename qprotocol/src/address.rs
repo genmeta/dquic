@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use qbase::net::addr::EndpointAddr;
+use qbase::net::addr::{EndpointAddr, Kind};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -20,7 +20,7 @@ pub enum AddressBookError {
     #[error("expected a Direct endpoint")]
     ExpectedDirect,
     #[error("expected an Agent endpoint")]
-    ExpectedAgent,
+    ExpectedMediate,
     #[error("a raw UDP socket can publish at most three Agent endpoints")]
     TooManyAgents,
 }
@@ -70,8 +70,8 @@ impl AddressBook {
     }
 
     pub fn insert_agent(&self, socket: Arc<QuicSocket>) -> Result<(), AddressBookError> {
-        if !matches!(socket.endpoint_addr(), EndpointAddr::Agent { .. }) {
-            return Err(AddressBookError::ExpectedAgent);
+        if socket.endpoint_addr().kind() != Kind::Mediate {
+            return Err(AddressBookError::ExpectedMediate);
         }
 
         let mut addresses = self.addresses.write().unwrap();

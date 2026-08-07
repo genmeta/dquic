@@ -67,7 +67,7 @@ async fn subscriber_replays_current_keyed_endpoints() {
         InterfaceEndpointUpdate::Upsert {
             key: InterfaceEndpointKey::Agent(key_agent),
             endpoint:
-                EndpointAddr::Agent {
+                EndpointAddr::Mediate {
                     agent: endpoint_agent,
                     outer: endpoint_outer,
                 },

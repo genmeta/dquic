@@ -62,7 +62,7 @@ impl ForwardProtocol {
             return Ok(());
         }
 
-        let EndpointAddr::Agent { agent, outer } = destination else {
+        let EndpointAddr::Mediate { agent, outer } = destination else {
             return Ok(());
         };
         if !self.enabled() || !self.serves(agent, socket) {
