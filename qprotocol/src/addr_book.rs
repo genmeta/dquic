@@ -9,7 +9,7 @@ use qbase::net::addr::{EndpointAddr, Kind};
 use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::{UdpSocket, quic::QuicSocket};
+use crate::socket::{UdpSocket, quic::QuicSocket};
 
 #[derive(Debug, Error)]
 pub enum AddressBookError {

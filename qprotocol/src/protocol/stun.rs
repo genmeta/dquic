@@ -22,9 +22,7 @@ use rand::RngExt;
 use thiserror::Error;
 use tokio::sync::SetOnce;
 
-use crate::UdpSocket;
-
-pub mod msg;
+use crate::socket::UdpSocket;
 
 type RequestHandler = dyn Fn(&Request, Link) -> Option<Response> + Send + Sync + 'static;
 

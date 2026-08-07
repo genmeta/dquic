@@ -3,7 +3,7 @@ use std::{io, net::SocketAddr, sync::Arc};
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 
-use crate::{UdpSocket, topology::Topology};
+use crate::{socket::UdpSocket, topology::Topology};
 
 pub struct Dock {
     sockets: DashMap<SocketAddr, std::sync::Weak<UdpSocket>>,
@@ -101,7 +101,8 @@ impl Drop for Dock {
 mod tests {
     use super::*;
     use crate::{
-        forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol, topology::Topology,
+        protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol},
+        topology::Topology,
     };
 
     #[tokio::test]
