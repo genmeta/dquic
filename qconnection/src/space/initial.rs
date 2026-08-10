@@ -144,11 +144,9 @@ fn frame_dispathcer<'a>(
     let crypto_frames_entry = OnceLock::new();
     let ack_frames_entry = OnceLock::new();
     let event_broker = event_broker.clone();
-    let rcvd_joural = space.journal.of_rcvd_packets();
     move |frame: Frame, path: &Path| match frame {
         Frame::Ack(f) => {
             path.cc().on_ack_rcvd(Epoch::Initial, &f);
-            rcvd_joural.on_rcvd_ack(&f);
             _ = ack_frames_entry
                 .get_or_init(|| {
                     let (entry, rcvd_ack_frames) = mpsc::unbounded_channel();

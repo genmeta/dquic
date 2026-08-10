@@ -42,8 +42,7 @@ use tracing::Instrument as _;
 
 use crate::{
     ArcLocalCids, ArcReliableFrameDeque, ArcRemoteCids, CidRegistry, Components, Connection,
-    DataJournal, DataStreams, FlowController, Handshake, QuicRouterRegistry, RawHandshake,
-    SpecificComponents,
+    DataStreams, FlowController, Handshake, QuicRouterRegistry, RawHandshake, SpecificComponents,
     events::{ArcEventBroker, EmitEvent, Event},
     path::ArcPathContexts,
     space::{
@@ -593,7 +592,6 @@ fn spawn_tls_handshake(components: &Components, tx_wakers: ArcSendWakers) {
             components.parameters.clone(),
             components.data_streams.clone(),
             components.flow_ctrl.clone(),
-            components.spaces.data().journal().clone(),
             components.cid_registry.local.clone(),
             components.idle_config.clone(),
             tx_wakers,
@@ -615,7 +613,6 @@ fn tls_fin_handler(
     parameters: ArcParameters,
     data_streams: DataStreams,
     flow_ctrl: FlowController,
-    data_journal: DataJournal,
     local_cids: ArcLocalCids,
     idle_config: ArcIdleConfig,
     tx_wakers: ArcSendWakers,
@@ -624,7 +621,6 @@ fn tls_fin_handler(
         data_streams: &DataStreams,
         flow_ctrl: &FlowController,
         // datagram_flow
-        data_journal: &DataJournal,
         local_cids: &ArcLocalCids,
         idle_config: &ArcIdleConfig,
         zero_rtt_rejected: bool,
@@ -646,11 +642,6 @@ fn tls_fin_handler(
                 .get(ParameterId::ActiveConnectionIdLimit)
                 .expect("unreachable: default value will be got if the value unset"),
         )?;
-        data_journal.of_rcvd_packets().revise_max_ack_delay(
-            remote_parameters
-                .get(ParameterId::MaxAckDelay)
-                .expect("unreachable: default value will be got if the value unset"),
-        );
         idle_config.negotiate_max_idle_timeout(
             remote_parameters
                 .get(ParameterId::MaxIdleTimeout)
@@ -691,7 +682,6 @@ fn tls_fin_handler(
                 apply_parameters(
                     &data_streams,
                     &flow_ctrl,
-                    &data_journal,
                     &local_cids,
                     &idle_config,
                     zero_rtt_rejected,
@@ -711,7 +701,6 @@ fn tls_fin_handler(
                 apply_parameters(
                     &data_streams,
                     &flow_ctrl,
-                    &data_journal,
                     &local_cids,
                     &idle_config,
                     zero_rtt_rejected,

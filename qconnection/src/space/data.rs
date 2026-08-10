@@ -132,10 +132,6 @@ impl DataSpace {
         self.zero_rtt_keys.clone()
     }
 
-    pub(crate) fn journal(&self) -> &DataJournal {
-        &self.journal
-    }
-
     pub fn tracker(
         &self,
         crypto_stream: CryptoStream,
@@ -355,11 +351,9 @@ fn frame_dispathcer(
         event_broker.clone(),
     );
     let event_broker = event_broker.clone();
-    let rcvd_joural = space.journal.of_rcvd_packets();
     move |frame: Frame, pty: packet::Type, path: &Path| match frame {
         Frame::Ack(f) => {
             path.cc().on_ack_rcvd(Epoch::Data, &f);
-            rcvd_joural.on_rcvd_ack(&f);
             _ = ack_frames_entry.send(f)
         }
         Frame::NewToken(f) => _ = new_token_frames_entry.send(f),
