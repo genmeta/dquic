@@ -133,10 +133,17 @@ impl RcvdJournal {
         rcvd_time: Instant,
         mut capacity: usize,
     ) -> Result<AckFrame, Signals> {
-        let Some(range_index) = self.packets.range_containing(largest) else {
-            return Err(Signals::TRANSPORT);
+        let (range_start, previous_ranges) = match self.packets.range_containing(largest) {
+            Some(range_index) => (
+                self.packets.ranges[range_index].start,
+                &self.packets.ranges[..range_index],
+            ),
+            // A path-local ACK trigger is independent of the bounded shared journal. If its range
+            // has since been retired, the trigger still proves that this packet was received, so a
+            // singleton ACK is valid and lets that path finish its pending ACK cycle.
+            None if largest < self.packets.retired_before => (largest, &[][..]),
+            None => return Err(Signals::TRANSPORT),
         };
-        let range = &self.packets.ranges[range_index];
         let largest = VarInt::from_u64(largest).map_err(|_| Signals::TRANSPORT)?;
         let delay: u64 = rcvd_time
             .elapsed()
@@ -146,7 +153,7 @@ impl RcvdJournal {
             .min(VARINT_MAX);
         let delay = VarInt::from_u64(delay).map_err(|_| Signals::TRANSPORT)?;
         let first_range =
-            VarInt::from_u64(largest.into_u64() - range.start).map_err(|_| Signals::TRANSPORT)?;
+            VarInt::from_u64(largest.into_u64() - range_start).map_err(|_| Signals::TRANSPORT)?;
 
         // Frame type + Largest Acknowledged + ACK Delay + ACK Range Count + First ACK Range.
         let min_len =
@@ -166,8 +173,8 @@ impl RcvdJournal {
         }
 
         let mut ranges = Vec::new();
-        let mut current_start = range.start;
-        for previous in self.packets.ranges[..range_index].iter().rev() {
+        let mut current_start = range_start;
+        for previous in previous_ranges.iter().rev() {
             let gap = current_start
                 .checked_sub(previous.end + 1)
                 .ok_or(Signals::TRANSPORT)?;
@@ -186,10 +193,6 @@ impl RcvdJournal {
         }
 
         Ok(AckFrame::new(largest, delay, first_range, ranges, None))
-    }
-
-    fn largest_received(&self) -> Option<(u64, Instant)> {
-        self.packets.largest()
     }
 }
 
@@ -232,10 +235,6 @@ impl ArcRcvdJournal {
             .gen_ack_frame_util(largest, rcvd_time, capacity)
     }
 
-    pub fn largest_received(&self) -> Option<(u64, Instant)> {
-        self.inner.read().unwrap().largest_received()
-    }
-
     pub fn ack_package<'r>(&'r self, need_ack: Option<(u64, Instant)>) -> AckPackege<'r> {
         AckPackege {
             journal: self,
@@ -249,20 +248,24 @@ pub struct AckPackege<'r> {
     need_ack: Option<(u64, Instant)>,
 }
 
+impl AckPackege<'_> {
+    fn gen_ack_frame(&self, capacity: usize) -> Result<AckFrame, Signals> {
+        let (largest, rcvd_time) = self.need_ack.ok_or(Signals::TRANSPORT)?;
+        self.journal
+            .gen_ack_frame_util(largest, rcvd_time, capacity)
+    }
+}
+
 impl<'r, Target> Package<Target> for AckPackege<'r>
 where
     Target: AsRef<PacketWriter<'r>> + ?Sized,
     AckFrame: Package<Target>,
 {
     fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        // A path-local CC can request an ACK for a packet received on that path. The ACK frame is
-        // connection/epoch scoped, so always encode the shared journal's current largest packet.
-        let snapshot = self
-            .need_ack
-            .and_then(|_| self.journal.largest_received())
-            .ok_or(Signals::TRANSPORT)?;
-        self.journal
-            .gen_ack_frame_util(snapshot.0, snapshot.1, target.as_ref().remaining_mut())?
+        // Packet numbers and ACK ranges are connection/epoch scoped, but ACK scheduling is
+        // path-local. Start at this path's trigger so a high PN received on another path cannot
+        // consume this ACK cycle while leaving the trigger outside a capacity-limited frame.
+        self.gen_ack_frame(target.as_ref().remaining_mut())?
             .dump(target)?;
         Ok(PacketContent::NonAckEliciting)
     }
@@ -348,6 +351,41 @@ mod tests {
             records.inner.read().unwrap().packets.ranges,
             vec![100..101, 10_000..10_001]
         );
+    }
+
+    #[test]
+    fn path_local_trigger_selects_ack_largest_in_shared_journal() {
+        let records = ArcRcvdJournal::with_capacity(16, None);
+        records.on_rcvd_pn(100, true, Duration::ZERO);
+        records.on_rcvd_pn(10_000, true, Duration::ZERO);
+
+        let ack = records
+            .ack_package(Some((100, Instant::now())))
+            .gen_ack_frame(1200)
+            .unwrap();
+
+        assert_eq!(ack.largest(), 100);
+        assert!(ack.iter().any(|range| range.contains(&100)));
+        assert!(!ack.iter().any(|range| range.contains(&10_000)));
+    }
+
+    #[test]
+    fn retired_path_trigger_can_still_generate_singleton_ack() {
+        let records = ArcRcvdJournal::with_capacity(MAX_TRACKED_ACK_RANGES, None);
+        records.on_rcvd_pn(0, true, Duration::ZERO);
+        for pn in (2..=MAX_TRACKED_ACK_RANGES as u64 * 2).step_by(2) {
+            records.on_rcvd_pn(pn, true, Duration::ZERO);
+        }
+        assert!(!records.inner.read().unwrap().packets.contains(0));
+
+        let ack = records
+            .ack_package(Some((0, Instant::now())))
+            .gen_ack_frame(1200)
+            .unwrap();
+
+        assert_eq!(ack.largest(), 0);
+        assert_eq!(ack.first_range(), 0);
+        assert_eq!(ack.ranges(), &[]);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

@@ -131,10 +131,17 @@ impl RcvdRecords {
 
     /// Called when an ACK is sent.
     /// Updates the last ACK sent information and resets the `need_ack` flag.
-    pub(crate) fn on_ack_sent(&mut self, _pn: u64, _largest_acked: u64) {
-        self.largest_rcvd_packet = None;
-        self.latest_rcvd_time = None;
-        self.ack_immedietly = false;
+    pub(crate) fn on_ack_sent(&mut self, _pn: u64, largest_acked: u64) {
+        // ACK assembly uses the path-local trigger as Largest Acknowledged. If a newer packet was
+        // received while the ACK packet was being assembled, leave it pending for the next cycle.
+        if self
+            .largest_rcvd_packet
+            .is_some_and(|(largest_rcvd, _)| largest_rcvd == largest_acked)
+        {
+            self.largest_rcvd_packet = None;
+            self.latest_rcvd_time = None;
+            self.ack_immedietly = false;
+        }
     }
 }
 
@@ -483,5 +490,16 @@ mod tests {
         assert_eq!(rcvd_records.need_ack(), None);
         rcvd_records.on_pkt_rcvd(11);
         assert_eq!(rcvd_records.need_ack().unwrap().0, 15);
+    }
+
+    #[test]
+    fn sending_an_older_ack_does_not_clear_a_newer_path_trigger() {
+        let mut rcvd_records = RcvdRecords::new(Epoch::Data, Duration::ZERO);
+        rcvd_records.on_pkt_rcvd(100);
+        rcvd_records.on_pkt_rcvd(101);
+
+        rcvd_records.on_ack_sent(10, 100);
+
+        assert_eq!(rcvd_records.largest_rcvd_packet.unwrap().0, 101);
     }
 }
