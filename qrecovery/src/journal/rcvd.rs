@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    ops::Range,
     sync::{Arc, RwLock},
 };
 
@@ -8,176 +8,149 @@ use qbase::{
     frame::AckFrame,
     net::tx::Signals,
     packet::{InvalidPacketNumber, Package, PacketContent, PacketNumber, PacketWriter},
-    util::{IndexDeque, IndexError},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};
 
-/// 收包记录有以下几种状态
-/// - Empty：收包记录为空，未收到该包
-/// - PacketReceived：（收包时间，最晚ack时间，过期时间）, 如果路径没有驱动 ack，由这里驱动
-/// - AckSent：（ack_eliciting，收包时间,淘汰时间，确认了这个包的包号集合），如果set里的任意包号被确认了，则转换成 AckConfirmed 状态
-/// - AckConfirmed：（ack_eliciting，收包时间，淘汰时间）
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-enum State {
-    #[default]
-    Empty,
-    PacketReceived(Instant, Option<Instant>, Instant),
-    AckSent(bool, Instant, Instant, HashSet<u64>),
-    AckConfirmed(bool, Instant, Instant),
+// A range is 16 bytes on 64-bit targets. This bound is deliberately wider than the number of
+// ranges that normally fit in one ACK packet so multipath reordering does not immediately retire
+// slow-path packets, while still providing a connection-local memory limit.
+const MAX_TRACKED_ACK_RANGES: usize = 256;
+
+/// Received packet numbers represented as sorted, disjoint, half-open ranges.
+///
+/// The range set is intentionally independent from ACK delivery. An ACK can be lost, arrive on a
+/// different path, or never be elicited by the peer; none of those events may make memory safety
+/// depend on peer cooperation.
+#[derive(Debug, Clone, Default)]
+struct ReceivedPacketRanges {
+    ranges: Vec<Range<u64>>,
+    // Packet numbers below this boundary are never accepted again. It advances only when the hard
+    // range bound is reached and the oldest range is evicted.
+    retired_before: u64,
+    largest_received: Option<(u64, Instant)>,
 }
 
-impl State {
-    // 是否要打包到 ack frame 中，如果需要，PacketReceived 状态转换成 AckSent 状态， AckSent 状态记录 pn
-    fn track_packet_in_ack_frame(&mut self, pn: u64) -> bool {
-        match self {
-            State::PacketReceived(recv_time, latest_ack_time, expire_time) => {
-                *self = State::AckSent(
-                    latest_ack_time.is_some(),
-                    *recv_time,
-                    *expire_time,
-                    [pn].into(),
-                );
-                true
-            }
-            State::AckSent(_, _, _, pns) => {
-                pns.insert(pn);
-                true
-            }
-            State::AckConfirmed(_, _, _) => true,
-            State::Empty => false,
-        }
+impl ReceivedPacketRanges {
+    fn contains(&self, pn: u64) -> bool {
+        let index = self.ranges.partition_point(|range| range.end <= pn);
+        self.ranges
+            .get(index)
+            .is_some_and(|range| range.start <= pn && pn < range.end)
     }
 
-    fn could_expire(&self, now: Instant) -> bool {
-        match self {
-            State::Empty => true,
-            State::AckConfirmed(ack_eliciting, _, expire_time) => {
-                !ack_eliciting || *expire_time < now
-            }
-            _ => false,
+    fn insert(&mut self, pn: u64, received_at: Instant) -> bool {
+        if pn < self.retired_before || self.contains(pn) {
+            return false;
         }
+
+        let index = self.ranges.partition_point(|range| range.end < pn);
+        let inserted_end = pn + 1;
+        if index < self.ranges.len() && self.ranges[index].end == pn {
+            self.ranges[index].end = inserted_end;
+            if index + 1 < self.ranges.len()
+                && self.ranges[index + 1].start <= self.ranges[index].end
+            {
+                let next_end = self.ranges[index + 1].end;
+                self.ranges[index].end = self.ranges[index].end.max(next_end);
+                self.ranges.remove(index + 1);
+            }
+        } else if index < self.ranges.len() && self.ranges[index].start == inserted_end {
+            self.ranges[index].start = pn;
+        } else {
+            self.ranges.insert(index, pn..inserted_end);
+        }
+
+        if self
+            .largest_received
+            .is_none_or(|(largest, _)| pn > largest)
+        {
+            self.largest_received = Some((pn, received_at));
+        }
+
+        if self.ranges.len() > MAX_TRACKED_ACK_RANGES {
+            let evicted = self.ranges.remove(0);
+            self.retired_before = self.retired_before.max(evicted.end);
+        }
+        true
+    }
+
+    fn largest(&self) -> Option<(u64, Instant)> {
+        self.largest_received
+    }
+
+    fn range_containing(&self, pn: u64) -> Option<usize> {
+        let index = self.ranges.partition_point(|range| range.end <= pn);
+        self.ranges
+            .get(index)
+            .filter(|range| range.start <= pn && pn < range.end)
+            .map(|_| index)
     }
 }
 
-/// 纯碎的一个收包记录，主要用于：
-/// - 记录包有无收到
-/// - 根据某个largest pktno，生成ack frame（ack frame不能超过buf大小）
-/// - 确定记录不再需要，可以被丢弃，滑走
+/// 记录已经收到的 packet，并生成 ACK frame。
+///
+/// 接收状态按 ACK range 保存，而不是为每个 PN 保存一个状态。ACK frame 的构造是只读操作；
+/// ACK 调度和发送后的状态更新由各路径的拥塞控制器负责。
 #[derive(Debug, Default)]
 struct RcvdJournal {
-    queue: IndexDeque<State, VARINT_MAX>,
-    max_ack_delay: Option<Duration>,
-    packet_include_ack: HashSet<u64>,
-    earliest_not_ack_time: Option<(u64, Instant)>,
+    packets: ReceivedPacketRanges,
 }
 
 impl RcvdJournal {
-    fn with_capacity(capacity: usize, max_ack_delay: Option<Duration>) -> Self {
+    fn with_capacity(capacity: usize, _max_ack_delay: Option<Duration>) -> Self {
         Self {
-            queue: IndexDeque::with_capacity(capacity),
-            max_ack_delay,
-            packet_include_ack: HashSet::new(),
-            earliest_not_ack_time: None,
+            packets: ReceivedPacketRanges {
+                ranges: Vec::with_capacity(capacity.min(MAX_TRACKED_ACK_RANGES)),
+                ..Default::default()
+            },
         }
     }
 
-    fn decode_pn(&mut self, pkt_number: PacketNumber) -> Result<u64, InvalidPacketNumber> {
-        let expected_pn = self.queue.largest();
+    fn decode_pn(&self, pkt_number: PacketNumber) -> Result<u64, InvalidPacketNumber> {
+        let expected_pn = self
+            .packets
+            .largest()
+            .map_or(0, |(largest, _)| largest.saturating_add(1));
         let pn = pkt_number.decode(expected_pn);
-        if pn < self.queue.offset() {
+        if pn < self.packets.retired_before {
             return Err(InvalidPacketNumber::TooOld);
         }
-
-        match self.queue.get(pn) {
-            Some(State::Empty) | None => Ok(pn),
-            _ => Err(InvalidPacketNumber::Duplicate),
+        if self.packets.contains(pn) {
+            return Err(InvalidPacketNumber::Duplicate);
         }
+        Ok(pn)
     }
 
-    fn on_rcvd_pn(&mut self, pn: u64, is_ack_eliciting: bool, pto: Duration) {
-        let now = tokio::time::Instant::now();
-        let ack_time = if is_ack_eliciting {
-            Some(now + self.max_ack_delay.unwrap_or_default())
-        } else {
-            None
-        };
-        let expire_time = now + pto * 3;
-        if let Some(record) = self.queue.get_mut(pn) {
-            // assert!(matches!(record, State::Empty));
-            *record = State::PacketReceived(now, ack_time, expire_time);
-        } else if let Err(e @ IndexError::ExceedLimit(..)) = self
-            .queue
-            .insert(pn, State::PacketReceived(now, ack_time, expire_time))
-        {
-            panic!("packet number never exceed limit: {e}")
-        }
-        if is_ack_eliciting && self.earliest_not_ack_time.is_none() {
-            self.earliest_not_ack_time = Some((pn, now));
-        }
-    }
-
-    fn on_rcvd_ack(&mut self, ack_frame: &AckFrame) {
-        let acked_pns: std::collections::HashSet<_> = ack_frame
-            .iter()
-            .flat_map(|range| range.clone())
-            .filter(|pn| self.packet_include_ack.contains(pn))
-            .collect();
-
-        self.packet_include_ack.retain(|pn| !acked_pns.contains(pn));
-
-        for record in self.queue.iter_mut() {
-            if let State::AckSent(ack_eliciting, recv_time, expire_time, pns) = record
-                && pns.iter().any(|pn| acked_pns.contains(pn))
-            {
-                *record = State::AckConfirmed(*ack_eliciting, *recv_time, *expire_time);
-            }
-        }
-        self.rotate_queue();
-    }
-
-    fn rotate_queue(&mut self) {
-        let now = tokio::time::Instant::now();
-        while self
-            .queue
-            .front()
-            .is_some_and(|(_pn, state)| state.could_expire(now))
-        {
-            self.queue.pop_front();
-        }
+    fn on_rcvd_pn(&mut self, pn: u64, _is_ack_eliciting: bool, _pto: Duration) {
+        let now = Instant::now();
+        self.packets.insert(pn, now);
     }
 
     fn gen_ack_frame_util(
-        &mut self,
-        pn: u64,
+        &self,
         largest: u64,
         rcvd_time: Instant,
         mut capacity: usize,
     ) -> Result<AckFrame, Signals> {
-        let mut pkts = self
-            .queue
-            .enumerate_mut()
-            .rev()
-            .skip_while(|(pktno, _)| *pktno > largest);
+        let Some(range_index) = self.packets.range_containing(largest) else {
+            return Err(Signals::TRANSPORT);
+        };
+        let range = &self.packets.ranges[range_index];
+        let largest = VarInt::from_u64(largest).map_err(|_| Signals::TRANSPORT)?;
+        let delay: u64 = rcvd_time
+            .elapsed()
+            .as_micros()
+            .try_into()
+            .unwrap_or(VARINT_MAX)
+            .min(VARINT_MAX);
+        let delay = VarInt::from_u64(delay).map_err(|_| Signals::TRANSPORT)?;
+        let first_range =
+            VarInt::from_u64(largest.into_u64() - range.start).map_err(|_| Signals::TRANSPORT)?;
 
-        // Minimum length with at least ACK frame type, largest, delay, range count, first_range (at least 1 byte for 0)
-        let largest = VarInt::from_u64(largest).unwrap();
-        let delay = rcvd_time.elapsed().as_micros() as u64;
-        let delay = VarInt::from_u64(delay).unwrap();
-        let mut first_range = 0_u32;
-        for (_, s) in pkts.by_ref() {
-            if s.track_packet_in_ack_frame(pn) {
-                first_range += 1;
-            } else {
-                break;
-            }
-        }
-        first_range = first_range.saturating_sub(1);
-
-        let first_range = VarInt::from(first_range);
-        // Frame type + Largest Acknowledged + First Ack Range + Ack Range Count
+        // Frame type + Largest Acknowledged + ACK Delay + ACK Range Count + First ACK Range.
         let min_len =
-            1 + largest.encoding_size() + delay.encoding_size() + first_range.encoding_size() + 1;
+            1 + largest.encoding_size() + delay.encoding_size() + 1 + first_range.encoding_size();
         if capacity < min_len {
             return Err(Signals::CONGESTION);
         }
@@ -185,107 +158,48 @@ impl RcvdJournal {
 
         fn range_count_size_increment(range_count: usize) -> usize {
             match range_count {
-                // 接下来需要2字节编码
-                len if len == (1 << 6) - 1 => 1, // 2 - 1
-                // 接下来需要4字节编码
-                len if len == (1 << 14) - 1 => 2, // 4 - 2
-                // 接下来需要8字节编码
-                len if len == (1 << 30) - 1 => 4, // 8 - 4
-                // 放不下了，不可能走到这里
+                len if len == (1 << 6) - 1 => 1,
+                len if len == (1 << 14) - 1 => 2,
+                len if len == (1 << 30) - 1 => 4,
                 _ => 0,
             }
         }
 
-        let mut ranges = vec![];
-
-        use core::ops::ControlFlow::*;
-        let (Continue((gap, ack, last_is_acked)) | Break((gap, ack, last_is_acked))) = pkts
-            .try_fold(
-                // take_while第一个被判否的元素会被消耗，如果它是gap那这里有gap=1，如果是因为迭代器没有更多元素这里gap=1也不影响
-                (1, 0, false),
-                |(gap, ack, last_is_acked), (_pktno, state)| {
-                    let range_count = ranges.len();
-                    match (last_is_acked, state.track_packet_in_ack_frame(pn)) {
-                        // 本range结束了，看看是否放得下本range，开始新的range
-                        (true, false) => {
-                            // 修正
-                            let gap = VarInt::from_u32(gap - 1);
-                            let ack = VarInt::from_u32(ack - 1);
-                            let size = range_count_size_increment(range_count)
-                                + gap.encoding_size()
-                                + ack.encoding_size();
-                            if capacity < size {
-                                // last_is_acked为false，不会被填进去
-                                return Break((0, 0, false));
-                            }
-                            capacity -= size;
-                            ranges.push((gap, ack));
-                            Continue((1, 0, state.track_packet_in_ack_frame(pn)))
-                        }
-                        // 如果当前是ack，增加ack，保持gap不变
-                        (false | true, true) => {
-                            Continue((gap, ack + 1, state.track_packet_in_ack_frame(pn)))
-                        }
-                        // 当前和之前都是gap，增加gap
-                        (false, false) => {
-                            Continue((gap + 1, ack, state.track_packet_in_ack_frame(pn)))
-                        }
-                    }
-                },
-            );
-        // 处理最后一个未来完成的range
-        if last_is_acked {
-            let gap = VarInt::from_u32(gap - 1);
-            let ack = VarInt::from_u32(ack - 1);
+        let mut ranges = Vec::new();
+        let mut current_start = range.start;
+        for previous in self.packets.ranges[..range_index].iter().rev() {
+            let gap = current_start
+                .checked_sub(previous.end + 1)
+                .ok_or(Signals::TRANSPORT)?;
+            let gap = VarInt::from_u64(gap).map_err(|_| Signals::TRANSPORT)?;
+            let ack = VarInt::from_u64(previous.end - previous.start - 1)
+                .map_err(|_| Signals::TRANSPORT)?;
             let size = range_count_size_increment(ranges.len())
                 + gap.encoding_size()
                 + ack.encoding_size();
-            if capacity > size {
-                // capacity -= size; unnecessary, never read latter
-                ranges.push((gap, ack));
+            if capacity < size {
+                break;
             }
+            capacity -= size;
+            ranges.push((gap, ack));
+            current_start = previous.start;
         }
-        self.packet_include_ack.insert(pn);
-        if let Some((pn, _)) = self.earliest_not_ack_time
-            && largest >= pn
-        {
-            self.earliest_not_ack_time = None;
-        }
+
         Ok(AckFrame::new(largest, delay, first_range, ranges, None))
     }
 
-    fn need_ack(&self) -> Option<(u64, Instant)> {
-        let now = tokio::time::Instant::now();
-        let (_, earliest_not_ack_time) = self.earliest_not_ack_time?;
-        let max_ack_delay = self.max_ack_delay.unwrap_or_default();
-        if earliest_not_ack_time + max_ack_delay >= now {
-            return None;
-        }
-        let (largest, state) = self.queue.back()?;
-        let recv_time = match state {
-            State::PacketReceived(rt, _, _)
-            | State::AckSent(_, rt, _, _)
-            | State::AckConfirmed(_, rt, _) => *rt,
-            _ => return None,
-        };
-
-        Some((largest, recv_time))
+    fn largest_received(&self) -> Option<(u64, Instant)> {
+        self.packets.largest()
     }
 }
 
-/// Records for received packets, decode the packet number and generate ack frames.
-// 接收数据包队列，各处共享的，判断包是否收到以及生成ack frame，只需要读锁；
-// 记录新收到的数据包，或者失活旧数据包并滑走，才需要写锁。
+/// Records for received packets, decodes packet numbers and generates ACK frames.
 #[derive(Debug, Clone, Default)]
 pub struct ArcRcvdJournal {
     inner: Arc<RwLock<RcvdJournal>>,
 }
 
 impl ArcRcvdJournal {
-    /// Create a new empty records with the given `capacity`.
-    ///
-    /// The number of records can exceed the `capacity` specified at creation time, but the internel
-    /// implementation strvies to avoid reallocation.
     pub fn with_capacity(capacity: usize, max_ack_delay: Option<Duration>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(
@@ -295,31 +209,10 @@ impl ArcRcvdJournal {
         }
     }
 
-    /// Decode the pn from peer's packet to actual packer number.
-    ///
-    /// See [`RFC`](https://www.rfc-editor.org/rfc/rfc9000.html#name-sample-packet-number-decodi)
-    /// for more details about decode packet number.
-    ///
-    /// If the packet is too old or has been received, or the pn is too big, this method will return
-    /// an error.
-    ///
-    /// Note that although the packet number successful decoded, it does not mean that the packet is
-    /// valid, and the frames in it are valid.
-    ///
-    /// The registered packet must be valid, successfully decrypted, and the frames in it must be
-    /// valid.
-    // 当新收到一个数据包，如果这个包很旧，那么大概率意味着是重复包，直接丢弃。
-    // 如果这个数据包号是最大的，那么它之前的空档都是尚未收到的，得记为未收到。
-    // 注意，包号合法，不代表的包内容合法，必须等到包被正确解密且其中帧被正确解出后，才能确认收到。
     pub fn decode_pn(&self, encoded_pn: PacketNumber) -> Result<u64, InvalidPacketNumber> {
-        self.inner.write().unwrap().decode_pn(encoded_pn)
+        self.inner.read().unwrap().decode_pn(encoded_pn)
     }
 
-    /// Register the packet has been recieved.
-    ///
-    /// The registered packet must be valid, successfully decrypted, and the frames in it must be
-    /// valid.
-    // 当包号合法，且包被完全解密，且包中的帧都正确之后，记录该包已经收到。
     pub fn on_rcvd_pn(&self, pn: u64, is_ack_eliciting: bool, pto: Duration) {
         self.inner
             .write()
@@ -327,34 +220,20 @@ impl ArcRcvdJournal {
             .on_rcvd_pn(pn, is_ack_eliciting, pto);
     }
 
-    /// Generate an ack frame which ack the received frames until `largest`.
-    ///
-    /// This method will write an ack frame into the `buf`. The `Ack Delay` field of the frame is
-    /// the argument `recv_time` as microsec, the `Largest Acknowledged` field of the frame is the
-    /// `largest` frame, the ranges in ack frame will not exceed `largest`.
     pub fn gen_ack_frame_util(
         &self,
-        pn: u64,
         largest: u64,
         rcvd_time: Instant,
         capacity: usize,
     ) -> Result<AckFrame, Signals> {
         self.inner
-            .write()
+            .read()
             .unwrap()
-            .gen_ack_frame_util(pn, largest, rcvd_time, capacity)
+            .gen_ack_frame_util(largest, rcvd_time, capacity)
     }
 
-    pub fn on_rcvd_ack(&self, ack_frame: &AckFrame) {
-        self.inner.write().unwrap().on_rcvd_ack(ack_frame);
-    }
-
-    pub fn need_ack(&self) -> Option<(u64, Instant)> {
-        self.inner.read().unwrap().need_ack()
-    }
-
-    pub fn revise_max_ack_delay(&self, max_ack_delay: Duration) {
-        self.inner.write().unwrap().max_ack_delay = Some(max_ack_delay);
+    pub fn largest_received(&self) -> Option<(u64, Instant)> {
+        self.inner.read().unwrap().largest_received()
     }
 
     pub fn ack_package<'r>(&'r self, need_ack: Option<(u64, Instant)>) -> AckPackege<'r> {
@@ -376,19 +255,15 @@ where
     AckFrame: Package<Target>,
 {
     fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        self.need_ack
-            .or_else(|| self.journal.need_ack())
-            .ok_or(Signals::TRANSPORT)
-            .and_then(|(largest_ack, rcvd_time)| {
-                self.journal.gen_ack_frame_util(
-                    target.as_ref().packet_number(),
-                    largest_ack,
-                    rcvd_time,
-                    target.as_ref().remaining_mut(),
-                )
-            })?
-            .dump(target)
-            .unwrap();
+        // A path-local CC can request an ACK for a packet received on that path. The ACK frame is
+        // connection/epoch scoped, so always encode the shared journal's current largest packet.
+        let snapshot = self
+            .need_ack
+            .and_then(|_| self.journal.largest_received())
+            .ok_or(Signals::TRANSPORT)?;
+        self.journal
+            .gen_ack_frame_util(snapshot.0, snapshot.1, target.as_ref().remaining_mut())?
+            .dump(target)?;
         Ok(PacketContent::NonAckEliciting)
     }
 }
@@ -398,90 +273,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rcvd_pkt_records() {
+    fn contiguous_packets_merge_into_one_range() {
         let records = ArcRcvdJournal::with_capacity(16, None);
-        assert_eq!(records.decode_pn(PacketNumber::encode(1, 0)), Ok(1));
-        assert_eq!(records.inner.read().unwrap().queue.len(), 0);
-
-        let pto = Duration::from_millis(100);
-        records.on_rcvd_pn(1, true, pto);
-
-        assert_eq!(records.inner.read().unwrap().queue.len(), 2);
-        assert_eq!(
-            records.inner.read().unwrap().queue.get(0).unwrap(),
-            &State::Empty
-        );
-
-        assert!(matches!(
-            records.inner.read().unwrap().queue.get(1).unwrap(),
-            State::PacketReceived(_, _, _)
-        ));
-
-        let ack_frame = records.gen_ack_frame_util(0, 1, Instant::now(), 1200);
-
-        assert_eq!(&ack_frame.unwrap().largest(), &1);
-        assert!(
-            records
-                .inner
-                .read()
-                .unwrap()
-                .packet_include_ack
-                .contains(&0)
-        );
-
-        assert!(matches!(
-            records.inner.read().unwrap().queue.get(1).unwrap(),
-            State::AckSent(true, _, _, _)
-        ));
-
-        let ack_frame = AckFrame::new(0_u32.into(), 100_u32.into(), 0_u32.into(), vec![], None);
-
-        records.on_rcvd_ack(&ack_frame);
-
-        assert_eq!(records.inner.read().unwrap().queue.len(), 1);
-        let binding = records.inner.read().unwrap();
-        let record = binding.queue.get(1).unwrap();
-        assert!(matches!(record, State::AckConfirmed(_, _, _)));
+        for pn in [10, 12, 11] {
+            records.on_rcvd_pn(pn, true, Duration::ZERO);
+        }
+        let journal = records.inner.read().unwrap();
+        assert_eq!(journal.packets.ranges, vec![10..13]);
+        assert_eq!(journal.packets.ranges.len(), 1);
     }
 
     #[test]
-    fn gen_ack_frame() {
-        let rcvd_state = State::PacketReceived(Instant::now(), None, Instant::now());
-        let unrcvd_state = State::Empty;
-        let mut queue = IndexDeque::with_capacity(45);
-        for idx in 1..11 {
-            queue.insert(idx, rcvd_state.clone()).unwrap();
-        }
-        for idx in 11..12 {
-            queue.insert(idx, unrcvd_state.clone()).unwrap();
-        }
-        for idx in 12..45 {
-            queue.insert(idx, rcvd_state.clone()).unwrap();
-        }
-        for idx in 45..50 {
-            queue.insert(idx, unrcvd_state.clone()).unwrap();
-        }
-        for idx in 50..55 {
-            queue.insert(idx, rcvd_state.clone()).unwrap();
-        }
+    fn large_packet_number_gap_does_not_allocate_empty_states() {
+        let records = ArcRcvdJournal::with_capacity(16, None);
+        records.on_rcvd_pn(10, true, Duration::ZERO);
+        records.on_rcvd_pn(10_000_000, true, Duration::ZERO);
+        let journal = records.inner.read().unwrap();
+        assert_eq!(journal.packets.ranges, vec![10..11, 10_000_000..10_000_001]);
+    }
 
-        let mut rcvd_jornal = RcvdJournal {
-            queue,
-            max_ack_delay: None,
-            packet_include_ack: Default::default(),
-            earliest_not_ack_time: None,
-        };
+    #[test]
+    fn range_bound_evicts_oldest_and_retires_it() {
+        let records = ArcRcvdJournal::with_capacity(MAX_TRACKED_ACK_RANGES, None);
+        for pn in (0..=MAX_TRACKED_ACK_RANGES as u64 * 2).step_by(2) {
+            records.on_rcvd_pn(pn, true, Duration::ZERO);
+        }
+        let journal = records.inner.read().unwrap();
+        assert_eq!(journal.packets.ranges.len(), MAX_TRACKED_ACK_RANGES);
+        assert!(journal.packets.retired_before > 0);
+        drop(journal);
+        assert_eq!(
+            records.decode_pn(PacketNumber::encode(0, 0)),
+            Err(InvalidPacketNumber::TooOld)
+        );
+    }
 
-        let ack = rcvd_jornal
-            .gen_ack_frame_util(0, 52, Instant::now(), 1000)
+    #[test]
+    fn ack_ranges_preserve_holes_and_encode_exactly() {
+        let records = ArcRcvdJournal::with_capacity(16, None);
+        for pn in [100, 101, 104, 105, 110] {
+            records.on_rcvd_pn(pn, true, Duration::ZERO);
+        }
+        let ack = records
+            .gen_ack_frame_util(110, Instant::now(), 1200)
             .unwrap();
+        assert_eq!(ack.largest(), 110);
+        assert_eq!(ack.first_range(), 0);
         assert_eq!(
             ack.ranges(),
             &vec![
-                (VarInt::from_u32(50 - 45 - 1), VarInt::from_u32(45 - 12 - 1)),
-                (VarInt::from_u32(12 - 11 - 1), VarInt::from_u32(11 - 1 - 1))
+                (VarInt::from_u64(3).unwrap(), VarInt::from_u64(1).unwrap()),
+                (VarInt::from_u64(1).unwrap(), VarInt::from_u64(1).unwrap()),
             ]
         );
-        assert_eq!(ack.first_range(), 2)
+        assert!(ack.iter().any(|range| range == (100..=101)));
+        assert!(ack.iter().any(|range| range == (104..=105)));
+    }
+
+    #[test]
+    fn ack_generation_is_read_only() {
+        let records = ArcRcvdJournal::with_capacity(16, None);
+        records.on_rcvd_pn(1, true, Duration::ZERO);
+        let before = records.inner.read().unwrap().clone_for_test();
+        assert!(records.gen_ack_frame_util(1, Instant::now(), 1200).is_ok());
+        assert_eq!(records.inner.read().unwrap().clone_for_test(), before);
+    }
+
+    #[test]
+    fn high_packet_number_does_not_retire_slow_path_range() {
+        let records = ArcRcvdJournal::with_capacity(16, None);
+        records.on_rcvd_pn(100, true, Duration::ZERO);
+        records.on_rcvd_pn(10_000, true, Duration::ZERO);
+        assert_eq!(
+            records.inner.read().unwrap().packets.ranges,
+            vec![100..101, 10_000..10_001]
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct JournalSnapshot {
+        ranges: Vec<Range<u64>>,
+        retired_before: u64,
+    }
+
+    impl RcvdJournal {
+        fn clone_for_test(&self) -> JournalSnapshot {
+            JournalSnapshot {
+                ranges: self.packets.ranges.clone(),
+                retired_before: self.packets.retired_before,
+            }
+        }
     }
 }

@@ -111,7 +111,12 @@ impl CongestionController {
             }
             self.algorithm.on_packet_sent_cc(&sent);
         }
-        self.packet_spaces[epoch].sent_packets.push_back(sent);
+        // Pure ACK packets are neither ack-eliciting nor in flight. The peer is not required to
+        // acknowledge them, and congestion control has no loss/RTT state to derive from them, so
+        // retaining one record per packet would create an unbounded tail during one-way traffic.
+        if ack_eliciting || in_flight {
+            self.packet_spaces[epoch].sent_packets.push_back(sent);
+        }
         if in_flight {
             self.set_loss_detection_timer();
         }
@@ -646,5 +651,20 @@ mod tests {
         let pto = controller.get_pto(Epoch::Data);
         assert_eq!(space.loss_time, None);
         assert_eq!(controller.loss_detection_timer, Some(last_sent + pto));
+    }
+
+    #[test]
+    fn pure_ack_packets_do_not_accumulate_sent_records() {
+        let mut controller = controller();
+
+        for pn in 0..100_000 {
+            controller.on_packet_sent(pn, Epoch::Data, false, false, 64);
+        }
+
+        assert!(
+            controller.packet_spaces[Epoch::Data]
+                .sent_packets
+                .is_empty()
+        );
     }
 }
