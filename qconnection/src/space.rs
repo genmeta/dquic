@@ -198,15 +198,13 @@ impl ReceiveFrame<AckFrame> for AckInitialSpace {
         let mut rotate_guard = self.sent_journal.rotate();
         rotate_guard.update_largest(&ack_frame)?;
 
-        let acked = ack_frame.iter().flat_map(|r| r.rev()).collect::<Vec<_>>();
+        let acked = rotate_guard.acked_packet_numbers(&ack_frame);
         qevent::event!(PacketsAcked {
             packet_number_space: qbase::Epoch::Initial,
             packet_nubers: acked.clone(),
         });
-        for pn in acked {
-            for frame in rotate_guard.on_packet_acked(pn) {
-                self.crypto_stream_outgoing.on_data_acked(&frame);
-            }
+        for frame in rotate_guard.on_packets_acked(&ack_frame) {
+            self.crypto_stream_outgoing.on_data_acked(&frame);
         }
 
         Ok(())
@@ -234,15 +232,13 @@ impl ReceiveFrame<AckFrame> for AckHandshakeSpace {
         let mut rotate_guard = self.sent_journal.rotate();
         rotate_guard.update_largest(&ack_frame)?;
 
-        let acked = ack_frame.iter().flat_map(|r| r.rev()).collect::<Vec<_>>();
+        let acked = rotate_guard.acked_packet_numbers(&ack_frame);
         qevent::event!(PacketsAcked {
             packet_number_space: qbase::Epoch::Handshake,
             packet_nubers: acked.clone(),
         });
-        for pn in acked {
-            for frame in rotate_guard.on_packet_acked(pn) {
-                self.crypto_stream_outgoing.on_data_acked(&frame);
-            }
+        for frame in rotate_guard.on_packets_acked(&ack_frame) {
+            self.crypto_stream_outgoing.on_data_acked(&frame);
         }
 
         Ok(())
@@ -276,25 +272,23 @@ impl ReceiveFrame<AckFrame> for AckDataSpace {
         let mut rotate_guard = self.send_journal.rotate();
         rotate_guard.update_largest(&ack_frame)?;
 
-        let acked = ack_frame.iter().flat_map(|r| r.rev()).collect::<Vec<_>>();
+        let acked = rotate_guard.acked_packet_numbers(&ack_frame);
         qevent::event!(PacketsAcked {
             packet_number_space: qbase::Epoch::Data,
             packet_nubers: acked.clone(),
         });
-        for pn in acked {
-            for frame in rotate_guard.on_packet_acked(pn) {
-                match frame {
-                    GuaranteedFrame::Stream(stream_frame) => {
-                        self.data_streams.on_data_acked(stream_frame)
-                    }
-                    GuaranteedFrame::Crypto(crypto_frame) => {
-                        self.crypto_stream_outgoing.on_data_acked(&crypto_frame)
-                    }
-                    GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(
-                        StreamCtlFrame::ResetStream(reset_frame),
-                    )) => self.data_streams.on_reset_acked(reset_frame),
-                    _ => { /* nothing to do */ }
+        for frame in rotate_guard.on_packets_acked(&ack_frame) {
+            match frame {
+                GuaranteedFrame::Stream(stream_frame) => {
+                    self.data_streams.on_data_acked(stream_frame)
                 }
+                GuaranteedFrame::Crypto(crypto_frame) => {
+                    self.crypto_stream_outgoing.on_data_acked(&crypto_frame)
+                }
+                GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(
+                    StreamCtlFrame::ResetStream(reset_frame),
+                )) => self.data_streams.on_reset_acked(reset_frame),
+                _ => { /* nothing to do */ }
             }
         }
         Ok(())

@@ -182,35 +182,33 @@ impl PacketSpace {
         if self.sent_packets.is_empty() {
             return None;
         }
+        let ack_ranges = ack_frame.iter_ranges().collect::<Vec<_>>();
         let mut include_ack_eliciting = false;
         let mut largest_acked = None;
-        let mut index = self
-            .sent_packets
-            .binary_search_by(|p| p.packet_number.cmp(&ack_frame.largest()))
-            .unwrap_or_else(|i| i.saturating_sub(1));
 
-        for range in ack_frame.iter() {
-            for pn in range.rev() {
-                while index > 0 && self.sent_packets[index].packet_number > pn {
-                    index = index.saturating_sub(1);
-                }
-                if self.sent_packets[index].packet_number == pn
-                    && self.sent_packets[index].state != State::Acked
-                {
-                    algorithm.on_packet_acked(&self.sent_packets[index]);
-                    self.sent_packets[index].state = State::Acked;
-                    include_ack_eliciting |= self.sent_packets[index].ack_eliciting;
-                    largest_acked = largest_acked
-                        .map(|(n, t)| {
-                            if n < pn {
-                                (pn, self.sent_packets[index].time_sent)
-                            } else {
-                                (n, t)
-                            }
-                        })
-                        .or(Some((pn, self.sent_packets[index].time_sent)));
-                }
+        // The ACK frame may cover huge PN intervals while this path only owns a sparse subset of
+        // those packets. Walk the bounded local records instead of expanding every PN in the ACK.
+        for sent in self.sent_packets.iter_mut().rev() {
+            if sent.state == State::Acked
+                || !ack_ranges
+                    .iter()
+                    .any(|range| range.contains(&sent.packet_number))
+            {
+                continue;
             }
+
+            algorithm.on_packet_acked(&*sent);
+            sent.state = State::Acked;
+            include_ack_eliciting |= sent.ack_eliciting;
+            largest_acked = largest_acked
+                .map(|(n, t)| {
+                    if n < sent.packet_number {
+                        (sent.packet_number, sent.time_sent)
+                    } else {
+                        (n, t)
+                    }
+                })
+                .or(Some((sent.packet_number, sent.time_sent)));
         }
 
         while self
@@ -468,6 +466,33 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(lost, vec![10]);
+    }
+
+    #[test]
+    fn ack_ranges_match_sparse_sent_packets() {
+        let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
+        let now = Instant::now();
+        for pn in [10, 100, 1_000_000] {
+            packet_space
+                .sent_packets
+                .push_back(SentPacket::new(pn, now, true, true, 1200));
+        }
+
+        // The range contains a million packet numbers, but this path only sent three of them.
+        let ack_frame = AckFrame::new(
+            1_000_000_u32.into(),
+            0_u32.into(),
+            1_000_000_u32.into(),
+            vec![],
+            None,
+        );
+        let mut reno = new_reno();
+
+        let newly_acked = packet_space
+            .on_ack_rcvd(&ack_frame, &mut reno)
+            .expect("the sparse local records should be acknowledged");
+        assert_eq!(newly_acked.largest.0, 1_000_000);
+        assert!(packet_space.sent_packets.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

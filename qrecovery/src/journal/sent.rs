@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    ops::RangeInclusive,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
@@ -150,6 +151,40 @@ struct SentJournal<T> {
 }
 
 impl<T: Clone> SentJournal<T> {
+    fn acked_record_numbers(&self, ack_frame: &AckFrame) -> Vec<u64> {
+        let ack_ranges = ack_frame.iter_ranges().collect::<Vec<_>>();
+        self.sent_packets
+            .iter()
+            .rev()
+            .filter(|record| {
+                ack_ranges
+                    .iter()
+                    .any(|range| range.contains(&record.packet_number))
+            })
+            .map(|record| record.packet_number)
+            .collect()
+    }
+
+    fn on_packets_acked(&mut self, ack_frame: &AckFrame) -> std::vec::IntoIter<T> {
+        let ack_ranges = ack_frame
+            .iter_ranges()
+            .collect::<Vec<RangeInclusive<u64>>>();
+        let mut offset = self.queue.len();
+        let mut frames = Vec::new();
+        for record in self.sent_packets.iter_mut().rev() {
+            let nframes = record.state.nframes();
+            offset -= nframes;
+            if ack_ranges
+                .iter()
+                .any(|range| range.contains(&record.packet_number))
+            {
+                let len = record.state.be_acked();
+                frames.extend(self.queue.range(offset..offset + len).cloned());
+            }
+        }
+        frames.into_iter()
+    }
+
     fn record_index_and_offset(&self, pn: u64) -> Option<(usize, usize)> {
         let mut offset = 0;
         for (index, record) in self.sent_packets.iter().enumerate() {
@@ -273,6 +308,14 @@ pub struct SentRotateGuard<'a, T> {
 }
 
 impl<T: Clone> SentRotateGuard<'_, T> {
+    pub fn acked_packet_numbers(&self, ack_frame: &AckFrame) -> Vec<u64> {
+        self.inner.acked_record_numbers(ack_frame)
+    }
+
+    pub fn on_packets_acked(&mut self, ack_frame: &AckFrame) -> impl Iterator<Item = T> + '_ {
+        self.inner.on_packets_acked(ack_frame)
+    }
+
     pub fn update_largest(&mut self, ack_frame: &AckFrame) -> Result<(), QuicError> {
         if ack_frame.largest() >= self.inner.next_pn {
             return Err(QuicError::new(
@@ -438,8 +481,13 @@ mod tests {
         }
 
         let mut rotate = journal.rotate();
-        rotate.update_largest(&ack_packet(5)).unwrap();
-        assert_eq!(rotate.on_packet_acked(5).collect::<Vec<_>>(), vec![5]);
+        let ack = AckFrame::new(5_u32.into(), 0_u32.into(), 5_u32.into(), vec![], None);
+        rotate.update_largest(&ack).unwrap();
+        assert_eq!(rotate.acked_packet_numbers(&ack), vec![5, 1]);
+        assert_eq!(
+            rotate.on_packets_acked(&ack).collect::<Vec<_>>(),
+            vec![5, 1]
+        );
         assert!(rotate.on_packet_acked(4).next().is_none());
     }
 
