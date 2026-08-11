@@ -1,6 +1,6 @@
 [package]
 name = "qinterface"
-version = "0.7.1-beta.1"
+version = "0.7.1"
 edition.workspace = true
 description = "dquic's network interface and IO abstractions"
 readme.workspace = true
