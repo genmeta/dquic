@@ -1,6 +1,6 @@
 [package]
 name = "qdatagram"
-version = "0.6.0"
+version = "0.6.1-beta.1"
 edition.workspace = true
 description = "Datagram transmission of dquic"
 readme.workspace = true
