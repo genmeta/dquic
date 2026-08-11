@@ -216,4 +216,17 @@ mod tests {
         bytes.put_slice(&[0; 15]);
         assert_eq!(be_datagram(bytes), Err(Error::InvalidStunMessage));
     }
+
+    #[test]
+    fn legacy_stun_request_is_rejected_without_panicking() {
+        // The legacy layout encoded a separate u16 message type between the
+        // nine-byte camouflage header and the transaction ID. The current
+        // layout carries the message type in the camouflage header itself.
+        let mut bytes = BytesMut::from(&[0xc2, 0, 0, 0, 0, 0, 0, 0, 0][..]);
+        bytes.put_u16(1);
+        bytes.put_slice(&[0; 16]);
+
+        assert_eq!(bytes.len(), 27);
+        assert_eq!(be_datagram(bytes), Err(Error::InvalidStunMessage));
+    }
 }

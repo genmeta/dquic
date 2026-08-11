@@ -689,7 +689,7 @@ struct StunClientState<I: RefIO + 'static> {
     task: Option<AbortOnDropHandle<()>>,
 }
 
-pub const DEFAULT_STUN_SERVER: &str = "nat.genmeta.net:20004";
+pub const DEFAULT_STUN_SERVER: &str = "nat.genmeta.net:20002";
 
 impl<I: RefIO + 'static> StunClientState<I> {
     pub fn new(

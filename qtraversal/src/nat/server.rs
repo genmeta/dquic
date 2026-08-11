@@ -22,17 +22,28 @@ use crate::nat::{
 
 #[derive(Debug, Clone, Default)]
 pub struct StunServerConfig {
+    /// Port of the other listener on the same public IP.
     change_port: Option<u16>,
+    /// Public listener on another IP used for CHANGE_IP requests and advertised
+    /// as CHANGED-ADDRESS.
     change_address: Option<SocketAddr>,
+    /// Public address of this listener, used as SOURCE-ADDRESS when the bind
+    /// address is private (for example, an EC2 instance behind an Elastic IP).
+    outer_address: Option<SocketAddr>,
 }
 
 #[bon::bon]
 impl StunServerConfig {
     #[builder(finish_fn = init)]
-    pub fn new(change_port: Option<u16>, change_address: Option<SocketAddr>) -> Self {
+    pub fn new(
+        change_port: Option<u16>,
+        change_address: Option<SocketAddr>,
+        outer_address: Option<SocketAddr>,
+    ) -> Self {
         Self {
             change_port,
             change_address,
+            outer_address,
         }
     }
 }
@@ -49,6 +60,7 @@ impl<I: RefIO + 'static> StunServer<I> {
         info!(
             target: "stun",
             local_addr = ?ref_iface.iface().local_addr(),
+            outer_address = ?config.outer_address,
             change_port = ?config.change_port,
             change_address = ?config.change_address,
             "new stun server",
@@ -75,6 +87,7 @@ async fn serve_loop<I: RefIO>(
 ) -> io::Result<()> {
     info!(target: "stun", "server started");
     let local_addr = ref_iface.iface().local_addr()?;
+    let source_addr = config.outer_address.unwrap_or(local_addr);
 
     while let Some((request, txid, src)) = stun_router.receive_request().await {
         trace!(target: "stun", ?request, "recv request");
@@ -98,14 +111,11 @@ async fn serve_loop<I: RefIO>(
                     .await?;
             }
             (None, Some(&response_addr)) => {
-                let mut attrs = vec![
-                    Attr::SourceAddress(local_addr),
-                    Attr::MappedAddress(response_addr),
-                ];
-                if let Some(addr) = config.change_address {
-                    attrs.push(Attr::ChangedAddress(addr));
-                }
-                let response = Response::with(attrs);
+                let response = Response::with(response_attributes(
+                    source_addr,
+                    response_addr,
+                    config.change_address,
+                ));
                 trace!(target: "stun", ?response, to = %response_addr, "send response");
                 ref_iface
                     .iface()
@@ -113,11 +123,8 @@ async fn serve_loop<I: RefIO>(
                     .await?;
             }
             _ => {
-                let mut attrs = vec![Attr::SourceAddress(local_addr), Attr::MappedAddress(src)];
-                if let Some(addr) = config.change_address {
-                    attrs.push(Attr::ChangedAddress(addr));
-                }
-                let response = Response::with(attrs);
+                let response =
+                    Response::with(response_attributes(source_addr, src, config.change_address));
                 trace!(target: "stun", ?response, to = %src, "send response");
                 ref_iface
                     .iface()
@@ -129,6 +136,21 @@ async fn serve_loop<I: RefIO>(
 
     trace!(target: "stun", "request handler finished with no more requests");
     Ok(())
+}
+
+fn response_attributes(
+    source_addr: SocketAddr,
+    mapped_addr: SocketAddr,
+    changed_addr: Option<SocketAddr>,
+) -> Vec<Attr> {
+    let mut attrs = vec![
+        Attr::SourceAddress(source_addr),
+        Attr::MappedAddress(mapped_addr),
+    ];
+    if let Some(addr) = changed_addr {
+        attrs.push(Attr::ChangedAddress(addr));
+    }
+    attrs
 }
 
 fn select_change_target(
@@ -233,5 +255,47 @@ impl Component for StunServerComponent {
                 StunServer::new(inner.ref_iface.clone(), router, inner.config.clone()).spawn(),
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_advertises_outer_instead_of_private_bind_address() {
+        let outer = "198.51.100.10:20002".parse().unwrap();
+        let mapped = "203.0.113.20:45000".parse().unwrap();
+        let changed = "198.51.100.11:20003".parse().unwrap();
+
+        assert_eq!(
+            response_attributes(outer, mapped, Some(changed)),
+            vec![
+                Attr::SourceAddress(outer),
+                Attr::MappedAddress(mapped),
+                Attr::ChangedAddress(changed),
+            ]
+        );
+    }
+
+    #[test]
+    fn change_targets_preserve_requested_address_and_port_relationship() {
+        let local = "10.0.0.10:20002".parse().unwrap();
+        let client = "203.0.113.20:45000".parse().unwrap();
+        let changed = "198.51.100.11:20003".parse().unwrap();
+        let config = StunServerConfig::builder()
+            .change_port(20003)
+            .change_address(changed)
+            .outer_address("198.51.100.10:20002".parse().unwrap())
+            .init();
+
+        assert_eq!(
+            select_change_target(client, CHANGE_PORT, local, &config).unwrap(),
+            "10.0.0.10:20003".parse().unwrap()
+        );
+        assert_eq!(
+            select_change_target(client, CHANGE_IP | CHANGE_PORT, local, &config).unwrap(),
+            changed
+        );
     }
 }
