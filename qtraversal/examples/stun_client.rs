@@ -1,10 +1,7 @@
 use std::{io::Result, net::SocketAddr, sync::Arc};
 
 use clap::Parser;
-use qinterface::{
-    component::local_endpoint::LocalEndpoints,
-    io::{IO, ProductIO, handy::DEFAULT_IO_FACTORY},
-};
+use qinterface::io::{IO, ProductIO, handy::DEFAULT_IO_FACTORY};
 use qtraversal::{
     nat::{client::StunClient, router::StunRouter},
     route::ReceiveAndDeliverPacket,
@@ -15,7 +12,7 @@ use tracing::info;
 pub struct Arguments {
     #[arg(long, default_value = "0.0.0.0:12345")]
     pub bind: SocketAddr,
-    #[arg(long, default_value = "nat.genmeta.net:20004")]
+    #[arg(long, default_value = "nat.genmeta.net:20002")]
     pub stun_svr: String,
 }
 
@@ -45,17 +42,9 @@ async fn main() -> Result<()> {
         .await
         .expect("failed to get outer addr");
     info!(target: "stun", %outer_addr, agent_addr = %stun_server, "detected outer address");
-    // Ok(())
     let nat_type = stun_client.nat_type().await;
-    let local_endpoints = std::sync::Arc::new(LocalEndpoints::new());
-    let mut subscriber = local_endpoints.subscribe();
-    while let Some(event) = subscriber.recv().await {
-        info!(target: "stun", ?event, "local endpoint event");
-        info!(target: "stun", ?nat_type, "detected NAT type");
-    }
+    info!(target: "stun", ?nat_type, "detected NAT type");
     Ok(())
-
-    // unreachable!("Observer never return None")
 }
 
 fn init_logger() -> std::io::Result<()> {
