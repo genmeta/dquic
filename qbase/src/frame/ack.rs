@@ -153,9 +153,8 @@ impl AckFrame {
         self.ecn.take()
     }
 
-    /// Iterate through the sequence numbers of the packets acknowledged by the iterative ACK frame,
-    /// starting from the largest and going down.
-    pub fn iter(&self) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
+    /// Iterate through the acknowledged packet ranges, starting from the largest and going down.
+    pub fn iter_ranges(&self) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
         let right = self.largest.into_u64();
         let left = right - self.first_range.into_u64();
         Some(left..=right).into_iter().chain(
@@ -169,6 +168,12 @@ impl AckFrame {
                     Some(left..=right)
                 }),
         )
+    }
+
+    /// Iterate through the sequence numbers of the packets acknowledged by the ACK frame,
+    /// starting from the largest and going down.
+    pub fn iter(&self) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
+        self.iter_ranges()
     }
 }
 
