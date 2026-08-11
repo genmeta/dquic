@@ -1,6 +1,6 @@
 [package]
 name = "qtraversal"
-version = "0.7.0"
+version = "0.7.1-beta.1"
 edition.workspace = true
 description = "NAT traversal utilities for QUIC, a part of dquic"
 readme = "README.md"
