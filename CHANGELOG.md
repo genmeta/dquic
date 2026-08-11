@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.1] - 2026-08-11
+
+### Changed
+
+- Promote the validated 0.7.1 beta line to a stable release without additional
+  protocol changes.
+
+### Published crates
+
+- `qbase` v0.6.3
+- `qevent` v0.6.1
+- `qudp` v0.7.1
+- `qinterface` v0.7.1
+- `qdatagram` v0.6.1
+- `qresolve` v0.8.0
+- `qcongestion` v0.6.1
+- `qrecovery` v0.6.1
+- `qtraversal` v0.7.1
+- `qconnection` v0.8.1
+- `dquic` v0.7.1
+
 ## [0.7.1-beta.1] - 2026-08-11
 
 ### Fixed

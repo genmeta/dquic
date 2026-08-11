@@ -1,6 +1,6 @@
 [package]
 name = "qconnection"
-version = "0.8.1-beta.1"
+version = "0.8.1"
 edition.workspace = true
 description = "Encapsulation of QUIC connections, a part of dquic"
 readme.workspace = true
