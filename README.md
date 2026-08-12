@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/genmeta/dquic" title="DQuic">
-    <img src="images/dquic-logo.svg" width="348" height="96" alt="DQuic">
+    <img src="https://media.dhttp.net/img/dquic/dquic-logo.svg" width="348" height="96" alt="DQuic">
   </a>
 </p>
 <h3 align="center">A QUIC implementation extended for peer-to-peer communication and multipath transport</h3>
@@ -31,7 +31,7 @@ This makes decentralized, transport-layer interconnection possible.
 That is the true **"inter"**-net.
 
 <p align="center">
-  <img src="images/dquic-connectivity-en.png" alt="DQuic extends cloud-centric partial connectivity into omniconnectivity between endpoints">
+  <img src="https://media.dhttp.net/img/dquic/dquic-connectivity-en.jpg" alt="DQuic extends cloud-centric partial connectivity into omniconnectivity between endpoints">
 </p>
 
 ## Endpoint Addresses
