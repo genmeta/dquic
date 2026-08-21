@@ -5,6 +5,10 @@ use tokio::time::Instant;
 
 use crate::algorithm::Control;
 
+/// Recovery state of one sent packet number.
+///
+/// `Retransmitted` means the packet's contents have been submitted to recovery for retransmission.
+/// The original packet may still arrive later and be acknowledged.
 #[derive(Default, PartialEq, Eq, Clone, Debug)]
 pub(crate) enum State {
     #[default]
@@ -142,6 +146,12 @@ impl RcvdRecords {
             self.latest_rcvd_time = None;
             self.ack_immedietly = false;
         }
+    }
+
+    fn clear(&mut self) {
+        self.ack_immedietly = false;
+        self.latest_rcvd_time = None;
+        self.largest_rcvd_packet = None;
     }
 }
 
@@ -297,15 +307,26 @@ impl PacketSpace {
         packet_numbers.into_iter()
     }
 
-    pub(crate) fn discard(&mut self, algorithm: &mut Box<dyn Control>) {
+    pub(crate) fn discard(&mut self, algorithm: &mut Box<dyn Control>) -> Vec<u64> {
+        // Only packets that have not gone through loss feedback need to be handed to connection-
+        // level recovery. Retransmitted packets have already submitted their frames for recovery.
+        let in_flight_packet_numbers = self
+            .sent_packets
+            .iter()
+            .filter(|sent| sent.state == State::Inflight)
+            .map(|sent| sent.packet_number)
+            .collect();
         let mut remove_from_inflight = self
             .sent_packets
             .iter()
             .filter(|sent| sent.state == State::Inflight);
         algorithm.remove_from_bytes_in_flight(&mut remove_from_inflight);
         self.sent_packets.clear();
+        self.largest_acked_packet = None;
         self.time_of_last_ack_eliciting_packet = None;
         self.loss_time = None;
+        self.rcvd_packets.clear();
+        in_flight_packet_numbers
     }
 }
 
@@ -492,6 +513,27 @@ mod tests {
             .on_ack_rcvd(&ack_frame, &mut reno)
             .expect("the sparse local records should be acknowledged");
         assert_eq!(newly_acked.largest.0, 1_000_000);
+        assert!(packet_space.sent_packets.is_empty());
+    }
+
+    #[test]
+    fn discard_reports_only_in_flight_packets() {
+        let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
+        let now = Instant::now();
+        let mut retransmitted = SentPacket::new(11, now, true, false, 1200);
+        retransmitted.state = State::Retransmitted;
+        let mut acknowledged = SentPacket::new(12, now, true, false, 1200);
+        acknowledged.state = State::Acked;
+
+        packet_space
+            .sent_packets
+            .push_back(SentPacket::new(10, now, true, false, 1200));
+        packet_space.sent_packets.push_back(retransmitted);
+        packet_space.sent_packets.push_back(acknowledged);
+
+        let discarded = packet_space.discard(&mut new_reno());
+
+        assert_eq!(discarded, vec![10]);
         assert!(packet_space.sent_packets.is_empty());
     }
 

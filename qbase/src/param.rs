@@ -624,6 +624,35 @@ mod tests {
         assert_eq!(guard.role(), Role::Client);
     }
 
+    #[test]
+    fn negotiated_idle_timeout_covers_all_zero_and_nonzero_combinations() {
+        fn negotiated(local: Duration, remote: Duration) -> Duration {
+            let mut client = create_test_client_params();
+            client
+                .set(ParameterId::MaxIdleTimeout, local)
+                .expect("valid idle timeout");
+            let mut server = create_test_server_params();
+            server
+                .set(ParameterId::MaxIdleTimeout, remote)
+                .expect("valid idle timeout");
+
+            let mut params =
+                Parameters::new_client(client, None, ConnectionId::from_slice(b"odcid"));
+            params.server = Arc::new(server);
+            params.state = Parameters::CLIENT_READY | Parameters::SERVER_READY;
+            params
+                .negotiated_max_idle_timeout()
+                .expect("both parameter sets are ready")
+        }
+
+        let short = Duration::from_secs(3);
+        let long = Duration::from_secs(9);
+        assert_eq!(negotiated(Duration::ZERO, Duration::ZERO), Duration::MAX);
+        assert_eq!(negotiated(Duration::ZERO, short), short);
+        assert_eq!(negotiated(short, Duration::ZERO), short);
+        assert_eq!(negotiated(long, short), short);
+    }
+
     #[tokio::test]
     async fn test_arc_parameters_error_handling() {
         let arc_params = ArcParameters::from(Parameters::new_client(

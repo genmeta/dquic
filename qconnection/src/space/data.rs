@@ -306,7 +306,10 @@ fn frame_dispathcer(
         rcvd_handshake_done_frames,
         components
             .quic_handshake
-            .discard_spaces_on_client_handshake_done(components.paths.clone()),
+            .discard_spaces_on_client_handshake_done(
+                components.paths.clone(),
+                components.spaces.clone(),
+            ),
         event_broker.clone(),
     );
     pipe(
@@ -493,7 +496,7 @@ async fn parse_normal_one_rtt_packet(
 
     components
         .quic_handshake
-        .discard_spaces_on_server_handshake_done(&components.paths);
+        .discard_spaces_on_server_handshake_done(&components.paths, &components.spaces);
 
     let packet_content = read_plain_packet(&packet, |frame| {
         dispatch_frame(frame, packet.get_type(), &path);

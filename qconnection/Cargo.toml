@@ -53,3 +53,4 @@ telemetry = ["qevent/telemetry"]
 
 [dev-dependencies]
 rustls = { workspace = true, features = ["ring"] }
+tokio = { workspace = true, features = ["test-util"] }

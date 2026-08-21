@@ -3,33 +3,27 @@ use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use tokio::time::{Duration, Instant};
 
-use crate::{frame::PingFrame, packet::PacketContent};
+use crate::packet::PacketContent;
+
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
 #[error("Path has been idle for too long")]
 pub struct TimeOut;
 
 #[derive(Debug)]
-pub struct IdleConfig {
+struct IdleConfig {
     max_idle_timeout: Duration,
     defer_idle_timeout: Duration,
     heartbeat_interval: Duration,
 }
 
 impl IdleConfig {
-    fn suitable_heartbeat_interval(max_idle_timeout: Duration) -> Duration {
-        if max_idle_timeout == Duration::ZERO {
-            Duration::from_secs(30)
-        } else {
-            (max_idle_timeout / 2)
-                .max(Duration::from_secs(1))
-                .min(Duration::from_secs(30))
-        }
-    }
-
-    // Creates a new `IdleTimer` with the specified maximum idle timeout and defer idle timeout.
-    pub fn new(max_idle_timeout: Duration, defer_idle_timeout: Duration) -> Self {
-        let heartbeat_interval = Self::suitable_heartbeat_interval(max_idle_timeout);
+    fn new(
+        max_idle_timeout: Duration,
+        defer_idle_timeout: Duration,
+        heartbeat_interval: Duration,
+    ) -> Self {
         Self {
             max_idle_timeout,
             defer_idle_timeout,
@@ -37,165 +31,164 @@ impl IdleConfig {
         }
     }
 
-    // Each endpoint advertises a max_idle_timeout, but the effective value at an endpoint
-    // is computed as the minimum of the two advertised values (or the sole advertised value,
-    // if only one endpoint advertises a non-zero value).
-    //
-    // Idle timeout is disabled when both endpoints omit this transport parameter or specify a value of 0.
-    pub fn negotiate_max_idle_timeout(&mut self, max_idle_timeout: Duration) {
-        match (self.max_idle_timeout, max_idle_timeout) {
-            (_, Duration::ZERO) => (),
+    fn negotiate_max_idle_timeout(&mut self, remote: Duration) {
+        match (self.max_idle_timeout, remote) {
+            (_, Duration::ZERO) => {}
             (Duration::ZERO, remote) => self.max_idle_timeout = remote,
             (local, remote) => self.max_idle_timeout = local.min(remote),
         }
-        self.heartbeat_interval = Self::suitable_heartbeat_interval(self.max_idle_timeout);
-    }
-
-    // Sets the interval for sending heartbeat packets.
-    pub fn set_heartbeat_interval(&mut self, interval: Duration) {
-        self.heartbeat_interval = interval;
     }
 }
 
+/// Negotiated idle policy and connection-wide idle activity.
 #[derive(Debug, Clone)]
-pub struct ArcIdleConfig(Arc<RwLock<IdleConfig>>);
+pub struct ArcConnIdle {
+    config: Arc<RwLock<IdleConfig>>,
+    idle_since: Arc<Mutex<Option<Instant>>>,
+    die_since: Arc<Mutex<Instant>>,
+}
 
-impl ArcIdleConfig {
-    // Creates a new `ArcIdleConfig` with the specified maximum idle timeout and defer idle timeout.
-    pub fn new(max_idle_timeout: Duration, defer_idle_timeout: Duration) -> Self {
-        ArcIdleConfig(Arc::new(RwLock::new(IdleConfig::new(
-            max_idle_timeout,
-            defer_idle_timeout,
-        ))))
+impl ArcConnIdle {
+    pub fn new(
+        max_idle_timeout: Duration,
+        defer_idle_timeout: Duration,
+        heartbeat_interval: Duration,
+    ) -> Self {
+        Self {
+            config: Arc::new(RwLock::new(IdleConfig::new(
+                max_idle_timeout,
+                defer_idle_timeout,
+                heartbeat_interval,
+            ))),
+            idle_since: Arc::new(Mutex::new(None)),
+            die_since: Arc::new(Mutex::new(Instant::now())),
+        }
     }
 
-    // Each endpoint advertises a max_idle_timeout, but the effective value at an endpoint
-    // is computed as the minimum of the two advertised values (or the sole advertised value,
-    // if only one endpoint advertises a non-zero value).
-    //
-    // Idle timeout is disabled when both endpoints omit this transport parameter or specify a value of 0.
-    pub fn negotiate_max_idle_timeout(&self, max_idle_timeout: Duration) {
-        self.0
+    pub fn negotiate_max_idle_timeout(&self, remote: Duration) {
+        self.config
             .write()
             .unwrap()
-            .negotiate_max_idle_timeout(max_idle_timeout);
+            .negotiate_max_idle_timeout(remote);
     }
 
-    // Sets the interval for sending heartbeat packets.
-    pub fn set_heartbeat_interval(&self, interval: Duration) {
-        self.0.write().unwrap().set_heartbeat_interval(interval);
+    pub fn timer(&self) -> PathIdleTimer {
+        PathIdleTimer {
+            conn_idle: self.clone(),
+            activity: Mutex::new(PathIdleActivity {
+                path_die_since: Instant::now(),
+                update_idle_on_send: true,
+                update_die_on_send: true,
+                last_sent_ack_eliciting: None,
+            }),
+        }
     }
 
-    pub fn timer(&self) -> ArcIdleTimer {
-        ArcIdleTimer(Arc::new(Mutex::new(IdleTimer {
-            idle_config: self.clone(),
-            heartbeat_times: 0,
-            last_effective_comm: None,
-            idle_begin_at: Some(Instant::now()),
-        })))
+    fn update_idle_since(&self, now: Instant) {
+        *self.idle_since.lock().unwrap() = Some(now);
     }
 
-    fn defer_idle_timeout(&self) -> Duration {
-        self.0.read().unwrap().defer_idle_timeout
+    fn update_die_since(&self, now: Instant) {
+        *self.die_since.lock().unwrap() = now;
     }
 
-    fn heartbeat_interval(&self) -> Duration {
-        self.0.read().unwrap().heartbeat_interval
-    }
-
-    fn timeout_after(&self, idle_at: Instant) -> bool {
-        let max_idle_timeout = self.0.read().unwrap().max_idle_timeout;
-        max_idle_timeout != Duration::ZERO && idle_at.elapsed() > max_idle_timeout
+    fn keep_alive_allowed(&self, now: Instant) -> bool {
+        let config = self.config.read().unwrap();
+        if config.defer_idle_timeout == Duration::ZERO {
+            return false;
+        }
+        self.idle_since.lock().unwrap().is_some_and(|last| {
+            last.checked_add(config.defer_idle_timeout)
+                .is_none_or(|deadline| now < deadline)
+        })
     }
 }
 
-// A timer for each path to determine when to send heartbeat packets
-// and when to delete the path due to idle timeout.
 #[derive(Debug)]
-pub struct IdleTimer {
-    idle_config: ArcIdleConfig,
-    heartbeat_times: u32,
-    last_effective_comm: Option<Instant>,
-    idle_begin_at: Option<Instant>,
+struct PathIdleActivity {
+    path_die_since: Instant,
+    update_idle_on_send: bool,
+    update_die_on_send: bool,
+    last_sent_ack_eliciting: Option<Instant>,
 }
 
-impl IdleTimer {
-    pub fn on_sent(&mut self, _packet_content: PacketContent) {
-        // Temporarily disabled.
-        //
-        // Sending a packet locally is not evidence that the peer is still reachable.  The previous
-        // implementation reset `last_effective_comm`, `heartbeat_times`, and, most importantly,
-        // `idle_begin_at` whenever an EffectivePayload packet was assembled for transmission.  If a
-        // peer disappears while this endpoint still has ack-eliciting payload to retransmit, those
-        // retransmissions repeatedly call this hook and keep clearing `idle_begin_at`.  The path can
-        // then keep itself alive without receiving anything from the peer, which turns stale
-        // connections into an unbounded send storm.
-        //
-        // Keep the hook as a compatibility stub for now so the per-path idle timer work from
-        // 835b9e9566db04168a055ec04e2aeb2aa3a427e3 does not need to be reverted wholesale.  A
-        // future cleanup should split heartbeat/defer-idle bookkeeping from max-idle liveness
-        // tracking.  Until then, only receive-side activity may refresh this timer.
-    }
-
-    // Updates the timer when a packet is received.
-    pub fn on_rcvd(&mut self, packet_content: PacketContent) {
-        if packet_content == PacketContent::EffectivePayload {
-            self.last_effective_comm = Some(Instant::now());
-            self.heartbeat_times = 0;
-            self.idle_begin_at = None;
-        }
-        if self.idle_begin_at.is_some() {
-            self.idle_begin_at = Some(Instant::now());
-        }
-    }
-
-    // Checks health of the path and
-    // determines whether a heartbeat packet needs to be sent.
-    pub fn health(&mut self) -> Result<Option<PingFrame>, TimeOut> {
-        // TODO: 考虑连接还没关闭，闲置路径的 defer_idle_timeout 不能生效
-        //       得统一考虑成连接级的 defer_idle_timeout
-        if let Some(t) = self.last_effective_comm {
-            let elapsed = t.elapsed();
-            if elapsed > self.idle_config.defer_idle_timeout() {
-                if self.idle_begin_at.is_none() {
-                    self.idle_begin_at = Some(Instant::now());
-                    return Ok(Some(PingFrame)); // heartbeat for the last time
-                }
-            } else if elapsed > self.idle_config.heartbeat_interval() * (self.heartbeat_times + 1) {
-                self.heartbeat_times += 1;
-                return Ok(Some(PingFrame));
-            }
-        }
-        if self
-            .idle_begin_at
-            .is_some_and(|t| self.idle_config.timeout_after(t))
-        {
-            return Err(TimeOut);
-        }
-        Ok(None)
-    }
+/// Path-local KeepAlive and liveness state backed by connection-wide idle policy.
+#[derive(Debug)]
+pub struct PathIdleTimer {
+    conn_idle: ArcConnIdle,
+    activity: Mutex<PathIdleActivity>,
 }
 
-// A shared timer for each path to determine when to send heartbeat packets
-// and when to delete the path due to idle timeout.
-#[derive(Debug, Clone)]
-pub struct ArcIdleTimer(Arc<Mutex<IdleTimer>>);
-
-impl ArcIdleTimer {
-    // Updates the timer when a packet is sent.
+impl PathIdleTimer {
     pub fn on_sent(&self, packet_content: PacketContent) {
-        self.0.lock().unwrap().on_sent(packet_content);
+        let now = Instant::now();
+        let mut activity = self.activity.lock().unwrap();
+        if packet_content == PacketContent::EffectivePayload && activity.update_idle_on_send {
+            self.conn_idle.update_idle_since(now);
+            activity.update_idle_on_send = false;
+        }
+        if packet_content.is_ack_eliciting() {
+            if activity.update_die_on_send {
+                self.conn_idle.update_die_since(now);
+                activity.path_die_since = now;
+                activity.update_die_on_send = false;
+            }
+            activity.last_sent_ack_eliciting = Some(now);
+        }
+        drop(activity);
     }
 
-    // Updates the timer when a packet is received.
     pub fn on_rcvd(&self, packet_content: PacketContent) {
-        self.0.lock().unwrap().on_rcvd(packet_content);
+        let now = Instant::now();
+        let mut activity = self.activity.lock().unwrap();
+        activity.path_die_since = now;
+        activity.update_idle_on_send = true;
+        activity.update_die_on_send = true;
+        drop(activity);
+
+        self.conn_idle.update_die_since(now);
+        if packet_content == PacketContent::EffectivePayload {
+            self.conn_idle.update_idle_since(now);
+        }
     }
 
-    // Checks health of the path and
-    // determines whether a heartbeat packet needs to be sent.
-    pub fn health(&self) -> Result<Option<PingFrame>, TimeOut> {
-        self.0.lock().unwrap().health()
+    pub fn keep_alive_due(&self, now: Instant) -> bool {
+        if !self.conn_idle.keep_alive_allowed(now) {
+            return false;
+        }
+        let heartbeat_interval = self.conn_idle.config.read().unwrap().heartbeat_interval;
+        self.activity
+            .lock()
+            .unwrap()
+            .last_sent_ack_eliciting
+            .and_then(|last| last.checked_add(heartbeat_interval))
+            .is_some_and(|deadline| now >= deadline)
+    }
+
+    /// Checks the connection-wide idle deadline.
+    pub fn timed_out(&self, now: Instant, pto_base: Duration) -> bool {
+        let max_idle_timeout = self.conn_idle.config.read().unwrap().max_idle_timeout;
+        if max_idle_timeout == Duration::ZERO {
+            return false;
+        }
+        let timeout = max_idle_timeout.max(pto_base.saturating_mul(3));
+        let die_since = *self.conn_idle.die_since.lock().unwrap();
+        let timed_out = now
+            .checked_duration_since(die_since)
+            .is_some_and(|elapsed| elapsed >= timeout);
+        timed_out
+    }
+
+    /// Checks the path-local deadline used to retire an unresponsive path.
+    pub fn path_timed_out(&self, now: Instant, pto_base: Duration) -> bool {
+        let max_idle_timeout = self.conn_idle.config.read().unwrap().max_idle_timeout;
+        if max_idle_timeout == Duration::ZERO {
+            return false;
+        }
+        let timeout = max_idle_timeout.max(pto_base.saturating_mul(3));
+        let path_die_since = self.activity.lock().unwrap().path_die_since;
+        now.checked_duration_since(path_die_since)
+            .is_some_and(|elapsed| elapsed >= timeout)
     }
 }
 
@@ -203,50 +196,212 @@ impl ArcIdleTimer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sent_effective_payload_does_not_extend_idle_timeout() {
-        let mut timer = IdleTimer {
-            idle_config: ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO),
-            heartbeat_times: 0,
-            last_effective_comm: None,
-            idle_begin_at: None,
-        };
+    #[tokio::test(start_paused = true)]
+    async fn negotiated_timeout_applies_to_existing_path_timers() {
+        let conn_idle = ArcConnIdle::new(
+            Duration::from_secs(20),
+            Duration::ZERO,
+            DEFAULT_HEARTBEAT_INTERVAL,
+        );
+        let timer = conn_idle.timer();
+        conn_idle.negotiate_max_idle_timeout(Duration::from_secs(12));
 
-        timer.on_rcvd(PacketContent::EffectivePayload);
-        assert!(timer.health().expect("timer should be healthy").is_some());
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert!(!timer.timed_out(Instant::now(), Duration::from_secs(1)));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(timer.timed_out(Instant::now(), Duration::from_secs(1)));
+    }
 
-        std::thread::sleep(Duration::from_millis(6));
+    #[tokio::test(start_paused = true)]
+    async fn path_idle_timeout_is_at_least_three_pto() {
+        let timer = ArcConnIdle::new(
+            Duration::from_secs(5),
+            Duration::ZERO,
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(!timer.timed_out(Instant::now(), Duration::from_secs(5)));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(timer.timed_out(Instant::now(), Duration::from_secs(5)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_first_ack_eliciting_send_after_receive_extends_connection_idle() {
+        let timer = ArcConnIdle::new(
+            Duration::from_secs(20),
+            Duration::ZERO,
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        timer.on_sent(PacketContent::JustPing);
+        tokio::time::advance(Duration::from_secs(10)).await;
         timer.on_sent(PacketContent::EffectivePayload);
-        std::thread::sleep(Duration::from_millis(6));
-
-        assert!(timer.health().is_err());
-    }
-
-    #[test]
-    fn new_timer_times_out_without_receive() {
-        let timer = ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO).timer();
-
-        std::thread::sleep(Duration::from_millis(20));
-
-        assert!(timer.health().is_err());
-    }
-
-    #[test]
-    fn zero_max_idle_timeout_disables_new_timer_timeout() {
-        let timer = ArcIdleConfig::new(Duration::ZERO, Duration::ZERO).timer();
-
-        std::thread::sleep(Duration::from_millis(20));
-
-        assert!(timer.health().is_ok());
-    }
-
-    #[test]
-    fn effective_receive_clears_initial_idle_deadline() {
-        let timer = ArcIdleConfig::new(Duration::from_millis(10), Duration::ZERO).timer();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert!(!timer.timed_out(Instant::now(), Duration::ZERO));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(timer.timed_out(Instant::now(), Duration::ZERO));
 
         timer.on_rcvd(PacketContent::EffectivePayload);
-        std::thread::sleep(Duration::from_millis(20));
+        assert!(!timer.timed_out(Instant::now(), Duration::ZERO));
+    }
 
-        assert!(timer.health().is_ok());
+    #[tokio::test(start_paused = true)]
+    async fn effective_payload_on_one_path_opens_keep_alive_for_another() {
+        let conn_idle = ArcConnIdle::new(
+            Duration::from_secs(120),
+            Duration::from_secs(40),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        );
+        let active_path = conn_idle.timer();
+        let idle_path = conn_idle.timer();
+        idle_path.on_sent(PacketContent::JustPing);
+
+        active_path.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        assert!(idle_path.keep_alive_due(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn effective_payload_restarts_the_same_path_heartbeat_interval() {
+        let timer = ArcConnIdle::new(
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::from_secs(10),
+        )
+        .timer();
+        timer.on_sent(PacketContent::JustPing);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        timer.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert!(!timer.keep_alive_due(Instant::now()));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(timer.keep_alive_due(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_interval_is_fixed_at_twenty_seconds() {
+        let short_idle = ArcConnIdle::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+        short_idle.on_sent(PacketContent::EffectivePayload);
+
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert!(!short_idle.keep_alive_due(Instant::now()));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(short_idle.keep_alive_due(Instant::now()));
+
+        let long_idle = ArcConnIdle::new(
+            Duration::from_secs(120),
+            Duration::from_secs(60),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+        long_idle.on_sent(PacketContent::EffectivePayload);
+
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert!(!long_idle.keep_alive_due(Instant::now()));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(long_idle.keep_alive_due(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_idle_is_shared_but_path_liveness_is_local() {
+        let conn_idle = ArcConnIdle::new(
+            Duration::from_secs(20),
+            Duration::ZERO,
+            DEFAULT_HEARTBEAT_INTERVAL,
+        );
+        let active_path = conn_idle.timer();
+        let idle_path = conn_idle.timer();
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        active_path.on_rcvd(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(10)).await;
+
+        assert!(!active_path.timed_out(Instant::now(), Duration::ZERO));
+        assert!(!idle_path.timed_out(Instant::now(), Duration::ZERO));
+        assert!(!active_path.path_timed_out(Instant::now(), Duration::ZERO));
+        assert!(idle_path.path_timed_out(Instant::now(), Duration::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retransmitted_effective_payload_does_not_extend_connection_keep_alive_window() {
+        let conn_idle = ArcConnIdle::new(
+            Duration::from_secs(120),
+            Duration::from_secs(20),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        );
+        let active_path = conn_idle.timer();
+        let idle_path = conn_idle.timer();
+        idle_path.on_sent(PacketContent::JustPing);
+
+        active_path.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(15)).await;
+        active_path.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(15)).await;
+
+        assert!(!conn_idle.keep_alive_allowed(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sent_effective_payload_updates_idle_since_only_once_until_receive() {
+        let conn_idle = ArcConnIdle::new(
+            Duration::from_secs(120),
+            Duration::from_secs(20),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        );
+        let timer = conn_idle.timer();
+
+        timer.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(15)).await;
+        timer.on_sent(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(6)).await;
+
+        assert!(!conn_idle.keep_alive_allowed(Instant::now()));
+
+        timer.on_rcvd(PacketContent::NonAckEliciting);
+        timer.on_sent(PacketContent::EffectivePayload);
+        assert!(conn_idle.keep_alive_allowed(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_does_not_open_connection_keep_alive_window() {
+        let timer = ArcConnIdle::new(
+            Duration::from_secs(20),
+            Duration::from_secs(20),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+        timer.on_sent(PacketContent::JustPing);
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!timer.keep_alive_due(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn received_packets_do_not_restart_keep_alive_send_interval() {
+        let timer = ArcConnIdle::new(
+            Duration::from_secs(120),
+            Duration::from_secs(120),
+            DEFAULT_HEARTBEAT_INTERVAL,
+        )
+        .timer();
+        timer.on_sent(PacketContent::EffectivePayload);
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        timer.on_rcvd(PacketContent::EffectivePayload);
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        assert!(timer.keep_alive_due(Instant::now()));
     }
 }

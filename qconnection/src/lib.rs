@@ -67,7 +67,7 @@ use qbase::{
     param::{ArcParameters, ParameterId},
     role::Role,
     sid::StreamId,
-    time::ArcIdleConfig,
+    time::ArcConnIdle,
     token::ArcTokenRegistry,
 };
 use qdatagram::DatagramFlow;
@@ -160,7 +160,7 @@ pub struct Components {
     interfaces: Arc<InterfaceManager>,
     rcvd_pkt_q: Arc<RcvdPacketQueue>,
     conn_state: ArcConnState,
-    idle_config: ArcIdleConfig,
+    conn_idle: ArcConnIdle,
     paths: ArcPathContexts,
     send_lock: ArcSendLock,
     tls_handshake: ArcTlsHandshake,
@@ -933,7 +933,6 @@ mod tests {
             .expect("wildcard outbound candidate should create a path");
 
         assert_eq!(path.link().src, local);
-        assert!(!path.is_validated_for_test());
     }
 
     #[tokio::test]

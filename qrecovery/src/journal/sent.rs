@@ -500,4 +500,48 @@ mod tests {
         assert!(journal.rotate().update_largest(&ack_packet(1)).is_err());
         assert!(journal.rotate().update_largest(&ack_packet(0)).is_ok());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn unacknowledged_frame_remains_available_until_loss_is_reported() {
+        let journal = ArcSentJournal::<u64>::with_capacity(1);
+        let mut packet = journal.new_packet();
+        packet.record_frame(7);
+        packet.build_with_time(Duration::from_millis(10), Duration::from_millis(20));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        assert_eq!(
+            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
+            vec![7]
+        );
+    }
+
+    #[test]
+    fn retransmitted_frame_can_be_resubmitted_until_acknowledged() {
+        let journal = ArcSentJournal::<u64>::with_capacity(1);
+        let mut packet = journal.new_packet();
+        packet.record_frame(7);
+        packet.build_with_time(Duration::from_secs(1), Duration::from_secs(2));
+
+        assert_eq!(
+            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(
+            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
+            vec![7]
+        );
+
+        assert_eq!(
+            journal.rotate().on_packet_acked(0).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert!(
+            journal
+                .rotate()
+                .may_loss_packet(0)
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+    }
 }

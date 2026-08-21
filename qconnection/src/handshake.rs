@@ -13,6 +13,7 @@ use qcongestion::HandshakeStatus;
 use crate::{
     events::{ArcEventBroker, EmitEvent, Event},
     path::ArcPathContexts,
+    space::Spaces,
 };
 
 pub type RawHandshake<T> = qbase::handshake::Handshake<T>;
@@ -46,12 +47,21 @@ where
         }
     }
 
-    pub fn discard_spaces_on_server_handshake_done(&self, paths: &ArcPathContexts) -> bool {
+    fn on_confirmed(&self, paths: &ArcPathContexts, spaces: &Spaces) {
+        self.inform_cc.handshake_confirmed();
+        spaces.discard_handshake_key();
+        paths.discard_handshake_space();
+        self.broker.emit(Event::Handshaked);
+    }
+
+    pub fn discard_spaces_on_server_handshake_done(
+        &self,
+        paths: &ArcPathContexts,
+        spaces: &Spaces,
+    ) -> bool {
         let is_server_done = self.inner.done();
         if is_server_done {
-            self.inform_cc.handshake_confirmed();
-            paths.discard_initial_and_handshake_space();
-            self.broker.emit(Event::Handshaked);
+            self.on_confirmed(paths, spaces);
         }
         is_server_done
     }
@@ -67,10 +77,12 @@ where
     pub fn discard_spaces_on_client_handshake_done(
         &self,
         paths: ArcPathContexts,
+        spaces: Spaces,
     ) -> HandshakeDoneReceiver<T> {
         HandshakeDoneReceiver {
             handshake: self.clone(),
             paths,
+            spaces,
         }
     }
 }
@@ -81,6 +93,7 @@ where
 {
     handshake: Handshake<T>,
     paths: ArcPathContexts,
+    spaces: Spaces,
 }
 
 impl<T> ReceiveFrame<HandshakeDoneFrame> for HandshakeDoneReceiver<T>
@@ -91,9 +104,7 @@ where
 
     fn recv_frame(&self, frame: HandshakeDoneFrame) -> Result<(), Error> {
         if self.handshake.inner.recv_frame(frame)? {
-            self.handshake.inform_cc.handshake_confirmed();
-            self.paths.discard_initial_and_handshake_space();
-            self.handshake.broker.emit(Event::Handshaked);
+            self.handshake.on_confirmed(&self.paths, &self.spaces);
         }
         Ok(())
     }

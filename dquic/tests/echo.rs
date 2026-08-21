@@ -3,10 +3,14 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use dquic::{
     prelude::{handy::*, *},
     qbase::param::{ClientParameters, ServerParameters},
-    qinterface::{bind_uri::BindUri, component::route::QuicRouter},
+    qinterface::{bind_uri::BindUri, component::route::QuicRouter, manager::InterfaceManager},
     qresolve::Source,
 };
-use tokio::task::JoinSet;
+use rustls::pki_types::pem::PemObject;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    task::JoinSet,
+};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
@@ -14,6 +18,32 @@ mod common;
 use common::*;
 mod echo_common;
 use echo_common::*;
+
+const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+
+async fn launch_gated_test_client(
+    router: Arc<QuicRouter>,
+    parameters: ClientParameters,
+    defer_idle_timeout: Duration,
+    gate: Arc<NetworkGateFactory>,
+    bind_uris: impl IntoIterator<Item = BindUri>,
+) -> Arc<QuicClient> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(
+        rustls::pki_types::CertificateDer::pem_slice_iter(CA_CERT).map(Result::unwrap),
+    );
+    let builder = QuicClient::builder()
+        .with_router(router)
+        .with_root_certificates(roots)
+        .without_cert()
+        .with_parameters(parameters)
+        .defer_idle_timeout(defer_idle_timeout)
+        .heartbeat_interval(TEST_HEARTBEAT_INTERVAL)
+        .with_iface_factory(gate)
+        .with_iface_manager(Arc::new(InterfaceManager::new()))
+        .with_qlog(qlogger());
+    Arc::new(builder.bind(bind_uris).await.build())
+}
 
 #[test]
 fn single_stream() -> Result<(), BoxError> {
@@ -185,6 +215,436 @@ fn idle_timeout() -> Result<(), BoxError> {
 }
 
 #[test]
+fn keep_alive_extends_path_idle_then_stops_at_defer_deadline() -> Result<(), BoxError> {
+    run(async {
+        const MAX_IDLE: Duration = Duration::from_secs(1);
+        const DEFER_IDLE: Duration = Duration::from_secs(3);
+
+        fn client_parameters() -> ClientParameters {
+            let mut params = handy::client_parameters();
+            params
+                .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+                .expect("unreachable");
+            params
+        }
+
+        fn server_parameters() -> ServerParameters {
+            let mut params = handy::server_parameters();
+            params
+                .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+                .expect("unreachable");
+            params
+        }
+
+        let router = Arc::new(QuicRouter::default());
+        let listeners = QuicListeners::builder()
+            .with_router(router.clone())
+            .without_client_cert_verifier()
+            .with_parameters(server_parameters())
+            .defer_idle_timeout(DEFER_IDLE)
+            .heartbeat_interval(TEST_HEARTBEAT_INTERVAL)
+            .with_qlog(qlogger())
+            .listen(128)?;
+        listeners
+            .add_server(
+                "localhost",
+                SERVER_CERT,
+                SERVER_KEY,
+                [BindUri::from("inet://127.0.0.1:0").alloc_port()],
+                None,
+            )
+            .await?;
+        let _server_task = AbortOnDropHandle::new(tokio::spawn(serve_echo(listeners.clone())));
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add_parsable_certificates(
+            rustls::pki_types::CertificateDer::pem_slice_iter(CA_CERT).map(Result::unwrap),
+        );
+        let client = Arc::new(
+            QuicClient::builder()
+                .with_router(router)
+                .with_root_certificates(roots)
+                .without_cert()
+                .with_parameters(client_parameters())
+                .defer_idle_timeout(DEFER_IDLE)
+                .heartbeat_interval(TEST_HEARTBEAT_INTERVAL)
+                .with_qlog(qlogger())
+                .build(),
+        );
+        let connection = client
+            .connected_to_with_source(
+                "localhost",
+                [(Source::System, get_server_addr(&listeners).into())],
+            )
+            .await?;
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        let effective_idle = connection
+            .path_context()?
+            .max_pto_duration()
+            .map(|pto| pto.saturating_mul(3))
+            .unwrap_or_default()
+            .max(MAX_IDLE);
+        tokio::time::sleep(effective_idle + Duration::from_millis(100)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), connection.terminated())
+                .await
+                .is_err(),
+            "periodic path PINGs must keep the path idle timer alive"
+        );
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        tokio::time::timeout(
+            DEFER_IDLE + effective_idle + Duration::from_secs(2),
+            async {
+                connection.terminated().await;
+            },
+        )
+        .await
+        .expect("connection must close after the KeepAlive window and path idle timeout");
+
+        listeners.shutdown();
+        Ok(())
+    })
+}
+
+#[test]
+fn established_connection_times_out_after_network_disappears() -> Result<(), BoxError> {
+    run(async {
+        const MAX_IDLE: Duration = Duration::from_millis(400);
+        const DEFER_IDLE: Duration = Duration::from_secs(3);
+
+        let mut client_params = handy::client_parameters();
+        client_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+        let mut server_params = handy::server_parameters();
+        server_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+
+        let router = Arc::new(QuicRouter::default());
+        let (listeners, server_task) = launch_echo_server(router.clone(), server_params).await?;
+        let _server_task = AbortOnDropHandle::new(tokio::spawn(server_task));
+        let gate = Arc::new(NetworkGateFactory::default());
+        let client = launch_gated_test_client(
+            router,
+            client_params,
+            DEFER_IDLE,
+            gate.clone(),
+            [BindUri::from("inet://127.0.0.1:0").alloc_port()],
+        )
+        .await;
+        let connection = client
+            .connected_to_with_source(
+                "localhost",
+                [(Source::System, get_server_addr(&listeners).into())],
+            )
+            .await?;
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        gate.disable_all();
+        tokio::time::timeout(Duration::from_secs(5), connection.terminated())
+            .await
+            .expect("one-way PING and recovery traffic must not keep the connection alive forever");
+
+        listeners.shutdown();
+        Ok(())
+    })
+}
+
+#[test]
+fn keep_alive_is_path_local_and_one_lost_path_does_not_kill_connection() -> Result<(), BoxError> {
+    run(async {
+        const MAX_IDLE: Duration = Duration::from_secs(1);
+        const DEFER_IDLE: Duration = Duration::from_secs(30);
+
+        let mut client_params = handy::client_parameters();
+        client_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+        let mut server_params = handy::server_parameters();
+        server_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+
+        let router = Arc::new(QuicRouter::default());
+        let listeners = QuicListeners::builder()
+            .with_router(router.clone())
+            .without_client_cert_verifier()
+            .with_parameters(server_params)
+            .defer_idle_timeout(DEFER_IDLE)
+            .heartbeat_interval(TEST_HEARTBEAT_INTERVAL)
+            .with_qlog(qlogger())
+            .listen(128)?;
+        listeners
+            .add_server(
+                "localhost",
+                SERVER_CERT,
+                SERVER_KEY,
+                [BindUri::from("inet://127.0.0.1:0").alloc_port()],
+                None,
+            )
+            .await?;
+        let _server_task = AbortOnDropHandle::new(tokio::spawn(serve_echo(listeners.clone())));
+
+        let bind_a = BindUri::from("inet://127.0.0.1:0").alloc_port();
+        let bind_b = BindUri::from("inet://127.0.0.1:0").alloc_port();
+        let gate = Arc::new(NetworkGateFactory::default());
+        let client = launch_gated_test_client(
+            router,
+            client_params,
+            DEFER_IDLE,
+            gate.clone(),
+            [bind_a.clone(), bind_b.clone()],
+        )
+        .await;
+        let connection = client
+            .connected_to_with_source(
+                "localhost",
+                [(Source::System, get_server_addr(&listeners).into())],
+            )
+            .await?;
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if connection.path_context().unwrap().paths::<Vec<_>>().len() == 2
+                    && gate.sent_packets(&bind_a) > 0
+                    && gate.sent_packets(&bind_b) > 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both client paths should be created and used");
+
+        let sent_a = gate.sent_packets(&bind_a);
+        let sent_b = gate.sent_packets(&bind_b);
+        tokio::time::sleep(MAX_IDLE / 2 + Duration::from_millis(300)).await;
+        assert!(
+            gate.sent_packets(&bind_a) > sent_a,
+            "path A should schedule its own keep-alive traffic"
+        );
+        assert!(
+            gate.sent_packets(&bind_b) > sent_b,
+            "path B should schedule its own keep-alive traffic"
+        );
+        assert_eq!(connection.path_context()?.paths::<Vec<_>>().len(), 2);
+
+        assert!(gate.disable(&bind_b), "path B gate should exist");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let paths = connection.path_context().unwrap().paths::<Vec<_>>();
+                assert!(
+                    paths.iter().any(|(_, path)| path.bind_uri() == bind_a),
+                    "healthy path A must not be removed while path B is black-holed"
+                );
+                if !paths.iter().any(|(_, path)| path.bind_uri() == bind_b) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the black-holed path should eventually fail recovery and be removed");
+
+        assert!(connection.has_viable_path()?);
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        listeners.shutdown();
+        Ok(())
+    })
+}
+
+#[test]
+fn data_on_retired_path_moves_to_surviving_path() -> Result<(), BoxError> {
+    run(async {
+        const MAX_IDLE: Duration = Duration::from_secs(5);
+        const DEFER_IDLE: Duration = Duration::from_secs(30);
+
+        let mut client_params = handy::client_parameters();
+        client_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+        let mut server_params = handy::server_parameters();
+        server_params
+            .set(ParameterId::MaxIdleTimeout, MAX_IDLE)
+            .expect("valid idle timeout");
+
+        let router = Arc::new(QuicRouter::default());
+        let listeners = QuicListeners::builder()
+            .with_router(router.clone())
+            .without_client_cert_verifier()
+            .with_parameters(server_params)
+            .defer_idle_timeout(DEFER_IDLE)
+            .heartbeat_interval(TEST_HEARTBEAT_INTERVAL)
+            .with_qlog(qlogger())
+            .listen(128)?;
+        listeners
+            .add_server(
+                "localhost",
+                SERVER_CERT,
+                SERVER_KEY,
+                [BindUri::from("inet://127.0.0.1:0").alloc_port()],
+                None,
+            )
+            .await?;
+
+        let (server_connection_tx, server_connection_rx) = tokio::sync::oneshot::channel();
+        let (request_received_tx, request_received_rx) = tokio::sync::oneshot::channel();
+        let (write_response_tx, write_response_rx) = tokio::sync::oneshot::channel();
+        let server_listeners = listeners.clone();
+        let server_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let (connection, _, _, _) = server_listeners.accept().await.unwrap();
+            assert!(server_connection_tx.send(connection.clone()).is_ok());
+            let (_, (reader, writer)) = connection.accept_bi_stream().await.unwrap();
+            echo_stream(reader, writer).await;
+            let (_, (mut reader, mut writer)) = connection.accept_bi_stream().await.unwrap();
+            let mut request = Vec::new();
+            reader.read_to_end(&mut request).await.unwrap();
+            assert_eq!(request, TEST_DATA);
+            request_received_tx.send(()).unwrap();
+            write_response_rx.await.unwrap();
+            writer.write_all(TEST_DATA).await.unwrap();
+            writer.shutdown().await.unwrap();
+        }));
+
+        let bind_a = BindUri::from("inet://127.0.0.1:0").alloc_port();
+        let bind_b = BindUri::from("inet://127.0.0.1:0").alloc_port();
+        let gate = Arc::new(NetworkGateFactory::default());
+        let client = launch_gated_test_client(
+            router,
+            client_params,
+            DEFER_IDLE,
+            gate.clone(),
+            [bind_a.clone(), bind_b.clone()],
+        )
+        .await;
+        let connection = client
+            .connected_to_with_source(
+                "localhost",
+                [(Source::System, get_server_addr(&listeners).into())],
+            )
+            .await?;
+        let server_connection = server_connection_rx.await?;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let client_ready = connection.path_context().unwrap().paths::<Vec<_>>().len() == 2;
+                let server_ready = server_connection
+                    .path_context()
+                    .unwrap()
+                    .paths::<Vec<_>>()
+                    .len()
+                    == 2;
+                if client_ready && server_ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both endpoints should have two paths");
+        send_and_verify_echo(&connection, TEST_DATA).await?;
+
+        let client_paths = connection.path_context()?.paths::<Vec<_>>();
+        let client_a = client_paths
+            .iter()
+            .find(|(_, path)| path.bind_uri() == bind_a)
+            .map(|(pathway, _)| *pathway)
+            .expect("client path A");
+        let client_b = client_paths
+            .iter()
+            .find(|(_, path)| path.bind_uri() == bind_b)
+            .map(|(pathway, _)| *pathway)
+            .expect("client path B");
+        let reciprocal = |left: Pathway, right: Pathway| {
+            left.local() == right.remote() && left.remote() == right.local()
+        };
+        let server_paths = server_connection.path_context()?.paths::<Vec<_>>();
+        let server_a = server_paths
+            .iter()
+            .find(|(pathway, _)| reciprocal(*pathway, client_a))
+            .map(|(pathway, _)| *pathway)
+            .expect("server path A");
+        let server_b = server_paths
+            .iter()
+            .find(|(pathway, _)| reciprocal(*pathway, client_b))
+            .map(|(pathway, _)| *pathway)
+            .expect("server path B");
+
+        assert!(gate.disable(&bind_b));
+        connection.del_path(&client_b)?;
+
+        let (_, (mut response_reader, mut request_writer)) =
+            connection.open_bi_stream().await?.unwrap();
+        request_writer.write_all(TEST_DATA).await?;
+        request_writer.shutdown().await?;
+        request_received_rx.await?;
+
+        assert!(gate.disable(&bind_a));
+        server_connection.del_path(&server_a)?;
+        assert_eq!(server_connection.path_context()?.paths::<Vec<_>>().len(), 1);
+        write_response_tx.send(()).unwrap();
+
+        let metrics = server_connection.metrics()?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while metrics.inflight_bytes() < TEST_DATA.len() as u64 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the response should be sent and remain unacknowledged on B");
+
+        assert!(gate.enable(&bind_a));
+        let (_, mut probe_writer) = connection.open_uni_stream().await?.unwrap();
+        probe_writer.write_all(b"recreate A").await?;
+        tokio::time::timeout(Duration::from_secs(2), probe_writer.shutdown())
+            .await
+            .expect("probe data and FIN should be acknowledged on A")?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if server_connection
+                    .path_context()
+                    .unwrap()
+                    .paths::<Vec<_>>()
+                    .iter()
+                    .any(|(pathway, _)| reciprocal(*pathway, client_a))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new traffic on A should recreate the server path");
+
+        server_connection.del_path(&server_b)?;
+        let mut response = Vec::new();
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(3),
+            response_reader.read_to_end(&mut response),
+        )
+        .await;
+        assert!(
+            read_result.is_ok(),
+            "B-local response should be retransmitted on A; received {} of {} bytes",
+            response.len(),
+            TEST_DATA.len()
+        );
+        read_result.unwrap()?;
+        assert_eq!(response, TEST_DATA);
+
+        listeners.shutdown();
+        server_task.await?;
+        Ok(())
+    })
+}
+
+#[test]
 fn unreachable_server_connection_times_out() -> Result<(), BoxError> {
     run(async {
         fn short_idle_client_parameters() -> ClientParameters {
@@ -206,9 +666,9 @@ fn unreachable_server_connection_times_out() -> Result<(), BoxError> {
             .connected_to_with_source("localhost", [(Source::System, unreachable.into())])
             .await?;
 
-        tokio::time::timeout(Duration::from_secs(2), connection.terminated())
+        tokio::time::timeout(Duration::from_secs(5), connection.terminated())
             .await
-            .expect("unreachable connection should terminate by max idle timeout");
+            .expect("unreachable connection should terminate after its last path times out");
 
         Ok(())
     })

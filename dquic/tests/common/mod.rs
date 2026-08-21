@@ -2,17 +2,29 @@
 #![allow(unused)]
 
 use std::{
+    collections::HashMap,
     future::Future,
+    io,
     net::SocketAddr,
-    sync::{Arc, LazyLock, OnceLock},
+    sync::{
+        Arc, LazyLock, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
     time::Duration,
 };
 
+use bytes::BytesMut;
 use dquic::{
     prelude::{handy::*, *},
-    qbase::{self, param::ClientParameters},
-    qinterface::{component::route::QuicRouter, io::IO},
+    qbase::{self, net::route::Route, param::ClientParameters},
+    qinterface::{
+        bind_uri::BindUri,
+        component::route::QuicRouter,
+        io::{IO, ProductIO, handy::DEFAULT_IO_FACTORY},
+    },
 };
+use futures::task::AtomicWaker;
 use qevent::telemetry::QLog;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use tokio::time;
@@ -28,6 +40,132 @@ pub fn qlogger() -> Arc<dyn QLog + Send + Sync> {
 }
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Default)]
+struct NetworkGateState {
+    disabled: AtomicBool,
+    sent_packets: AtomicUsize,
+    recv_waker: AtomicWaker,
+}
+
+/// Test-only I/O factory that can turn a live interface into a silent network black hole.
+#[derive(Default)]
+pub struct NetworkGateFactory {
+    states: Mutex<HashMap<BindUri, Arc<NetworkGateState>>>,
+}
+
+impl NetworkGateFactory {
+    fn state(&self, bind_uri: &BindUri) -> Option<Arc<NetworkGateState>> {
+        self.states.lock().unwrap().get(bind_uri).cloned()
+    }
+
+    pub fn disable(&self, bind_uri: &BindUri) -> bool {
+        let Some(state) = self.state(bind_uri) else {
+            return false;
+        };
+        state.disabled.store(true, Ordering::Release);
+        state.recv_waker.wake();
+        true
+    }
+
+    pub fn enable(&self, bind_uri: &BindUri) -> bool {
+        let Some(state) = self.state(bind_uri) else {
+            return false;
+        };
+        state.disabled.store(false, Ordering::Release);
+        state.recv_waker.wake();
+        true
+    }
+
+    pub fn disable_all(&self) {
+        for state in self.states.lock().unwrap().values() {
+            state.disabled.store(true, Ordering::Release);
+            state.recv_waker.wake();
+        }
+    }
+
+    pub fn sent_packets(&self, bind_uri: &BindUri) -> usize {
+        self.state(bind_uri)
+            .map(|state| state.sent_packets.load(Ordering::Acquire))
+            .unwrap_or_default()
+    }
+}
+
+impl ProductIO for NetworkGateFactory {
+    fn bind(&self, bind_uri: BindUri) -> Box<dyn IO> {
+        let state = Arc::new(NetworkGateState::default());
+        self.states
+            .lock()
+            .unwrap()
+            .insert(bind_uri.clone(), state.clone());
+        Box::new(NetworkGateIo {
+            inner: DEFAULT_IO_FACTORY.bind(bind_uri),
+            state,
+        })
+    }
+}
+
+struct NetworkGateIo {
+    inner: Box<dyn IO>,
+    state: Arc<NetworkGateState>,
+}
+
+impl IO for NetworkGateIo {
+    fn bind_uri(&self) -> BindUri {
+        self.inner.bind_uri()
+    }
+
+    fn bound_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.bound_addr()
+    }
+
+    fn max_segment_size(&self) -> io::Result<usize> {
+        self.inner.max_segment_size()
+    }
+
+    fn max_segments(&self) -> io::Result<usize> {
+        self.inner.max_segments()
+    }
+
+    fn poll_send(
+        &self,
+        cx: &mut Context,
+        pkts: &[io::IoSlice],
+        route: Route,
+    ) -> Poll<io::Result<usize>> {
+        if self.state.disabled.load(Ordering::Acquire) {
+            self.state
+                .sent_packets
+                .fetch_add(pkts.len(), Ordering::AcqRel);
+            return Poll::Ready(Ok(pkts.len()));
+        }
+        match self.inner.poll_send(cx, pkts, route) {
+            Poll::Ready(Ok(sent)) => {
+                self.state.sent_packets.fetch_add(sent, Ordering::AcqRel);
+                Poll::Ready(Ok(sent))
+            }
+            result => result,
+        }
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        pkts: &mut [BytesMut],
+        route: &mut [Route],
+    ) -> Poll<io::Result<usize>> {
+        // Register before checking the flag so disable() cannot race a pending inner receive.
+        self.state.recv_waker.register(cx.waker());
+        if self.state.disabled.load(Ordering::Acquire) {
+            return Poll::Pending;
+        }
+        self.inner.poll_recv(cx, pkts, route)
+    }
+
+    fn poll_close(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
+        self.inner.poll_close(cx)
+    }
+}
 
 pub fn run<F: Future>(future: F) -> F::Output {
     static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {

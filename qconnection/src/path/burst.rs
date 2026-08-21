@@ -35,7 +35,7 @@ use qrecovery::journal::{AckPackege, ArcRcvdJournal, Journal};
 
 use crate::{
     ArcDcidCell, ArcReliableFrameDeque, CidRegistry, Components,
-    path::{AntiAmplifier, Constraints},
+    path::{AntiAmplifier, ArcPathContexts, Constraints},
     space::{Spaces, data::DataSpace, handshake::HandshakeSpace, initial::InitialSpace},
     tls::ArcTlsHandshake,
     tx::PacketWriter,
@@ -71,6 +71,7 @@ pub struct Burst {
     spin: bool,
 
     spaces: Spaces,
+    paths: ArcPathContexts,
 
     tls_handshake: ArcTlsHandshake,
 }
@@ -127,6 +128,7 @@ impl super::Path {
             cid_registry: components.cid_registry.clone(),
             spin: false, // TODO
             spaces: components.spaces.clone(),
+            paths: components.paths.clone(),
             tls_handshake: components.tls_handshake.clone(),
         }
     }
@@ -413,7 +415,14 @@ impl Burst {
             buffer,
             &mut packet_content,
         ) {
-            Ok(bytes_sent) => buffer = buffer[bytes_sent..].as_mut(),
+            Ok(bytes_sent) => {
+                buffer = buffer[bytes_sent..].as_mut();
+                // RFC 9001 Section 4.9.1 requires clients to discard Initial keys
+                // when they first send a Handshake packet.
+                if self.cid_registry.role() == Role::Client && self.spaces.discard_initial_key() {
+                    self.paths.discard_initial_space();
+                }
+            }
             Err(s) => signals |= s,
         }
 
@@ -541,13 +550,25 @@ impl Burst {
         Err(BurstError::Signals(signals))
     }
 
-    fn load_heartbeat(&self, buffer: &mut [u8]) -> Result<(usize, PacketContent), BurstError> {
-        let Self { spaces, path, .. } = self;
+    fn load_keep_alive(&self, buffer: &mut [u8]) -> Result<(usize, PacketContent), BurstError> {
+        let Self {
+            spaces,
+            path,
+            tls_handshake,
+            ..
+        } = self;
         let mut assembler = self.assembler()?;
         let mut packet_content = PacketContent::default();
+        let one_rtt_ready = tls_handshake
+            .is_finished()
+            .is_ok_and(|is_finished| is_finished);
+        let now = tokio::time::Instant::now();
+        if !path.keep_alive_due(one_rtt_ready, now) {
+            return Err(BurstError::Signals(Signals::TRANSPORT));
+        }
         match assembler.assemble::<OneRttHeader, _, _>(
             spaces.data().as_ref(),
-            &path.heartbeat_sndbuf,
+            &PingFrame,
             buffer,
             &mut packet_content,
         ) {
@@ -556,11 +577,14 @@ impl Burst {
         }
     }
 
-    pub async fn burst<'b>(
+    pub fn burst<'b>(
         &self,
         data_sources: &mut DataSources,
         buffers: &'b mut Vec<Vec<u8>>,
-    ) -> Result<Vec<io::IoSlice<'b>>, BurstError> {
+    ) -> Result<(Vec<io::IoSlice<'b>>, PacketContent), BurstError> {
+        if !self.path.is_active() {
+            return Err(BurstError::PathDeactived);
+        }
         let Ok(max_segments) = self.path.interface.max_segments() else {
             return Err(BurstError::PathDeactived);
         };
@@ -570,6 +594,7 @@ impl Burst {
 
         let reversed_size = forward_reserved_overhead(self.path.pathway);
         let mut segment_lengths = Vec::with_capacity(max_segments);
+        let mut burst_content = PacketContent::default();
         let Some(mut remaining_credit) = self.path.anti_amplifier.balance()? else {
             return Err(BurstError::PathDeactived);
         };
@@ -600,9 +625,6 @@ impl Burst {
             let buffer = &mut segment[..buffer_size][reversed_size..];
             let load_result = self
                 .load_spaces(data_sources, buffer)
-                .inspect(|(_, packet_content)| {
-                    self.path.idle_timer.on_sent(*packet_content);
-                })
                 .or_else(|error| match error {
                     BurstError::Signals(signals) => self.load_ping(buffer).map_err(|e| match e {
                         BurstError::Signals(s) => BurstError::Signals(signals | s),
@@ -612,14 +634,15 @@ impl Burst {
                 })
                 .or_else(|error| match error {
                     BurstError::Signals(signals) => {
-                        self.load_heartbeat(buffer).map_err(|e| match e {
+                        self.load_keep_alive(buffer).map_err(|e| match e {
                             BurstError::Signals(s) => BurstError::Signals(signals | s),
                             e @ BurstError::PathDeactived => e,
                         })
                     }
                     e @ BurstError::PathDeactived => Err(e),
                 })
-                .map(|(packet_size, _)| {
+                .map(|(packet_size, packet_content)| {
+                    burst_content += packet_content;
                     if reversed_size > 0 {
                         let encoded_size =
                             encode_forward_in_place(segment, packet_size, self.path.pathway);
@@ -648,11 +671,14 @@ impl Burst {
             }
         }
 
-        Ok(segment_lengths
-            .iter()
-            .zip(buffers)
-            .map(|(&len, buffer)| io::IoSlice::new(&buffer[..len]))
-            .collect())
+        Ok((
+            segment_lengths
+                .iter()
+                .zip(buffers)
+                .map(|(&len, buffer)| io::IoSlice::new(&buffer[..len]))
+                .collect(),
+            burst_content,
+        ))
     }
 }
 
