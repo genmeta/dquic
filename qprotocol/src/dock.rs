@@ -31,12 +31,17 @@ impl Dock {
         }
 
         self.sockets.insert(bound, Arc::downgrade(&socket));
+        self.topology.stun().register_socket(bound, &socket);
+        let registered = Arc::downgrade(&socket);
         let dock = Arc::downgrade(self);
         let topology = self.topology.clone();
         let task = tokio::spawn(async move {
             let _ = topology.receive(socket).await;
+            topology.stun().unregister_socket(bound, &registered);
             if let Some(dock) = dock.upgrade() {
-                dock.sockets.remove(&bound);
+                dock.sockets.remove_if(&bound, |_, socket| {
+                    std::sync::Weak::ptr_eq(socket, &registered)
+                });
                 dock.tasks.remove(&bound);
             }
         });
@@ -54,7 +59,9 @@ impl Dock {
     }
 
     pub fn remove_bound(&self, bound: SocketAddr) -> bool {
-        self.sockets.remove(&bound);
+        if let Some((_, socket)) = self.sockets.remove(&bound) {
+            self.topology.stun().unregister_socket(bound, &socket);
+        }
         self.tasks.remove(&bound).is_some_and(|(_, task)| {
             task.abort();
             true
@@ -91,6 +98,11 @@ impl Dock {
 
 impl Drop for Dock {
     fn drop(&mut self) {
+        for socket in self.sockets.iter() {
+            self.topology
+                .stun()
+                .unregister_socket(*socket.key(), socket.value());
+        }
         for task in self.tasks.iter() {
             task.abort();
         }

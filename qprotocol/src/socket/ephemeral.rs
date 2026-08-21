@@ -10,7 +10,7 @@ use thiserror::Error;
 use super::{UdpSocket, quic::QuicSocket};
 use crate::{
     dock::Dock,
-    protocol::stun::{CookieId, Request, StunProtocol},
+    protocol::stun::{Request, StunError, StunProtocol},
 };
 
 #[derive(Debug, Error)]
@@ -42,14 +42,13 @@ impl EphemeralSocket {
 
     pub async fn outer_addr(
         &self,
-        stun: &StunProtocol,
+        stun: &Arc<StunProtocol>,
         agent: SocketAddr,
-        cookie_id: CookieId,
-    ) -> io::Result<SocketAddr> {
-        let (response, _) = stun
-            .request(self.udp.clone(), agent, Request::default(), cookie_id)
-            .await?;
-        response.map_addr()
+    ) -> Result<SocketAddr, StunError> {
+        let mut transaction = stun.new_transaction();
+        let link = Link::new(self.udp.local_addr()?, agent);
+        let (_, response) = transaction.request(link, Request::default()).await?;
+        Ok(response.map_addr()?)
     }
 
     pub async fn send(&self, packets: &[IoSlice<'_>], link: Link) -> io::Result<usize> {

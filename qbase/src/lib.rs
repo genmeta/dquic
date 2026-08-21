@@ -103,51 +103,90 @@ where
 }
 
 #[derive(Debug, Default)]
-pub enum Receiving<F> {
+pub enum Receiving<I> {
     #[default]
     Pending,
     Waiting(Waker),
-    Rcvd(F),
+    Rcvd(I),
     Read,
-    Reset,
+    Cancelled,
 }
 
-impl<F> Receiving<F> {
-    fn recv_frame(&mut self, frame: F) {
-        match std::mem::take(self) {
+impl<I> Receiving<I> {
+    fn obtain(&mut self, item: I) {
+        match self {
             Self::Pending => {
-                *self = Self::Rcvd(frame);
+                *self = Self::Rcvd(item);
             }
-            Self::Waiting(waker) => {
+            Self::Waiting(_) => {
+                let Self::Waiting(waker) = std::mem::replace(self, Self::Rcvd(item)) else {
+                    unreachable!()
+                };
                 waker.wake();
-                *self = Self::Rcvd(frame);
             }
             _ => (),
         }
     }
 
-    fn reset(&mut self) {
-        if let Self::Waiting(waker) = std::mem::replace(self, Self::Reset) {
+    fn cancel(&mut self) {
+        if let Self::Waiting(waker) = std::mem::replace(self, Self::Cancelled) {
             waker.wake();
         }
     }
 }
 
 #[derive(Debug, Error)]
-#[error("Reset")]
-pub struct ResetError;
+#[error("Cancelled")]
+pub struct Cancelled;
 
-#[derive(Debug, Default, Clone)]
-pub struct ArcReceiving<F>(Arc<Mutex<Receiving<F>>>);
+impl<I: Unpin> Future for Receiving<I> {
+    type Output = Result<Option<I>, Cancelled>;
 
-impl<F> ArcReceiving<F> {
-    pub fn reset(&self) {
-        self.0.lock().unwrap().reset();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let state = self.get_mut();
+        match std::mem::replace(state, Self::Read) {
+            Self::Pending => {
+                *state = Self::Waiting(cx.waker().clone());
+                Poll::Pending
+            }
+            Self::Waiting(mut waker) => {
+                if !waker.will_wake(cx.waker()) {
+                    waker = cx.waker().clone();
+                }
+                *state = Self::Waiting(waker);
+                Poll::Pending
+            }
+            Self::Rcvd(item) => Poll::Ready(Ok(Some(item))),
+            Self::Read => Poll::Ready(Ok(None)),
+            Self::Cancelled => {
+                *state = Self::Cancelled;
+                Poll::Ready(Err(Cancelled))
+            }
+        }
     }
 }
 
-impl<F: Unpin> Future for ArcReceiving<F> {
-    type Output = Result<Option<F>, ResetError>;
+#[derive(Debug, Clone)]
+pub struct ArcReceiving<I>(Arc<Mutex<Receiving<I>>>);
+
+impl<I> Default for ArcReceiving<I> {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Receiving::Pending)))
+    }
+}
+
+impl<I> ArcReceiving<I> {
+    pub fn obtain(&self, item: I) {
+        self.0.lock().unwrap().obtain(item);
+    }
+
+    pub fn cancel(&self) {
+        self.0.lock().unwrap().cancel();
+    }
+}
+
+impl<I: Unpin> Future for ArcReceiving<I> {
+    type Output = Result<Option<I>, Cancelled>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.lock().unwrap().poll_unpin(cx)
@@ -155,4 +194,79 @@ impl<F: Unpin> Future for ArcReceiving<F> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, Wake, Waker},
+    };
+
+    use super::ArcReceiving;
+    //use crate::frame::io::ReceiveFrame;
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn poll<T: Unpin>(
+        future: &mut ArcReceiving<T>,
+        waker: &Waker,
+    ) -> Poll<Result<Option<T>, super::Cancelled>> {
+        Future::poll(Pin::new(future), &mut Context::from_waker(waker))
+    }
+
+    #[test]
+    fn received_frame_wakes_waiter() {
+        let mut receiving = ArcReceiving::<u8>::default();
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(wake_counter.clone());
+
+        assert!(poll(&mut receiving, &waker).is_pending());
+        receiving.obtain(7);
+
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            poll(&mut receiving, &waker),
+            Poll::Ready(Ok(Some(7)))
+        ));
+    }
+
+    #[test]
+    fn repoll_replaces_cancelled_waiter() {
+        let mut receiving = ArcReceiving::<u8>::default();
+        let first_counter = Arc::new(WakeCounter::default());
+        let first_waker = Waker::from(first_counter.clone());
+        let second_counter = Arc::new(WakeCounter::default());
+        let second_waker = Waker::from(second_counter.clone());
+
+        assert!(poll(&mut receiving, &first_waker).is_pending());
+        assert!(poll(&mut receiving, &second_waker).is_pending());
+        receiving.obtain(7);
+
+        assert_eq!(first_counter.0.load(Ordering::Relaxed), 0);
+        assert_eq!(second_counter.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn duplicate_frame_does_not_discard_first_frame() {
+        let mut receiving = ArcReceiving::default();
+        let waker = Waker::noop();
+
+        receiving.obtain(7);
+        receiving.obtain(9);
+
+        assert!(matches!(
+            poll(&mut receiving, waker),
+            Poll::Ready(Ok(Some(7)))
+        ));
+    }
+}
