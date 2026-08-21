@@ -1,8 +1,3 @@
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
-
 use bytes::Bytes;
 
 use super::{
@@ -19,7 +14,7 @@ use super::{
     stream::stream_frame_with_flag, stream_data_blocked::be_stream_data_blocked_frame,
     streams_blocked::streams_blocked_frame_with_dir, *,
 };
-use crate::{ArcReceiving, Receiving, ResetError, util::ContinuousData};
+use crate::{ArcReceiving, util::ContinuousData};
 
 /// Return a parser for a complete frame from the raw bytes with the given type,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
@@ -238,38 +233,11 @@ pub trait ReceiveFrame<T> {
     fn recv_frame(&self, frame: T) -> Result<Self::Output, crate::error::Error>;
 }
 
-impl<F: Unpin> Future for Receiving<F> {
-    type Output = Result<Option<F>, ResetError>;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let state = self.get_mut();
-        match std::mem::take(state) {
-            Self::Pending => Poll::Pending,
-            Self::Waiting(waker) => {
-                *state = Self::Waiting(waker);
-                Poll::Pending
-            }
-            Self::Rcvd(frame) => {
-                *state = Self::Read;
-                Poll::Ready(Ok(Some(frame)))
-            }
-            Self::Read => {
-                *state = Self::Read;
-                Poll::Ready(Ok(None))
-            }
-            Self::Reset => {
-                *state = Self::Reset;
-                Poll::Ready(Err(ResetError))
-            }
-        }
-    }
-}
-
 impl<F> ReceiveFrame<F> for ArcReceiving<F> {
     type Output = ();
 
     fn recv_frame(&self, frame: F) -> Result<Self::Output, crate::error::Error> {
-        self.0.lock().unwrap().recv_frame(frame);
+        self.obtain(frame);
         Ok(())
     }
 }
