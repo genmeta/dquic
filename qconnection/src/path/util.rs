@@ -33,23 +33,23 @@ impl<T> SendBuffer<T> {
     /// [`SendBuffer`] can only buffer one frame at a time. If you write a new frame to the buffer before the previous
     /// frame is sent, the previous frame will be overwritten.
     pub fn write(&self, frame: T) {
-        self.tx_waker.wake_by(Signals::TRANSPORT);
         *self.item.lock().unwrap() = Some(frame);
+        self.tx_waker.wake_by(Signals::TRANSPORT);
     }
 }
 
 impl<F> SendBuffer<F> {
     /// Try load the frame to be sent into the `packet`.
-    pub fn try_load_frames_into<P: ?Sized>(&self, packet: &mut P) -> Result<(), Signals>
+    pub fn try_load_frames_into<P: ?Sized>(&self, packet: &mut P) -> Result<PacketContent, Signals>
     where
         for<'a> &'a F: Package<P>,
     {
         let mut guard = self.item.lock().unwrap();
         match guard.as_ref() {
             Some(mut frame) => {
-                frame.dump(packet)?;
+                let packet_content = frame.dump(packet)?;
                 guard.take().unwrap();
-                Ok(())
+                Ok(packet_content)
             }
             None => Err(Signals::TRANSPORT),
         }
@@ -62,8 +62,7 @@ where
 {
     #[inline]
     fn dump(&mut self, into: &mut P) -> Result<PacketContent, Signals> {
-        self.try_load_frames_into(into)?;
-        Ok(PacketContent::EffectivePayload)
+        self.try_load_frames_into(into)
     }
 }
 
@@ -217,5 +216,29 @@ pub trait ApplyConstraints {
 impl ApplyConstraints for &mut [u8] {
     fn apply(self, constraints: &Constraints) -> Self {
         constraints.constrain(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestFrame(PacketContent);
+
+    impl Package<Vec<PacketContent>> for &TestFrame {
+        fn dump(&mut self, target: &mut Vec<PacketContent>) -> Result<PacketContent, Signals> {
+            target.push(self.0);
+            Ok(self.0)
+        }
+    }
+
+    #[test]
+    fn send_buffer_propagates_frame_packet_content() {
+        let buffer = SendBuffer::new(ArcSendWaker::new());
+        buffer.write(TestFrame(PacketContent::JustPing));
+        let mut contents = Vec::new();
+        let mut package = &buffer;
+
+        assert_eq!(package.dump(&mut contents), Ok(PacketContent::JustPing));
     }
 }

@@ -850,3 +850,92 @@ where
         ArcRecver::new(sid, buf_size, Ext(self.ctrl_frames.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+    };
+
+    use bytes::{BufMut, BytesMut, buf::UninitSlice};
+    use qbase::{
+        flow::ArcSendControler,
+        frame::{Frame, io::SendFrame},
+        net::tx::ArcSendWakers,
+        packet::{Package, PacketContent, RecordFrame},
+        param::handy::{client_parameters, server_parameters},
+        role::Role,
+        sid::{Dir, handy::DemandConcurrency},
+        util::ContinuousData,
+    };
+    use tokio::io::AsyncWrite;
+
+    use super::{DataStreams, IOState};
+    use crate::send::{Outgoing, Writer};
+
+    #[derive(Clone, Copy)]
+    struct MockFrameSender;
+
+    impl<F> SendFrame<F> for MockFrameSender {
+        fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
+    }
+
+    struct TestPacket(BytesMut);
+
+    // Safety: every method delegates to BytesMut without changing its initialized-length rules.
+    unsafe impl BufMut for TestPacket {
+        fn remaining_mut(&self) -> usize {
+            self.0.remaining_mut()
+        }
+
+        unsafe fn advance_mut(&mut self, cnt: usize) {
+            unsafe { self.0.advance_mut(cnt) };
+        }
+
+        fn chunk_mut(&mut self) -> &mut UninitSlice {
+            self.0.chunk_mut()
+        }
+    }
+
+    impl<D: ContinuousData> RecordFrame<Frame<D>, D> for TestPacket {
+        fn record_frame(&mut self, _frame: &Frame<D>) {}
+    }
+
+    #[test]
+    fn empty_stream_fin_is_effective_packet_content() {
+        let streams = Arc::new(DataStreams::new(
+            Role::Client,
+            &client_parameters(),
+            &server_parameters(),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            ArcSendWakers::default(),
+            None,
+        ));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let sid = match streams.stream_ids.local.poll_alloc_sid(&mut cx, Dir::Uni) {
+            Poll::Ready(Some(sid)) => sid,
+            _ => panic!("the peer should permit a unidirectional stream"),
+        };
+        let sender = streams.create_sender(sid, 1024);
+        streams
+            .output
+            .streams()
+            .as_mut()
+            .expect("streams should be open")
+            .insert(sid, (Outgoing::new(sender.clone()), IOState::send_only()));
+
+        let mut writer = Writer::new(sender);
+        assert!(Pin::new(&mut writer).poll_shutdown(&mut cx).is_pending());
+
+        let flow_ctrl = ArcSendControler::new(1024, MockFrameSender, ArcSendWakers::default());
+        let mut package = streams.package(flow_ctrl, false);
+        let mut packet = TestPacket(BytesMut::with_capacity(128));
+        assert_eq!(
+            package.dump(&mut packet),
+            Ok(PacketContent::EffectivePayload)
+        );
+    }
+}

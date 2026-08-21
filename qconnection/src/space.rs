@@ -69,6 +69,14 @@ impl Spaces {
     pub fn data(&self) -> &Arc<data::DataSpace> {
         &self.data
     }
+
+    pub(crate) fn discard_initial_key(&self) -> bool {
+        self.initial.keys().invalid().is_some()
+    }
+
+    pub(crate) fn discard_handshake_key(&self) {
+        _ = self.handshake.keys().invalid();
+    }
 }
 
 fn assemble_closing_packet<'s, 'b: 's, H, S>(

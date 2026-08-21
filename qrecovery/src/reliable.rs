@@ -64,9 +64,16 @@ impl<F> ArcReliableFrameDeque<F> {
         if deque.is_empty() {
             return Err(Signals::TRANSPORT);
         }
+        let mut wrote_frame = false;
         while let Some(mut frame) = deque.front() {
-            frame.dump(packet)?;
-            deque.pop_front();
+            match frame.dump(packet) {
+                Ok(_) => {
+                    wrote_frame = true;
+                    deque.pop_front();
+                }
+                Err(signals) if !wrote_frame => return Err(signals),
+                Err(_) => break,
+            }
         }
         Ok(())
     }
@@ -90,5 +97,74 @@ where
     fn send_frame<I: IntoIterator<Item = T>>(&self, iter: I) {
         self.frames_guard().extend(iter.into_iter().map(Into::into));
         self.tx_wakers.wake_all_by(Signals::TRANSPORT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use qbase::{
+        frame::{EncodeSize, FrameType, GetFrameType, io::SendFrame},
+        net::tx::Signals,
+        packet::{Package, PacketContent},
+    };
+
+    use super::ArcReliableFrameDeque;
+
+    #[derive(Clone)]
+    struct TestFrame;
+
+    struct LimitedPacket {
+        remaining_frames: usize,
+        written_frames: usize,
+    }
+
+    impl EncodeSize for TestFrame {}
+
+    impl GetFrameType for TestFrame {
+        fn frame_type(&self) -> FrameType {
+            FrameType::HandshakeDone
+        }
+    }
+
+    impl Package<Vec<()>> for &TestFrame {
+        fn dump(&mut self, target: &mut Vec<()>) -> Result<PacketContent, Signals> {
+            target.push(());
+            Ok(PacketContent::EffectivePayload)
+        }
+    }
+
+    impl Package<LimitedPacket> for &TestFrame {
+        fn dump(&mut self, target: &mut LimitedPacket) -> Result<PacketContent, Signals> {
+            if target.remaining_frames == 0 {
+                return Err(Signals::CONGESTION);
+            }
+            target.remaining_frames -= 1;
+            target.written_frames += 1;
+            Ok(PacketContent::EffectivePayload)
+        }
+    }
+
+    #[test]
+    fn reliable_queue_preserves_content_when_only_some_frames_fit() {
+        let mut queue: ArcReliableFrameDeque<TestFrame> =
+            ArcReliableFrameDeque::with_capacity_and_wakers(2, Default::default());
+        queue.send_frame([TestFrame, TestFrame]);
+        let mut packet = LimitedPacket {
+            remaining_frames: 1,
+            written_frames: 0,
+        };
+
+        assert_eq!(queue.dump(&mut packet), Ok(PacketContent::EffectivePayload));
+        assert_eq!(packet.written_frames, 1);
+
+        let mut next_packet = LimitedPacket {
+            remaining_frames: 1,
+            written_frames: 0,
+        };
+        assert_eq!(
+            queue.dump(&mut next_packet),
+            Ok(PacketContent::EffectivePayload)
+        );
+        assert_eq!(next_packet.written_frames, 1);
     }
 }

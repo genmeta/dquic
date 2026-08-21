@@ -9,14 +9,14 @@ use std::{
 use qbase::{
     Epoch,
     error::Error,
-    frame::{PathChallengeFrame, PathResponseFrame, PingFrame, io::ReceiveFrame},
+    frame::{PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{
         route::{Line, Link, Pathway, Route},
-        tx::ArcSendWaker,
+        tx::{ArcSendWaker, Signals},
     },
     packet::PacketContent,
     param::ParameterId,
-    time::ArcIdleTimer,
+    time::PathIdleTimer,
 };
 use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, MSS, PathStatus, Transport};
 use qevent::{quic::connectivity::PathAssigned, telemetry::Instrument};
@@ -39,7 +39,6 @@ pub use aa::*;
 pub use burst::PacketSpace;
 pub use error::*;
 pub use paths::*;
-use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument as _;
 pub use util::*;
 
@@ -55,8 +54,7 @@ pub struct Path {
     cc: ArcCC,
     dcid_cell: ArcDcidCell,
     anti_amplifier: AntiAmplifier,
-    idle_timer: ArcIdleTimer,
-    heartbeat_sndbuf: SendBuffer<PingFrame>,
+    idle_timer: PathIdleTimer,
     challenge_sndbuf: SendBuffer<PathChallengeFrame>,
     response_sndbuf: SendBuffer<PathResponseFrame>,
     response_rcvbuf: RecvBuffer<PathResponseFrame>,
@@ -103,7 +101,7 @@ impl Components {
                 pathway,
                 dcid_cell,
                 max_ack_delay,
-                self.idle_config.timer(),
+                self.conn_idle.timer(),
                 [
                     Arc::new(
                         self.spaces
@@ -165,8 +163,14 @@ impl Components {
                 async move {
                     let mut buffers = vec![];
                     loop {
-                        match burst.burst(&mut packages, &mut buffers).await {
-                            Ok(segments) => path.send_packets(&segments).await?,
+                        match burst.burst(&mut packages, &mut buffers) {
+                            Ok((segments, packet_content)) => {
+                                if !path.is_active() {
+                                    return Ok(());
+                                }
+                                path.send_packets(&segments).await?;
+                                path.idle_timer.on_sent(packet_content);
+                            }
                             Err(BurstError::Signals(s)) => path.tx_waker.wait_for(s).await,
                             Err(BurstError::PathDeactived) => return io::Result::Ok(()),
                         }
@@ -174,12 +178,15 @@ impl Components {
                 }
             };
 
+            let lifecycle_path = path.clone();
             let task = async move {
-                Err(tokio::select! {
-                    Ok(Err(e)) = AbortOnDropHandle::new(tokio::spawn(validate.instrument_in_current().in_current_span())) => PathDeactivated::from(e),
-                    Ok(Err(e)) = AbortOnDropHandle::new(tokio::spawn(drive.instrument_in_current().in_current_span())) => e,
-                    Ok(Err(e)) = AbortOnDropHandle::new(tokio::spawn(burst.instrument_in_current().in_current_span())) => PathDeactivated::from(e),
-                })
+                let reason = tokio::select! {
+                    Err(error) = validate.instrument_in_current().in_current_span() => PathDeactivated::from(error),
+                    Err(reason) = drive.instrument_in_current().in_current_span() => reason,
+                    Err(error) = burst.instrument_in_current().in_current_span() => PathDeactivated::from(error),
+                };
+                lifecycle_path.deactivate();
+                Err(reason)
             };
 
             let task =
@@ -202,7 +209,7 @@ impl Path {
         pathway: Pathway,
         dcid_cell: ArcDcidCell,
         max_ack_delay: Duration,
-        idle_timer: ArcIdleTimer,
+        idle_timer: PathIdleTimer,
         feedbacks: [Arc<dyn Feedback>; 3],
         handshake_status: Arc<HandshakeStatus>,
     ) -> Self {
@@ -227,7 +234,6 @@ impl Path {
             active: AtomicBool::new(true),
             anti_amplifier: AntiAmplifier::new(tx_waker.clone()),
             idle_timer,
-            heartbeat_sndbuf: SendBuffer::new(tx_waker.clone()),
             challenge_sndbuf: SendBuffer::new(tx_waker.clone()),
             response_sndbuf: SendBuffer::new(tx_waker.clone()),
             response_rcvbuf: Default::default(),
@@ -262,6 +268,21 @@ impl Path {
         self.cc().grant_anti_amplification();
     }
 
+    fn keep_alive_due(&self, one_rtt_ready: bool, now: tokio::time::Instant) -> bool {
+        one_rtt_ready
+            && self.validated.load(Ordering::Acquire)
+            // Periodic PINGs both maintain the NAT binding and sample path reachability.
+            // Recovery manages existing in-flight packets with a backing-off PTO, so an
+            // ack-eliciting packet in flight must not suppress the fixed KeepAlive cadence.
+            && self.idle_timer.keep_alive_due(now)
+    }
+
+    fn wake_keep_alive_if_due(&self, one_rtt_ready: bool) {
+        if self.keep_alive_due(one_rtt_ready, tokio::time::Instant::now()) {
+            self.tx_waker.wake_by(Signals::TRANSPORT);
+        }
+    }
+
     pub fn mtu(&self) -> u16 {
         self.pmtu.load(Ordering::Acquire)
     }
@@ -278,20 +299,20 @@ impl Path {
     }
 
     pub fn deactivate(&self) {
-        self.active.store(false, Ordering::Release);
+        if !self.active.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.anti_amplifier.abort();
+        self.response_rcvbuf.dismiss();
+        self.tx_waker.wake_by(Signals::all());
     }
 
-    pub fn active(&self) {
-        self.active.store(true, Ordering::Release);
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
     }
 
     pub fn link(&self) -> &Link {
         &self.link
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_validated_for_test(&self) -> bool {
-        self.validated.load(Ordering::Acquire)
     }
 
     pub fn pathway(&self) -> &Pathway {

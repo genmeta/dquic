@@ -113,6 +113,7 @@ impl ArcPathContexts {
         }
         remote_cids.apply_initial_dcid(initial_dcid, &path.dcid_cell);
         state.initial_path = Some(Arc::downgrade(path));
+        drop(state);
         tracing::debug!(
             target: "dquic",
             pathway = %path.pathway,
@@ -154,22 +155,31 @@ impl ArcPathContexts {
                 let (path, task) = try_create()?;
                 let send_waker_entry =
                     PathSendWakerEntry::insert(pathway, &self.tx_wakers, &path.tx_waker);
+                // Register the path before its worker can create recovery state. Handshake
+                // confirmation relies on the map containing every worker it must retire.
+                let (start_tx, start_rx) = tokio::sync::oneshot::channel();
                 let paths = self.clone();
                 let task = AbortOnDropHandle::new(tokio::spawn(
                     async move {
+                        if start_rx.await.is_err() {
+                            return;
+                        }
                         let reason = task.await.unwrap_err();
                         paths.remove(&pathway, &reason);
                     }
                     .instrument_in_current()
                     .in_current_span(),
                 ));
-                Ok(vacant_entry
+                let path = vacant_entry
                     .insert(PathContext {
                         path,
                         _task: task,
                         _send_waker_entry: send_waker_entry,
                     })
-                    .clone())
+                    .clone();
+                drop(state);
+                _ = start_tx.send(());
+                Ok(path)
             }
         }
     }
@@ -179,9 +189,15 @@ impl ArcPathContexts {
     }
 
     pub fn remove(&self, pathway: &Pathway, reason: &PathDeactivated) {
-        let Some((_, path)) = self.paths.remove(pathway) else {
+        let Some((_, path_context)) = self.paths.remove(pathway) else {
             return;
         };
+        let path = path_context.path.clone();
+        path.deactivate();
+        // Stop this path's sender and unregister its waker before loss feedback wakes the
+        // surviving paths. Otherwise the removed sender can consume the recovered data again.
+        drop(path_context);
+        path.cc().on_path_lost();
         tracing::debug!(target: "dquic", %pathway, %reason, "path deactivated");
 
         let mut state = self.state.write().unwrap();
@@ -203,7 +219,7 @@ impl ArcPathContexts {
     pub fn max_pto_duration(&self) -> Option<Duration> {
         self.paths
             .iter()
-            .map(|p| p.cc().get_pto(Epoch::Data))
+            .map(|path| path.cc().get_pto(Epoch::Data))
             .max()
             .or_else(|| self.state.read().unwrap().last_path_pto)
     }
@@ -215,9 +231,14 @@ impl ArcPathContexts {
             .collect()
     }
 
-    pub fn discard_initial_and_handshake_space(&self) {
+    pub fn discard_initial_space(&self) {
         self.paths.iter().for_each(|p| {
             p.cc().discard_epoch(Epoch::Initial);
+        });
+    }
+
+    pub fn discard_handshake_space(&self) {
+        self.paths.iter().for_each(|p| {
             p.cc().discard_epoch(Epoch::Handshake);
         });
     }
@@ -228,6 +249,7 @@ impl ArcPathContexts {
             state.accepting_paths = false;
             state.initial_path = None;
         }
+        self.paths.iter().for_each(|path| path.deactivate());
         self.paths.clear();
     }
 }

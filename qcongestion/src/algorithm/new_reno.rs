@@ -90,11 +90,11 @@ impl NewReno {
         if !acked_packet.count_for_cc {
             return;
         }
-        // 如果不是 inflight 状态，说明已经丢包重传了
+        // Retransmitted packets were removed from bytes in flight during loss handling.
         if acked_packet.state == State::Inflight {
             self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_packet.sent_bytes);
         }
-        // 如果是 Retranmit 状态，又被 ack， 把拥塞窗口加回来
+        // The original packet may still be acknowledged after retransmission was queued.
         if self.in_congestion_recovery(&acked_packet.time_sent) {
             qevent::event!({ RecoveryMetricsUpdated::from(&*self) });
             return;

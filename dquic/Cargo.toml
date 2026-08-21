@@ -25,6 +25,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 clap = { workspace = true }
 http = { workspace = true }
 indicatif = { workspace = true }

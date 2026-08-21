@@ -217,6 +217,10 @@ async fn parse_normal_packet(
 
     let packet_content = read_plain_packet(&packet, |frame| dispatch_frame(frame, &path))?;
 
+    if components.spaces.discard_initial_key() {
+        components.paths.discard_initial_space();
+    }
+
     space.journal.of_rcvd_packets().on_rcvd_pn(
         packet.pn(),
         packet_content.is_ack_eliciting(),

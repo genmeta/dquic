@@ -14,7 +14,7 @@ use qbase::{
     sid::{
         ControlStreamsConcurrency, ProductStreamsConcurrencyController, handy::DemandConcurrency,
     },
-    time::ArcIdleConfig,
+    time::{ArcConnIdle, DEFAULT_HEARTBEAT_INTERVAL},
     token::{ArcTokenRegistry, TokenProvider, TokenSink},
 };
 use qcongestion::HandshakeStatus;
@@ -116,6 +116,7 @@ pub struct ConnectionFoundation<Foundation, TlsConfig> {
     stun_servers: Arc<[SocketAddr]>,
     streams_ctrl: Box<dyn ControlStreamsConcurrency>,
     defer_idle_timeout: Duration,
+    heartbeat_interval: Duration,
 }
 
 pub type ClientConnectionFoundation = ConnectionFoundation<ClientFoundation, TlsClientConfig>;
@@ -135,6 +136,7 @@ impl ClientFoundation {
             stun_servers: Arc::new([]),
             streams_ctrl: Box::new(DemandConcurrency), // ZST cause no alloc
             defer_idle_timeout: Duration::ZERO,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
         }
     }
 }
@@ -177,6 +179,7 @@ impl ServerFoundation {
             stun_servers: Arc::new([]),
             streams_ctrl: Box::new(DemandConcurrency), // ZST cause no alloc
             defer_idle_timeout: Duration::ZERO,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
         }
     }
 }
@@ -231,6 +234,11 @@ impl<Foundation, TlsConfig> ConnectionFoundation<Foundation, TlsConfig> {
 
     pub fn with_defer_idle_timeout(mut self, timeout: Duration) -> Self {
         self.defer_idle_timeout = timeout;
+        self
+    }
+
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
         self
     }
 }
@@ -307,6 +315,7 @@ impl ConnectionFoundation<ClientFoundation, TlsClientConfig> {
             stun_servers: self.stun_servers,
             rcvd_pkt_q,
             defer_idle_timeout: self.defer_idle_timeout,
+            heartbeat_interval: self.heartbeat_interval,
             role: Role::Client,
             origin_dcid,
             initial_scid,
@@ -365,6 +374,7 @@ impl ConnectionFoundation<ServerFoundation, TlsServerConfig> {
             stun_servers: self.stun_servers,
             rcvd_pkt_q,
             defer_idle_timeout: self.defer_idle_timeout,
+            heartbeat_interval: self.heartbeat_interval,
             role: Role::Server,
             origin_dcid,
             initial_scid,
@@ -394,6 +404,7 @@ pub struct PendingConnection {
     stun_servers: Arc<[SocketAddr]>,
     rcvd_pkt_q: Arc<RcvdPacketQueue>,
     defer_idle_timeout: Duration,
+    heartbeat_interval: Duration,
     role: Role,
     origin_dcid: ConnectionId,
     initial_scid: ConnectionId,
@@ -541,7 +552,11 @@ impl PendingConnection {
             interfaces: self.interfaces,
             rcvd_pkt_q: self.rcvd_pkt_q,
             conn_state: conn_state.clone(),
-            idle_config: ArcIdleConfig::new(max_idle_timeout, self.defer_idle_timeout),
+            conn_idle: ArcConnIdle::new(
+                max_idle_timeout,
+                self.defer_idle_timeout,
+                self.heartbeat_interval,
+            ),
             paths: ArcPathContexts::new(self.tx_wakers.clone(), event_broker.clone()),
             send_lock: self.send_lock,
             tls_handshake: ArcTlsHandshake::new(self.tls_session),
@@ -593,7 +608,7 @@ fn spawn_tls_handshake(components: &Components, tx_wakers: ArcSendWakers) {
             components.data_streams.clone(),
             components.flow_ctrl.clone(),
             components.cid_registry.local.clone(),
-            components.idle_config.clone(),
+            components.conn_idle.clone(),
             tx_wakers,
         ),
     );
@@ -614,7 +629,7 @@ fn tls_fin_handler(
     data_streams: DataStreams,
     flow_ctrl: FlowController,
     local_cids: ArcLocalCids,
-    idle_config: ArcIdleConfig,
+    conn_idle: ArcConnIdle,
     tx_wakers: ArcSendWakers,
 ) -> impl FnOnce(&TlsHandshakeInfo) -> Result<(), Error> + Send {
     fn apply_parameters<Role: IntoRole>(
@@ -622,7 +637,7 @@ fn tls_fin_handler(
         flow_ctrl: &FlowController,
         // datagram_flow
         local_cids: &ArcLocalCids,
-        idle_config: &ArcIdleConfig,
+        conn_idle: &ArcConnIdle,
         zero_rtt_rejected: bool,
         remote_parameters: Arc<qbase::param::core::Parameters<Role>>,
     ) -> Result<(), Error> {
@@ -642,12 +657,11 @@ fn tls_fin_handler(
                 .get(ParameterId::ActiveConnectionIdLimit)
                 .expect("unreachable: default value will be got if the value unset"),
         )?;
-        idle_config.negotiate_max_idle_timeout(
+        conn_idle.negotiate_max_idle_timeout(
             remote_parameters
                 .get(ParameterId::MaxIdleTimeout)
                 .expect("Duration::ZERO if not specified"),
         );
-
         Ok(())
     }
 
@@ -683,7 +697,7 @@ fn tls_fin_handler(
                     &data_streams,
                     &flow_ctrl,
                     &local_cids,
-                    &idle_config,
+                    &conn_idle,
                     zero_rtt_rejected,
                     remote_parameters,
                 )?;
@@ -702,7 +716,7 @@ fn tls_fin_handler(
                     &data_streams,
                     &flow_ctrl,
                     &local_cids,
-                    &idle_config,
+                    &conn_idle,
                     zero_rtt_rejected,
                     remote_parameters,
                 )?;

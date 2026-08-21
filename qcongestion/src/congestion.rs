@@ -462,10 +462,26 @@ impl CongestionController {
     //   SetLossDetectionTimer()
     fn discard_epoch(&mut self, epoch: Epoch) {
         assert!(epoch != Epoch::Data);
-        self.packet_spaces[epoch].discard(&mut self.algorithm);
+        _ = self.packet_spaces[epoch].discard(&mut self.algorithm);
+        self.need_send_ack_eliciting_packets[epoch] = 0;
         self.loss_detection_timer = None;
         self.pto_count = 0;
         self.set_loss_detection_timer();
+    }
+
+    fn on_path_lost(&mut self) {
+        // Initial and Handshake packets belong to the single handshake path. They are discarded
+        // when the handshake completes, so retiring a path must not requeue them for retransmit.
+        for &epoch in Epoch::iter() {
+            let packet_numbers = self.packet_spaces[epoch].discard(&mut self.algorithm);
+            if epoch == Epoch::Data && !packet_numbers.is_empty() {
+                self.trackers[epoch].may_loss(
+                    PacketLostTrigger::PtoExpired,
+                    &mut packet_numbers.into_iter(),
+                );
+            }
+        }
+        self.loss_detection_timer = None;
     }
 
     fn get_pto(&self, epoch: Epoch) -> Duration {
@@ -474,6 +490,14 @@ impl CongestionController {
             pto_time += self.max_ack_delay * (1 << self.pto_count);
         }
         pto_time
+    }
+
+    fn pto_base(&self, epoch: Epoch) -> Duration {
+        let mut pto = self.rtt.base_pto(0);
+        if epoch == Epoch::Data {
+            pto += self.max_ack_delay;
+        }
+        pto
     }
 }
 
@@ -495,6 +519,16 @@ impl ArcCC {
             path_status,
             tx_waker,
         ))))
+    }
+
+    /// Returns the PTO period without exponential loss-recovery backoff.
+    pub fn pto_base(&self, epoch: Epoch) -> Duration {
+        self.0.lock().unwrap().pto_base(epoch)
+    }
+
+    /// Discards this path's recovery state and reports every unacknowledged packet as lost.
+    pub fn on_path_lost(&self) {
+        self.0.lock().unwrap().on_path_lost();
     }
 }
 
@@ -562,21 +596,12 @@ impl super::Transport for ArcCC {
                 .rcvd_packets
                 .on_ack_sent(pn, largest_acked);
         }
-        // See [Section 17.2.2.1](https://www.rfc-editor.org/rfc/rfc9000#name-abandoning-initial-packets)
-        if epoch == Epoch::Handshake && !guard.path_status.is_server() {
-            guard.discard_epoch(Epoch::Initial);
-        }
     }
 
     fn on_ack_rcvd(&self, epoch: Epoch, ack_frame: &AckFrame) {
         let mut guard = self.0.lock().unwrap();
         let now = Instant::now();
         guard.on_ack_rcvd(epoch, ack_frame, now);
-
-        // See [Section 17.2.2.1](https://www.rfc-editor.org/rfc/rfc9000#name-abandoning-initial-packets)
-        if epoch == Epoch::Handshake && guard.path_status.is_server() {
-            guard.discard_epoch(Epoch::Initial);
-        }
     }
 
     fn on_pkt_rcvd(&self, epoch: Epoch, pn: u64, is_ack_eliciting: bool) {
@@ -616,7 +641,7 @@ mod tests {
     use qbase::net::tx::ArcSendWaker;
 
     use super::*;
-    use crate::HandshakeStatus;
+    use crate::{HandshakeStatus, Transport};
 
     struct NoopFeedback;
 
@@ -624,8 +649,15 @@ mod tests {
         fn may_loss(&self, _trigger: PacketLostTrigger, _pns: &mut dyn Iterator<Item = u64>) {}
     }
 
-    fn controller() -> CongestionController {
-        let feedback: Arc<dyn Feedback> = Arc::new(NoopFeedback);
+    struct RecordingFeedback(Arc<Mutex<Vec<u64>>>);
+
+    impl Feedback for RecordingFeedback {
+        fn may_loss(&self, _trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
+            self.0.lock().unwrap().extend(pns);
+        }
+    }
+
+    fn controller_with_feedback(feedback: Arc<dyn Feedback>) -> CongestionController {
         let handshake = Arc::new(HandshakeStatus::new(false));
         handshake.handshake_confirmed();
         let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
@@ -638,6 +670,58 @@ mod tests {
             path_status,
             ArcSendWaker::new(),
         )
+    }
+
+    fn controller() -> CongestionController {
+        let feedback: Arc<dyn Feedback> = Arc::new(NoopFeedback);
+        controller_with_feedback(feedback)
+    }
+
+    #[test]
+    fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let feedback: Arc<dyn Feedback> = Arc::new(RecordingFeedback(recovered.clone()));
+        let mut controller = controller_with_feedback(feedback);
+
+        controller.need_send_ack_eliciting_packets[Epoch::Initial] = 1;
+        controller.packet_spaces[Epoch::Initial]
+            .rcvd_packets
+            .on_pkt_rcvd(7);
+        controller.discard_epoch(Epoch::Initial);
+
+        assert_eq!(
+            controller.need_send_ack_eliciting_packets[Epoch::Initial],
+            0
+        );
+        assert!(!controller.need_ack());
+
+        // Even if stale state somehow reaches path retirement, obsolete handshake data is not
+        // returned to the connection-wide recovery queues after confirmation.
+        controller.on_path_lost();
+        assert!(recovered.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn path_loss_does_not_recover_handshake_spaces_before_confirmation() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let feedback: Arc<dyn Feedback> = Arc::new(RecordingFeedback(recovered.clone()));
+        let handshake = Arc::new(HandshakeStatus::new(false));
+        let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
+        path_status.release_anti_amplification_limit();
+        let mut controller = CongestionController::init(
+            Algorithm::NewReno,
+            Duration::from_millis(25),
+            [feedback.clone(), feedback.clone(), feedback],
+            path_status,
+            ArcSendWaker::new(),
+        );
+
+        controller.on_packet_sent(0, Epoch::Initial, true, true, MSS);
+        controller.on_packet_sent(1, Epoch::Handshake, true, true, MSS);
+        controller.on_packet_sent(2, Epoch::Data, true, true, MSS);
+        controller.on_path_lost();
+
+        assert_eq!(*recovered.lock().unwrap(), vec![2]);
     }
 
     #[test]
@@ -654,6 +738,15 @@ mod tests {
     }
 
     #[test]
+    fn pto_base_ignores_loss_recovery_backoff() {
+        let mut controller = controller();
+        let base = controller.pto_base(Epoch::Data);
+        controller.pto_count = 3;
+        assert_eq!(controller.pto_base(Epoch::Data), base);
+        assert!(controller.get_pto(Epoch::Data) > base);
+    }
+
+    #[test]
     fn pure_ack_packets_do_not_accumulate_sent_records() {
         let mut controller = controller();
 
@@ -666,5 +759,85 @@ mod tests {
                 .sent_packets
                 .is_empty()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_way_receive_traffic_cannot_starve_pto() {
+        let cc = ArcCC(Arc::new(Mutex::new(controller())));
+        cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
+        assert!(!cc.0.lock().unwrap().no_ack_eliciting_in_flight());
+
+        for pn in 1..=7 {
+            cc.on_pkt_rcvd(Epoch::Data, pn, true);
+            assert!(!cc.0.lock().unwrap().no_ack_eliciting_in_flight());
+
+            let deadline =
+                cc.0.lock()
+                    .unwrap()
+                    .loss_detection_timer
+                    .expect("an ack-eliciting packet must arm PTO");
+            tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
+
+            let result = cc.do_tick();
+            if pn < 7 {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(TooManyPtos(7))));
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ack_ranges_keep_healthy_path_alive_while_other_path_times_out() {
+        let mut healthy = controller();
+        let mut black_holed = controller();
+
+        // Packet numbers are connection-wide and therefore interleave across paths:
+        // A owns 8 and 10, while B owns 9. A's later ACK has Largest=10 and a
+        // second range containing 8; it must clear both of A's local records.
+        healthy.on_packet_sent(8, Epoch::Data, true, true, MSS);
+        black_holed.on_packet_sent(9, Epoch::Data, true, true, MSS);
+        healthy.on_packet_sent(10, Epoch::Data, true, true, MSS);
+        let ack_a = AckFrame::new(
+            10_u32.into(),
+            0_u32.into(),
+            0_u32.into(),
+            vec![(0_u32.into(), 0_u32.into())],
+            None,
+        );
+        healthy.on_ack_rcvd(Epoch::Data, &ack_a, Instant::now());
+
+        assert!(healthy.no_ack_eliciting_in_flight());
+        assert_eq!(healthy.pto_count, 0);
+        assert_eq!(healthy.loss_detection_timer, None);
+        assert!(!black_holed.no_ack_eliciting_in_flight());
+
+        // Keep A healthy with a fresh path-local ACK during every B PTO period.
+        // Advancing Tokio's paused clock makes this deterministic and fast.
+        for timeout_count in 1..=7 {
+            let pn_a = 10 + timeout_count as u64 * 2;
+            healthy.on_packet_sent(pn_a, Epoch::Data, true, true, MSS);
+            let ack_a = AckFrame::new(
+                pn_a.try_into().unwrap(),
+                0_u32.into(),
+                0_u32.into(),
+                vec![],
+                None,
+            );
+            healthy.on_ack_rcvd(Epoch::Data, &ack_a, Instant::now());
+            assert!(healthy.no_ack_eliciting_in_flight());
+            assert_eq!(healthy.pto_count, 0);
+            assert_eq!(healthy.loss_detection_timer, None);
+
+            let deadline = black_holed
+                .loss_detection_timer
+                .expect("B must retain a PTO while its packet is unacknowledged");
+            tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
+            assert_eq!(black_holed.on_loss_detection_timeout(), timeout_count);
+        }
+
+        assert_eq!(black_holed.pto_count, 7);
+        assert!(!black_holed.no_ack_eliciting_in_flight());
+        assert!(healthy.no_ack_eliciting_in_flight());
     }
 }

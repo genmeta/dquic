@@ -14,6 +14,7 @@ use futures::StreamExt;
 use qbase::{
     packet::{DataHeader, GetDcid, Packet, long::DataHeader as LongHeader},
     param::ServerParameters,
+    time::DEFAULT_HEARTBEAT_INTERVAL,
     token::TokenProvider,
     util::BoundQueue,
 };
@@ -205,6 +206,7 @@ pub struct QuicListeners {
     tls_config: TlsServerConfig,
     stream_strategy_factory: Arc<dyn ProductStreamsConcurrencyController>,
     defer_idle_timeout: Duration,
+    heartbeat_interval: Duration,
     qlogger: Arc<dyn QLog + Send + Sync>,
 }
 
@@ -488,6 +490,7 @@ impl QuicListeners {
             .with_streams_concurrency_strategy(self.stream_strategy_factory.as_ref())
             .with_zero_rtt(self.tls_config.max_early_data_size == 0xffffffff)
             .with_defer_idle_timeout(self.defer_idle_timeout)
+            .with_heartbeat_interval(self.heartbeat_interval)
             .with_iface_factory(self.network.iface_factory.clone())
             .with_iface_manager(self.network.iface_manager.clone())
             .with_quic_router(self.network.quic_router.clone())
@@ -555,6 +558,7 @@ pub struct QuicListenersBuilder<T> {
     tls_config: T,
     stream_strategy_factory: Arc<dyn ProductStreamsConcurrencyController>,
     defer_idle_timeout: Duration,
+    heartbeat_interval: Duration,
     qlogger: Arc<dyn QLog + Send + Sync>,
 }
 
@@ -596,6 +600,7 @@ impl QuicListeners {
             tls_config,
             stream_strategy_factory: Arc::new(handy::ConsistentConcurrency::new),
             defer_idle_timeout: Duration::ZERO,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             qlogger: Arc::new(handy::NoopLogger),
         }
     }
@@ -766,6 +771,7 @@ impl<T> QuicListenersBuilder<T> {
             tls_config: f(self.tls_config),
             stream_strategy_factory: self.stream_strategy_factory,
             defer_idle_timeout: self.defer_idle_timeout,
+            heartbeat_interval: self.heartbeat_interval,
             qlogger: self.qlogger,
         }
     }
@@ -786,17 +792,21 @@ impl<T> QuicListenersBuilder<T> {
         }
     }
 
-    /// Provide an option to defer an idle timeout.
-    ///
-    /// This facility could be used when the application wishes to avoid losing
-    /// state that has been associated with an open connection but does not expect
-    /// to exchange application data for some time.
+    /// Set how long periodic path KeepAlive PINGs may be initiated after the
+    /// connection's most recent effective payload. Zero disables active KeepAlive.
     ///
     /// See [Deferring Idle Timeout](https://datatracker.ietf.org/doc/html/rfc9000#name-deferring-idle-timeout)
-    /// of [RFC 9000](https://datatracker.ietf.org/doc/html/rfc9000)
-    /// for more information.
+    /// of [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) for more information.
     pub fn defer_idle_timeout(mut self, duration: Duration) -> Self {
         self.defer_idle_timeout = duration;
+        self
+    }
+
+    /// Set the interval between path heartbeat PINGs.
+    ///
+    /// Default: 20 seconds.
+    pub fn heartbeat_interval(mut self, duration: Duration) -> Self {
+        self.heartbeat_interval = duration;
         self
     }
 
@@ -900,6 +910,7 @@ impl QuicListenersBuilder<TlsServerConfig> {
             tls_config: self.tls_config,
             stream_strategy_factory: self.stream_strategy_factory,
             defer_idle_timeout: self.defer_idle_timeout,
+            heartbeat_interval: self.heartbeat_interval,
             qlogger: self.qlogger,
         });
 

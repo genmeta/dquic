@@ -12,7 +12,11 @@ pub use client_auth::{
     AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAuthorityVerifyResult,
     ClientNameVerifyResult,
 };
-use futures::{future::poll_fn, never::Never};
+use futures::{
+    TryFutureExt,
+    future::{poll_fn, try_join4},
+    never::Never,
+};
 use qbase::{
     Epoch,
     error::{Error, ErrorKind, QuicError},
@@ -640,7 +644,7 @@ impl ArcTlsHandshake {
         crypto_streams: [CryptoStream; 3],
         (handshake_keys, zero_rtt_keys, one_rtt_keys): (ArcKeys, ArcZeroRttKeys, ArcOneRttKeys),
         on_handshake_conmplete: impl FnOnce(&TlsHandshakeInfo) -> Result<(), Error> + Send + 'static,
-    ) -> impl futures::Future<Output = Result<(), Error>> + Send + 'static {
+    ) -> impl futures::Future<Output = Result<Never, Error>> + Send + 'static {
         let mut on_handshake_conmplete = Some(on_handshake_conmplete);
 
         let crypto_read_task = |epoch: Epoch| {
@@ -697,14 +701,12 @@ impl ArcTlsHandshake {
             result
         };
 
-        async move {
-            tokio::try_join!(
-                initial_read_task,
-                handshake_read_task,
-                data_read_task,
-                crypto_write_task,
-            )?;
-            Ok(())
-        }
+        try_join4(
+            initial_read_task,
+            handshake_read_task,
+            data_read_task,
+            crypto_write_task,
+        )
+        .map_ok(|(_, _, _, never)| never)
     }
 }
