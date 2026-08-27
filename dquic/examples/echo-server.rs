@@ -93,7 +93,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error + Send + 
         .without_client_cert_verifier()
         .with_parameters(handy::server_parameters())
         .with_qlog(qlogger)
-        .defer_idle_timeout(Duration::from_secs(0))
+        .keep_alive(Duration::from_secs(0), Duration::from_secs(20))
         .enable_0rtt()
         .listen(options.backlog)?;
     listeners
