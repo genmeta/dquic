@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 readme = "README.md"
 repository = "https://github.com/genmeta/dquic"
@@ -97,17 +97,17 @@ tracing-appender = "0.2"
 
 # members
 qmacro = { path = "./qmacro", version = "0.5.1" }
-qbase = { path = "./qbase", version = "0.6.3" }
-qevent = { path = "./qevent", version = "0.6.1" }
-qudp = { path = "./qudp", version = "0.7.1" }
-qinterface = { path = "./qinterface", version = "0.7.1" }
-qdatagram = { path = "./qdatagram", version = "0.6.1" }
-qresolve = { path = "./qresolve", version = "0.8.0" }
-qrecovery = { path = "./qrecovery", version = "0.6.1" }
-qtraversal = { path = "./qtraversal", version = "0.7.1" }
-qcongestion = { path = "./qcongestion", version = "0.6.1" }
-qconnection = { path = "./qconnection", version = "0.8.1" }
-dquic = { path = "./dquic", version = "0.7.1" }
+qbase = { path = "./qbase", version = "0.6.4" }
+qevent = { path = "./qevent", version = "0.6.2" }
+qudp = { path = "./qudp", version = "0.7.2" }
+qinterface = { path = "./qinterface", version = "0.7.2" }
+qdatagram = { path = "./qdatagram", version = "0.6.2" }
+qresolve = { path = "./qresolve", version = "0.8.1" }
+qrecovery = { path = "./qrecovery", version = "0.6.2" }
+qtraversal = { path = "./qtraversal", version = "0.7.2" }
+qcongestion = { path = "./qcongestion", version = "0.6.2" }
+qconnection = { path = "./qconnection", version = "0.8.2" }
+dquic = { path = "./dquic", version = "0.7.2" }
 h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
 
