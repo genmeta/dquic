@@ -107,7 +107,7 @@ async fn run(options: Options) -> Result<(), Error> {
             .without_cert()
             .with_parameters(handy::client_parameters())
             .with_qlog(qlogger)
-            .defer_idle_timeout(Duration::from_secs(60))
+            .keep_alive(Duration::from_secs(60), Duration::from_secs(20))
             .enable_sslkeylog()
             .enable_0rtt()
             .build(),

@@ -679,21 +679,17 @@ impl<T> QuicClientBuilder<T> {
         self
     }
 
-    /// Set how long periodic path KeepAlive PINGs may be initiated after the
+    /// Configure active connection KeepAlive.
+    ///
+    /// `duration` sets how long periodic path KeepAlive PINGs may be initiated after the
     /// connection's most recent effective payload. Zero disables active KeepAlive.
+    /// `heartbeat_interval` sets the interval between path heartbeat PINGs (default: 20 seconds).
     ///
     /// See [Deferring Idle Timeout](https://datatracker.ietf.org/doc/html/rfc9000#name-deferring-idle-timeout)
     /// of [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) for more information.
-    pub fn defer_idle_timeout(mut self, duration: Duration) -> Self {
+    pub fn keep_alive(mut self, duration: Duration, heartbeat_interval: Duration) -> Self {
         self.defer_idle_timeout = duration;
-        self
-    }
-
-    /// Set the interval between path heartbeat PINGs.
-    ///
-    /// Default: 20 seconds.
-    pub fn heartbeat_interval(mut self, duration: Duration) -> Self {
-        self.heartbeat_interval = duration;
+        self.heartbeat_interval = heartbeat_interval;
         self
     }
 

@@ -79,7 +79,7 @@ impl ArcConnIdle {
                 path_die_since: Instant::now(),
                 update_idle_on_send: true,
                 update_die_on_send: true,
-                last_sent_ack_eliciting: None,
+                path_idle_since: None,
             }),
         }
     }
@@ -107,9 +107,9 @@ impl ArcConnIdle {
 #[derive(Debug)]
 struct PathIdleActivity {
     path_die_since: Instant,
+    path_idle_since: Option<Instant>,
     update_idle_on_send: bool,
     update_die_on_send: bool,
-    last_sent_ack_eliciting: Option<Instant>,
 }
 
 /// Path-local KeepAlive and liveness state backed by connection-wide idle policy.
@@ -133,7 +133,7 @@ impl PathIdleTimer {
                 activity.path_die_since = now;
                 activity.update_die_on_send = false;
             }
-            activity.last_sent_ack_eliciting = Some(now);
+            activity.path_idle_since = Some(now);
         }
         drop(activity);
     }
@@ -160,7 +160,7 @@ impl PathIdleTimer {
         self.activity
             .lock()
             .unwrap()
-            .last_sent_ack_eliciting
+            .path_idle_since
             .and_then(|last| last.checked_add(heartbeat_interval))
             .is_some_and(|deadline| now >= deadline)
     }
@@ -181,14 +181,18 @@ impl PathIdleTimer {
 
     /// Checks the path-local deadline used to retire an unresponsive path.
     pub fn path_timed_out(&self, now: Instant, pto_base: Duration) -> bool {
-        let max_idle_timeout = self.conn_idle.config.read().unwrap().max_idle_timeout;
-        if max_idle_timeout == Duration::ZERO {
+        let config = self.conn_idle.config.read().unwrap();
+        if config.max_idle_timeout == Duration::ZERO {
             return false;
         }
-        let timeout = max_idle_timeout.max(pto_base.saturating_mul(3));
-        let path_die_since = self.activity.lock().unwrap().path_die_since;
-        now.checked_duration_since(path_die_since)
-            .is_some_and(|elapsed| elapsed >= timeout)
+        let idle_since = match self.activity.lock().unwrap().path_idle_since {
+            Some(t) => t,
+            None => return false,
+        };
+        let timeout =
+            config.defer_idle_timeout + config.max_idle_timeout.max(pto_base.saturating_mul(3));
+        now.checked_duration_since(idle_since)
+            .is_some_and(|elapsed| elapsed > timeout)
     }
 }
 
@@ -323,6 +327,7 @@ mod tests {
         );
         let active_path = conn_idle.timer();
         let idle_path = conn_idle.timer();
+        idle_path.on_sent(PacketContent::JustPing);
 
         tokio::time::advance(Duration::from_secs(10)).await;
         active_path.on_rcvd(PacketContent::EffectivePayload);
@@ -331,6 +336,7 @@ mod tests {
         assert!(!active_path.timed_out(Instant::now(), Duration::ZERO));
         assert!(!idle_path.timed_out(Instant::now(), Duration::ZERO));
         assert!(!active_path.path_timed_out(Instant::now(), Duration::ZERO));
+        tokio::time::advance(Duration::from_secs(1)).await;
         assert!(idle_path.path_timed_out(Instant::now(), Duration::ZERO));
     }
 

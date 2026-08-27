@@ -550,7 +550,7 @@ impl Burst {
         Err(BurstError::Signals(signals))
     }
 
-    fn load_keep_alive(&self, buffer: &mut [u8]) -> Result<(usize, PacketContent), BurstError> {
+    fn load_heartbeat(&self, buffer: &mut [u8]) -> Result<(usize, PacketContent), BurstError> {
         let Self {
             spaces,
             path,
@@ -634,7 +634,7 @@ impl Burst {
                 })
                 .or_else(|error| match error {
                     BurstError::Signals(signals) => {
-                        self.load_keep_alive(buffer).map_err(|e| match e {
+                        self.load_heartbeat(buffer).map_err(|e| match e {
                             BurstError::Signals(s) => BurstError::Signals(signals | s),
                             e @ BurstError::PathDeactived => e,
                         })
