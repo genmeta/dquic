@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-dns-lookup = "3"
+dns-lookup = "4"
 futures = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 qbase = { workspace = true }
