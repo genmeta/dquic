@@ -11,6 +11,7 @@ members = [
     "qprotocol",
     "qdatagram",
     "qconnection",
+    "qtls",
     "dquic",
     "h3-shim",
     "qtraversal",
@@ -25,6 +26,7 @@ default-members = [
     "qinterface",
     "qprotocol",
     "qconnection",
+    "qtls",
     "dquic",
     "h3-shim",
     "qtraversal",
@@ -107,6 +109,7 @@ qrecovery = { path = "./qrecovery", version = "0.6.2" }
 qtraversal = { path = "./qtraversal", version = "0.7.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.2" }
 qconnection = { path = "./qconnection", version = "0.8.2" }
+qtls = { path = "./qtls", version = "0.6.1" }
 dquic = { path = "./dquic", version = "0.7.2" }
 h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
