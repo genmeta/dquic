@@ -26,6 +26,8 @@ use thiserror::Error;
 pub mod cid;
 /// Non-QUIC datagram envelopes carried alongside QUIC.
 pub mod datagram;
+/// Endpoint defination
+pub mod endpoint;
 /// [QUIC errors](https://www.rfc-editor.org/rfc/rfc9000.html#name-error-codes).
 pub mod error;
 /// QUIC connection-level flow control.

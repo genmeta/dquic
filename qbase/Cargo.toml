@@ -31,6 +31,7 @@ qmacro = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
