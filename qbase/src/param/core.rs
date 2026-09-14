@@ -244,6 +244,11 @@ pub struct Parameters<Role> {
 }
 
 impl<Role> Parameters<Role> {
+    /// Explicitly configured parameters, without synthesizing default values.
+    pub fn iter(&self) -> impl Iterator<Item = (&ParameterId, &ParameterValue)> {
+        self.map.iter()
+    }
+
     pub fn get<V>(&self, id: ParameterId) -> Option<V>
     where
         V: TryFrom<ParameterValue>,

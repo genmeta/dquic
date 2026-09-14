@@ -1,4 +1,4 @@
-use std::{fmt::Debug, time::Duration};
+use std::{collections::HashSet, fmt::Debug, time::Duration};
 
 use bytes::Bytes;
 use nom::{Parser, multi::length_data};
@@ -50,10 +50,12 @@ pub fn be_parameter_value(input: &[u8], id: ParameterId) -> nom::IResult<&[u8], 
         ParameterValueType::ResetToken => {
             map(be_reset_token, ParameterValue::ResetToken).parse(input)
         }
-        ParameterValueType::ConnectionId => Ok((
-            &[],
-            ParameterValue::ConnectionId(ConnectionId::from_slice(input)),
-        )),
+        ParameterValueType::ConnectionId => {
+            if input.len() > 20 {
+                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+            }
+            Ok((&[], ParameterValue::ConnectionId(ConnectionId::from_slice(input))))
+        }
         ParameterValueType::PreferredAddress => {
             map(be_preferred_address, ParameterValue::PreferredAddress).parse(input)
         }
@@ -144,21 +146,20 @@ impl<Role, T: bytes::BufMut> WriteParameters<Role> for T {
     }
 }
 
-fn handle_nom_error<F: Debug, E: Debug>(input: &[u8], nom_error: nom::Err<F, E>) -> Error {
-    assert!(
-        matches!(nom_error, nom::Err::Incomplete(..)),
-        "Only incomplete errors should occur, but {nom_error:?} happened for input: {input:?}"
-    );
-    Error::IncompleteParameterId(format!("incomplete parameter data for input: {input:?}"))
+fn handle_nom_error<F: Debug, E: Debug>(_input: &[u8], _nom_error: nom::Err<F, E>) -> Error {
+    Error::IncompleteParameterId("invalid transport parameter encoding".to_owned())
 }
 
 impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
     pub fn parse_from_bytes(mut buf: &[u8]) -> Result<Self, QuicError> {
         let mut parameters = Self::default();
+        let mut seen = HashSet::new();
         while !buf.is_empty() {
             let (param_id, param_value);
             (buf, (param_id, param_value)) =
                 be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
+
+            if !seen.insert(param_id) { return Err(Error::DuplicateParameter(param_id).into()); }
 
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
@@ -172,7 +173,9 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
             ParameterId::belong_to(param_id, R::into_role())?;
             let (remain, param_value) = be_parameter_value(param_value, param_id)
                 .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
-            assert!(remain.is_empty(), "Parameter value should consume all data");
+            if !remain.is_empty() {
+                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
+            }
 
             parameters.set(param_id, param_value)?;
         }
@@ -188,10 +191,13 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
 impl ServerParameters {
     pub fn try_from_remembered_bytes(mut buf: &[u8]) -> Result<Self, QuicError> {
         let mut parameters = Self::new();
+        let mut seen = HashSet::new();
         while !buf.is_empty() {
             let (param_id, param_value);
             (buf, (param_id, param_value)) =
                 be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
+
+            if !seen.insert(param_id) { return Err(Error::DuplicateParameter(param_id).into()); }
 
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
@@ -205,10 +211,35 @@ impl ServerParameters {
             ParameterId::belong_to(param_id, Role::Server)?;
             let (remain, param_value) = be_parameter_value(param_value, param_id)
                 .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
-            assert!(remain.is_empty(), "Parameter value should consume all data");
+            if !remain.is_empty() {
+                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
+            }
 
             parameters.set(param_id, param_value)?;
         }
         Ok(parameters)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::param::ClientParameters;
+
+    #[test]
+    fn duplicate_transport_parameters_are_rejected_even_when_unknown() {
+        for bytes in [vec![15, 0, 15, 0], vec![0x40, 0x3f, 0, 0x40, 0x3f, 0, 15, 0]] {
+            assert!(ClientParameters::parse_from_bytes(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_parameter_values_return_errors_without_panicking() {
+        let mut oversized_cid = vec![15, 21];
+        oversized_cid.extend([0; 21]);
+        for bytes in [vec![4, 2, 1, 2, 15, 0], vec![12, 1, 0, 15, 0], oversized_cid] {
+            let result = std::panic::catch_unwind(|| ClientParameters::parse_from_bytes(&bytes));
+            assert!(result.is_ok(), "malformed parameter panicked");
+            assert!(result.unwrap().is_err());
+        }
     }
 }

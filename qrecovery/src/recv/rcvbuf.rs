@@ -41,6 +41,9 @@ pub struct RecvBuf {
 }
 
 impl RecvBuf {
+    /// Number of retained fragments, for a caller's reassembly metadata budget.
+    pub fn segment_count(&self) -> usize { self.segments.len() }
+
     /// Returns whether the receiving buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()

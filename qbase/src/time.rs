@@ -54,6 +54,14 @@ impl ArcConnIdle {
         defer_idle_timeout: Duration,
         heartbeat_interval: Duration,
     ) -> Self {
+        Self::new_at(max_idle_timeout, defer_idle_timeout, heartbeat_interval, Instant::now())
+    }
+
+    /// Starts idle accounting at an existing receive timestamp, including time
+    /// spent waiting for a connection-processing worker.
+    pub fn new_at(max_idle_timeout: Duration, defer_idle_timeout: Duration,
+        heartbeat_interval: Duration, received_at: Instant) -> Self
+    {
         Self {
             config: Arc::new(RwLock::new(IdleConfig::new(
                 max_idle_timeout,
@@ -61,7 +69,7 @@ impl ArcConnIdle {
                 heartbeat_interval,
             ))),
             idle_since: Arc::new(Mutex::new(None)),
-            die_since: Arc::new(Mutex::new(Instant::now())),
+            die_since: Arc::new(Mutex::new(received_at)),
         }
     }
 

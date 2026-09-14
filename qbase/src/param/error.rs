@@ -18,6 +18,8 @@ pub enum Error {
     IncompleteParameterId(String),
     #[error("Parameter {0} is not defined")]
     UnknownParameterId(VarInt),
+    #[error("Duplicate transport parameter {0}")]
+    DuplicateParameter(VarInt),
     #[error("Lack {1:?} for {0}")]
     LackParameterId(Role, ParameterId),
     #[error("{0:?} is not belong to {1}")]

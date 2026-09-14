@@ -97,6 +97,12 @@ impl LocalAuthority {
         self.ocsp.as_deref()
     }
 
+    /// Shares the already loaded signing capability with a TLS backend.
+    /// This does not expose or reload the encoded private key.
+    pub fn signing_key(&self) -> &Arc<dyn SigningKey> {
+        &self.key
+    }
+
     /// Signs an unhashed message using the hash and encoding of `scheme`.
     pub fn sign(&self, scheme: SignatureScheme, message: &[u8]) -> Result<Vec<u8>, SignError> {
         let signer = self
