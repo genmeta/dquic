@@ -20,6 +20,25 @@ pub struct LocalAuthority {
 }
 
 impl LocalAuthority {
+    /// Builds handshake credentials from an already loaded signing capability.
+    /// Certificate parsing and key matching happen here, without loading a
+    /// private key a second time. Name/trust/validity verification of the peer
+    /// remains the responsibility of the configured identity verifier.
+    pub fn from_signing_key(
+        name: Arc<str>,
+        certificates: Vec<CertificateDer<'static>>,
+        signing_key: Arc<dyn SigningKey>,
+        ocsp: Option<Vec<u8>>,
+    ) -> Result<Self, InvalidLocalAuthority> {
+        let public_key = extract_public_key(&certificates)?;
+        let certified_key = CertifiedKey::new(certificates, signing_key);
+        match certified_key.keys_match() {
+            Ok(()) | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {}
+            Err(error) => return Err(InvalidLocalAuthority::InvalidPrivateKey(error.to_string())),
+        }
+        Self::from_certified_key(name, certified_key, public_key, ocsp)
+    }
+
     pub fn new(
         provider: &rustls::crypto::CryptoProvider,
         name: Arc<str>,

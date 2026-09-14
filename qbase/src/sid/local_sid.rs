@@ -42,10 +42,8 @@ where
         blocked: BLOCKED,
         tx_wakers: ArcSendWakers,
     ) -> Self {
-        debug_assert!(
-            role == Role::Client || (init_max_bi_streams == 0 && init_max_uni_streams == 0),
-            "Server cannot remember the parameters"
-        );
+        // These may be remembered client limits or already validated peer
+        // limits when a server creates its data components after negotiation.
         Self {
             role,
             max: [init_max_bi_streams, init_max_uni_streams],
@@ -257,6 +255,18 @@ mod tests {
         assert_eq!(sid, StreamId(0));
         assert_eq!(sid.role(), Role::Client);
         assert_eq!(sid.dir(), Dir::Bi);
+    }
+
+    #[test]
+    fn server_can_start_with_validated_peer_stream_limits() {
+        let local = ArcLocalStreamIds::new(Role::Server, 1, 1,
+            StreamsBlockedFrameTx::default(), ArcSendWakers::default());
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Ready(Some(StreamId(1))));
+        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Pending);
+        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Ready(Some(StreamId(3))));
+        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Pending);
     }
 
     #[test]

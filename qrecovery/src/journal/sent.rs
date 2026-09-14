@@ -16,6 +16,7 @@ use tokio::time::Instant;
 /// State for a sent packet that contains frames requiring ACK/loss feedback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SentPktState {
+    Pending { nframes: usize },
     Flighting {
         nframes: usize,
         sent_time: Instant,
@@ -46,7 +47,7 @@ impl SentPktState {
 
     fn nframes(&self) -> usize {
         match self {
-            Self::Flighting { nframes, .. }
+            Self::Pending { nframes } | Self::Flighting { nframes, .. }
             | Self::Retransmitted { nframes, .. }
             | Self::Acked { nframes, .. } => *nframes,
         }
@@ -72,7 +73,7 @@ impl SentPktState {
                 };
                 nframes
             }
-            Self::Acked { .. } => 0,
+            Self::Pending { .. } | Self::Acked { .. } => 0,
         }
     }
 
@@ -92,7 +93,7 @@ impl SentPktState {
                 nframes
             }
             Self::Retransmitted { nframes, .. } => nframes,
-            Self::Acked { .. } => 0,
+            Self::Pending { .. } | Self::Acked { .. } => 0,
         }
     }
 
@@ -117,7 +118,7 @@ impl SentPktState {
 
     fn should_remain_after(&self, pn: u64, now: Instant) -> bool {
         match self {
-            Self::Flighting { .. } => true,
+            Self::Pending { .. } | Self::Flighting { .. } => true,
             Self::Retransmitted { expire_time, .. } => {
                 if *expire_time > now {
                     true
@@ -157,7 +158,7 @@ impl<T: Clone> SentJournal<T> {
             .iter()
             .rev()
             .filter(|record| {
-                ack_ranges
+                !matches!(record.state, SentPktState::Pending { .. }) && ack_ranges
                     .iter()
                     .any(|range| range.contains(&record.packet_number))
             })
@@ -300,6 +301,39 @@ impl<T> ArcSentJournal<T> {
             inner,
         }
     }
+
+    /// Commits recovery timestamps after an outstanding socket send completes.
+    /// Returns false if this PN is no longer pending. A pending packet never
+    /// participates in ACK/loss feedback before this transition.
+    pub fn mark_sent(&self, pn: u64, retran_timeout: Duration, expire_timeout: Duration) -> bool {
+        let mut inner = self.0.lock().unwrap();
+        let Some(index) = inner.sent_packets.iter().position(|record| record.packet_number == pn) else { return false };
+        let SentPktState::Pending { nframes } = inner.sent_packets[index].state else { return false };
+        if nframes == 0 {
+            inner.sent_packets.remove(index);
+        } else {
+            let now = Instant::now();
+            inner.sent_packets[index].state = SentPktState::new(nframes, now, now + retran_timeout, now + expire_timeout);
+        }
+        true
+    }
+
+    /// Cancels an unsent reservation and returns its frames to the caller.
+    /// The packet number remains consumed, including after encryption failed.
+    pub fn cancel_pending(&self, pn: u64) -> Vec<T> {
+        let mut inner = self.0.lock().unwrap();
+        let mut offset = 0;
+        for index in 0..inner.sent_packets.len() {
+            let record = inner.sent_packets[index];
+            if record.packet_number == pn {
+                let SentPktState::Pending { nframes } = record.state else { return Vec::new() };
+                inner.sent_packets.remove(index);
+                return inner.queue.drain(offset..offset + nframes).collect();
+            }
+            offset += record.state.nframes();
+        }
+        Vec::new()
+    }
 }
 
 /// Handles peer ACK/loss feedback for retained reliable packets.
@@ -385,6 +419,18 @@ impl<T> NewPacketGuard<'_, T> {
         self.committed = true;
     }
 
+    /// Burns the PN and retains frames without starting recovery timers. The
+    /// caller must subsequently mark_sent or cancel_pending exactly once.
+    pub fn build_pending(mut self) {
+        let nframes = self.inner.queue.len() - self.origin_len;
+        assert!(self.trivial || nframes > 0, "cannot commit an empty packet");
+        let packet_number = self.packet_number;
+        self.inner.sent_packets.push_back(SentPacketRecord {
+            packet_number, state: SentPktState::Pending { nframes },
+        });
+        self.commit();
+    }
+
     pub fn build_with_time(mut self, retran_timeout: Duration, expire_timeout: Duration) {
         let nframes = self.inner.queue.len() - self.origin_len;
         assert!(self.trivial || nframes > 0, "cannot commit an empty packet");
@@ -432,6 +478,42 @@ mod tests {
             vec![],
             None,
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_packets_do_not_start_recovery_or_return_ack_feedback() {
+        let journal = ArcSentJournal::with_capacity(0);
+        let mut packet = journal.new_packet();
+        packet.record_frame(7u64);
+        packet.build_pending();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        {
+            let mut feedback = journal.rotate();
+            assert!(feedback.acked_packet_numbers(&ack_packet(0)).is_empty());
+            assert_eq!(feedback.on_packet_acked(0).count(), 0);
+            assert_eq!(feedback.may_loss_packet(0).count(), 0);
+            assert_eq!(feedback.fast_retransmit().count(), 0);
+        }
+        assert!(journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
+        assert!(!journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
+        assert_eq!(journal.rotate().on_packet_acked(0).collect::<Vec<_>>(), vec![7]);
+    }
+
+    #[test]
+    fn cancelled_pending_packet_returns_frames_and_never_reuses_pn() {
+        let journal = ArcSentJournal::with_capacity(0);
+        for frame in [7u64, 8, 9] {
+            let mut packet = journal.new_packet();
+            packet.record_frame(frame);
+            packet.build_pending();
+        }
+        assert_eq!(journal.cancel_pending(1), vec![8]);
+        assert!(journal.cancel_pending(1).is_empty());
+        assert_eq!(journal.new_packet().pn().0, 3);
+        for (pn, frame) in [(0, 7), (2, 9)] {
+            assert!(journal.mark_sent(pn, Duration::from_secs(1), Duration::from_secs(3)));
+            assert_eq!(journal.rotate().on_packet_acked(pn).collect::<Vec<_>>(), vec![frame]);
+        }
     }
 
     #[test]
