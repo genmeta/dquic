@@ -427,7 +427,7 @@ mod tests {
 
     fn keys(cid: ConnectionId) -> qtls::BidirectionalKeys {
         qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
-            provider: Arc::new(tls_backend::crypto::ring::default_provider()),
+            provider: Arc::new(qtls::default_provider()),
             alpn: vec![b"qconn".to_vec()],
             resolve_local: Arc::new(NoAuthority),
             verify_client: None,

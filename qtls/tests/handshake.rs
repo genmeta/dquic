@@ -13,6 +13,7 @@ use qtls::{
     SignatureScheme, TicketKeyRing, TlsEvent, TlsHandshake, TlsLimits, UnixTime, VerifyIdentity,
 };
 use rustls::pki_types::pem::PemObject;
+use qtls::default_provider as crypto_provider;
 
 const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
 const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
@@ -20,17 +21,6 @@ const CLIENT_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client
 const CLIENT_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/client.key");
 const SERVER_OCSP: &[u8] = b"server-ocsp";
 const CLIENT_OCSP: &[u8] = b"client-ocsp";
-
-fn crypto_provider() -> rustls::crypto::CryptoProvider {
-    #[cfg(feature = "aws-lc-rs")]
-    {
-        rustls::crypto::aws_lc_rs::default_provider()
-    }
-    #[cfg(not(feature = "aws-lc-rs"))]
-    {
-        rustls::crypto::ring::default_provider()
-    }
-}
 
 fn ticket_key_ring() -> TicketKeyRing {
     #[cfg(feature = "aws-lc-rs")]

@@ -37,6 +37,13 @@ pub use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
 
+/// Default provider for the enabled qtls backend; AWS-LC takes precedence over ring.
+#[cfg(feature = "aws-lc-rs")]
+pub use rustls::crypto::aws_lc_rs::default_provider;
+/// Default provider when only the ring backend is enabled.
+#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
+pub use rustls::crypto::ring::default_provider;
+
 /// QUIC versions whose TLS labels and Initial salts are supported by this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum QuicVersion {

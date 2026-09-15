@@ -79,7 +79,7 @@ impl qtls::VerifyIdentity for Pinned {
 }
 
 pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSummary; 2]) {
-    let provider = Arc::new(tls_backend::crypto::ring::default_provider());
+    let provider = Arc::new(qtls::default_provider());
     let server = qtls::LocalAuthority::new(
         &provider,
         "localhost".into(),
