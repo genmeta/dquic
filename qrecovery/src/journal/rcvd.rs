@@ -212,6 +212,15 @@ impl ArcRcvdJournal {
         }
     }
 
+    /// Whether a whole interval is present in the bounded journal. Intervals below
+    /// the retirement floor are treated as historical; they cannot be checked again.
+    pub fn covers_range(&self, range: std::ops::RangeInclusive<u64>) -> bool {
+        let journal = self.inner.read().unwrap();
+        let start = (*range.start()).max(journal.packets.retired_before);
+        let end = *range.end();
+        start > end || journal.packets.ranges.iter().any(|r| r.start <= start && r.end > end)
+    }
+
     pub fn decode_pn(&self, encoded_pn: PacketNumber) -> Result<u64, InvalidPacketNumber> {
         self.inner.read().unwrap().decode_pn(encoded_pn)
     }

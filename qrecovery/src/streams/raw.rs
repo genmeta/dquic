@@ -582,6 +582,7 @@ where
         output.on_conn_error(error);
         input.on_conn_error(error);
         listener.on_conn_error(error);
+        self.stream_ids.on_conn_error();
     }
 }
 
@@ -698,8 +699,6 @@ where
         cx: &mut Context<'_>,
         arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let mut output = self.output.guard()?;
-        let mut input = self.input.guard()?;
         let mut params = arc_params.lock_guard()?;
 
         let snd_buf_size = match params.remembered() {
@@ -716,6 +715,18 @@ where
             },
         };
 
+        drop(params);
+        self.poll_open_bi_with_limit(cx, snd_buf_size)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn poll_open_bi_with_limit(
+        &self,
+        cx: &mut Context<'_>,
+        snd_buf_size: u64,
+    ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
+        let mut output = self.output.guard()?;
+        let mut input = self.input.guard()?;
         let Some(sid) = ready!(self.stream_ids.local.poll_alloc_sid(cx, Dir::Bi)) else {
             return Poll::Ready(Ok(None));
         };
@@ -737,7 +748,6 @@ where
         cx: &mut Context<'_>,
         arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
-        let mut output = self.output.guard()?;
         let mut params = arc_params.lock_guard()?;
 
         let snd_buf_size = match params.remembered() {
@@ -754,6 +764,17 @@ where
             },
         };
 
+        drop(params);
+        self.poll_open_uni_with_limit(cx, snd_buf_size)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn poll_open_uni_with_limit(
+        &self,
+        cx: &mut Context<'_>,
+        snd_buf_size: u64,
+    ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
+        let mut output = self.output.guard()?;
         let Some(sid) = ready!(self.stream_ids.local.poll_alloc_sid(cx, Dir::Uni)) else {
             return Poll::Ready(Ok(None));
         };
@@ -762,6 +783,15 @@ where
         let io_state = IOState::send_only();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
         Poll::Ready(Ok(Some((sid, Writer::new(arc_sender)))))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn poll_accept_bi_with_limit(
+        &self,
+        cx: &mut Context<'_>,
+        snd_buf_size: u64,
+    ) -> Poll<Result<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>)), Error>> {
+        self.listener.poll_accept_bi_with_limit(cx, snd_buf_size)
     }
 
     pub(super) fn accept_bi<'a>(
@@ -901,6 +931,54 @@ mod tests {
 
     impl<D: ContinuousData> RecordFrame<Frame<D>, D> for TestPacket {
         fn record_frame(&mut self, _frame: &Frame<D>) {}
+    }
+
+    #[test]
+    fn connection_error_preserves_received_but_unread_stream() {
+        use qbase::{
+            error::{Error, ErrorKind, QuicError},
+            frame::StreamFrame,
+        };
+
+        use crate::recv::{Incoming, Reader};
+
+        let streams = DataStreams::new(
+            Role::Client,
+            &client_parameters(),
+            &server_parameters(),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            ArcSendWakers::default(),
+            None,
+        );
+        let sid = qbase::sid::StreamId::new(Role::Client, Dir::Bi, 0);
+        let recver = streams.create_recver(sid, 1024);
+        streams.input.guard().unwrap().insert(
+            sid,
+            Incoming::new(recver.clone()),
+            IOState::bidirection(),
+        );
+        let mut reader = Reader::new(recver);
+        let mut frame = StreamFrame::new(sid, 0, 4);
+        frame.set_eos_flag(true);
+        streams
+            .recv_data((frame, bytes::Bytes::from_static(b"data")))
+            .unwrap();
+        let error: Error = QuicError::with_default_fty(ErrorKind::Internal, "closed").into();
+        streams.on_conn_error(&error);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let mut buf = BytesMut::with_capacity(4);
+        assert!(matches!(
+            reader.poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(&buf[..], b"data");
+        buf.clear();
+        assert!(matches!(
+            reader.poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(buf.is_empty());
     }
 
     #[test]

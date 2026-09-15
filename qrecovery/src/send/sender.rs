@@ -89,7 +89,7 @@ impl<TX> ReadySender<TX> {
 
     pub(crate) fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
         if self.shutdown_waker.is_some() {
-            return Poll::Ready(Err(StreamError::EosSent));
+            return Poll::Ready(Err(StreamError::Finished));
         }
 
         if !self.sndbuf.has_remaining_mut() {
@@ -102,7 +102,7 @@ impl<TX> ReadySender<TX> {
 
     pub(crate) fn write(&mut self, data: Bytes) -> Result<(), StreamError> {
         if self.shutdown_waker.is_some() {
-            return Err(StreamError::EosSent);
+            return Err(StreamError::Finished);
         }
 
         let data_len = data.len() as u64;
@@ -250,7 +250,7 @@ impl<TX> SendingSender<TX> {
 
     pub(super) fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
         if self.shutdown_waker.is_some() {
-            return Poll::Ready(Err(StreamError::EosSent));
+            return Poll::Ready(Err(StreamError::Finished));
         }
 
         if !self.sndbuf.has_remaining_mut() {
@@ -263,7 +263,7 @@ impl<TX> SendingSender<TX> {
 
     pub(super) fn write(&mut self, data: Bytes) -> Result<(), StreamError> {
         if self.shutdown_waker.is_some() {
-            return Err(StreamError::EosSent);
+            return Err(StreamError::Finished);
         }
 
         let data_len = data.len() as u64;

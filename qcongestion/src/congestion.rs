@@ -117,7 +117,7 @@ impl CongestionController {
         if ack_eliciting || in_flight {
             self.packet_spaces[epoch].sent_packets.push_back(sent);
         }
-        if in_flight {
+        if in_flight || self.path_status.is_at_anti_amplification_limit() {
             self.set_loss_detection_timer();
         }
         self.pacer.on_sent(sent_bytes);
@@ -629,8 +629,9 @@ impl super::Transport for ArcCC {
     }
 
     fn grant_anti_amplification(&self) {
-        let guard = self.0.lock().unwrap();
+        let mut guard = self.0.lock().unwrap();
         guard.path_status.release_anti_amplification_limit();
+        guard.set_loss_detection_timer();
     }
 }
 
@@ -744,6 +745,72 @@ mod tests {
         controller.pto_count = 3;
         assert_eq!(controller.pto_base(Epoch::Data), base);
         assert!(controller.get_pto(Epoch::Data) > base);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multipath_packet_threshold_counts_sends_on_this_path() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
+        controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
+        controller.on_packet_sent(100, Epoch::Data, true, true, MSS);
+        let ack = AckFrame::new(100u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        assert!(recovered.lock().unwrap().is_empty(), "other paths' PN gaps are not loss evidence");
+        controller.on_packet_sent(200, Epoch::Data, true, true, MSS);
+        controller.on_packet_sent(300, Epoch::Data, true, true, MSS);
+        let ack = AckFrame::new(300u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        assert_eq!(*recovered.lock().unwrap(), vec![0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ack_with_largest_on_another_path_does_not_sample_rtt() {
+        let mut controller = controller();
+        let pto = controller.pto_base(Epoch::Data);
+        controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
+        tokio::time::advance(Duration::from_millis(5)).await;
+        let ack = AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None);
+        controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        assert_eq!(controller.pto_base(Epoch::Data), pto);
+    }
+
+    #[test]
+    fn regression_releasing_amplification_credit_rearms_recovery() {
+        let mut controller = controller();
+        controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
+        controller.path_status.enter_anti_amplification_limit();
+        controller.set_loss_detection_timer();
+        assert!(controller.loss_detection_timer.is_none());
+        let cc = ArcCC(Arc::new(Mutex::new(controller)));
+        cc.grant_anti_amplification();
+        assert!(cc.0.lock().unwrap().loss_detection_timer.is_some());
+    }
+
+    #[test]
+    fn ack_only_send_that_exhausts_amplification_credit_disarms_pto() {
+        let mut controller = controller();
+        controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
+        assert!(controller.loss_detection_timer.is_some());
+        controller.path_status.enter_anti_amplification_limit();
+        controller.on_packet_sent(1, Epoch::Data, false, false, 30);
+        assert!(controller.loss_detection_timer.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packet_threshold_survives_removing_the_queue_front() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
+        for pn in [0, 100, 200, 300, 400] {
+            controller.on_packet_sent(pn, Epoch::Data, true, true, MSS);
+        }
+        for pn in [0u32, 200] {
+            let ack = AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
+            controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        }
+        assert!(recovered.lock().unwrap().is_empty());
+        let ack = AckFrame::new(400u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        assert_eq!(*recovered.lock().unwrap(), vec![100]);
     }
 
     #[test]

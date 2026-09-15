@@ -164,6 +164,19 @@ impl ArcSendWakers {
         self.lock_guard().remove(pathway);
     }
 
+    /// Register a replacement path instance at the same address.
+    pub fn replace(&self, pathway: Pathway, waker: &ArcSendWaker) {
+        self.lock_guard().paths.insert(pathway, waker.clone());
+    }
+
+    /// A retiring instance must not remove its replacement's waiter.
+    pub fn remove_if(&self, pathway: &Pathway, waker: &ArcSendWaker) {
+        let mut guard = self.lock_guard();
+        if guard.paths.get(pathway).is_some_and(|current| Arc::ptr_eq(&current.0, &waker.0)) {
+            guard.paths.remove(pathway);
+        }
+    }
+
     #[inline]
     pub fn wake_all_by(&self, signals: Signals) {
         self.lock_guard().wake_all_by(signals);

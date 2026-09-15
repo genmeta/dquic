@@ -207,6 +207,14 @@ where
         self.0.lock().unwrap().poll_alloc_sid(cx, dir)
     }
 
+    /// Wake all blocked stream allocation requests after the owner records the connection error.
+    pub fn on_conn_error(&self) {
+        let mut guard = self.0.lock().unwrap();
+        for waker in guard.wakers.iter_mut().flat_map(|queue| queue.drain(..)) {
+            waker.wake();
+        }
+    }
+
     pub fn revise_max_streams(
         &self,
         zero_rtt_rejected: bool,
@@ -259,13 +267,24 @@ mod tests {
 
     #[test]
     fn server_can_start_with_validated_peer_stream_limits() {
-        let local = ArcLocalStreamIds::new(Role::Server, 1, 1,
-            StreamsBlockedFrameTx::default(), ArcSendWakers::default());
+        let local = ArcLocalStreamIds::new(
+            Role::Server,
+            1,
+            1,
+            StreamsBlockedFrameTx::default(),
+            ArcSendWakers::default(),
+        );
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
-        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Ready(Some(StreamId(1))));
+        assert_eq!(
+            local.poll_alloc_sid(&mut cx, Dir::Bi),
+            Poll::Ready(Some(StreamId(1)))
+        );
         assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Pending);
-        assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Ready(Some(StreamId(3))));
+        assert_eq!(
+            local.poll_alloc_sid(&mut cx, Dir::Uni),
+            Poll::Ready(Some(StreamId(3)))
+        );
         assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Pending);
     }
 

@@ -121,6 +121,41 @@ impl QuicProtocol {
         send_all(&socket, &packets, line(link, packets[0].len())).await
     }
 
+    /// Bytes added by qprotocol outside the QUIC packet.
+    pub fn packet_overhead(pathway: Pathway) -> usize {
+        if matches!(pathway.local(), EndpointAddr::Direct { .. })
+            && matches!(pathway.remote(), EndpointAddr::Direct { .. }) { 0 }
+        else { 2 + pathway.local().encoding_size() + pathway.remote().encoding_size() }
+    }
+
+    /// Submit exactly one UDP datagram without awaiting while holding the caller's
+    /// submission boundary. Pending means no datagram was submitted. Ready(Ok(n))
+    /// reports the complete UDP payload size, including forwarding overhead.
+    pub fn poll_send_packet(&self, cx: &mut std::task::Context<'_>, pathway: Pathway, packet: &[u8])
+        -> std::task::Poll<io::Result<usize>>
+    {
+        use std::task::{Poll, ready};
+        let socket = self.find_socket(pathway.local()).ok_or_else(||
+            io::Error::new(io::ErrorKind::NotConnected, "local endpoint unavailable"))?;
+        let destination = match pathway.remote() {
+            EndpointAddr::Direct { addr } => addr,
+            EndpointAddr::Mediate { agent, .. } => agent,
+        };
+        let link = Link::new(socket.local_addr()?, destination);
+        let overhead = Self::packet_overhead(pathway);
+        let payload;
+        let wire = if overhead == 0 { packet } else {
+            let mut bytes = BytesMut::zeroed(overhead + packet.len());
+            bytes[overhead..].copy_from_slice(packet);
+            payload = ForwardPayload::from_raw(&pathway, bytes, overhead)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            payload.as_ref()
+        };
+        let count = ready!(socket.poll_send(cx, &[IoSlice::new(wire)], &line(link, wire.len())))?;
+        if count != 1 { return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "UDP did not submit the packet"))); }
+        Poll::Ready(Ok(wire.len()))
+    }
+
     pub fn on_packet(&self, datagram: BytesMut, pathway: Pathway, link: Link) -> bool {
         if self.find_socket(pathway.local()).is_none() {
             return false;
