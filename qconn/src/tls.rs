@@ -167,7 +167,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn pair(mutual: bool) -> (qtls::TlsHandshake, qtls::TlsHandshake) {
-        let provider = Arc::new(tls_backend::crypto::ring::default_provider());
+        let provider = Arc::new(qtls::default_provider());
         let server = authority("localhost", SERVER_CERT, SERVER_KEY);
         let client = authority("client", CLIENT_CERT, CLIENT_KEY);
         let client_tls = qtls::ClientTlsEndpoint::new(qtls::ClientTlsConfig {
@@ -213,7 +213,7 @@ pub(crate) mod tests {
 
     pub(crate) fn initial_keys() -> qtls::BidirectionalKeys {
         qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
-            provider: Arc::new(tls_backend::crypto::ring::default_provider()),
+            provider: Arc::new(qtls::default_provider()),
             alpn: vec![b"qconn".to_vec()],
             resolve_local: Arc::new(Authority(None)),
             verify_client: None,

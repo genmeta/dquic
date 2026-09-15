@@ -92,7 +92,7 @@ impl Network {
             protocol.clone(),
         )));
         let (listener, accepted) = Listener::new();
-        let provider = Arc::new(tls_backend::crypto::ring::default_provider());
+        let provider = Arc::new(qtls::default_provider());
         let initial = qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
             provider: provider.clone(),
             alpn: vec![b"qconn".to_vec()],
