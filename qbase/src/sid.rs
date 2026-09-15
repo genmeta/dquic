@@ -282,4 +282,9 @@ where
             ArcRemoteStreamIds::new(!role, local_max_bi, local_max_uni, sid_frames_tx, ctrl);
         Self { local, remote }
     }
+
+    #[inline]
+    pub fn on_conn_error(&self) {
+        self.local.on_conn_error();
+    }
 }

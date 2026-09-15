@@ -1,0 +1,24 @@
+[package]
+name = "qtransport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Established QUIC connections and composable packet transport"
+
+[dependencies]
+qbase.workspace = true
+qrecovery.workspace = true
+qcongestion.workspace = true
+qevent.workspace = true
+qtls.workspace = true
+qprotocol = { path = "../qprotocol" }
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "io-util", "net"] }
+tls-backend = { package = "rustls", git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std", "ring"] }

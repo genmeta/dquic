@@ -129,6 +129,21 @@ impl<TX> ArcListener<TX> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn poll_accept_bi_with_limit(
+        &self, cx: &mut Context<'_>, snd_buf_size: u64,
+    ) -> Poll<Result<(StreamId, (Reader<TX>, Writer<TX>)), QuicError>> {
+        let mut guard = self.0.lock().unwrap();
+        let set = guard.as_mut().map_err(|error| error.clone())?;
+        if let Some((sid, (recver, sender))) = set.bi_streams.pop_front() {
+            sender.update_window(snd_buf_size);
+            Poll::Ready(Ok((sid, (Reader::new(recver), Writer::new(sender)))))
+        } else {
+            set.bi_waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
     pub fn poll_accept_uni_stream(
         &self,
         cx: &mut Context<'_>,

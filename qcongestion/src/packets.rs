@@ -255,6 +255,8 @@ impl PacketSpace {
         let now = Instant::now();
         let lost_sent_time = now - loss_delay;
 
+        // Front removal shifts both indexes equally; no separate sequence is needed.
+        let largest_acked_index = self.sent_packets.iter().rposition(|pkt| pkt.state == State::Acked);
         let loss: Vec<_> = self
             .sent_packets
             .iter_mut()
@@ -262,10 +264,7 @@ impl PacketSpace {
             .filter(|(_, pkt)| pkt.state == State::Inflight && pkt.packet_number <= largest_acked)
             .map(move |(idx, unacked)| {
                 if unacked.time_sent <= lost_sent_time
-                    || largest_acked
-                        >= unacked
-                            .packet_number
-                            .saturating_add(packet_threshold as u64)
+                    || largest_acked_index.is_some_and(|largest| largest >= idx + packet_threshold)
                 {
                     unacked.state = State::Retransmitted;
                     Ok((idx, &*unacked))
@@ -470,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_threshold_uses_packet_numbers_not_queue_indexes() {
+    fn packet_threshold_uses_queue_indexes_not_packet_number_gaps() {
         let mut packet_space = PacketSpace::with_epoch(Epoch::Data, Duration::from_millis(25));
         let now = Instant::now();
         packet_space
@@ -486,7 +485,7 @@ mod tests {
             .detect_lost_packets(Duration::from_secs(1), 3, &mut reno)
             .collect::<Vec<_>>();
 
-        assert_eq!(lost, vec![10]);
+        assert!(lost.is_empty());
     }
 
     #[test]

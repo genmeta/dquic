@@ -9,8 +9,8 @@ pub enum StreamError {
     Connection(#[from] Error),
     #[error(transparent)]
     Reset(#[from] ResetStreamError),
-    #[error("EOS has been sent")]
-    EosSent,
+    #[error("can not write any more after being finished")]
+    Finished,
 }
 
 impl From<StreamError> for io::Error {
@@ -19,7 +19,7 @@ impl From<StreamError> for io::Error {
             error @ (StreamError::Connection(..) | StreamError::Reset(..)) => {
                 io::Error::new(io::ErrorKind::BrokenPipe, error)
             }
-            error @ StreamError::EosSent => io::Error::new(io::ErrorKind::Unsupported, error),
+            error @ StreamError::Finished => io::Error::new(io::ErrorKind::Unsupported, error),
         }
     }
 }

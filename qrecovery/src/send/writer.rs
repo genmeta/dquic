@@ -148,8 +148,8 @@ impl<TX> Writer<TX> {
         match sending_state {
             Sender::Ready(s) => s.poll_ready(cx),
             Sender::Sending(s) => s.poll_ready(cx),
-            Sender::DataSent(_) => Poll::Ready(Err(StreamError::EosSent)),
-            Sender::DataRcvd => Poll::Ready(Err(StreamError::EosSent)),
+            Sender::DataSent(_) => Poll::Ready(Err(StreamError::Finished)),
+            Sender::DataRcvd => Poll::Ready(Err(StreamError::Finished)),
             Sender::ResetSent(reset) => Poll::Ready(Err(StreamError::Reset(*reset))),
             Sender::ResetRcvd(reset) => Poll::Ready(Err(StreamError::Reset(*reset))),
         }
@@ -168,8 +168,8 @@ impl<TX> Writer<TX> {
         match sending_state {
             Sender::Ready(s) => s.write(buf),
             Sender::Sending(s) => s.write(buf),
-            Sender::DataSent(_) => Err(StreamError::EosSent),
-            Sender::DataRcvd => Err(StreamError::EosSent),
+            Sender::DataSent(_) => Err(StreamError::Finished),
+            Sender::DataRcvd => Err(StreamError::Finished),
             Sender::ResetSent(reset) => Err(StreamError::Reset(*reset)),
             Sender::ResetRcvd(reset) => Err(StreamError::Reset(*reset)),
         }
@@ -194,8 +194,8 @@ impl<TX> Writer<TX> {
                 ready!(s.poll_ready(cx)?);
                 Poll::Ready(s.write(data))
             }
-            Sender::DataSent(_) => Poll::Ready(Err(StreamError::EosSent)),
-            Sender::DataRcvd => Poll::Ready(Err(StreamError::EosSent)),
+            Sender::DataSent(_) => Poll::Ready(Err(StreamError::Finished)),
+            Sender::DataRcvd => Poll::Ready(Err(StreamError::Finished)),
             Sender::ResetSent(reset) => Poll::Ready(Err(StreamError::Reset(*reset))),
             Sender::ResetRcvd(reset) => Poll::Ready(Err(StreamError::Reset(*reset))),
         }
