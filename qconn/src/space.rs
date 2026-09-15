@@ -181,7 +181,10 @@ impl Spaces {
         ]
     }
 
-    #[expect(clippy::type_complexity, reason = "callers unpack shared space handles directly")]
+    #[expect(
+        clippy::type_complexity,
+        reason = "callers unpack shared space handles directly"
+    )]
     pub(crate) fn snapshot(
         &self,
         epoch: Epoch,

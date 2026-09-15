@@ -40,7 +40,10 @@ pub(crate) struct Network {
     sockets: Mutex<HashMap<(String, IpAddr), Arc<qudp::UdpSocket>>>,
     scope: AtomicU8,
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    #[expect(clippy::type_complexity, reason = "connection requests are passed directly as tuples")]
+    #[expect(
+        clippy::type_complexity,
+        reason = "connection requests are passed directly as tuples"
+    )]
     clients: mpsc::Sender<(
         Option<Endpoint>,
         String,
@@ -330,7 +333,10 @@ impl Network {
         Ok(paths)
     }
 
-    #[expect(clippy::type_complexity, reason = "connection requests are passed directly as tuples")]
+    #[expect(
+        clippy::type_complexity,
+        reason = "connection requests are passed directly as tuples"
+    )]
     async fn incoming(
         network: Arc<Self>,
         mut incoming: mpsc::Receiver<Incoming>,
