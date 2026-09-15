@@ -11,9 +11,9 @@ use qtls::{
     ResolveClientAuthority, ResolveServerAuthority, ServerCredentialRequest,
     ServerResumptionConfig, ServerTlsConfig, ServerTlsEndpoint, SessionSealKeyRing,
     SignatureScheme, TicketKeyRing, TlsEvent, TlsHandshake, TlsLimits, UnixTime, VerifyIdentity,
+    default_provider as crypto_provider,
 };
 use rustls::pki_types::pem::PemObject;
-use qtls::default_provider as crypto_provider;
 
 const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
 const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
