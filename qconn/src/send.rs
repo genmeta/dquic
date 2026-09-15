@@ -346,16 +346,16 @@ pub(crate) async fn send_loop(
                 for frame in &pending.frames {
                     if let qbase::frame::Frame::PathChallenge(sent) = frame {
                         let mut challenge = path.challenge.lock().unwrap();
-                        if let Some((frame, due, count)) = challenge.as_mut() {
-                            if frame == sent {
-                                *count += 1;
-                                *due = Instant::now()
-                                    + path
-                                        .cc
-                                        .pto_base(Epoch::Data)
-                                        .max(Duration::from_millis(100))
-                                        * 3;
-                            }
+                        if let Some((frame, due, count)) = challenge.as_mut()
+                            && frame == sent
+                        {
+                            *count += 1;
+                            *due = Instant::now()
+                                + path
+                                    .cc
+                                    .pto_base(Epoch::Data)
+                                    .max(Duration::from_millis(100))
+                                    * 3;
                         }
                     }
                     if let qbase::frame::Frame::PathResponse(response) = frame {

@@ -48,7 +48,6 @@ rust-version = "1.88.0"
 
 [workspace.dependencies]
 arc-swap = "1"
-async-trait = "0.1.88"
 bitflags = "2"
 bon = "3"
 bytes = "1"
@@ -76,12 +75,11 @@ smallvec = { version = "1", features = [
 ] }
 socket2 = { version = "0.6", features = ["all"] }
 snafu = "0.9"
-thiserror = "2"
+thiserror = "2.0.20"
 tokio = { version = "1" }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
 x509-parser = "0.18"
-url = "2.5.7"
 
 # h3 for h3-shim only , windows-sys, nix and libc for qudp only
 # they are not the default members of the workspace
@@ -92,7 +90,6 @@ url = "2.5.7"
 # dev-dependencies, for examples
 clap = { version = "4", features = ["derive"] }
 h3 = "0.0.8"
-h3-datagram = "0.0.2"
 http = "1"
 indicatif = { version = "0.18", features = ["tokio"] }
 parking_lot = "0.12"
@@ -113,11 +110,8 @@ qrecovery = { path = "./qrecovery", version = "0.6.2" }
 qtraversal = { path = "./qtraversal", version = "0.7.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.2" }
 qconnection = { path = "./qconnection", version = "0.8.2" }
-qconn = { path = "./qconn", version = "0.6.1" }
 qtls = { path = "./qtls", version = "0.6.1" }
-qtransport = { path = "./qtransport", version = "0.6.1" }
 dquic = { path = "./dquic", version = "0.7.2" }
-h3-shim = { path = "./h3-shim", version = "0.5.1" }
 
 
 [profile.bench]
