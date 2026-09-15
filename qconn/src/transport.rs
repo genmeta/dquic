@@ -42,6 +42,7 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
+    #[expect(clippy::type_complexity, reason = "return runtime components directly to the owning task")]
     pub(crate) fn new(
         role: Role,
         keys: qtls::BidirectionalKeys,

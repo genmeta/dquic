@@ -14,14 +14,13 @@ autoexamples = false
 
 [dependencies]
 h3 = { workspace = true }
-h3-datagram = { workspace = true, optional = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 dquic = { workspace = true }
 tokio = { workspace = true }
 
 [features]
-datagram = ["dep:h3-datagram", "dquic/datagram"]
+datagram = ["dquic/datagram"]
 telemetry = ["dquic/telemetry"]
 
 [dev-dependencies]
