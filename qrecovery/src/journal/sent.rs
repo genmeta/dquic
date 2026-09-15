@@ -16,7 +16,9 @@ use tokio::time::Instant;
 /// State for a sent packet that contains frames requiring ACK/loss feedback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SentPktState {
-    Pending { nframes: usize },
+    Pending {
+        nframes: usize,
+    },
     Flighting {
         nframes: usize,
         sent_time: Instant,
@@ -47,7 +49,8 @@ impl SentPktState {
 
     fn nframes(&self) -> usize {
         match self {
-            Self::Pending { nframes } | Self::Flighting { nframes, .. }
+            Self::Pending { nframes }
+            | Self::Flighting { nframes, .. }
             | Self::Retransmitted { nframes, .. }
             | Self::Acked { nframes, .. } => *nframes,
         }
@@ -158,9 +161,10 @@ impl<T: Clone> SentJournal<T> {
             .iter()
             .rev()
             .filter(|record| {
-                !matches!(record.state, SentPktState::Pending { .. }) && ack_ranges
-                    .iter()
-                    .any(|range| range.contains(&record.packet_number))
+                !matches!(record.state, SentPktState::Pending { .. })
+                    && ack_ranges
+                        .iter()
+                        .any(|range| range.contains(&record.packet_number))
             })
             .map(|record| record.packet_number)
             .collect()
@@ -307,13 +311,22 @@ impl<T> ArcSentJournal<T> {
     /// participates in ACK/loss feedback before this transition.
     pub fn mark_sent(&self, pn: u64, retran_timeout: Duration, expire_timeout: Duration) -> bool {
         let mut inner = self.0.lock().unwrap();
-        let Some(index) = inner.sent_packets.iter().position(|record| record.packet_number == pn) else { return false };
-        let SentPktState::Pending { nframes } = inner.sent_packets[index].state else { return false };
+        let Some(index) = inner
+            .sent_packets
+            .iter()
+            .position(|record| record.packet_number == pn)
+        else {
+            return false;
+        };
+        let SentPktState::Pending { nframes } = inner.sent_packets[index].state else {
+            return false;
+        };
         if nframes == 0 {
             inner.sent_packets.remove(index);
         } else {
             let now = Instant::now();
-            inner.sent_packets[index].state = SentPktState::new(nframes, now, now + retran_timeout, now + expire_timeout);
+            inner.sent_packets[index].state =
+                SentPktState::new(nframes, now, now + retran_timeout, now + expire_timeout);
         }
         true
     }
@@ -326,7 +339,9 @@ impl<T> ArcSentJournal<T> {
         for index in 0..inner.sent_packets.len() {
             let record = inner.sent_packets[index];
             if record.packet_number == pn {
-                let SentPktState::Pending { nframes } = record.state else { return Vec::new() };
+                let SentPktState::Pending { nframes } = record.state else {
+                    return Vec::new();
+                };
                 inner.sent_packets.remove(index);
                 return inner.queue.drain(offset..offset + nframes).collect();
             }
@@ -426,7 +441,8 @@ impl<T> NewPacketGuard<'_, T> {
         assert!(self.trivial || nframes > 0, "cannot commit an empty packet");
         let packet_number = self.packet_number;
         self.inner.sent_packets.push_back(SentPacketRecord {
-            packet_number, state: SentPktState::Pending { nframes },
+            packet_number,
+            state: SentPktState::Pending { nframes },
         });
         self.commit();
     }
@@ -496,7 +512,10 @@ mod tests {
         }
         assert!(journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
         assert!(!journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
-        assert_eq!(journal.rotate().on_packet_acked(0).collect::<Vec<_>>(), vec![7]);
+        assert_eq!(
+            journal.rotate().on_packet_acked(0).collect::<Vec<_>>(),
+            vec![7]
+        );
     }
 
     #[test]
@@ -512,7 +531,10 @@ mod tests {
         assert_eq!(journal.new_packet().pn().0, 3);
         for (pn, frame) in [(0, 7), (2, 9)] {
             assert!(journal.mark_sent(pn, Duration::from_secs(1), Duration::from_secs(3)));
-            assert_eq!(journal.rotate().on_packet_acked(pn).collect::<Vec<_>>(), vec![frame]);
+            assert_eq!(
+                journal.rotate().on_packet_acked(pn).collect::<Vec<_>>(),
+                vec![frame]
+            );
         }
     }
 

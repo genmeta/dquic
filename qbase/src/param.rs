@@ -15,8 +15,8 @@ use crate::{
 
 pub mod core;
 pub mod error;
-pub mod handy;
 pub mod fixed;
+pub mod handy;
 pub mod io;
 pub mod preferred_address;
 

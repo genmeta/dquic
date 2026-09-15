@@ -750,12 +750,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn multipath_packet_threshold_counts_sends_on_this_path() {
         let recovered = Arc::new(Mutex::new(Vec::new()));
-        let mut controller = controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
+        let mut controller =
+            controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
         controller.on_packet_sent(0, Epoch::Data, true, true, MSS);
         controller.on_packet_sent(100, Epoch::Data, true, true, MSS);
         let ack = AckFrame::new(100u32.into(), 0u32.into(), 0u32.into(), vec![], None);
         controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
-        assert!(recovered.lock().unwrap().is_empty(), "other paths' PN gaps are not loss evidence");
+        assert!(
+            recovered.lock().unwrap().is_empty(),
+            "other paths' PN gaps are not loss evidence"
+        );
         controller.on_packet_sent(200, Epoch::Data, true, true, MSS);
         controller.on_packet_sent(300, Epoch::Data, true, true, MSS);
         let ack = AckFrame::new(300u32.into(), 0u32.into(), 0u32.into(), vec![], None);
@@ -799,7 +803,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn packet_threshold_survives_removing_the_queue_front() {
         let recovered = Arc::new(Mutex::new(Vec::new()));
-        let mut controller = controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
+        let mut controller =
+            controller_with_feedback(Arc::new(RecordingFeedback(recovered.clone())));
         for pn in [0, 100, 200, 300, 400] {
             controller.on_packet_sent(pn, Epoch::Data, true, true, MSS);
         }
