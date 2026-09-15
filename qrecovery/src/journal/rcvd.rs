@@ -218,7 +218,12 @@ impl ArcRcvdJournal {
         let journal = self.inner.read().unwrap();
         let start = (*range.start()).max(journal.packets.retired_before);
         let end = *range.end();
-        start > end || journal.packets.ranges.iter().any(|r| r.start <= start && r.end > end)
+        start > end
+            || journal
+                .packets
+                .ranges
+                .iter()
+                .any(|r| r.start <= start && r.end > end)
     }
 
     pub fn decode_pn(&self, encoded_pn: PacketNumber) -> Result<u64, InvalidPacketNumber> {

@@ -131,7 +131,9 @@ impl<TX> ArcListener<TX> {
 
     #[allow(clippy::type_complexity)]
     pub fn poll_accept_bi_with_limit(
-        &self, cx: &mut Context<'_>, snd_buf_size: u64,
+        &self,
+        cx: &mut Context<'_>,
+        snd_buf_size: u64,
     ) -> Poll<Result<(StreamId, (Reader<TX>, Writer<TX>)), QuicError>> {
         let mut guard = self.0.lock().unwrap();
         let set = guard.as_mut().map_err(|error| error.clone())?;

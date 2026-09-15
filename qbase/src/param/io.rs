@@ -52,9 +52,15 @@ pub fn be_parameter_value(input: &[u8], id: ParameterId) -> nom::IResult<&[u8], 
         }
         ParameterValueType::ConnectionId => {
             if input.len() > 20 {
-                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::TooLarge,
+                )));
             }
-            Ok((&[], ParameterValue::ConnectionId(ConnectionId::from_slice(input))))
+            Ok((
+                &[],
+                ParameterValue::ConnectionId(ConnectionId::from_slice(input)),
+            ))
         }
         ParameterValueType::PreferredAddress => {
             map(be_preferred_address, ParameterValue::PreferredAddress).parse(input)
@@ -159,7 +165,9 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
             (buf, (param_id, param_value)) =
                 be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
 
-            if !seen.insert(param_id) { return Err(Error::DuplicateParameter(param_id).into()); }
+            if !seen.insert(param_id) {
+                return Err(Error::DuplicateParameter(param_id).into());
+            }
 
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
@@ -174,7 +182,9 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
             let (remain, param_value) = be_parameter_value(param_value, param_id)
                 .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
             if !remain.is_empty() {
-                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
+                return Err(
+                    Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into(),
+                );
             }
 
             parameters.set(param_id, param_value)?;
@@ -197,7 +207,9 @@ impl ServerParameters {
             (buf, (param_id, param_value)) =
                 be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
 
-            if !seen.insert(param_id) { return Err(Error::DuplicateParameter(param_id).into()); }
+            if !seen.insert(param_id) {
+                return Err(Error::DuplicateParameter(param_id).into());
+            }
 
             let param_id = match ParameterId::try_from(param_id) {
                 Ok(param_id) => param_id,
@@ -212,7 +224,9 @@ impl ServerParameters {
             let (remain, param_value) = be_parameter_value(param_value, param_id)
                 .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
             if !remain.is_empty() {
-                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
+                return Err(
+                    Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into(),
+                );
             }
 
             parameters.set(param_id, param_value)?;
@@ -227,7 +241,10 @@ mod tests {
 
     #[test]
     fn duplicate_transport_parameters_are_rejected_even_when_unknown() {
-        for bytes in [vec![15, 0, 15, 0], vec![0x40, 0x3f, 0, 0x40, 0x3f, 0, 15, 0]] {
+        for bytes in [
+            vec![15, 0, 15, 0],
+            vec![0x40, 0x3f, 0, 0x40, 0x3f, 0, 15, 0],
+        ] {
             assert!(ClientParameters::parse_from_bytes(&bytes).is_err());
         }
     }
@@ -236,7 +253,11 @@ mod tests {
     fn malformed_parameter_values_return_errors_without_panicking() {
         let mut oversized_cid = vec![15, 21];
         oversized_cid.extend([0; 21]);
-        for bytes in [vec![4, 2, 1, 2, 15, 0], vec![12, 1, 0, 15, 0], oversized_cid] {
+        for bytes in [
+            vec![4, 2, 1, 2, 15, 0],
+            vec![12, 1, 0, 15, 0],
+            oversized_cid,
+        ] {
             let result = std::panic::catch_unwind(|| ClientParameters::parse_from_bytes(&bytes));
             assert!(result.is_ok(), "malformed parameter panicked");
             assert!(result.unwrap().is_err());

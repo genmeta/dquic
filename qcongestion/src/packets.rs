@@ -256,7 +256,10 @@ impl PacketSpace {
         let lost_sent_time = now - loss_delay;
 
         // Front removal shifts both indexes equally; no separate sequence is needed.
-        let largest_acked_index = self.sent_packets.iter().rposition(|pkt| pkt.state == State::Acked);
+        let largest_acked_index = self
+            .sent_packets
+            .iter()
+            .rposition(|pkt| pkt.state == State::Acked);
         let loss: Vec<_> = self
             .sent_packets
             .iter_mut()

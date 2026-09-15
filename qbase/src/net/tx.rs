@@ -172,7 +172,11 @@ impl ArcSendWakers {
     /// A retiring instance must not remove its replacement's waiter.
     pub fn remove_if(&self, pathway: &Pathway, waker: &ArcSendWaker) {
         let mut guard = self.lock_guard();
-        if guard.paths.get(pathway).is_some_and(|current| Arc::ptr_eq(&current.0, &waker.0)) {
+        if guard
+            .paths
+            .get(pathway)
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &waker.0))
+        {
             guard.paths.remove(pathway);
         }
     }
