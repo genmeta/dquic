@@ -123,11 +123,31 @@ impl From<quic::Keys> for BidirectionalKeys {
     }
 }
 
+/// Packet protection keys for both directions of one generation.
+pub struct PacketKeys {
+    pub opening: PacketKey,
+    pub sealing: PacketKey,
+}
+
+/// Secrets used to derive the next pair of packet protection keys.
+#[derive(Clone)]
+pub struct Secrets(Box<quic::Secrets>);
+
+impl Secrets {
+    pub fn next_packet_keys(&mut self) -> PacketKeys {
+        let keys = self.0.next_packet_keys();
+        PacketKeys {
+            opening: PacketKey::new(keys.remote),
+            sealing: PacketKey::new(keys.local),
+        }
+    }
+}
+
 pub struct OneRttKeyMaterial {
     pub opening_header: HeaderProtectionKey,
     pub sealing_header: HeaderProtectionKey,
-    pub opening: OpeningKeyCursor,
-    pub sealing: SealingKeyCursor,
+    pub packet: PacketKeys,
+    pub next_secret: Secrets,
 }
 
 impl OneRttKeyMaterial {
@@ -135,80 +155,11 @@ impl OneRttKeyMaterial {
         Self {
             opening_header: HeaderProtectionKey::new(keys.remote.header),
             sealing_header: HeaderProtectionKey::new(keys.local.header),
-            opening: OpeningKeyCursor(KeyCursor::new(
-                keys.remote.packet,
-                next.clone(),
-                Direction::Opening,
-            )),
-            sealing: SealingKeyCursor(KeyCursor::new(keys.local.packet, next, Direction::Sealing)),
+            packet: PacketKeys {
+                opening: PacketKey::new(keys.remote.packet),
+                sealing: PacketKey::new(keys.local.packet),
+            },
+            next_secret: Secrets(Box::new(next)),
         }
-    }
-}
-
-pub struct OpeningKeyCursor(KeyCursor);
-
-impl OpeningKeyCursor {
-    pub fn current(&self) -> &PacketKey {
-        &self.0.current
-    }
-
-    pub fn advance(&mut self) -> Result<DerivedPacketKey, CryptoError> {
-        self.0.advance()
-    }
-}
-
-pub struct SealingKeyCursor(KeyCursor);
-
-impl SealingKeyCursor {
-    pub fn current(&self) -> &PacketKey {
-        &self.0.current
-    }
-
-    pub fn advance(&mut self) -> Result<DerivedPacketKey, CryptoError> {
-        self.0.advance()
-    }
-}
-
-pub struct DerivedPacketKey {
-    pub generation: u64,
-    pub key: PacketKey,
-}
-
-#[derive(Clone, Copy)]
-enum Direction {
-    Opening,
-    Sealing,
-}
-
-struct KeyCursor {
-    generation: u64,
-    current: PacketKey,
-    next: Box<quic::Secrets>,
-    direction: Direction,
-}
-
-impl KeyCursor {
-    fn new(current: Box<dyn quic::PacketKey>, next: quic::Secrets, direction: Direction) -> Self {
-        Self {
-            generation: 0,
-            current: PacketKey::new(current),
-            next: Box::new(next),
-            direction,
-        }
-    }
-
-    fn advance(&mut self) -> Result<DerivedPacketKey, CryptoError> {
-        let generation = self
-            .generation
-            .checked_add(1)
-            .ok_or(CryptoError::GenerationOverflow)?;
-        let keys = self.next.next_packet_keys();
-        let key = PacketKey::new(match self.direction {
-            Direction::Opening => keys.remote,
-            Direction::Sealing => keys.local,
-        });
-        self.generation = generation;
-        self.current = key.clone();
-        Ok(DerivedPacketKey { generation, key })
     }
 }

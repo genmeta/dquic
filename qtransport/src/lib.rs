@@ -15,10 +15,10 @@
 //! }
 //! ```
 mod connection;
-pub mod control;
 pub mod keys;
 pub mod path;
 pub mod recv;
+pub mod router;
 pub mod send;
 pub mod space;
 pub mod transport;

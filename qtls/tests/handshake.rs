@@ -644,16 +644,14 @@ fn transfer(
 }
 
 fn test_updated_packet_keys(mut client: OneRttKeyMaterial, mut server: OneRttKeyMaterial) {
-    let client_generation_one = client.sealing.advance().unwrap();
-    let server_generation_one = server.opening.advance().unwrap();
-    assert_eq!(client_generation_one.generation, 1);
-    assert_eq!(server_generation_one.generation, 1);
-    test_direction(&client_generation_one.key, &server_generation_one.key);
-
-    assert_eq!(client.sealing.advance().unwrap().generation, 2);
-    assert_eq!(server.opening.advance().unwrap().generation, 2);
-    assert_eq!(client.opening.advance().unwrap().generation, 1);
-    assert_eq!(server.sealing.advance().unwrap().generation, 1);
+    test_direction(&client.packet.sealing, &server.packet.opening);
+    test_direction(&server.packet.sealing, &client.packet.opening);
+    for _ in 0..3 {
+        let client_keys = client.next_secret.next_packet_keys();
+        let server_keys = server.next_secret.next_packet_keys();
+        test_direction(&client_keys.sealing, &server_keys.opening);
+        test_direction(&server_keys.sealing, &client_keys.opening);
+    }
 }
 
 fn test_direction(sealing: &qtls::PacketKey, opening: &qtls::PacketKey) {

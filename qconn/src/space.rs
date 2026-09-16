@@ -156,7 +156,6 @@ pub(crate) struct Spaces {
     pub(crate) handshake: Arc<HandshakeSpace>,
     pub(crate) data: Arc<DataSpace>,
     pub(crate) enabled: std::sync::atomic::AtomicU8,
-    pub(crate) data_cursor: std::sync::Mutex<Option<qtls::SealingKeyCursor>>,
 }
 
 impl Spaces {
@@ -169,7 +168,6 @@ impl Spaces {
             handshake: HandshakeSpace::new(data.clone(), reliable.clone()),
             data: DataSpace::new(data, reliable),
             enabled: 1.into(),
-            data_cursor: std::sync::Mutex::new(None),
         })
     }
 

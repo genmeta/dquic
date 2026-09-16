@@ -26,11 +26,13 @@ use qprotocol::protocol::quic::QuicProtocol;
 
 use crate::{
     Error,
+    keys::OneRttKeys,
     path::{Path, PathState},
     transport::Transport,
 };
 
 pub struct Sender {
+    keys: OneRttKeys,
     transport: Arc<Transport>,
     path: Arc<Path>,
     buffer: BytesMut,
@@ -40,8 +42,13 @@ pub struct Sender {
 }
 
 impl Sender {
-    pub fn new(transport: Arc<Transport>, path: Arc<Path>) -> Result<Self, Error> {
-        if !Arc::ptr_eq(&path.submission, &transport.data.control.submission) {
+    /// The connection driver distributes ready keys before starting path senders.
+    pub fn new(
+        keys: OneRttKeys,
+        transport: Arc<Transport>,
+        path: Arc<Path>,
+    ) -> Result<Self, Error> {
+        if !Arc::ptr_eq(&path.submission, &transport.data.submission) {
             return Err(crate::error(
                 ErrorKind::Internal,
                 "path and space must share the submission boundary",
@@ -58,6 +65,7 @@ impl Sender {
             .send_wakers
             .replace(path.pathway, &path.send_waker);
         Ok(Self {
+            keys,
             transport,
             path,
             buffer: BytesMut::zeroed(1200),
@@ -78,7 +86,7 @@ impl Sender {
         }
         self.signals =
             Signals::TRANSPORT | Signals::CREDIT | Signals::KEYS | Signals::PATH_VALIDATE;
-        if !self.transport.data.control.can_send() {
+        if !self.transport.data.can_send() {
             return Ok(false);
         }
         if self.path.state() == PathState::Retired {
@@ -89,9 +97,7 @@ impl Sender {
         if !self.transport.data.sent_packets.has_capacity() {
             return Ok(false);
         }
-        let Some(tag_len) = self.transport.data.keys.tag_len() else {
-            return Ok(false);
-        };
+        let tag_len = self.keys.tag_len();
         let overhead = QuicProtocol::packet_overhead(self.path.pathway);
         let probe = self.path.cc.need_send_ack_eliciting(Epoch::Data) != 0;
         let mut constraints = self.path.constraints(1200, probe);
@@ -185,12 +191,8 @@ impl Sender {
             return Ok(false);
         }
         let frames = packet.frames().to_vec();
-        let pending = match packet.seal(&self.transport.data.keys) {
+        let pending = match packet.seal(&self.keys) {
             Ok(pending) => pending,
-            Err(PacketError::Stale) => {
-                self.transport.requeue(frames);
-                return Ok(false);
-            }
             Err(error) => {
                 self.transport.requeue(frames);
                 return Err(packet_error(error));
@@ -235,10 +237,9 @@ impl Sender {
             return Poll::Ready(Ok(false));
         };
         let data = self.transport.data.clone();
-        let _submission = data.control.submission.lock().unwrap();
-        if !data.control.can_send()
+        let _submission = data.submission.lock().unwrap();
+        if !data.can_send()
             || self.path.state() == PathState::Retired
-            || !data.keys.current_generation(packet.generation)
             || !data.sent_packets.can_submit(packet.pn)
         {
             self.abort_pending();
@@ -252,7 +253,13 @@ impl Sender {
             self.signals = Signals::CREDIT | Signals::CONGESTION;
             return Poll::Ready(Ok(false));
         }
-        match submit(cx, self.path.pathway, &packet.bytes) {
+        let Some(result) = self.keys.with_generation(packet.generation, || {
+            submit(cx, self.path.pathway, &packet.bytes)
+        }) else {
+            self.abort_pending();
+            return Poll::Ready(Ok(false));
+        };
+        match result {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => {
                 self.abort_pending();
@@ -298,7 +305,7 @@ impl Sender {
     /// Borrowing self keeps the path owner available for the external close driver.
     pub async fn run(&mut self, protocol: &QuicProtocol) -> Result<(), Error> {
         loop {
-            if self.transport.data.control.sending_stopped() {
+            if !self.transport.data.can_send() {
                 self.abort_pending();
                 return Ok(());
             }
@@ -346,14 +353,16 @@ fn packet_error(error: PacketError) -> Error {
 
 /// Data ACK pipe target. Capture the original components before Transport is created.
 /// Serialization with socket submission makes an early ACK wait for CC accounting.
+/// Report acknowledged generations to the receive task's ready OneRttKeys.
 pub fn acknowledge(
     data: &crate::space::Space<crate::keys::ArcOneRttKeys>,
     streams: &qrecovery::streams::DataStreams<crate::ReliableFrames>,
     parameters: &crate::ArcParameters,
     ack: &AckFrame,
     received_on: &Arc<Path>,
+    on_ack: impl Fn(u64),
 ) -> Result<(), Error> {
-    let _submission = data.control.submission.lock().unwrap();
+    let _submission = data.submission.lock().unwrap();
     let exponent: u64 = parameters.remote(ParameterId::AckDelayExponent).unwrap();
     let delay = ack
         .delay()
@@ -374,7 +383,7 @@ pub fn acknowledge(
             path.cc.on_ack_rcvd(Epoch::Data, &ack);
         }
         for (_, generation, frames) in packets {
-            data.keys.on_ack(generation);
+            on_ack(generation);
             for frame in frames {
                 match frame {
                     Frame::Crypto(frame, ()) => data.crypto.outgoing().on_data_acked(&frame),
@@ -399,7 +408,12 @@ mod tests {
     async fn idle_stream_sender_yields_pending_instead_of_spinning_on_returned_credit() {
         let [(client, transport, path), _] = crate::tests::pair(1);
         let (_, _writer) = client.open_uni_stream().await.unwrap().unwrap();
-        let mut sender = Sender::new(transport.clone(), path).unwrap();
+        let mut sender = Sender::new(
+            transport.data.keys.clone().await.unwrap(),
+            transport.clone(),
+            path,
+        )
+        .unwrap();
         // The watchdog makes a spin a finite failing test rather than hanging the runtime.
         let watchdog = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));

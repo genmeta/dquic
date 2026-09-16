@@ -25,8 +25,8 @@ pub use handshake::{
     CryptoLevel, EstablishedTls, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake,
 };
 pub use keys::{
-    BidirectionalKeys, DerivedPacketKey, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial,
-    OpeningKeyCursor, PacketKey, SealingKeyCursor,
+    BidirectionalKeys, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial, PacketKey,
+    PacketKeys, Secrets,
 };
 pub use resumption::{
     ClientResumptionConfig, MemoryResumptionStore, ResumptionKey, ResumptionStore,

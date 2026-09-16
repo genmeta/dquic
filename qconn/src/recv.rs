@@ -35,7 +35,7 @@ pub(crate) struct Topology {
     opening: [Option<(Arc<qtls::HeaderProtectionKey>, qtls::PacketKey)>; 3],
     journals: [Option<ArcRcvdJournal>; 3],
     enabled: [bool; 3],
-    one_rtt: Option<qtls::OpeningKeyCursor>,
+    next_secret: Option<qtls::Secrets>,
     next: Option<qtls::PacketKey>,
     previous: Option<(qtls::PacketKey, Instant)>,
     generation: u64,
@@ -50,7 +50,7 @@ impl Topology {
             opening: [Some((Arc::new(initial.header), initial.packet)), None, None],
             journals: [Some(ArcRcvdJournal::with_capacity(0, None)), None, None],
             enabled: [true; 3],
-            one_rtt: None,
+            next_secret: None,
             next: None,
             previous: None,
             generation: 0,
@@ -119,19 +119,22 @@ impl Topology {
                         Ok(())
                     }
                     qtls::InstalledKeys::OneRtt(keys) => {
-                        self.install_one_rtt(keys.opening_header, keys.opening)
-                            .map_err(crate::internal)?;
+                        self.install_one_rtt(
+                            keys.opening_header,
+                            keys.packet.opening,
+                            keys.next_secret,
+                        )
+                        .map_err(crate::internal)?;
                         transport
                             .spaces
                             .data
                             .install(
                                 Arc::new(keys.sealing_header),
-                                keys.sealing.current().clone(),
+                                keys.packet.sealing,
                                 self.journal(Epoch::Data).unwrap().clone(),
                                 transport.wakers.clone(),
                             )
                             .map_err(crate::internal)?;
-                        *transport.spaces.data_cursor.lock().unwrap() = Some(keys.sealing);
                         transport
                             .spaces
                             .enabled
@@ -144,7 +147,7 @@ impl Topology {
                 result?;
             }
             Command::TlsComplete(done) => {
-                if transport.data.get().is_none() || self.one_rtt.is_none() {
+                if transport.data.get().is_none() || self.next_secret.is_none() {
                     let error =
                         crate::internal("TLS completed before data components and 1-RTT keys");
                     let _ = done.send(Err(error.clone()));
@@ -348,13 +351,14 @@ impl Topology {
     pub(crate) fn install_one_rtt(
         &mut self,
         header: qtls::HeaderProtectionKey,
-        cursor: qtls::OpeningKeyCursor,
+        opening: qtls::PacketKey,
+        next_secret: qtls::Secrets,
     ) -> Result<(), &'static str> {
         if !self.enabled[2] || self.opening[2].is_some() {
             return Err("1-RTT keys already installed or discarded");
         }
-        self.opening[2] = Some((Arc::new(header), cursor.current().clone()));
-        self.one_rtt = Some(cursor);
+        self.opening[2] = Some((Arc::new(header), opening));
+        self.next_secret = Some(next_secret);
         self.journals[2] = Some(ArcRcvdJournal::with_capacity(
             0,
             Some(Duration::from_millis(25)),
@@ -372,7 +376,7 @@ impl Topology {
         self.opening[i] = None;
         self.journals[i] = None;
         if epoch == Epoch::Data {
-            self.one_rtt = None;
+            self.next_secret = None;
             self.next = None;
             self.previous = None;
         }
@@ -468,12 +472,11 @@ impl Topology {
         let key = if updating {
             if self.next.is_none() {
                 self.next = Some(
-                    self.one_rtt
+                    self.next_secret
                         .as_mut()
-                        .expect("1-RTT cursor installed")
-                        .advance()
-                        .map_err(|_| "key generation exhausted")?
-                        .key,
+                        .expect("1-RTT secrets installed")
+                        .next_packet_keys()
+                        .opening,
                 );
             }
             self.next.as_ref().unwrap().clone()
@@ -539,17 +542,17 @@ mod tests {
         tls::tests::{handshake, initial_keys},
     };
 
-    fn ready() -> (
-        Topology,
-        Arc<qtls::HeaderProtectionKey>,
-        qtls::SealingKeyCursor,
-    ) {
+    fn ready() -> (Topology, qtls::OneRttKeyMaterial) {
         let [client, server] = handshake(false);
         let mut topology = Topology::new(initial_keys().opening);
         topology
-            .install_one_rtt(server.opening_header, server.opening)
+            .install_one_rtt(
+                server.opening_header,
+                server.packet.opening,
+                server.next_secret,
+            )
             .unwrap();
-        (topology, Arc::new(client.sealing_header), client.sealing)
+        (topology, client)
     }
 
     fn packet(
@@ -585,8 +588,9 @@ mod tests {
 
     #[test]
     fn a_rejected_component_does_not_commit_the_packet_number() {
-        let (mut topology, header, cursor) = ready();
-        let bytes = packet(&header, cursor.current(), 0, false);
+        let (mut topology, keys) = ready();
+        let header = Arc::new(keys.sealing_header);
+        let bytes = packet(&header, &keys.packet.sealing, 0, false);
         let pto = Duration::from_secs(1);
         assert!(
             topology
@@ -616,11 +620,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn forged_next_phase_does_not_replace_current_keys_and_old_keys_expire() {
-        let (mut topology, header, mut cursor) = ready();
+        let (mut topology, mut keys) = ready();
+        let header = Arc::new(keys.sealing_header);
         topology.confirm();
         let pto = Duration::from_secs(1);
-        let old = cursor.current().clone();
-        let next = cursor.advance().unwrap().key;
+        let old = keys.packet.sealing;
+        let next = keys.next_secret.next_packet_keys().sealing;
         let mut forged = packet(&header, &next, 4, true);
         let last = forged.len() - 1;
         forged[last] ^= 1;
@@ -667,8 +672,9 @@ mod tests {
 
     #[test]
     fn authenticated_key_update_requires_handshake_confirmation() {
-        let (mut topology, header, mut cursor) = ready();
-        let next = cursor.advance().unwrap().key;
+        let (mut topology, mut keys) = ready();
+        let header = Arc::new(keys.sealing_header);
+        let next = keys.next_secret.next_packet_keys().sealing;
         assert_eq!(
             topology
                 .receive(
