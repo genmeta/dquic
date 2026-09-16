@@ -9,7 +9,7 @@ use std::{
 };
 
 use qbase::{
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     frame::{AckFrame, Frame},
     varint::VARINT_MAX,
 };
@@ -58,10 +58,11 @@ impl SentPackets {
         let mut pn = self.next_pn.load(Ordering::Acquire);
         loop {
             if pn > VARINT_MAX {
-                return Err(crate::error(
+                return Err(QuicError::with_default_fty(
                     ErrorKind::AeadLimitReached,
                     "packet numbers exhausted",
-                ));
+                )
+                .into());
             }
             match self.next_pn.compare_exchange_weak(
                 pn,
@@ -161,7 +162,7 @@ impl SentPackets {
         let largest = self.largest_submitted.load(Ordering::Acquire);
         // qbase's decoder reads ACK fields; validate range arithmetic before its
         // iterators or CC can see an authenticated but malformed ACK.
-        let invalid = || crate::error(ErrorKind::FrameEncoding, "invalid ACK range");
+        let invalid = || QuicError::with_default_fty(ErrorKind::FrameEncoding, "invalid ACK range");
         let mut start = ack
             .largest()
             .checked_sub(ack.first_range())
@@ -182,10 +183,11 @@ impl SentPackets {
                 .iter()
                 .any(|range| !self.journal.covers_range(range.clone()))
         {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::ProtocolViolation,
                 "ACK acknowledges an unsent packet",
-            ));
+            )
+            .into());
         }
         let mut packets = self.packets.lock().unwrap();
         let numbers = packets
