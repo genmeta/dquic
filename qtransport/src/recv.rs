@@ -1,87 +1,184 @@
 //! Receive engines are functions. Their closures capture already connected component pipes.
-use std::{sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use qbase::{
     Epoch,
     error::ErrorKind,
-    frame::{Frame, FrameReader},
-    packet::{DataHeader, DataPacket, GetType, PacketContent, long, number::take_pn_len},
+    flow::FlowController,
+    frame::{
+        ConnectionCloseFrame, Frame, FrameReader, GetFrameType, NewConnectionIdFrame,
+        NewTokenFrame, RetireConnectionIdFrame, io::ReceiveFrame,
+    },
+    net::route::{Link, Pathway},
+    packet::{DataHeader, DataPacket, Packet, PacketContent, long},
     varint::VARINT_MAX,
 };
 use qcongestion::Transport as _;
-use qrecovery::journal::ArcRcvdJournal;
+use qrecovery::{crypto::CryptoStream, streams::DataStreams};
 use tokio::sync::mpsc;
 
-use crate::{Error, keys::ReceiveKeys, path::Path, space::Space};
+use crate::{
+    ArcParameters, Error, ReliableFrames,
+    keys::{ArcKeys, ArcOneRttKeys, OneRttKeys, OpenPacket},
+    path::Path,
+    router::{PACKET_QUEUE_CAPACITY, ReceivedPacket},
+    space::Space,
+};
 
-pub fn open_packet(
-    packet: DataPacket,
-    keys: &impl ReceiveKeys,
-    journal: &ArcRcvdJournal,
-    pto: Duration,
-) -> Result<Option<(u64, FrameReader)>, Error> {
-    keys.open(packet, journal, pto)
+/// Connect existing components once. No task, registry or extra frame buffer is created here.
+/// Handshake ACK/HANDSHAKE_DONE and negotiated extensions belong to the external driver.
+/// Data dispatch supplies an ACK callback capturing its already acquired OneRttKeys.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn frame_dispatcher(
+    data: Arc<Space<ArcOneRttKeys>>,
+    parameters: ArcParameters,
+    streams: DataStreams<ReliableFrames>,
+    flow: FlowController<ReliableFrames>,
+    crypto: [CryptoStream; 3],
+    local_cids: impl ReceiveFrame<RetireConnectionIdFrame> + Send + Sync,
+    remote_cids: impl ReceiveFrame<NewConnectionIdFrame> + Send + Sync,
+    tokens: impl ReceiveFrame<NewTokenFrame> + Send + Sync,
+    closing: Arc<AtomicBool>,
+    on_close: impl Fn(Epoch, ConnectionCloseFrame, &Arc<Path>) -> Result<(), Error> + Send + Sync,
+    on_other: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error> + Send + Sync,
+) -> impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error> + Send + Sync {
+    move |epoch, frame, path, on_ack| {
+        let kind = frame.frame_type();
+        match frame {
+            Frame::Padding(_) | Frame::Ping(_) => Ok(()),
+            Frame::Ack(frame) if epoch == Epoch::Data => {
+                crate::send::acknowledge(&data, &streams, &parameters, &frame, path, on_ack)
+            }
+            Frame::Crypto(frame, bytes) => crypto[epoch].incoming().recv_frame((frame, bytes)),
+            Frame::Stream(frame, bytes) => {
+                let fresh = streams.recv_frame((frame, bytes))?;
+                flow.recver.on_new_rcvd(kind, fresh).map(|_| ())
+            }
+            Frame::StreamCtl(frame) => {
+                let fresh = streams.recv_frame(frame)?;
+                flow.recver.on_new_rcvd(kind, fresh).map(|_| ())
+            }
+            Frame::MaxData(frame) => flow.sender.recv_frame(frame),
+            Frame::DataBlocked(frame) => flow.recver.recv_frame(frame),
+            Frame::NewConnectionId(frame) => remote_cids.recv_frame(frame).map(|_| ()),
+            Frame::RetireConnectionId(frame) => local_cids.recv_frame(frame).map(|_| ()),
+            Frame::NewToken(frame) => tokens.recv_frame(frame).map(|_| ()),
+            Frame::PathChallenge(frame) => path.recv_frame(frame),
+            Frame::PathResponse(frame) => path.recv_frame(frame),
+            Frame::Close(frame) => {
+                closing.store(true, Ordering::Release);
+                data.stop_sending();
+                let error = Error::from(frame.clone());
+                streams.on_conn_error(&error);
+                flow.on_conn_error(&error);
+                on_close(epoch, frame, path)
+            }
+            frame => on_other(epoch, frame, path),
+        }
+    }
 }
 
-pub(crate) fn open_with(
-    mut packet: DataPacket,
-    header_key: &qtls::HeaderProtectionKey,
-    journal: &ArcRcvdJournal,
-    mut decrypt: impl FnMut(u64, u8, &[u8], &mut [u8]) -> Result<Option<usize>, Error>,
-) -> Result<Option<(u64, FrameReader)>, Error> {
-    let kind = packet.get_type();
-    let sample_start = packet.offset.saturating_add(4);
-    if packet.offset == 0
-        || sample_start.saturating_add(header_key.sample_len()) > packet.bytes.len()
-    {
-        return Ok(None);
+/// Demultiplex without awaiting keys or downstream queue capacity.
+pub async fn route_packets(
+    mut inbox: mpsc::Receiver<ReceivedPacket>,
+    entries: [mpsc::Sender<(DataPacket, Arc<Path>)>; 3],
+    mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    mut on_unprotected: impl FnMut(Packet, Pathway, Link),
+) {
+    while let Some((packet, pathway, link, size)) = inbox.recv().await {
+        let Some(path) = path_for(pathway, link) else {
+            continue;
+        };
+        if size != 0 {
+            path.on_datagram_received(size);
+        }
+        match packet {
+            Packet::Data(packet) => {
+                let epoch = match packet.header {
+                    DataHeader::Long(long::DataHeader::Initial(_)) => Epoch::Initial,
+                    DataHeader::Long(long::DataHeader::Handshake(_)) => Epoch::Handshake,
+                    DataHeader::Short(_) => Epoch::Data,
+                    // 0-RTT is not enabled by this transport.
+                    _ => continue,
+                };
+                let _ = entries[epoch].try_send((packet, path));
+            }
+            packet => on_unprotected(packet, pathway, link),
+        }
     }
-    let (header_pn, sample) = packet.bytes.split_at_mut(sample_start);
-    let (prefix, pn_bytes) = header_pn.split_at_mut(packet.offset);
-    if header_key
-        .unprotect(&sample[..header_key.sample_len()], &mut prefix[0], pn_bytes)
-        .is_err()
-    {
-        return Ok(None);
-    }
-    let first = packet.bytes[0];
-    let pn_len = (first & 3) + 1;
-    let (_, encoded) = take_pn_len(pn_len)(&packet.bytes[packet.offset..])
-        .map_err(|_| crate::error(ErrorKind::Internal, "invalid packet-number layout"))?;
-    let Ok(pn) = journal.decode_pn(encoded) else {
-        return Ok(None);
-    };
-    if pn > VARINT_MAX {
-        return Ok(None);
-    }
-    let body_offset = packet.offset + pn_len as usize;
-    let (header, body) = packet.bytes.split_at_mut(body_offset);
-    let Some(plain_len) = decrypt(pn, first, header, body)? else {
-        return Ok(None);
-    };
-    let reserved = if matches!(packet.header, DataHeader::Short(_)) {
-        0x18
-    } else {
-        0x0c
-    };
-    if first & reserved != 0 {
-        return Err(crate::error(
-            ErrorKind::ProtocolViolation,
-            "nonzero authenticated reserved bits",
-        ));
-    }
-    let payload = packet
-        .bytes
-        .freeze()
-        .slice(body_offset..body_offset + plain_len);
-    if payload.is_empty() {
-        return Err(crate::error(
-            ErrorKind::ProtocolViolation,
-            "empty packet payload",
-        ));
-    }
-    Ok(Some((pn, FrameReader::new(payload, kind))))
+}
+
+/// One coroutine drives all receive spaces. A pending Handshake key does not block Initial/Data.
+/// qconn owns spawning/cancellation, path creation, TLS progression and final route removal.
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    inbox: mpsc::Receiver<ReceivedPacket>,
+    initial: Arc<Space<ArcKeys>>,
+    handshake: Arc<Space<ArcKeys>>,
+    data: Arc<Space<ArcOneRttKeys>>,
+    closing: Arc<AtomicBool>,
+    path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
+    on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
+    on_unprotected: impl FnMut(Packet, Pathway, Link),
+    on_error: impl Fn(Error),
+) {
+    let (initial_entry, initial_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
+    let (handshake_entry, handshake_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
+    let (data_entry, data_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
+    tokio::join!(
+        route_packets(
+            inbox,
+            [initial_entry, handshake_entry, data_entry],
+            path_for,
+            on_unprotected
+        ),
+        run_receive(
+            initial_packets,
+            initial.clone(),
+            |keys, packet, pto| {
+                keys.opening
+                    .open(packet, |pn| initial.rcvd_packets.decode_pn(pn), pto)
+            },
+            closing.clone(),
+            |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
+            &on_processed,
+            &on_error
+        ),
+        run_receive(
+            handshake_packets,
+            handshake.clone(),
+            |keys, packet, pto| {
+                keys.opening
+                    .open(packet, |pn| handshake.rcvd_packets.decode_pn(pn), pto)
+            },
+            closing.clone(),
+            |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
+            &on_processed,
+            &on_error
+        ),
+        run_receive(
+            data_packets,
+            data.clone(),
+            |keys: &OneRttKeys, packet, pto| {
+                keys.open(packet, |pn| data.rcvd_packets.decode_pn(pn), pto)
+            },
+            closing,
+            |keys, epoch, frame, path| {
+                dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
+            },
+            &on_processed,
+            &on_error
+        ),
+    );
 }
 
 /// Dispatch must synchronously accept ownership or return a terminal error. A full
@@ -92,9 +189,20 @@ pub fn receive_packet<K>(
     frames: FrameReader,
     space: &Space<K>,
     path: &Arc<Path>,
+    closing: &AtomicBool,
     mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
 ) -> Result<PacketContent, Error> {
+    if closing.load(Ordering::Acquire) {
+        for frame in frames {
+            let Ok((frame, _)) = frame else { break };
+            if matches!(frame, Frame::Close(_)) {
+                dispatch(space.epoch, frame, path)?;
+                break;
+            }
+        }
+        return Ok(PacketContent::default());
+    }
     let mut decoded = Vec::new();
     let mut content = PacketContent::default();
     for frame in frames {
@@ -124,6 +232,9 @@ pub fn receive_packet<K>(
         return Ok(PacketContent::default());
     }
     for frame in decoded {
+        if closing.load(Ordering::Acquire) {
+            return Ok(PacketContent::default());
+        }
         dispatch(space.epoch, frame, path)?;
     }
     let pto = path.cc.get_pto(space.epoch);
@@ -136,15 +247,20 @@ pub fn receive_packet<K>(
     Ok(content)
 }
 
-/// Run exactly once per space. The external driver cancels this future on close,
-/// retaining its own CID inbox and Closing/Draining receive branch.
-pub async fn run_receive<K: ReceiveKeys>(
+/// One key waiter per space. Closing keeps this same engine alive for CLOSE frames.
+/// Retirement ends only this space; qconn cancels the whole task after draining.
+/// Dispatch receives the same ready material used to open the packet.
+pub async fn run_receive<K, M>(
     mut packets: mpsc::Receiver<(DataPacket, Arc<Path>)>,
     space: Arc<Space<K>>,
-    mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
+    mut open: impl FnMut(&M, DataPacket, Duration) -> Result<Option<(u64, FrameReader)>, Error>,
+    closing: Arc<AtomicBool>,
+    mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
-) {
+) where
+    K: Clone + Future<Output = Option<M>>,
+{
     while let Some((packet, path)) = packets.recv().await {
         let epoch = match packet.header {
             DataHeader::Long(long::DataHeader::Initial(_)) => Epoch::Initial,
@@ -155,29 +271,35 @@ pub async fn run_receive<K: ReceiveKeys>(
         if epoch != space.epoch {
             continue;
         }
-        if !space.keys.ready().await || !space.control.receiving().await {
+        if !space.can_receive() {
             break;
         }
-        if !space.control.can_receive() {
+        let Some(keys) = space.keys.clone().await else {
+            break;
+        };
+        if !space.can_receive() {
             break;
         }
-        let result = open_packet(
-            packet,
-            &space.keys,
-            &space.rcvd_packets,
-            path.cc.get_pto(epoch),
-        )
-        .and_then(|opened| {
+        let result = open(&keys, packet, path.cc.get_pto(epoch)).and_then(|opened| {
             if let Some((pn, frames)) = opened
-                && space.control.can_receive()
+                && space.can_receive()
             {
-                receive_packet(pn, frames, &space, &path, &mut dispatch, &mut on_processed)?;
+                receive_packet(
+                    pn,
+                    frames,
+                    &space,
+                    &path,
+                    &closing,
+                    |epoch, frame, path| dispatch(&keys, epoch, frame, path),
+                    &mut on_processed,
+                )?;
             }
             Ok(())
         });
-        if let Err(error) = result {
+        if let Err(error) = result
+            && !closing.swap(true, Ordering::AcqRel)
+        {
             on_error(error);
-            break;
         }
     }
 }

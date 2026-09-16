@@ -1,10 +1,13 @@
-use std::{future::poll_fn, sync::Arc};
+use std::{
+    future::poll_fn,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use bytes::Bytes;
-use qbase::{
-    error::{AppError, ErrorKind},
-    param::ParameterId,
-};
+use qbase::{error::AppError, param::ParameterId};
 
 use crate::{
     ArcParameters, Error, Role, StreamId, StreamReader, StreamWriter, VarInt, transport::Transport,
@@ -18,28 +21,18 @@ pub struct ArcConnection(Arc<Connection>);
 struct Connection {
     alpn: Bytes,
     transport: Arc<Transport>,
+    closing: Arc<AtomicBool>,
 }
 
 impl ArcConnection {
     /// Protocol integration only: the caller has completed TLS and authenticated parameters.
     #[doc(hidden)]
-    pub fn new(transport: Arc<Transport>, alpn: Bytes) -> Result<Self, Error> {
-        if alpn.is_empty() || alpn.len() > 255 {
-            return Err(crate::error(
-                ErrorKind::Crypto(120),
-                "missing or invalid negotiated ALPN",
-            ));
-        }
-        if !transport.data.keys.is_ready()
-            || !transport.data.control.can_receive()
-            || !transport.data.control.can_send()
-        {
-            return Err(crate::error(
-                ErrorKind::Internal,
-                "data transport is not ready for delivery",
-            ));
-        }
-        Ok(Self(Arc::new(Connection { alpn, transport })))
+    pub fn new(transport: Arc<Transport>, alpn: Bytes, closing: Arc<AtomicBool>) -> Self {
+        Self(Arc::new(Connection {
+            alpn,
+            transport,
+            closing,
+        }))
     }
 
     pub fn role(&self) -> Role {
@@ -96,6 +89,7 @@ impl ArcConnection {
     }
     /// Stop all clones and streams immediately; qconn completes Closing/Draining.
     pub fn close(self, code: VarInt, reason: &str) {
+        self.0.closing.store(true, Ordering::Release);
         self.0
             .transport
             .close(AppError::new(code, reason.to_owned()).into());
@@ -104,6 +98,7 @@ impl ArcConnection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.closing.store(true, Ordering::Release);
         self.transport
             .close(AppError::new(VarInt::from_u32(0), "last connection handle dropped").into());
     }

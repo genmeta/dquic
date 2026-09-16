@@ -13,13 +13,12 @@ use qbase::{
 };
 
 use super::constraints::Constraints;
+use crate::keys::SealPacket;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketError {
     #[error("packet assembly blocked: {0:?}")]
     Blocked(Signals),
-    #[error("packet permission, number or generation is obsolete")]
-    Stale,
     #[error(transparent)]
     Connection(#[from] crate::Error),
     #[error("frame {0:?} is not allowed in this packet")]
@@ -275,35 +274,28 @@ impl OneRttPacket {
         std::mem::take(&mut self.frames)
     }
 
-    pub fn seal(mut self, keys: &crate::keys::ArcOneRttKeys) -> Result<PendingPacket, PacketError> {
+    pub fn seal(mut self, keys: &crate::keys::OneRttKeys) -> Result<PendingPacket, PacketError> {
         if self.cursor == self.body_offset || self.illegal.is_some() {
             return Err(PacketError::Layout);
         }
-        keys.seal(self.pn, |header_key, packet_key, generation| {
-            if packet_key.tag_len() != self.tag_len {
-                return Err(PacketError::Layout);
-            }
-            if generation % 2 != 0 {
-                self.buffer[0] |= 4;
-            }
-            let total = self.cursor + self.tag_len;
-            let (header, body_tag) = self.buffer[..total].split_at_mut(self.body_offset);
-            let (body, tag) = body_tag.split_at_mut(self.cursor - self.body_offset);
-            packet_key.seal(self.pn, header, body, tag)?;
-            let (header_pn, sample) = self.buffer[..total].split_at_mut(self.body_offset);
-            let (prefix, pn_bytes) = header_pn.split_at_mut(self.pn_offset);
-            header_key.protect(&sample[..header_key.sample_len()], &mut prefix[0], pn_bytes)?;
-            self.buffer.truncate(total);
-            Ok(PendingPacket {
-                bytes: self.buffer,
-                pn: self.pn,
-                epoch: Epoch::Data,
-                generation,
-                content: self.content,
-                in_flight: self.in_flight,
-                ack: self.ack,
-                frames: self.frames,
-            })
+        let total = self.cursor + self.tag_len;
+        let (generation, _) = keys.seal(
+            self.pn,
+            &mut self.buffer[..total],
+            self.pn_offset,
+            self.body_offset,
+            self.tag_len,
+        )?;
+        self.buffer.truncate(total);
+        Ok(PendingPacket {
+            bytes: self.buffer,
+            pn: self.pn,
+            epoch: Epoch::Data,
+            generation,
+            content: self.content,
+            in_flight: self.in_flight,
+            ack: self.ack,
+            frames: self.frames,
         })
     }
 }

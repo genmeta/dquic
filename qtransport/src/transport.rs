@@ -3,7 +3,6 @@ use std::sync::Arc;
 use qbase::{
     flow::FlowController,
     frame::{Frame, ReliableFrame, io::SendFrame},
-    net::tx::Signals,
 };
 use qrecovery::streams::DataStreams;
 
@@ -40,10 +39,9 @@ impl Transport {
 
     /// Terminate business use. The external driver retains the receive route and close keys.
     pub fn close(&self, error: Error) {
-        self.data.control.stop_sending();
+        self.data.stop_sending();
         self.streams.on_conn_error(&error);
         self.flow.on_conn_error(&error);
-        self.data.send_wakers.wake_all_by(Signals::all());
     }
 
     pub(crate) fn requeue(&self, frames: impl IntoIterator<Item = Frame<()>>) {

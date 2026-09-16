@@ -48,8 +48,6 @@ pub enum CryptoError {
     InvalidTagLength { expected: usize, actual: usize },
     #[error("QUIC key operation failed")]
     OperationFailed,
-    #[error("key generation overflow")]
-    GenerationOverflow,
 }
 
 #[derive(Debug, Error)]
