@@ -14,7 +14,7 @@ use bytes::BytesMut;
 use packet::{OneRttPacket, PacketError, PendingPacket};
 use qbase::{
     Epoch,
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     frame::{AckFrame, Frame, PingFrame},
     net::tx::Signals,
     packet::{OneRttHeader, io::Repeat},
@@ -49,16 +49,18 @@ impl Sender {
         path: Arc<Path>,
     ) -> Result<Self, Error> {
         if !Arc::ptr_eq(&path.submission, &transport.data.submission) {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::Internal,
                 "path and space must share the submission boundary",
-            ));
+            )
+            .into());
         }
         if path.sender_active.swap(true, Ordering::AcqRel) {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::Internal,
                 "path already has a sending owner",
-            ));
+            )
+            .into());
         }
         transport
             .data
@@ -90,7 +92,9 @@ impl Sender {
             return Ok(false);
         }
         if self.path.state() == PathState::Retired {
-            return Err(crate::error(ErrorKind::NoViablePath, "path retired"));
+            return Err(
+                QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
+            );
         }
         self.transport
             .requeue(self.transport.data.sent_packets.take_lost());
@@ -263,10 +267,11 @@ impl Sender {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => {
                 self.abort_pending();
-                Poll::Ready(Err(crate::error(
+                Poll::Ready(Err(QuicError::with_default_fty(
                     ErrorKind::NoViablePath,
                     error.to_string(),
-                )))
+                )
+                .into()))
             }
             Poll::Ready(Ok(submitted)) => {
                 // One datagram is atomic; qprotocol reports its entire UDP payload size.
@@ -309,10 +314,9 @@ impl Sender {
                 self.abort_pending();
                 return Ok(());
             }
-            self.path
-                .cc
-                .do_tick()
-                .map_err(|error| crate::error(ErrorKind::NoViablePath, error.to_string()))?;
+            self.path.cc.do_tick().map_err(|error| {
+                QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
+            })?;
             if self.prepare()? {
                 let wake = self.path.send_waker.clone();
                 let signals = self.signals;
@@ -347,7 +351,7 @@ impl Drop for Sender {
 fn packet_error(error: PacketError) -> Error {
     match error {
         PacketError::Connection(error) => error,
-        error => crate::error(ErrorKind::Internal, error.to_string()),
+        error => QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
     }
 }
 
@@ -417,7 +421,8 @@ mod tests {
         // The watchdog makes a spin a finite failing test rather than hanging the runtime.
         let watchdog = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            transport.close(crate::error(ErrorKind::Internal, "test watchdog"));
+            transport
+                .close(QuicError::with_default_fty(ErrorKind::Internal, "test watchdog").into());
         });
         let protocol = QuicProtocol::new();
         let mut running = Box::pin(sender.run(&protocol));

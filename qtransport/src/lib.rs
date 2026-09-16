@@ -32,12 +32,5 @@ pub type ReliableFrames = qrecovery::reliable::ArcReliableFrameDeque<qbase::fram
 pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ReliableFrames>>;
 pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ReliableFrames>>;
 
-fn error(
-    kind: qbase::error::ErrorKind,
-    reason: impl Into<std::borrow::Cow<'static, str>>,
-) -> Error {
-    qbase::error::QuicError::with_default_fty(kind, reason).into()
-}
-
 #[cfg(test)]
 mod tests;

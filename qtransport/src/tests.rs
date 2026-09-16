@@ -12,7 +12,7 @@ use futures::FutureExt;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    error::{AppError, ErrorKind},
+    error::{AppError, ErrorKind, QuicError},
     flow::FlowController,
     frame::{AckFrame, Frame, MaxStreamsFrame, PingFrame, StreamCtlFrame, io::ReceiveFrame},
     net::{addr::EndpointAddr, route::Pathway, tx::ArcSendWakers},
@@ -306,10 +306,11 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
         Frame::Close(frame) => transport.close(frame.into()),
         Frame::Padding(_) | Frame::Ping(_) => {}
         _ => {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::ProtocolViolation,
                 "unexpected test frame",
-            ));
+            )
+            .into());
         }
     }
     Ok(())
@@ -717,7 +718,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
                 Ok(())
             } else {
                 ordinary += 1;
-                Err(crate::error(ErrorKind::Internal, "component failed"))
+                Err(QuicError::with_default_fty(ErrorKind::Internal, "component failed").into())
             }
         },
         |_, _| Ok(()),
@@ -1218,7 +1219,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             &st.data,
             &sp,
             &AtomicBool::new(false),
-            |_, _, _| Err(crate::error(ErrorKind::Internal, "pipe full")),
+            |_, _, _| Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into()),
             |_, _| Ok(())
         )
         .is_err()

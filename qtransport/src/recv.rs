@@ -11,7 +11,7 @@ use std::{
 use bytes::Bytes;
 use qbase::{
     Epoch,
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     flow::FlowController,
     frame::{
         ConnectionCloseFrame, Frame, FrameReader, GetFrameType, NewConnectionIdFrame,
@@ -206,8 +206,9 @@ pub fn receive_packet<K>(
     let mut decoded = Vec::new();
     let mut content = PacketContent::default();
     for frame in frames {
-        let (frame, kind) =
-            frame.map_err(|error| crate::error(ErrorKind::FrameEncoding, error.to_string()))?;
+        let (frame, kind) = frame.map_err(|error| {
+            QuicError::with_default_fty(ErrorKind::FrameEncoding, error.to_string())
+        })?;
         content += PacketContent::from(kind);
         if matches!(frame, Frame::Padding(_)) {
             continue;
@@ -215,10 +216,11 @@ pub fn receive_packet<K>(
         if let Frame::Crypto(frame, bytes) = &frame
             && frame.offset().saturating_add(bytes.len() as u64) > VARINT_MAX
         {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::FrameEncoding,
                 "CRYPTO range exceeds maximum offset",
-            ));
+            )
+            .into());
         }
         decoded.push(frame);
     }

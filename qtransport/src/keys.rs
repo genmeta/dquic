@@ -10,7 +10,7 @@ use std::{
 };
 
 use qbase::{
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     frame::FrameReader,
     packet::{
         DataHeader, DataPacket, GetPacketNumberLength, GetType, InvalidPacketNumber, KeyPhaseBit,
@@ -80,10 +80,11 @@ impl<K> ArcKeys<K> {
     pub fn install(&self, keys: K) -> Result<(), Error> {
         let mut state = self.0.lock().unwrap();
         if !matches!(*state, KeyState::Pending | KeyState::Waiting(_)) {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::Internal,
                 "keys already installed or retired",
-            ));
+            )
+            .into());
         }
         if let KeyState::Waiting(waker) = std::mem::replace(&mut *state, KeyState::Ready(keys)) {
             waker.wake();
@@ -136,7 +137,9 @@ impl OneRttPacketKeys {
             .unwrap()
             .generation
             .checked_add(1)
-            .ok_or_else(|| crate::error(ErrorKind::KeyUpdate, "key generation exhausted"))?;
+            .ok_or_else(|| {
+                QuicError::with_default_fty(ErrorKind::KeyUpdate, "key generation exhausted")
+            })?;
         if self.keys.len() == 3 {
             self.keys.pop_front();
         }
@@ -155,10 +158,11 @@ impl OneRttPacketKeys {
 
     fn update(&mut self) -> Result<(), Error> {
         if !self.can_update {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::KeyUpdate,
                 "local key update is not permitted",
-            ));
+            )
+            .into());
         }
         let mut next_secret = self.next_secret.clone();
         let keys = next_secret.next_packet_keys();
@@ -185,10 +189,10 @@ impl OneRttPacketKeys {
         }
         let keys = self.keys.back().unwrap();
         if self.sealed_count >= keys.sealing.confidentiality_limit() {
-            return Err(crate::error(
+            return Err(Error::from(QuicError::with_default_fty(
                 ErrorKind::AeadLimitReached,
                 "packet protection confidentiality limit",
-            )
+            ))
             .into());
         }
         self.sealed_count += 1;
@@ -256,10 +260,11 @@ impl OneRttPacketKeys {
             Err(_) => {
                 self.failed_opened += 1;
                 if self.failed_opened >= opening.integrity_limit() {
-                    return Err(crate::error(
+                    return Err(QuicError::with_default_fty(
                         ErrorKind::AeadLimitReached,
                         "packet protection integrity limit",
-                    ));
+                    )
+                    .into());
                 }
                 return Ok(None);
             }
@@ -514,8 +519,9 @@ fn open_with(
     }
     let first = packet.bytes[0];
     let pn_len = (first & 3) + 1;
-    let (_, encoded) = take_pn_len(pn_len)(&packet.bytes[packet.offset..])
-        .map_err(|_| crate::error(ErrorKind::Internal, "invalid packet-number layout"))?;
+    let (_, encoded) = take_pn_len(pn_len)(&packet.bytes[packet.offset..]).map_err(|_| {
+        QuicError::with_default_fty(ErrorKind::Internal, "invalid packet-number layout")
+    })?;
     let Ok(pn) = decode_pn(encoded) else {
         return Ok(None);
     };
@@ -538,10 +544,11 @@ fn open_with(
         .freeze()
         .slice(body_offset..body_offset + plain_len);
     if payload.is_empty() {
-        return Err(crate::error(
+        return Err(QuicError::with_default_fty(
             ErrorKind::ProtocolViolation,
             "empty packet payload",
-        ));
+        )
+        .into());
     }
     Ok(Some((pn, FrameReader::new(payload, kind))))
 }
