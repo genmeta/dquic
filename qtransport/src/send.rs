@@ -16,7 +16,7 @@ use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
     frame::{AckFrame, Frame, PingFrame},
-    net::tx::Signals,
+    net::{route::Pathway, tx::Signals},
     packet::{OneRttHeader, io::Repeat},
     param::ParameterId,
     varint::{VARINT_MAX, VarInt},
@@ -231,11 +231,7 @@ impl Sender {
     pub(crate) fn poll_send_with(
         &mut self,
         cx: &mut Context<'_>,
-        mut submit: impl FnMut(
-            &mut Context<'_>,
-            qbase::net::route::Pathway,
-            &[u8],
-        ) -> Poll<io::Result<usize>>,
+        mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<io::Result<usize>>,
     ) -> Poll<Result<bool, Error>> {
         let Some(packet) = &self.pending else {
             return Poll::Ready(Ok(false));

@@ -13,7 +13,7 @@ use crate::{
     Epoch,
     frame::{io::WriteFrame, *},
     net::tx::Signals,
-    util::{ContinuousData, NonData, WriteData},
+    util::{Buffer, NonData, WriteData},
     varint::be_varint,
 };
 
@@ -520,11 +520,11 @@ impl PacketInfo {
     }
 }
 
-pub trait RecordFrame<F, D: ContinuousData> {
+pub trait RecordFrame<F, D: Buffer> {
     fn record_frame(&mut self, frame: &F);
 }
 
-impl<D: ContinuousData> RecordFrame<Frame<D>, D> for PacketInfo {
+impl<D: Buffer> RecordFrame<Frame<D>, D> for PacketInfo {
     fn record_frame(&mut self, frame: &Frame<D>) {
         debug_assert!(
             frame.belongs_to(self.packet_type(),),
@@ -544,7 +544,7 @@ impl<D: ContinuousData> RecordFrame<Frame<D>, D> for PacketInfo {
     }
 }
 
-impl<F, D: ContinuousData> RecordFrame<F, D> for PacketWriter<'_>
+impl<F, D: Buffer> RecordFrame<F, D> for PacketWriter<'_>
 where
     PacketInfo: RecordFrame<F, D>,
 {
