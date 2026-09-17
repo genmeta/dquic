@@ -16,7 +16,7 @@ use qbase::{
         long::{HandshakeHeader, InitialHeader, ZeroRttHeader},
         short::OneRttHeader,
     },
-    util::ContinuousData,
+    util::Buffer,
     varint::VarInt,
 };
 use serde::{Deserialize, Serialize};
@@ -615,7 +615,7 @@ impl From<&PingFrame> for QuicFrame {
     }
 }
 
-impl<D: ContinuousData + ?Sized> From<(&CryptoFrame, &D)> for QuicFrame {
+impl<D: Buffer + ?Sized> From<(&CryptoFrame, &D)> for QuicFrame {
     fn from((frame, data): (&CryptoFrame, &D)) -> Self {
         let payload_length = frame.len();
         let length = frame.encoding_size() as u64 + payload_length;
@@ -648,7 +648,7 @@ impl From<&CryptoFrame> for QuicFrame {
     }
 }
 
-impl<D: ContinuousData + ?Sized> From<(&StreamFrame, &D)> for QuicFrame {
+impl<D: Buffer + ?Sized> From<(&StreamFrame, &D)> for QuicFrame {
     fn from((frame, data): (&StreamFrame, &D)) -> Self {
         let payload_length = frame.len();
         let length = frame.encoding_size() + payload_length;
@@ -683,7 +683,7 @@ impl From<&StreamFrame> for QuicFrame {
     }
 }
 
-impl<D: ContinuousData + ?Sized> From<(&DatagramFrame, &D)> for QuicFrame {
+impl<D: Buffer + ?Sized> From<(&DatagramFrame, &D)> for QuicFrame {
     fn from((frame, data): (&DatagramFrame, &D)) -> Self {
         let payload_length = frame.len().into_u64();
         let length = frame.encoding_size() as u64 + payload_length;
@@ -898,7 +898,7 @@ impl From<&ConnectionCloseFrame> for QuicFrame {
     }
 }
 
-impl<D: ContinuousData> From<&Frame<D>> for QuicFrame {
+impl<D: Buffer> From<&Frame<D>> for QuicFrame {
     fn from(frame: &Frame<D>) -> Self {
         match frame {
             Frame::Padding(..) => QuicFrame::Padding {

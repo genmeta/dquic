@@ -12,7 +12,7 @@ use qbase::{
         GetType, HandshakeHeader, HeaderSize, InitialHeader, OneRttHeader, Package, PacketContent,
         Type, header::io::WriteHeader,
     },
-    util::{ContinuousData, WriteData},
+    util::{Buffer, WriteData},
 };
 
 use super::constraints::Constraints;

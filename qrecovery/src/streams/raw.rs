@@ -898,7 +898,7 @@ mod tests {
         param::handy::{client_parameters, server_parameters},
         role::Role,
         sid::{Dir, handy::DemandConcurrency},
-        util::ContinuousData,
+        util::Buffer,
     };
     use tokio::io::AsyncWrite;
 
@@ -929,7 +929,7 @@ mod tests {
         }
     }
 
-    impl<D: ContinuousData> RecordFrame<Frame<D>, D> for TestPacket {
+    impl<D: Buffer> RecordFrame<Frame<D>, D> for TestPacket {
         fn record_frame(&mut self, _frame: &Frame<D>) {}
     }
 

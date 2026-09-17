@@ -5,7 +5,7 @@ mod bound_queue;
 pub use bound_queue::BoundQueue;
 
 mod data;
-pub use data::{ContinuousData, DataPair, NonData, WriteData};
+pub use data::{Buffer, DataPair, NonData, WriteData};
 
 mod index_deque;
 pub use index_deque::{IndexDeque, IndexError};

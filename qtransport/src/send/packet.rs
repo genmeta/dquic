@@ -9,7 +9,7 @@ use qbase::{
     packet::{
         GetType, HeaderSize, OneRttHeader, Package, PacketContent, Type, header::io::WriteHeader,
     },
-    util::{ContinuousData, WriteData},
+    util::{Buffer, WriteData},
 };
 
 use super::constraints::Constraints;
@@ -186,7 +186,7 @@ impl OneRttPacket {
         Ok(self.content)
     }
 
-    fn write<D: ContinuousData>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
+    fn write<D: Buffer>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
     where
         for<'a, 'b> &'a mut &'b mut [u8]: WriteData<D>,
     {

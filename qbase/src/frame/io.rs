@@ -14,7 +14,7 @@ use super::{
     stream::stream_frame_with_flag, stream_data_blocked::be_stream_data_blocked_frame,
     streams_blocked::streams_blocked_frame_with_dir, *,
 };
-use crate::{ArcReceiving, util::ContinuousData};
+use crate::{ArcReceiving, util::Buffer};
 
 /// Return a parser for a complete frame from the raw bytes with the given type,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
@@ -152,9 +152,9 @@ pub trait WriteFrame<F>: bytes::BufMut {
     fn put_frame(&mut self, frame: &F);
 }
 
-impl<B: BufMut, D: ContinuousData> WriteFrame<Frame<D>> for B
+impl<B: BufMut, D: Buffer> WriteFrame<Frame<D>> for B
 where
-    D: ContinuousData,
+    D: Buffer,
     B: BufMut + ?Sized,
     for<'b> &'b mut B: crate::util::WriteData<D>,
 {
@@ -192,7 +192,7 @@ where
 
 /// A [`bytes::BufMut`] extension trait, makes buffer more friendly
 /// to write frame with data.
-pub trait WriteDataFrame<F, D: ContinuousData>: bytes::BufMut {
+pub trait WriteDataFrame<F, D: Buffer>: bytes::BufMut {
     /// Write a frame and its data to the buffer.
     fn put_data_frame(&mut self, frame: &F, data: &D);
 }
