@@ -236,21 +236,26 @@ impl Io for UdpSocket {
             macro_rules! send_batch {
                 ($ty:ty, $addr:expr) => {{
                     let sock_addr = <$ty>::from($addr);
-                    match sendmsg(
-                        self.io.as_raw_fd(),
-                        &[*slice],
-                        &[],
-                        MsgFlags::empty(),
-                        Some(&sock_addr),
-                    ) {
-                        Ok(_send_bytes) => sent_packet += 1,
-                        Err(_) if sent_packet > 0 => return Ok(sent_packet),
-                        Err(Errno::EINTR) => continue,
-                        Err(e @ (Errno::EAGAIN | Errno::ENOBUFS)) => {
-                            return Err(io::Error::new(io::ErrorKind::WouldBlock, e));
-                        }
-                        Err(e) => {
-                            return Err(e.into());
+                    loop {
+                        match sendmsg(
+                            self.io.as_raw_fd(),
+                            &[*slice],
+                            &[],
+                            MsgFlags::empty(),
+                            Some(&sock_addr),
+                        ) {
+                            Ok(_send_bytes) => {
+                                sent_packet += 1;
+                                break;
+                            }
+                            Err(_) if sent_packet > 0 => return Ok(sent_packet),
+                            Err(Errno::EINTR) => continue,
+                            Err(e @ (Errno::EAGAIN | Errno::ENOBUFS)) => {
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, e));
+                            }
+                            Err(e) => {
+                                return Err(e.into());
+                            }
                         }
                     }
                 }};

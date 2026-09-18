@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use qbase::{
-    flow::FlowController,
-    frame::{Frame, ReliableFrame, io::SendFrame},
-};
+use qbase::flow::FlowController;
 use qrecovery::streams::DataStreams;
+use tokio::time::Instant;
 
 use crate::{ArcParameters, Error, ReliableFrames, keys::ArcOneRttKeys, path::Paths, space::Space};
 
@@ -44,17 +42,9 @@ impl Transport {
         self.flow.on_conn_error(&error);
     }
 
-    pub(crate) fn requeue(&self, frames: impl IntoIterator<Item = Frame<()>>) {
-        for frame in frames {
-            match frame {
-                Frame::Crypto(frame, ()) => self.data.crypto.outgoing().may_loss_data(&frame),
-                Frame::Stream(frame, ()) => self.streams.may_loss_data(&frame),
-                frame => {
-                    if let Ok(frame) = ReliableFrame::try_from(&frame) {
-                        self.reliable_frames.send_frame([frame]);
-                    }
-                }
-            }
-        }
+    /// Drive recovery from the connection's timer while Data sending is enabled.
+    /// Keep ticking even when no path sender remains; recovered data can await a new path.
+    pub fn on_tick(&self, now: Instant) {
+        self.data.on_tick(now);
     }
 }

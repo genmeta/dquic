@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     ArcParameters, Error, ReliableFrames,
-    keys::{ArcKeys, ArcOneRttKeys, OneRttKeys, OpenPacket},
+    keys::{ArcKeys, ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket},
     path::Path,
     router::{PACKET_QUEUE_CAPACITY, ReceivedPacket},
     space::Space,
@@ -146,7 +146,7 @@ pub async fn run(
             initial.clone(),
             |keys, packet, pto| {
                 keys.opening
-                    .open(packet, |pn| initial.rcvd_packets.decode_pn(pn), pto)
+                    .open(packet, |pn| initial.rcvd_journal.decode_pn(pn), pto)
             },
             closing.clone(),
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
@@ -158,7 +158,7 @@ pub async fn run(
             handshake.clone(),
             |keys, packet, pto| {
                 keys.opening
-                    .open(packet, |pn| handshake.rcvd_packets.decode_pn(pn), pto)
+                    .open(packet, |pn| handshake.rcvd_journal.decode_pn(pn), pto)
             },
             closing.clone(),
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
@@ -169,7 +169,7 @@ pub async fn run(
             data_packets,
             data.clone(),
             |keys: &OneRttKeys, packet, pto| {
-                keys.open(packet, |pn| data.rcvd_packets.decode_pn(pn), pto)
+                keys.open(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
             },
             closing,
             |keys, epoch, frame, path| {
@@ -241,7 +241,7 @@ pub fn receive_packet<K>(
     }
     let pto = path.cc.get_pto(space.epoch);
     space
-        .rcvd_packets
+        .rcvd_journal
         .on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
     path.cc
         .on_pkt_rcvd(space.epoch, pn, content.is_ack_eliciting());
@@ -261,7 +261,7 @@ pub async fn run_receive<K, M>(
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
 ) where
-    K: Clone + Future<Output = Option<M>>,
+    K: Clone + Future<Output = Result<M, KeyRetired>>,
 {
     while let Some((packet, path)) = packets.recv().await {
         let epoch = match packet.header {
@@ -276,7 +276,7 @@ pub async fn run_receive<K, M>(
         if !space.can_receive() {
             break;
         }
-        let Some(keys) = space.keys.clone().await else {
+        let Ok(keys) = space.keys.clone().await else {
             break;
         };
         if !space.can_receive() {

@@ -194,9 +194,12 @@ impl Io for UdpSocket {
 
             if ret != 0 {
                 let e = io::Error::last_os_error();
-                if e.kind() != io::ErrorKind::WouldBlock {
-                    return Err(e);
-                }
+                // Preserve the accepted prefix; a blocked datagram was not sent.
+                return if count == 0 {
+                    Err(e)
+                } else {
+                    Ok(count as usize)
+                };
             }
             count += 1;
         }

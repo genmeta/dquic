@@ -1,8 +1,5 @@
 //! One packet-number space. No parent connection or transport back-reference.
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use qbase::{
     Epoch,
@@ -11,56 +8,62 @@ use qbase::{
 use qcongestion::Feedback;
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
+use tokio::time::Instant;
 
-use crate::{
-    keys::{ArcKeys, ArcOneRttKeys},
-    send::records::SentPackets,
-};
+use crate::{GuaranteedFrame, keys::ArcKeys, send::records::ArcSendJournal};
 
 pub struct Space<K> {
     pub epoch: Epoch,
     pub keys: K,
     pub crypto: CryptoStream,
-    pub sent_packets: SentPackets,
-    pub rcvd_packets: ArcRcvdJournal,
+    pub send_journal: ArcSendJournal,
+    pub rcvd_journal: ArcRcvdJournal,
     receiving: AtomicBool,
     sending: AtomicBool,
-    pub(crate) submission: Arc<Mutex<()>>,
     pub send_wakers: ArcSendWakers,
 }
 
 impl<K> Space<K> {
+    /// Capture this space's frame owners in on_loss before starting CC or timer tasks.
+    /// It runs synchronously under the journal lock and must not reenter the journal or CC.
     pub fn new(
         epoch: Epoch,
         keys: K,
-        submission: Arc<Mutex<()>>,
+        crypto: CryptoStream,
         send_wakers: ArcSendWakers,
+        on_loss: impl Fn(&GuaranteedFrame) + Send + Sync + 'static,
     ) -> Self {
         Self {
             epoch,
             keys,
-            crypto: CryptoStream::new(send_wakers.clone()),
-            sent_packets: SentPackets::default(),
-            rcvd_packets: ArcRcvdJournal::with_capacity(0, None),
+            crypto,
+            send_journal: ArcSendJournal::new(on_loss),
+            rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
             receiving: true.into(),
             sending: true.into(),
-            submission,
             send_wakers,
         }
+    }
+
+    /// Notify the same frame owners as CC loss feedback, independent of path lifetime.
+    pub fn on_tick(&self, now: Instant) {
+        self.send_journal
+            .on_tick(now, |frame| self.send_journal.recover(frame));
     }
 
     pub fn can_receive(&self) -> bool {
         self.receiving.load(Ordering::Acquire)
     }
+
     pub fn can_send(&self) -> bool {
         self.sending.load(Ordering::Acquire)
     }
+
     pub fn stop_receiving(&self) {
         self.receiving.store(false, Ordering::Release);
     }
 
     pub fn stop_sending(&self) {
-        let _submission = self.submission.lock().unwrap();
         self.sending.store(false, Ordering::Release);
         self.send_wakers.wake_all_by(Signals::all());
     }
@@ -75,17 +78,9 @@ impl<K> Space<ArcKeys<K>> {
     }
 }
 
-impl Space<ArcOneRttKeys> {
-    pub fn retire(&self) {
-        self.stop_receiving();
-        self.stop_sending();
-        self.keys.retire();
-    }
-}
-
 impl<K: Send + Sync> Feedback for Space<K> {
     fn may_loss(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        self.sent_packets.mark_lost(pns);
-        self.send_wakers.wake_all_by(Signals::TRANSPORT);
+        self.send_journal
+            .mark_lost(pns, |frame| self.send_journal.recover(frame));
     }
 }

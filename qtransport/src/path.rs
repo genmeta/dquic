@@ -1,10 +1,7 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU16},
     time::Duration,
 };
 
@@ -12,7 +9,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
-    frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
+    frame::{PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{
         route::Pathway,
         tx::{ArcSendWaker, Signals},
@@ -21,7 +18,13 @@ use qbase::{
 use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, PathStatus, Transport as _};
 use tokio::time::Instant;
 
-use crate::{Error, send::constraints::Constraints};
+use crate::{
+    Error,
+    send::{
+        constraints::{AntiAmplifier, Constraints},
+        write::PendingPacket,
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
@@ -42,12 +45,7 @@ pub struct Path {
     state: Mutex<PathState>,
     pub send_waker: ArcSendWaker,
     responses: Mutex<VecDeque<PathResponseFrame>>,
-    received_bytes: AtomicU64,
-    sent_bytes: AtomicU64,
-    address_validated: AtomicBool,
-    pub(crate) submission: Arc<Mutex<()>>,
-    pub(crate) sender_active: AtomicBool,
-    status: PathStatus,
+    pub anti_amplifier: Arc<AntiAmplifier>,
 }
 
 impl Path {
@@ -57,7 +55,6 @@ impl Path {
         handshake: Arc<HandshakeStatus>,
         max_ack_delay: Duration,
         feedback: [Arc<dyn Feedback>; 3],
-        submission: Arc<Mutex<()>>,
     ) -> Self {
         let send_waker = ArcSendWaker::new();
         let status = PathStatus::new(handshake, Arc::new(AtomicU16::new(1200)));
@@ -75,12 +72,7 @@ impl Path {
             state: Mutex::new(PathState::Unvalidated),
             send_waker,
             responses: Mutex::new(VecDeque::new()),
-            received_bytes: 0.into(),
-            sent_bytes: 0.into(),
-            address_validated: false.into(),
-            submission,
-            sender_active: false.into(),
-            status,
+            anti_amplifier: Arc::new(AntiAmplifier::new(status)),
         }
     }
 
@@ -88,7 +80,6 @@ impl Path {
         *self.dcid.read().unwrap()
     }
     pub fn set_dcid(&self, dcid: ConnectionId) {
-        let _submission = self.submission.lock().unwrap();
         *self.dcid.write().unwrap() = dcid;
         self.send_waker.wake_by(Signals::CONNECTION_ID);
     }
@@ -101,10 +92,8 @@ impl Path {
 
     /// Account each received UDP datagram once, at the connection router.
     pub fn on_datagram_received(&self, bytes: usize) {
-        self.received_bytes
-            .fetch_add(bytes as u64, Ordering::AcqRel);
+        self.anti_amplifier.on_received(bytes);
         if self.amplification_credit() >= 1200 {
-            self.status.release_anti_amplification_limit();
             self.cc.grant_anti_amplification();
         }
         self.send_waker.wake_by(Signals::CREDIT);
@@ -113,13 +102,11 @@ impl Path {
     /// Client-originated traffic, a validated token, or successful address validation grants this.
     /// Granting anti-amplification credit alone does not enable business traffic on a new path.
     pub fn grant_amplification(&self) {
-        self.address_validated.store(true, Ordering::Release);
-        self.status.release_anti_amplification_limit();
+        self.anti_amplifier.grant();
         self.cc.grant_anti_amplification();
         self.send_waker.wake_by(Signals::CREDIT);
     }
     pub fn validate(&self) {
-        let _submission = self.submission.lock().unwrap();
         let mut state = self.state.lock().unwrap();
         if *state != PathState::Retired {
             *state = PathState::Validated;
@@ -139,25 +126,16 @@ impl Path {
         }
     }
     pub fn retire(&self) {
-        {
-            let _submission = self.submission.lock().unwrap();
-            *self.state.lock().unwrap() = PathState::Retired;
-        }
-        self.cc.on_path_lost();
+        *self.state.lock().unwrap() = PathState::Retired;
+        // Connection-level recovery retains the sent packets and their deadlines.
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_by(Signals::all());
     }
 
     pub fn amplification_credit(&self) -> usize {
-        if self.address_validated.load(Ordering::Acquire) {
-            return usize::MAX;
-        }
-        self.received_bytes
-            .load(Ordering::Acquire)
-            .saturating_mul(3)
-            .saturating_sub(self.sent_bytes.load(Ordering::Acquire))
-            .min(usize::MAX as u64) as usize
+        self.anti_amplifier.balance()
     }
+
     pub fn constraints(&self, capacity: usize, probe: bool) -> Constraints {
         Constraints {
             capacity,
@@ -169,7 +147,7 @@ impl Path {
             anti_amplification: self.amplification_credit(),
         }
     }
-    pub(crate) fn challenge(&self) -> Result<Option<PathChallengeFrame>, Error> {
+    pub fn challenge(&self) -> Result<Option<PathChallengeFrame>, Error> {
         match self.state() {
             PathState::Validating {
                 attempts: 3..,
@@ -188,41 +166,32 @@ impl Path {
             _ => Ok(None),
         }
     }
-    pub(crate) fn response(&self) -> Option<PathResponseFrame> {
+    pub fn response(&self) -> Option<PathResponseFrame> {
         self.responses.lock().unwrap().front().copied()
     }
-    pub(crate) fn on_sent(&self, bytes: usize, frames: &[Frame<()>]) {
-        self.sent_bytes.fetch_add(bytes as u64, Ordering::AcqRel);
-        for frame in frames {
-            match frame {
-                Frame::PathResponse(frame) => {
-                    let mut responses = self.responses.lock().unwrap();
-                    if responses.front() == Some(frame) {
-                        responses.pop_front();
-                    }
-                }
-                Frame::PathChallenge(sent) => {
-                    if let PathState::Validating {
-                        challenge,
-                        attempts,
-                        retry_at,
-                    } = &mut *self.state.lock().unwrap()
-                        && challenge == sent
-                    {
-                        *attempts += 1;
-                        *retry_at = Instant::now()
-                            + self
-                                .cc
-                                .pto_base(Epoch::Data)
-                                .max(Duration::from_millis(100))
-                                * 3;
-                    }
-                }
-                _ => {}
+    /// Confirm only path validation frames whose datagram reached the socket.
+    pub fn on_packet_sent(&self, packet: &PendingPacket) {
+        if let Some(frame) = packet.response {
+            let mut responses = self.responses.lock().unwrap();
+            if responses.front() == Some(&frame) {
+                responses.pop_front();
             }
         }
-        if self.amplification_credit() < 1200 {
-            self.status.enter_anti_amplification_limit();
+        if let Some(sent) = packet.challenge
+            && let PathState::Validating {
+                challenge,
+                attempts,
+                retry_at,
+            } = &mut *self.state.lock().unwrap()
+            && *challenge == sent
+        {
+            *attempts += 1;
+            *retry_at = Instant::now()
+                + self
+                    .cc
+                    .pto_base(Epoch::Data)
+                    .max(Duration::from_millis(100))
+                    * 3;
         }
     }
 }

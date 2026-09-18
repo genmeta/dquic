@@ -20,7 +20,11 @@ use qbase::{
 };
 use tokio::time::Instant;
 
-use crate::{Error, send::packet::PacketError};
+use crate::{Error, send::write::PacketError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("keys retired")]
+pub struct KeyRetired;
 
 #[derive(Clone)]
 pub enum KeyState<K> {
@@ -31,10 +35,10 @@ pub enum KeyState<K> {
 }
 
 impl<K> KeyState<K> {
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Option<&K>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<&K, KeyRetired>> {
         match self {
-            Self::Ready(keys) => Poll::Ready(Some(keys)),
-            Self::Retired => Poll::Ready(None),
+            Self::Ready(keys) => Poll::Ready(Ok(keys)),
+            Self::Retired => Poll::Ready(Err(KeyRetired)),
             Self::Waiting(waker) if waker.will_wake(cx.waker()) => Poll::Pending,
             Self::Pending | Self::Waiting(_) => {
                 *self = Self::Waiting(cx.waker().clone());
@@ -45,7 +49,7 @@ impl<K> KeyState<K> {
 }
 
 impl<K: Clone + Unpin> Future for KeyState<K> {
-    type Output = Option<K>;
+    type Output = Result<K, KeyRetired>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.get_mut().poll_ready(cx).map(|keys| keys.cloned())
@@ -55,7 +59,7 @@ impl<K: Clone + Unpin> Future for KeyState<K> {
 pub struct ArcKeys<K = Arc<qtls::BidirectionalKeys>>(Arc<Mutex<KeyState<K>>>);
 
 impl<K: Clone> Future for ArcKeys<K> {
-    type Output = Option<K>;
+    type Output = Result<K, KeyRetired>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0
@@ -69,6 +73,17 @@ impl<K: Clone> Future for ArcKeys<K> {
 impl<K> Clone for ArcKeys<K> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
+    }
+}
+
+impl<K: Clone> ArcKeys<K> {
+    /// Snapshot material without registering a waiter; distinguish pending from retired.
+    pub fn try_get(&self) -> Result<Option<K>, KeyRetired> {
+        match &*self.0.lock().unwrap() {
+            KeyState::Ready(keys) => Ok(Some(keys.clone())),
+            KeyState::Pending | KeyState::Waiting(_) => Ok(None),
+            KeyState::Retired => Err(KeyRetired),
+        }
     }
 }
 
@@ -110,6 +125,14 @@ pub struct HeaderKeys {
 pub struct OneRttKeys {
     pub headers: Arc<HeaderKeys>,
     packets: Arc<Mutex<OneRttPacketKeys>>,
+}
+
+/// A fixed sending generation, reserved together with its packet number.
+/// No key-manager lock is held while encrypting or submitting the packet.
+pub(crate) struct OneRttSealingKey {
+    headers: Arc<HeaderKeys>,
+    packet: qtls::PacketKey,
+    generation: u64,
 }
 
 struct PacketKeys {
@@ -169,13 +192,7 @@ impl OneRttPacketKeys {
         self.push(keys, next_secret)
     }
 
-    fn encrypt(
-        &mut self,
-        pn: u64,
-        header: &mut [u8],
-        body: &mut [u8],
-        tag: &mut [u8],
-    ) -> Result<(u64, KeyPhaseBit), PacketError> {
+    fn prepare_sealing(&mut self) -> Result<(), PacketError> {
         let nearing_limit = self.sealed_count
             >= self
                 .keys
@@ -195,16 +212,7 @@ impl OneRttPacketKeys {
             ))
             .into());
         }
-        self.sealed_count += 1;
-        if keys.sealing.tag_len() != tag.len() {
-            return Err(PacketError::Layout);
-        }
-        let phase = KeyPhaseBit::from(keys.generation & 1 != 0);
-        let mut specific_bits = ShortSpecificBits::from(header[0]);
-        specific_bits.set_key_phase(phase);
-        header[0] = *specific_bits;
-        keys.sealing.seal(pn, header, body, tag)?;
-        Ok((keys.generation, phase))
+        Ok(())
     }
 
     fn decrypt(
@@ -290,6 +298,10 @@ impl OneRttPacketKeys {
 pub struct ArcOneRttKeys(ArcKeys<OneRttKeys>);
 
 impl ArcOneRttKeys {
+    pub fn try_get(&self) -> Result<Option<OneRttKeys>, KeyRetired> {
+        self.0.try_get()
+    }
+
     pub fn new_pending() -> Self {
         Self(ArcKeys::new_pending())
     }
@@ -324,7 +336,7 @@ impl ArcOneRttKeys {
 }
 
 impl Future for ArcOneRttKeys {
-    type Output = Option<OneRttKeys>;
+    type Output = Result<OneRttKeys, KeyRetired>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.get_mut().0).poll(cx)
@@ -350,14 +362,23 @@ impl OneRttKeys {
         }
     }
 
-    /// Keep key updates serialized with one nonblocking socket submission.
-    pub(crate) fn with_generation<R>(
+    /// Allocate the PN while the generation is fixed, then reserve one AEAD use.
+    /// The returned key remains valid across later local and peer key updates.
+    pub(crate) fn reserve<T>(
         &self,
-        generation: u64,
-        submit: impl FnOnce() -> R,
-    ) -> Option<R> {
-        let packets = self.packets.lock().unwrap();
-        (packets.keys.back().unwrap().generation == generation).then(submit)
+        allocate: impl FnOnce(u64) -> Result<T, PacketError>,
+    ) -> Result<(T, OneRttSealingKey), PacketError> {
+        let mut packets = self.packets.lock().unwrap();
+        packets.prepare_sealing()?;
+        let keys = packets.keys.back().unwrap();
+        let allocated = allocate(keys.generation)?;
+        let sealing = OneRttSealingKey {
+            headers: self.headers.clone(),
+            packet: keys.sealing.clone(),
+            generation: keys.generation,
+        };
+        packets.sealed_count += 1;
+        Ok((allocated, sealing))
     }
 
     pub fn tag_len(&self) -> usize {
@@ -388,7 +409,8 @@ pub trait SealPacket {
     /// Fixed keys return (); 1-RTT keys return the sending generation and Key Phase.
     type Output;
 
-    /// Protect a packet with a four-byte PN and a reserved authentication tag.
+    /// Protect the PN in pn_offset..body_offset and a reserved authentication tag.
+    /// The caller supplies enough ciphertext/tag for a sample starting at pn_offset + 4.
     fn seal(
         &self,
         pn: u64,
@@ -432,8 +454,9 @@ impl SealPacket for qtls::DirectionalKeys {
         let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
         self.packet.seal(pn, header, body, tag)?;
         let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
+        let sample_offset = 4 - pn_bytes.len();
         self.header.protect(
-            &body_tag[..self.header.sample_len()],
+            &body_tag[sample_offset..sample_offset + self.header.sample_len()],
             &mut prefix[0],
             pn_bytes,
         )?;
@@ -444,9 +467,22 @@ impl SealPacket for qtls::DirectionalKeys {
 impl SealPacket for OneRttKeys {
     type Output = (u64, KeyPhaseBit);
 
-    /// Protect an assembled packet in place, including its reserved authentication tag.
-    /// Offsets delimit a four-byte PN and plaintext; the body/tag must supply an HP sample.
-    /// Returns the sending generation and the Key Phase written before AEAD protection.
+    fn seal(
+        &self,
+        pn: u64,
+        buffer: &mut [u8],
+        pn_offset: usize,
+        body_offset: usize,
+        tag_len: usize,
+    ) -> Result<Self::Output, PacketError> {
+        let (_, key) = self.reserve(|_| Ok(()))?;
+        key.seal(pn, buffer, pn_offset, body_offset, tag_len)
+    }
+}
+
+impl SealPacket for OneRttSealingKey {
+    type Output = (u64, KeyPhaseBit);
+
     fn seal(
         &self,
         pn: u64,
@@ -458,16 +494,20 @@ impl SealPacket for OneRttKeys {
         let tag_offset = buffer.len() - tag_len;
         let (header, body_tag) = buffer.split_at_mut(body_offset);
         let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
-        let mut packets = self.packets.lock().unwrap();
-        let (generation, phase) = packets.encrypt(pn, header, body, tag)?;
+        let phase = KeyPhaseBit::from(self.generation & 1 != 0);
+        let mut specific_bits = ShortSpecificBits::from(header[0]);
+        specific_bits.set_key_phase(phase);
+        header[0] = *specific_bits;
+        self.packet.seal(pn, header, body, tag)?;
         let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
         let header_key = &self.headers.sealing;
+        let sample_offset = 4 - pn_bytes.len();
         header_key.protect(
-            &body_tag[..header_key.sample_len()],
+            &body_tag[sample_offset..sample_offset + header_key.sample_len()],
             &mut prefix[0],
             pn_bytes,
         )?;
-        Ok((generation, phase))
+        Ok((self.generation, phase))
     }
 }
 
@@ -564,7 +604,7 @@ mod tests {
     use qrecovery::journal::ArcRcvdJournal;
 
     use super::*;
-    use crate::send::{constraints::Constraints, packet::OneRttPacket};
+    use crate::send::{constraints::Constraints, write::Packet};
 
     fn ready() -> OneRttKeys {
         let ([client, _], _) = crate::tests::handshake();
@@ -572,41 +612,88 @@ mod tests {
         keys.install(client).unwrap();
         keys.now_or_never().unwrap().unwrap()
     }
-    fn packet(pn: u64) -> OneRttPacket {
-        let mut packet = OneRttPacket::new(
+    fn packet(
+        pn: u64,
+        keys: &OneRttKeys,
+    ) -> Result<crate::send::write::PendingPacket, PacketError> {
+        let mut packet = Packet::new(
             bytes::BytesMut::zeroed(1200),
             OneRttHeader::new(Default::default(), ConnectionId::default()),
-            pn,
             16,
+        )?;
+        let mut frames = Vec::new();
+        packet.assemble(
+            &Constraints {
+                capacity: 1200,
+                congestion: 1200,
+                anti_amplification: 1200,
+            },
+            &mut frames,
+            [&mut PingFrame],
+        )?;
+        crate::tests::seal_packet(
+            packet,
+            keys,
+            &crate::send::records::ArcSendJournal::starting_at(pn),
+            &mut frames,
         )
-        .unwrap();
-        packet
-            .assemble(
-                &mut Constraints {
-                    capacity: 1200,
-                    congestion: 1200,
-                    anti_amplification: 1200,
-                },
-                [&mut PingFrame],
-            )
-            .unwrap();
-        packet
+    }
+
+    #[test]
+    fn try_get_never_replaces_the_receive_waiter() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Wake(AtomicUsize);
+        impl futures::task::ArcWake for Wake {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let keys = ArcKeys::<u64>::new_pending();
+        assert_eq!(keys.try_get(), Ok(None));
+        let mut receiving = keys.clone();
+        let wake = Arc::new(Wake(AtomicUsize::new(0)));
+        let waker = futures::task::waker(wake.clone());
+        assert!(
+            Pin::new(&mut receiving)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(keys.try_get(), Ok(None));
+        assert_eq!(keys.try_get(), Ok(None));
+        keys.install(42).unwrap();
+        assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+        assert_eq!(keys.try_get(), Ok(Some(42)));
+        assert_eq!(
+            Pin::new(&mut receiving).poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Ok(42))
+        );
+        keys.retire();
+        assert_eq!(keys.try_get(), Err(KeyRetired));
+        assert_eq!(
+            Pin::new(&mut receiving).poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Err(KeyRetired))
+        );
     }
 
     #[tokio::test]
     async fn one_rtt_wait_yields_shared_material_and_reports_retirement() {
         let keys = ArcOneRttKeys::new_pending();
+        assert!(matches!(keys.try_get(), Ok(None)));
         let mut waiting = keys.clone();
         assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(matches!(keys.try_get(), Ok(None)));
         let ([client, _], _) = crate::tests::handshake();
         keys.install(client).unwrap();
         let material = waiting.await.unwrap();
+        let snapshot = keys.try_get().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&snapshot.packets, &material.packets));
         let shared = keys.clone().await.unwrap();
         material.allow_update();
         shared.update().unwrap();
-        assert_eq!(packet(0).seal(&material).unwrap().generation, 1);
+        assert_eq!(packet(0, &material).unwrap().generation, Some(1));
         keys.retire();
-        assert!(keys.await.is_none());
+        assert!(matches!(keys.try_get(), Err(KeyRetired)));
+        assert!(matches!(keys.await, Err(KeyRetired)));
     }
 
     #[test]
@@ -671,10 +758,9 @@ mod tests {
         let ([client, server], _) = crate::tests::handshake();
         let sending = ArcOneRttKeys::new_pending();
         sending.install(client).unwrap();
-        let bytes = packet(0)
-            .seal(&sending.now_or_never().unwrap().unwrap())
+        let bytes = packet(0, &sending.now_or_never().unwrap().unwrap())
             .unwrap()
-            .bytes;
+            .into_buffer();
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0)
             .next()
             .unwrap()
@@ -705,15 +791,57 @@ mod tests {
     }
 
     #[test]
-    fn packets_can_be_sealed_out_of_allocation_order() {
-        let keys = ready();
-        let records = crate::send::records::SentPackets::default();
-        let earlier = packet(records.next_pn().unwrap());
-        let later = packet(records.next_pn().unwrap());
-        let later = later.seal(&keys).unwrap();
-        let earlier = earlier.seal(&keys).unwrap();
-        assert!(earlier.pn < later.pn);
-        assert_eq!(earlier.generation, later.generation);
+    fn reserved_packet_keys_stay_bound_across_updates_and_reverse_encryption() {
+        let ([client, server], _) = crate::tests::handshake();
+        let material = ArcOneRttKeys::new_pending();
+        material.install(client).unwrap();
+        let keys = material.now_or_never().unwrap().unwrap();
+        let peer = ArcOneRttKeys::new_pending();
+        peer.install(server).unwrap();
+        let peer = peer.now_or_never().unwrap().unwrap();
+        let journal = ArcRcvdJournal::with_capacity(0, None);
+        let open = |bytes: &[u8]| {
+            let qbase::packet::Packet::Data(packet) =
+                qbase::packet::PacketReader::new(bytes::BytesMut::from(bytes), 0)
+                    .next()
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!()
+            };
+            peer.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .0
+        };
+        keys.allow_update();
+        let records = crate::send::records::ArcSendJournal::default();
+        let ((earlier, _), old) = keys
+            .reserve(|generation| records.record_pending(generation, &mut Vec::new()))
+            .unwrap();
+        keys.update().unwrap();
+        let ((later, _), new) = keys
+            .reserve(|generation| records.record_pending(generation, &mut Vec::new()))
+            .unwrap();
+        assert_eq!((earlier, later), (0, 1));
+        let mut bytes = [0; 22];
+        bytes[0] = 0x43;
+        bytes[1..5].copy_from_slice(&(later as u32).to_be_bytes());
+        bytes[5] = 1;
+        assert_eq!(
+            new.seal(later, &mut bytes, 1, 5, 16).unwrap(),
+            (1, KeyPhaseBit::One)
+        );
+        assert_eq!(open(&bytes), later);
+        bytes.fill(0);
+        bytes[0] = 0x43;
+        bytes[1..5].copy_from_slice(&(earlier as u32).to_be_bytes());
+        bytes[5] = 1;
+        assert_eq!(
+            old.seal(earlier, &mut bytes, 1, 5, 16).unwrap(),
+            (0, KeyPhaseBit::Zero)
+        );
+        assert_eq!(open(&bytes), earlier);
     }
 
     #[test]
@@ -732,12 +860,7 @@ mod tests {
             keys.update().is_err(),
             "the new generation has not been acknowledged"
         );
-        assert_eq!(
-            keys.with_generation(0, || panic!("submitted an old key phase")),
-            None
-        );
-        assert_eq!(keys.with_generation(1, || ()), Some(()));
-        assert_eq!(packet(1).seal(&keys).unwrap().generation, 1);
+        assert_eq!(packet(1, &keys).unwrap().generation, Some(1));
         keys.on_ack(0);
         assert!(
             keys.update().is_err(),
@@ -773,7 +896,7 @@ mod tests {
                 .map(|(pn, _)| pn)
         };
         for generation in 1..=3 {
-            let old = packet(generation * 10 - 1).seal(&sending).unwrap().bytes;
+            let old = packet(generation * 10 - 1, &sending).unwrap().into_buffer();
             sending.on_ack(generation - 1);
             sending.update().unwrap();
             // The second update is initiated by both endpoints at once.
@@ -784,35 +907,52 @@ mod tests {
             } else {
                 generation - 1
             };
-            let low = packet(generation * 10).seal(&sending).unwrap();
-            let high = packet(generation * 10 + 1).seal(&sending).unwrap();
-            assert_eq!(high.generation, generation);
-            let mut forged = high.bytes.clone();
+            let low = packet(generation * 10, &sending).unwrap();
+            let high = packet(generation * 10 + 1, &sending).unwrap();
+            assert_eq!(high.generation, Some(generation));
+            let mut forged = high.datagram.msg.clone();
             *forged.last_mut().unwrap() ^= 1;
             assert_eq!(open(&server, forged, &server_journal), None);
             assert_eq!(
-                receiving.with_generation(server_generation, || ()),
-                Some(())
+                receiving
+                    .packets
+                    .lock()
+                    .unwrap()
+                    .keys
+                    .back()
+                    .unwrap()
+                    .generation,
+                server_generation
             );
             assert_eq!(
-                open(&server, high.bytes, &server_journal),
+                open(&server, high.into_buffer(), &server_journal),
                 Some(generation * 10 + 1)
             );
             assert_eq!(
-                open(&server, low.bytes, &server_journal),
+                open(&server, low.into_buffer(), &server_journal),
                 Some(generation * 10)
             );
             assert_eq!(
                 open(&server, old, &server_journal),
                 Some(generation * 10 - 1)
             );
-            let response = packet(generation - 1).seal(&receiving).unwrap();
-            assert_eq!(response.generation, generation);
+            let response = packet(generation - 1, &receiving).unwrap();
+            assert_eq!(response.generation, Some(generation));
             assert_eq!(
-                open(&client, response.bytes, &client_journal),
+                open(&client, response.into_buffer(), &client_journal),
                 Some(generation - 1)
             );
-            assert_eq!(sending.with_generation(generation, || ()), Some(()));
+            assert_eq!(
+                sending
+                    .packets
+                    .lock()
+                    .unwrap()
+                    .keys
+                    .back()
+                    .unwrap()
+                    .generation,
+                generation
+            );
             assert!(
                 sending.update().is_err(),
                 "a new-phase packet is not an ACK"
@@ -850,40 +990,60 @@ mod tests {
                 .unwrap()
                 .map(|(pn, _)| pn)
         };
-        let oldest = packet(98).seal(&sending).unwrap().bytes;
+        let oldest = packet(98, &sending).unwrap().into_buffer();
         assert_eq!(
-            open(&server, packet(99).seal(&sending).unwrap().bytes),
+            open(&server, packet(99, &sending).unwrap().into_buffer()),
             Some(99)
         );
         sending.update().unwrap();
-        let delayed = packet(100).seal(&sending).unwrap().bytes;
+        let delayed = packet(100, &sending).unwrap().into_buffer();
         assert_eq!(
-            open(&server, packet(101).seal(&sending).unwrap().bytes),
+            open(&server, packet(101, &sending).unwrap().into_buffer()),
             Some(101)
         );
         assert!(receiving.update().is_err());
         // The receiver replies under generation 1; ACK accounting confirms PN 101.
-        let response = packet(7).seal(&receiving).unwrap();
-        assert_eq!(response.generation, 1);
-        assert_eq!(open(&client, response.bytes), Some(7));
+        let response = packet(7, &receiving).unwrap();
+        assert_eq!(response.generation, Some(1));
+        assert_eq!(open(&client, response.into_buffer()), Some(7));
         assert!(sending.update().is_err());
         sending.on_ack(1);
         sending.update().unwrap();
-        let next = packet(102).seal(&sending).unwrap();
-        assert_eq!(next.generation, 2);
-        let mut forged = next.bytes.clone();
+        let next = packet(102, &sending).unwrap();
+        assert_eq!(next.generation, Some(2));
+        let mut forged = next.datagram.msg.clone();
         *forged.last_mut().unwrap() ^= 1;
         assert_eq!(open(&server, forged), None);
-        assert_eq!(receiving.with_generation(1, || ()), Some(()));
-        assert_eq!(open(&server, next.bytes), Some(102));
-        assert_eq!(receiving.with_generation(2, || ()), Some(()));
+        assert_eq!(
+            receiving
+                .packets
+                .lock()
+                .unwrap()
+                .keys
+                .back()
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(open(&server, next.into_buffer()), Some(102));
+        assert_eq!(
+            receiving
+                .packets
+                .lock()
+                .unwrap()
+                .keys
+                .back()
+                .unwrap()
+                .generation,
+            2
+        );
         assert_eq!(open(&server, delayed), Some(100));
         // Generations 0 and 2 share phase 0; PN selects the retained generation 0 pair.
         assert_eq!(open(&server, oldest.clone()), Some(98));
         // Neither receiving a new generation nor ACKing a previous generation permits updating.
         receiving.on_ack(1);
         assert!(receiving.update().is_err());
-        assert_eq!(packet(8).seal(&receiving).unwrap().generation, 2);
+        assert_eq!(packet(8, &receiving).unwrap().generation, Some(2));
         receiving.on_ack(2);
         receiving.update().unwrap();
         assert_eq!(
@@ -918,21 +1078,56 @@ mod tests {
                 .unwrap()
                 .map(|(pn, _)| pn)
         };
-        let old = packet(0).seal(&sending).unwrap().bytes;
-        let late_old = packet(1).seal(&sending).unwrap().bytes;
+        let old = packet(0, &sending).unwrap().into_buffer();
+        let late_old = packet(1, &sending).unwrap().into_buffer();
         receiving.update().unwrap();
         tokio::time::advance(Duration::from_secs(4)).await;
         assert_eq!(open(old), Some(0));
         sending.update().unwrap();
-        assert_eq!(open(packet(2).seal(&sending).unwrap().bytes), Some(2));
+        assert_eq!(open(packet(2, &sending).unwrap().into_buffer()), Some(2));
         assert!(
             receiving.update().is_err(),
             "opening the tail does not grant permission"
         );
-        assert_eq!(receiving.with_generation(1, || ()), Some(()));
+        assert_eq!(
+            receiving
+                .packets
+                .lock()
+                .unwrap()
+                .keys
+                .back()
+                .unwrap()
+                .generation,
+            1
+        );
         tokio::time::advance(Duration::from_secs(3)).await;
         assert_eq!(open(late_old), None);
-        assert_eq!(open(packet(3).seal(&sending).unwrap().bytes), Some(3));
+        assert_eq!(open(packet(3, &sending).unwrap().into_buffer()), Some(3));
+    }
+
+    #[test]
+    fn failed_allocation_does_not_consume_the_last_aead_use() {
+        let keys = ready();
+        let limit = keys
+            .packets
+            .lock()
+            .unwrap()
+            .keys
+            .back()
+            .unwrap()
+            .sealing
+            .confidentiality_limit();
+        keys.packets.lock().unwrap().sealed_count = limit - 1;
+        assert!(
+            keys.reserve::<()>(|_| Err(PacketError::Blocked(qbase::net::tx::Signals::TRANSPORT)))
+                .is_err()
+        );
+        keys.reserve(|_| Ok(())).unwrap();
+        assert_eq!(keys.packets.lock().unwrap().sealed_count, limit);
+        assert!(
+            keys.reserve::<()>(|_| panic!("allocated beyond the AEAD limit"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -944,13 +1139,13 @@ mod tests {
             let mut packets = keys.packets.lock().unwrap();
             packets.sealed_count = packets.keys.back().unwrap().sealing.confidentiality_limit();
         }
-        assert_eq!(packet(0).seal(&keys).unwrap().generation, 1);
+        assert_eq!(packet(0, &keys).unwrap().generation, Some(1));
         {
             let mut packets = keys.packets.lock().unwrap();
             packets.sealed_count = packets.keys.back().unwrap().sealing.confidentiality_limit();
         }
         assert!(
-            matches!(packet(1).seal(&keys), Err(PacketError::Connection(error)) if error.kind() == ErrorKind::AeadLimitReached)
+            matches!(packet(1, &keys), Err(PacketError::Connection(error)) if error.kind() == ErrorKind::AeadLimitReached)
         );
     }
 
@@ -967,7 +1162,7 @@ mod tests {
             let mut packets = receiving.packets.lock().unwrap();
             packets.failed_opened = packets.keys.back().unwrap().opening.integrity_limit() - 1;
         }
-        let mut forged = packet(0).seal(&sending).unwrap().bytes;
+        let mut forged = packet(0, &sending).unwrap().into_buffer();
         let last = forged.len() - 1;
         forged[last] ^= 1;
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(forged, 0)
@@ -991,8 +1186,31 @@ mod tests {
         let task = tokio::spawn(waiting);
         tokio::task::yield_now().await;
         keys.retire();
-        assert_eq!(task.await.unwrap(), None);
+        assert_eq!(task.await.unwrap(), Err(KeyRetired));
+        assert_eq!(keys.try_get(), Err(KeyRetired));
         assert!(keys.install(()).is_err());
+    }
+
+    #[tokio::test]
+    async fn retiring_pending_one_rtt_keys_wakes_the_waiter_with_key_retired() {
+        let keys = ArcOneRttKeys::new_pending();
+        let mut waiting = keys.clone();
+        let (entered, pending) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            assert!(futures::poll!(&mut waiting).is_pending());
+            entered.send(()).unwrap();
+            waiting.await
+        });
+        pending.await.unwrap();
+        keys.retire();
+        assert!(matches!(keys.try_get(), Err(KeyRetired)));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(KeyRetired)
+        ));
     }
 
     #[test]
@@ -1004,13 +1222,16 @@ mod tests {
         assert!(Pin::new(&mut state).poll(&mut cx).is_pending());
         state = KeyState::Ready(material.clone());
         for _ in 0..2 {
-            let Poll::Ready(Some(keys)) = Pin::new(&mut state).poll(&mut cx) else {
+            let Poll::Ready(Ok(keys)) = Pin::new(&mut state).poll(&mut cx) else {
                 panic!()
             };
             assert!(Arc::ptr_eq(&material, &keys));
         }
         state = KeyState::Retired;
-        assert_eq!(Pin::new(&mut state).poll(&mut cx), Poll::Ready(None));
+        assert_eq!(
+            Pin::new(&mut state).poll(&mut cx),
+            Poll::Ready(Err(KeyRetired))
+        );
     }
 
     #[tokio::test]
@@ -1034,21 +1255,21 @@ mod tests {
         assert!(Arc::ptr_eq(&received, &material));
         assert!(Arc::ptr_eq(&keys.clone().await.unwrap(), &material));
         keys.retire();
-        assert_eq!(keys.await, None);
+        assert_eq!(keys.await, Err(KeyRetired));
     }
 
     #[tokio::test]
-    async fn sealing_waits_until_pending_socket_submission_finishes() {
+    async fn sealing_does_not_wait_for_socket_submission() {
         let [(_client, transport, path), _] = crate::tests::pair(1);
         let keys = transport.data.keys.clone().await.unwrap();
-        let mut sender = crate::send::Sender::new(keys.clone(), transport, path).unwrap();
+        let mut sender = crate::tests::Sender::new(keys.clone(), transport, path).unwrap();
         sender.heartbeat();
         assert!(sender.prepare().unwrap());
         let (start, started) = std::sync::mpsc::channel();
         let (sealed, completed) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             started.recv().unwrap();
-            packet(1).seal(&keys).unwrap();
+            packet(1, &keys).unwrap();
             sealed.send(()).unwrap();
         });
         assert!(matches!(
@@ -1056,16 +1277,12 @@ mod tests {
                 &mut Context::from_waker(futures::task::noop_waker_ref()),
                 |_, _, bytes| {
                     start.send(()).unwrap();
-                    assert!(matches!(
-                        completed.recv_timeout(Duration::from_millis(30)),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    ));
+                    completed.recv_timeout(Duration::from_secs(1)).unwrap();
                     Poll::Ready(Ok(bytes.len()))
                 },
             ),
             Poll::Ready(Ok(true))
         ));
-        completed.recv_timeout(Duration::from_secs(1)).unwrap();
         worker.join().unwrap();
     }
 }
