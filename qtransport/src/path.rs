@@ -143,7 +143,7 @@ impl Path {
             let _submission = self.submission.lock().unwrap();
             *self.state.lock().unwrap() = PathState::Retired;
         }
-        self.cc.on_path_lost();
+        // Connection-level recovery retains the sent packets and their deadlines.
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_by(Signals::all());
     }

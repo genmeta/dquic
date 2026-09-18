@@ -5,6 +5,7 @@ use qbase::{
     frame::{Frame, ReliableFrame, io::SendFrame},
 };
 use qrecovery::streams::DataStreams;
+use tokio::time::Instant;
 
 use crate::{ArcParameters, Error, ReliableFrames, keys::ArcOneRttKeys, path::Paths, space::Space};
 
@@ -42,6 +43,12 @@ impl Transport {
         self.data.stop_sending();
         self.streams.on_conn_error(&error);
         self.flow.on_conn_error(&error);
+    }
+
+    /// Drive recovery from the connection's timer while Data sending is enabled.
+    /// Keep ticking even when no path sender remains; recovered data can await a new path.
+    pub fn on_tick(&self, now: Instant) {
+        self.data.on_tick(now);
     }
 
     pub(crate) fn requeue(&self, frames: impl IntoIterator<Item = Frame<()>>) {

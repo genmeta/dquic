@@ -190,7 +190,7 @@ macro_rules! packet {
                 Ok(self.content)
             }
 
-            fn write<D: ContinuousData>(
+            fn write<D: Buffer>(
                 &mut self,
                 frame: &Frame<D>,
             ) -> Result<PacketContent, Signals>

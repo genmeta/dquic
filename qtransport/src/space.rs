@@ -11,42 +11,55 @@ use qbase::{
 use qcongestion::Feedback;
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
+use tokio::time::Instant;
 
 use crate::{
+    GuaranteedFrame,
     keys::{ArcKeys, ArcOneRttKeys},
-    send::records::SentPackets,
+    send::records::ArcSendJournal,
 };
 
 pub struct Space<K> {
     pub epoch: Epoch,
     pub keys: K,
     pub crypto: CryptoStream,
-    pub sent_packets: SentPackets,
+    pub send_journal: ArcSendJournal,
     pub rcvd_packets: ArcRcvdJournal,
     receiving: AtomicBool,
     sending: AtomicBool,
     pub(crate) submission: Arc<Mutex<()>>,
     pub send_wakers: ArcSendWakers,
+    on_loss: Box<dyn Fn(&GuaranteedFrame) + Send + Sync>,
 }
 
 impl<K> Space<K> {
+    /// Capture this space's frame owners in on_loss before starting CC or timer tasks.
+    /// It runs synchronously under the journal lock and must not reenter the journal or CC.
     pub fn new(
         epoch: Epoch,
         keys: K,
+        crypto: CryptoStream,
         submission: Arc<Mutex<()>>,
         send_wakers: ArcSendWakers,
+        on_loss: impl Fn(&GuaranteedFrame) + Send + Sync + 'static,
     ) -> Self {
         Self {
             epoch,
             keys,
-            crypto: CryptoStream::new(send_wakers.clone()),
-            sent_packets: SentPackets::default(),
+            crypto,
+            send_journal: ArcSendJournal::default(),
             rcvd_packets: ArcRcvdJournal::with_capacity(0, None),
             receiving: true.into(),
             sending: true.into(),
             submission,
             send_wakers,
+            on_loss: Box::new(on_loss),
         }
+    }
+
+    /// Notify the same frame owners as CC loss feedback, independent of path lifetime.
+    pub fn on_tick(&self, now: Instant) {
+        self.send_journal.on_tick(now, &self.on_loss);
     }
 
     pub fn can_receive(&self) -> bool {
@@ -85,7 +98,6 @@ impl Space<ArcOneRttKeys> {
 
 impl<K: Send + Sync> Feedback for Space<K> {
     fn may_loss(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        self.sent_packets.mark_lost(pns);
-        self.send_wakers.wake_all_by(Signals::TRANSPORT);
+        self.send_journal.mark_lost(pns, &self.on_loss);
     }
 }
