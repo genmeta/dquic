@@ -13,7 +13,7 @@ use crate::{
     Epoch,
     frame::{io::WriteFrame, *},
     net::tx::Signals,
-    util::{ContinuousData, NonData, WriteData},
+    util::{Buffer, NonData, WriteData},
     varint::be_varint,
 };
 
@@ -331,7 +331,7 @@ macro_rules! frame_packages {
         impl<Target,D> Package<Target> for $($frame_with_data)*
         where
             Target: BufMut + RecordFrame<Frame<D>, D> + ?Sized,
-            D: ContinuousData + Clone,
+            D: Buffer + Clone,
             for<'b> &'b mut Target: WriteData<D>,
         {
             #[inline]
@@ -349,7 +349,7 @@ macro_rules! frame_packages {
             }
         }
     };
-    (impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for ($frame:ident, D) {} $($tail:tt)*) => {
+    (impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for ($frame:ident, D) {} $($tail:tt)*) => {
         frame_packages!{ @imp_data_frame ($frame, D) }
         frame_packages!{ @imp_data_frame &($frame, D) }
         frame_packages!{ $($tail)* }
@@ -371,9 +371,9 @@ frame_packages! {
     impl<Target: WriteFrame<Self>> Package<Target> for ReliableFrame {}
     impl<Target: WriteFrame<Self>> Package<Target> for PunchHelloFrame {}
     impl<Target: WriteFrame<Self>> Package<Target> for PunchDoneFrame {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (StreamFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (CryptoFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (DatagramFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (StreamFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (CryptoFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (DatagramFrame, D) {}
 }
 
 pub enum Keys {
@@ -520,11 +520,11 @@ impl PacketInfo {
     }
 }
 
-pub trait RecordFrame<F, D: ContinuousData> {
+pub trait RecordFrame<F, D: Buffer> {
     fn record_frame(&mut self, frame: &F);
 }
 
-impl<D: ContinuousData> RecordFrame<Frame<D>, D> for PacketInfo {
+impl<D: Buffer> RecordFrame<Frame<D>, D> for PacketInfo {
     fn record_frame(&mut self, frame: &Frame<D>) {
         debug_assert!(
             frame.belongs_to(self.packet_type(),),
@@ -544,7 +544,7 @@ impl<D: ContinuousData> RecordFrame<Frame<D>, D> for PacketInfo {
     }
 }
 
-impl<F, D: ContinuousData> RecordFrame<F, D> for PacketWriter<'_>
+impl<F, D: Buffer> RecordFrame<F, D> for PacketWriter<'_>
 where
     PacketInfo: RecordFrame<F, D>,
 {

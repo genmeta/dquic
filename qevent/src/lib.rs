@@ -13,7 +13,7 @@ use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 use bytes::Bytes;
 use derive_builder::Builder;
 use derive_more::{Display, From, Into};
-use qbase::{cid::ConnectionId, role::Role, util::ContinuousData};
+use qbase::{cid::ConnectionId, role::Role, util::Buffer};
 use quic::ConnectionID;
 use serde::{Deserialize, Serialize};
 
@@ -589,13 +589,13 @@ pub struct RawInfo {
 impl RawInfoBuilder {
     /// the (potentially truncated) contents of the full entity,
     /// including headers and possibly trailers
-    pub fn data<D: ContinuousData>(&mut self, data: D) -> &mut Self {
+    pub fn data<D: Buffer>(&mut self, data: D) -> &mut Self {
         self.data = telemetry::filter::raw_data().then(|| Some(data.to_bytes().into()));
         self
     }
 }
 
-impl<D: ContinuousData> From<D> for RawInfo {
+impl<D: Buffer> From<D> for RawInfo {
     fn from(data: D) -> Self {
         build!(RawInfo {
             length: data.len() as u64,

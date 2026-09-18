@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
-pub trait ContinuousData {
+pub trait Buffer {
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool;
@@ -10,7 +10,7 @@ pub trait ContinuousData {
 
 pub type DataPair<'a> = (&'a [u8], &'a [u8]);
 
-impl ContinuousData for DataPair<'_> {
+impl Buffer for DataPair<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.0.len() + self.1.len()
@@ -27,7 +27,7 @@ impl ContinuousData for DataPair<'_> {
     }
 }
 
-impl ContinuousData for [u8] {
+impl Buffer for [u8] {
     #[inline]
     fn len(&self) -> usize {
         <[u8]>::len(self)
@@ -44,7 +44,7 @@ impl ContinuousData for [u8] {
     }
 }
 
-impl<const N: usize> ContinuousData for [u8; N] {
+impl<const N: usize> Buffer for [u8; N] {
     #[inline]
     fn len(&self) -> usize {
         N
@@ -61,7 +61,7 @@ impl<const N: usize> ContinuousData for [u8; N] {
     }
 }
 
-impl ContinuousData for Vec<u8> {
+impl Buffer for Vec<u8> {
     #[inline]
     fn len(&self) -> usize {
         self.len()
@@ -78,7 +78,7 @@ impl ContinuousData for Vec<u8> {
     }
 }
 
-impl ContinuousData for Bytes {
+impl Buffer for Bytes {
     #[inline]
     fn len(&self) -> usize {
         self.len()
@@ -97,7 +97,7 @@ impl ContinuousData for Bytes {
 
 pub type NonData = ();
 
-impl ContinuousData for NonData {
+impl Buffer for NonData {
     #[inline]
     fn len(&self) -> usize {
         0
@@ -114,7 +114,7 @@ impl ContinuousData for NonData {
     }
 }
 
-impl<D: ContinuousData + ?Sized> ContinuousData for &D {
+impl<D: Buffer + ?Sized> Buffer for &D {
     #[inline]
     fn len(&self) -> usize {
         D::len(*self)
@@ -131,7 +131,7 @@ impl<D: ContinuousData + ?Sized> ContinuousData for &D {
     }
 }
 
-impl<D: ContinuousData> ContinuousData for [D] {
+impl<D: Buffer> Buffer for [D] {
     #[inline]
     fn len(&self) -> usize {
         self.iter().map(|d| d.len()).sum()
@@ -153,7 +153,7 @@ impl<D: ContinuousData> ContinuousData for [D] {
     }
 }
 
-impl<D: ContinuousData, const N: usize> ContinuousData for [D; N] {
+impl<D: Buffer, const N: usize> Buffer for [D; N] {
     #[inline]
     fn len(&self) -> usize {
         <[D]>::len(self)
@@ -170,7 +170,7 @@ impl<D: ContinuousData, const N: usize> ContinuousData for [D; N] {
     }
 }
 
-pub trait WriteData<D: ContinuousData + ?Sized>: BufMut {
+pub trait WriteData<D: Buffer + ?Sized>: BufMut {
     fn put_data(&mut self, data: &D);
 }
 
@@ -208,7 +208,7 @@ impl<T: BufMut> WriteData<NonData> for T {
     fn put_data(&mut self, &(): &()) {}
 }
 
-impl<T, D: ContinuousData + ?Sized> WriteData<&D> for T
+impl<T, D: Buffer + ?Sized> WriteData<&D> for T
 where
     T: BufMut + WriteData<D>,
 {
@@ -218,7 +218,7 @@ where
     }
 }
 
-impl<T, D: ContinuousData> WriteData<[D]> for T
+impl<T, D: Buffer> WriteData<[D]> for T
 where
     T: BufMut + WriteData<D>,
 {
@@ -230,7 +230,7 @@ where
     }
 }
 
-impl<T, D: ContinuousData, const N: usize> WriteData<[D; N]> for T
+impl<T, D: Buffer, const N: usize> WriteData<[D; N]> for T
 where
     T: BufMut + WriteData<D>,
 {

@@ -11,7 +11,7 @@ use std::{
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{
         route::Pathway,
@@ -143,7 +143,7 @@ impl Path {
             let _submission = self.submission.lock().unwrap();
             *self.state.lock().unwrap() = PathState::Retired;
         }
-        self.cc.on_path_lost();
+        // Connection-level recovery retains the sent packets and their deadlines.
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_by(Signals::all());
     }
@@ -175,10 +175,11 @@ impl Path {
                 attempts: 3..,
                 retry_at,
                 ..
-            } if Instant::now() >= retry_at => Err(crate::error(
+            } if Instant::now() >= retry_at => Err(QuicError::with_default_fty(
                 ErrorKind::NoViablePath,
                 "path validation timed out",
-            )),
+            )
+            .into()),
             PathState::Validating {
                 challenge,
                 retry_at,

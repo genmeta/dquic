@@ -7,7 +7,7 @@ use qbase::{
     net::tx::Signals,
     packet::Package,
     sid::StreamId,
-    util::ContinuousData,
+    util::Buffer,
     varint::VarInt,
 };
 use qevent::quic::transport::{GranularStreamStates, StreamSide, StreamStateUpdated};
@@ -49,7 +49,7 @@ impl<TX: Clone> Outgoing<TX> {
             packet.put_bytes(0, strategy.pre_padding());
             (frame, data.as_slice()).dump(packet).unwrap();
 
-            (ContinuousData::len(data.as_slice()), is_fresh)
+            (Buffer::len(data.as_slice()), is_fresh)
         };
 
         let predicate = |offset| {

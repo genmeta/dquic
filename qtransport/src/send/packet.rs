@@ -1,18 +1,18 @@
-use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
+use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
 use qbase::{
-    Epoch,
     frame::{
-        self, AckFrame, ConnectionCloseFrame, CryptoFrame, EncodeSize, Frame, FrameFeature,
-        FrameType, GetFrameType, PingFrame, ReliableFrame, StreamFrame, io::WriteFrame,
+        self, AckFrame, ConnectionCloseFrame, CryptoFrame, EncodeSize, Frame, FrameType,
+        GetFrameType, PingFrame, ReliableFrame, StreamFrame, io::WriteFrame,
     },
     net::tx::Signals,
     packet::{
-        GetType, HeaderSize, OneRttHeader, Package, PacketContent, Type, header::io::WriteHeader,
+        HeaderSize, OneRttHeader, Package, PacketContent, PacketNumber, ShortSpecificBits,
+        WritePacketNumber, header::io::WriteHeader,
     },
-    util::{ContinuousData, WriteData},
+    util::{Buffer, WriteData},
 };
 
-use super::constraints::Constraints;
+use super::{constraints::Constraints, records::ArcSendJournal};
 use crate::keys::SealPacket;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,180 +21,200 @@ pub enum PacketError {
     Blocked(Signals),
     #[error(transparent)]
     Connection(#[from] crate::Error),
-    #[error("frame {0:?} is not allowed in this packet")]
-    IllegalFrame(FrameType),
     #[error("invalid packet layout or capacity")]
     Layout,
     #[error(transparent)]
     Crypto(#[from] qtls::CryptoError),
 }
 
-/// A sealed packet keeps its original frame ownership until socket completion.
+/// Sealed bytes and submission metadata; recovery frames belong to ArcSendJournal.
 /// It contains no borrowed source, journal lock, or buffer reference.
 pub struct PendingPacket {
     pub(crate) bytes: BytesMut,
     pub pn: u64,
-    pub epoch: Epoch,
     pub generation: u64,
     pub content: PacketContent,
     pub in_flight: bool,
-    pub ack: Option<u64>,
-    pub frames: Vec<Frame<()>>,
+    pub largest_acked: Option<u64>,
 }
 
 impl PendingPacket {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-
-    /// Call only when no bytes of this packet reached the socket. An uncertain
-    /// socket outcome burns the PN and retains congestion accounting instead.
-    pub fn abort(self, constraints: &mut Constraints) -> Vec<Frame<()>> {
-        constraints.capacity += self.bytes.len();
-        constraints.anti_amplification += self.bytes.len();
-        if self.in_flight {
-            constraints.congestion += self.bytes.len();
-        }
-        self.frames
-    }
 }
 
+/// Packet encoding state and its owned buffer.
 pub struct OneRttPacket {
     buffer: BytesMut,
-    pn: u64,
-    pn_offset: usize,
+    padded_to: usize,
     body_offset: usize,
     cursor: usize,
-    packet_type: Type,
     tag_len: usize,
-    limit: usize,
-    source_start: usize,
-    source_end: usize,
-    flight_limit: usize,
-    reserved: usize,
-    reserved_flight: usize,
     content: PacketContent,
     in_flight: bool,
-    ack: Option<u64>,
-    frames: Vec<Frame<()>>,
-    illegal: Option<FrameType>,
+    largest_acked: Option<u64>,
 }
 
 impl OneRttPacket {
-    pub fn frames(&self) -> &[Frame<()>] {
-        &self.frames
-    }
-
+    /// Assemble frames with four bytes reserved for the eventual packet number.
     pub fn new(
         mut buffer: BytesMut,
         header: OneRttHeader,
-        pn: u64,
         tag_len: usize,
     ) -> Result<Self, PacketError> {
-        let packet_type = header.get_type();
-        let long = matches!(packet_type, Type::Long(_));
-        let pn_offset = header.size() + if long { 2 } else { 0 };
-        let body_offset = pn_offset + 4;
+        let body_offset = header.size() + 4;
         let limit = buffer
             .len()
             .checked_sub(tag_len)
             .ok_or(PacketError::Layout)?;
-        if body_offset >= limit || pn > qbase::varint::VARINT_MAX || (long && buffer.len() >= 16384)
-        {
+        if body_offset >= limit {
             return Err(PacketError::Layout);
         }
         let mut writer = &mut buffer[..];
         writer.put_header(&header);
-        if long {
-            writer.put_u16(0);
-        }
-        writer.put_u32(pn as u32);
-        buffer[0] |= 3; // A four-byte PN also supplies a full HP sample with the tag.
+        writer.put_packet_number(PacketNumber::U32(0));
         Ok(Self {
             buffer,
-            pn,
-            pn_offset,
+            padded_to: 0,
             body_offset,
             cursor: body_offset,
-            packet_type,
             tag_len,
-            limit,
-            source_start: body_offset,
-            source_end: limit,
-            flight_limit: 0,
-            reserved: 0,
-            reserved_flight: 0,
             content: PacketContent::default(),
             in_flight: false,
-            ack: None,
-            frames: Vec::new(),
-            illegal: None,
+            largest_acked: None,
         })
     }
 
-    pub fn assemble<const N: usize>(
-        &mut self,
-        constraints: &mut Constraints,
-        sources: [&mut dyn Package<Self>; N],
+    pub fn assemble<'a, const N: usize>(
+        &'a mut self,
+        constraints: &'a Constraints,
+        records: &'a mut Vec<Frame<()>>,
+        sources: [&mut dyn Package<PacketWriter<'a>>; N],
     ) -> Result<PacketContent, PacketError> {
-        let tag = self.tag_len;
-        self.limit = self
-            .buffer
-            .len()
-            .min(
-                self.reserved
-                    .saturating_add(constraints.capacity.min(constraints.anti_amplification)),
-            )
-            .saturating_sub(tag);
-        self.flight_limit = self.reserved_flight.saturating_add(constraints.congestion);
         let start = self.cursor;
+        let mut writer = PacketWriter::new(self, constraints, records);
         let mut blocked = Signals::empty();
-        for (index, source) in sources.into_iter().enumerate() {
-            // Bound earlier queues; permit one larger frame to avoid starvation.
-            // The last source uses all remaining capacity.
-            self.source_start = self.cursor;
-            self.source_end = if index + 1 == N {
-                self.limit
-            } else {
-                self.cursor.saturating_add(512).min(self.limit)
-            };
-            match source.dump(self) {
+        for source in sources {
+            match source.dump(&mut writer) {
                 Ok(_) => {}
                 Err(signals) => blocked |= signals,
             }
-            if self.illegal.is_some() {
-                break;
-            }
         }
-        let size = if self.cursor == self.body_offset {
-            0
-        } else {
-            self.cursor + tag
-        };
-        let flight = if self.in_flight { size } else { 0 };
-        constraints.capacity -= size.saturating_sub(self.reserved);
-        constraints.anti_amplification -= size.saturating_sub(self.reserved);
-        constraints.congestion -= flight.saturating_sub(self.reserved_flight);
-        self.reserved = size;
-        self.reserved_flight = flight;
-        if let Some(frame) = self.illegal {
-            return Err(PacketError::IllegalFrame(frame));
-        }
-        if self.cursor == start {
+        if writer.packet.cursor == start {
             return Err(PacketError::Blocked(blocked));
         }
-        Ok(self.content)
+        Ok(writer.packet.content)
     }
 
-    fn write<D: ContinuousData>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
-    where
-        for<'a, 'b> &'a mut &'b mut [u8]: WriteData<D>,
-    {
-        let frame_type = frame.frame_type();
-        if !frame.belongs_to(self.packet_type) {
-            self.illegal = Some(frame_type);
-            return Err(Signals::empty());
+    /// Padding makes the entire packet count toward the congestion limit.
+    pub fn pad_to(&mut self, length: usize, constraints: &Constraints) -> Result<(), PacketError> {
+        let size = self.cursor + self.tag_len;
+        // The actual PN may reclaim two bytes of headroom. A requested length
+        // above that minimum can require padding even if it fits the current layout.
+        if length <= size.saturating_sub(2) {
+            self.padded_to = self.padded_to.max(length);
+            return Ok(());
         }
+        if self.cursor == self.body_offset
+            || length > self.buffer.len()
+            || length > constraints.capacity.min(constraints.anti_amplification)
+            || length > constraints.congestion
+        {
+            return Err(PacketError::Blocked(Signals::CONGESTION));
+        }
+        if length > size {
+            self.buffer[self.cursor..length - self.tag_len].fill(0);
+            self.cursor = length - self.tag_len;
+            self.in_flight = true;
+            self.content += PacketContent::from(FrameType::Padding);
+        }
+        self.padded_to = self.padded_to.max(length);
+        Ok(())
+    }
+
+    pub(crate) fn into_buffer(self) -> BytesMut {
+        self.buffer
+    }
+
+    /// Allocate PN and its immutable sealing key only after frames are assembled.
+    pub fn seal(
+        mut self,
+        keys: &crate::keys::OneRttKeys,
+        journal: &ArcSendJournal,
+        records: &mut Vec<Frame<()>>,
+    ) -> Result<PendingPacket, PacketError> {
+        if self.cursor == self.body_offset {
+            return Err(PacketError::Layout);
+        }
+        let ((pn, encoded_pn), key) =
+            keys.reserve(|generation| journal.record_pending(generation, records))?;
+        let pn_offset = self.body_offset - 4;
+        let shift = 4 - encoded_pn.size();
+        // Move only the short header; the frame bytes stay at their original offsets.
+        self.buffer.copy_within(..pn_offset, shift);
+        self.buffer[shift] |= *ShortSpecificBits::from_pn(&encoded_pn);
+        (&mut self.buffer[pn_offset + shift..self.body_offset]).put_packet_number(encoded_pn);
+        let total = (self.cursor + self.tag_len).max(self.padded_to + shift);
+        if total > self.cursor + self.tag_len {
+            self.in_flight = true;
+            self.content += PacketContent::from(FrameType::Padding);
+        }
+        self.buffer.resize(total, 0);
+        self.buffer[self.cursor..total - self.tag_len].fill(0);
+        let result = key.seal(
+            pn,
+            &mut self.buffer[shift..],
+            pn_offset,
+            self.body_offset - shift,
+            self.tag_len,
+        );
+        let (generation, _) = match result {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                journal.cancel_pending(pn, records);
+                return Err(error);
+            }
+        };
+        self.buffer.advance(shift);
+        Ok(PendingPacket {
+            bytes: self.buffer,
+            pn,
+            generation,
+            content: self.content,
+            in_flight: self.in_flight,
+            largest_acked: self.largest_acked,
+        })
+    }
+}
+
+/// A packet write target with borrowed limits and reusable recovery records.
+pub struct PacketWriter<'a> {
+    packet: &'a mut OneRttPacket,
+    constraints: &'a Constraints,
+    records: &'a mut Vec<Frame<()>>,
+}
+
+impl<'a> PacketWriter<'a> {
+    pub fn new(
+        packet: &'a mut OneRttPacket,
+        constraints: &'a Constraints,
+        records: &'a mut Vec<Frame<()>>,
+    ) -> Self {
+        Self {
+            packet,
+            constraints,
+            records,
+        }
+    }
+
+    fn write<D: Buffer>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
+    where
+        for<'b, 'c> &'b mut &'c mut [u8]: WriteData<D>,
+    {
+        let packet = &mut self.packet;
+        let constraints = self.constraints;
+        let frame_type = frame.frame_type();
         let data_len = match frame {
             Frame::Crypto(_, data) | Frame::Stream(_, data) | Frame::Datagram(_, data) => {
                 data.len()
@@ -202,174 +222,188 @@ impl OneRttPacket {
             _ => 0,
         };
         let length = frame.encoding_size().saturating_add(data_len);
-        let end = self.cursor.saturating_add(length);
+        let end = packet.cursor.saturating_add(length);
+        // PacketNumber::encode uses at least two bytes. Budget HP padding for that
+        // shortest encoding before allocating the PN (the remaining two bytes are headroom).
+        let padded_end = end.max((packet.body_offset + 18).saturating_sub(packet.tag_len));
         let content = PacketContent::from(frame_type);
-        let in_flight =
-            self.in_flight || content.is_ack_eliciting() || matches!(frame, Frame::Padding(_));
-        if (end > self.source_end && self.cursor != self.source_start)
-            || end > self.limit
-            || (in_flight && end + self.tag_len > self.flight_limit)
+        let in_flight = packet.in_flight
+            || content.is_ack_eliciting()
+            || matches!(frame, Frame::Padding(_))
+            || padded_end != end;
+        let size = padded_end + packet.tag_len;
+        if size
+            > packet
+                .buffer
+                .len()
+                .min(constraints.capacity)
+                .min(constraints.anti_amplification)
+            || (in_flight && size > constraints.congestion)
         {
             return Err(Signals::CONGESTION);
         }
-        let mut writer = &mut self.buffer[self.cursor..end];
+        let mut writer = &mut packet.buffer[packet.cursor..end];
         writer.put_frame(frame);
         assert!(
             writer.is_empty(),
             "frame encoder must match its declared size"
         );
-        self.cursor = end;
-        self.content += content;
-        self.in_flight = in_flight;
+        packet.buffer[end..padded_end].fill(0);
+        packet.cursor = padded_end;
+        packet.content += content;
+        packet.in_flight = in_flight;
         match frame {
-            Frame::Ack(ack) => self.ack = Some(ack.largest()),
-            Frame::Crypto(frame, _) => self.frames.push(Frame::Crypto(*frame, ())),
-            Frame::Stream(frame, _) => self.frames.push(Frame::Stream(*frame, ())),
-            Frame::PathChallenge(frame) => self.frames.push(Frame::PathChallenge(*frame)),
-            Frame::PathResponse(frame) => self.frames.push(Frame::PathResponse(*frame)),
+            Frame::Ack(ack) => packet.largest_acked = Some(ack.largest()),
+            Frame::Crypto(frame, _) => self.records.push(Frame::Crypto(*frame, ())),
+            Frame::Stream(frame, _) => self.records.push(Frame::Stream(*frame, ())),
+            Frame::PathChallenge(frame) => self.records.push(Frame::PathChallenge(*frame)),
+            Frame::PathResponse(frame) => self.records.push(Frame::PathResponse(*frame)),
             frame => {
                 if let Ok(reliable) = ReliableFrame::try_from(frame) {
-                    self.frames.push(reliable.into());
+                    self.records.push(reliable.into());
                 }
             }
         }
         Ok(content)
     }
-
-    /// Padding is part of the plaintext and consumes congestion/AA credit.
-    pub fn pad_to(
-        &mut self,
-        length: usize,
-        constraints: &mut Constraints,
-    ) -> Result<(), PacketError> {
-        let size = self.cursor + self.tag_len;
-        if length <= size {
-            return Ok(());
-        }
-        if self.cursor == self.body_offset
-            || length > self.buffer.len()
-            || length - size > constraints.capacity.min(constraints.anti_amplification)
-            || length.saturating_sub(self.reserved_flight) > constraints.congestion
-        {
-            return Err(PacketError::Blocked(Signals::CONGESTION));
-        }
-        self.buffer[self.cursor..length - self.tag_len].fill(0);
-        constraints.capacity -= length - size;
-        constraints.anti_amplification -= length - size;
-        constraints.congestion -= length - self.reserved_flight;
-        self.cursor = length - self.tag_len;
-        self.reserved = length;
-        self.reserved_flight = length;
-        self.in_flight = true;
-        self.content += PacketContent::from(FrameType::Padding);
-        Ok(())
-    }
-
-    /// Return unsent frame descriptors to their owning sources. This also
-    /// refunds the local reservation; no packet number is made reusable.
-    pub fn abort(mut self, constraints: &mut Constraints) -> Vec<Frame<()>> {
-        constraints.capacity += self.reserved;
-        constraints.anti_amplification += self.reserved;
-        constraints.congestion += self.reserved_flight;
-        std::mem::take(&mut self.frames)
-    }
-
-    pub fn seal(mut self, keys: &crate::keys::OneRttKeys) -> Result<PendingPacket, PacketError> {
-        if self.cursor == self.body_offset || self.illegal.is_some() {
-            return Err(PacketError::Layout);
-        }
-        let total = self.cursor + self.tag_len;
-        let (generation, _) = keys.seal(
-            self.pn,
-            &mut self.buffer[..total],
-            self.pn_offset,
-            self.body_offset,
-            self.tag_len,
-        )?;
-        self.buffer.truncate(total);
-        Ok(PendingPacket {
-            bytes: self.buffer,
-            pn: self.pn,
-            epoch: Epoch::Data,
-            generation,
-            content: self.content,
-            in_flight: self.in_flight,
-            ack: self.ack,
-            frames: self.frames,
-        })
-    }
 }
 
-// STREAM sources also write raw pre-padding. Leave room for an explicit
-// STREAM length even when qrecovery selected a length-omitting encoding.
-// Only the checked frame adapter may consume these eight reserved bytes.
-unsafe impl BufMut for OneRttPacket {
+// Raw writes are STREAM pre-padding; data sources see the constrained capacity.
+unsafe impl BufMut for PacketWriter<'_> {
     fn remaining_mut(&self) -> usize {
-        self.source_end
-            .min(self.limit)
-            .min(self.flight_limit.saturating_sub(self.tag_len))
-            .saturating_sub(self.cursor)
-            .saturating_sub(8)
+        // Sources may omit STREAM's length; reserve room to encode it explicitly.
+        self.packet
+            .buffer
+            .len()
+            .min(self.constraints.capacity)
+            .min(self.constraints.anti_amplification)
+            .min(self.constraints.congestion)
+            .saturating_sub(self.packet.cursor + self.packet.tag_len)
+            .saturating_sub(qbase::varint::VarInt::MAX_SIZE)
     }
     unsafe fn advance_mut(&mut self, count: usize) {
         assert!(count <= self.remaining_mut());
         assert!(
-            self.buffer[self.cursor..self.cursor + count]
+            self.packet.buffer[self.packet.cursor..self.packet.cursor + count]
                 .iter()
                 .all(|byte| *byte == 0),
             "raw packet writes are reserved for STREAM pre-padding"
         );
-        self.cursor += count;
+        self.packet.cursor += count;
         if count != 0 {
-            self.in_flight = true;
-            self.content += PacketContent::from(FrameType::Padding);
+            self.packet.in_flight = true;
+            self.packet.content += PacketContent::from(FrameType::Padding);
         }
     }
     fn chunk_mut(&mut self) -> &mut UninitSlice {
-        let end = self.cursor + self.remaining_mut();
-        UninitSlice::new(&mut self.buffer[self.cursor..end])
+        let end = self.packet.cursor + self.remaining_mut();
+        UninitSlice::new(&mut self.packet.buffer[self.packet.cursor..end])
     }
 }
 
-impl Package<OneRttPacket> for (CryptoFrame, &[Bytes]) {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for (CryptoFrame, &[Bytes]) {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::Crypto(self.0, self.1))
     }
 }
-impl Package<OneRttPacket> for AckFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for AckFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::Ack(self.clone()))
     }
 }
-impl Package<OneRttPacket> for PingFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for PingFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::Ping(*self))
     }
 }
-impl Package<OneRttPacket> for ConnectionCloseFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for ConnectionCloseFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::Close(self.clone()))
     }
 }
-impl Package<OneRttPacket> for (StreamFrame, &[Bytes]) {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for (StreamFrame, &[Bytes]) {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         let mut frame = self.0;
         frame.set_len_bit(frame::Len::Explicit);
         packet.write(&Frame::Stream(frame, self.1))
     }
 }
-impl Package<OneRttPacket> for &ReliableFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for &ReliableFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::from((*self).clone()))
     }
 }
-impl Package<OneRttPacket> for frame::PathChallengeFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for frame::PathChallengeFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::PathChallenge(*self))
     }
 }
-impl Package<OneRttPacket> for frame::PathResponseFrame {
-    fn dump(&mut self, packet: &mut OneRttPacket) -> Result<PacketContent, Signals> {
+impl Package<PacketWriter<'_>> for frame::PathResponseFrame {
+    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
         packet.write(&Frame::<()>::PathResponse(*self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_sealing_abandons_pn_and_returns_recovery_frames() {
+        let [(_client, transport, _path), _peer] = crate::tests::pair(1);
+        let keys = crate::tests::keys(&transport);
+        let journal = ArcSendJournal::default();
+        let mut packet = OneRttPacket::new(
+            BytesMut::zeroed(1200),
+            OneRttHeader::new(Default::default(), Default::default()),
+            keys.tag_len() - 1,
+        )
+        .unwrap();
+        let mut frames = Vec::new();
+        let frame = ReliableFrame::MaxData(frame::MaxDataFrame::new(42u32.into()));
+        packet
+            .assemble(
+                &Constraints {
+                    capacity: 1200,
+                    congestion: 1200,
+                    anti_amplification: 1200,
+                },
+                &mut frames,
+                [&mut &frame],
+            )
+            .unwrap();
+        assert!(packet.seal(&keys, &journal, &mut frames).is_err());
+        assert!(matches!(frames.as_slice(), [Frame::MaxData(f)] if f.max_data() == 42));
+        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        assert!(
+            journal
+                .acknowledge(&ack, |_| panic!("failed packet acknowledged"))
+                .is_err()
+        );
+        assert_eq!(journal.record_pending(0, &mut frames).unwrap().0, 1);
+    }
+
+    #[test]
+    fn padding_requested_before_pn_allocation_obeys_congestion() {
+        let mut packet = OneRttPacket::new(
+            BytesMut::zeroed(1200),
+            OneRttHeader::new(Default::default(), Default::default()),
+            16,
+        )
+        .unwrap();
+        let constraints = Constraints {
+            capacity: 1200,
+            congestion: 0,
+            anti_amplification: 1200,
+        };
+        let mut frames = Vec::new();
+        let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        packet
+            .assemble(&constraints, &mut frames, [&mut ack])
+            .unwrap();
+        // Finalizing a two-byte PN shortens this packet by two bytes. Keeping this
+        // requested length would introduce PADDING and must require congestion credit.
+        let length = packet.cursor + packet.tag_len;
+        assert!(packet.pad_to(length, &constraints).is_err());
     }
 }

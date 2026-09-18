@@ -12,7 +12,7 @@ use qbase::{
         GetType, HandshakeHeader, HeaderSize, InitialHeader, OneRttHeader, Package, PacketContent,
         Type, header::io::WriteHeader,
     },
-    util::{ContinuousData, WriteData},
+    util::{Buffer, WriteData},
 };
 
 use super::constraints::Constraints;
@@ -190,7 +190,7 @@ macro_rules! packet {
                 Ok(self.content)
             }
 
-            fn write<D: ContinuousData>(
+            fn write<D: Buffer>(
                 &mut self,
                 frame: &Frame<D>,
             ) -> Result<PacketContent, Signals>

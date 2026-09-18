@@ -14,9 +14,9 @@ use bytes::BytesMut;
 use packet::{OneRttPacket, PacketError, PendingPacket};
 use qbase::{
     Epoch,
-    error::ErrorKind,
+    error::{ErrorKind, QuicError},
     frame::{AckFrame, Frame, PingFrame},
-    net::tx::Signals,
+    net::{route::Pathway, tx::Signals},
     packet::{OneRttHeader, io::Repeat},
     param::ParameterId,
     varint::{VARINT_MAX, VarInt},
@@ -25,7 +25,7 @@ use qcongestion::Transport as _;
 use qprotocol::protocol::quic::QuicProtocol;
 
 use crate::{
-    Error,
+    Error, GuaranteedFrame,
     keys::OneRttKeys,
     path::{Path, PathState},
     transport::Transport,
@@ -36,6 +36,7 @@ pub struct Sender {
     transport: Arc<Transport>,
     path: Arc<Path>,
     buffer: BytesMut,
+    frames: Vec<Frame<()>>,
     pending: Option<PendingPacket>,
     heartbeat_pending: bool,
     signals: Signals,
@@ -49,16 +50,18 @@ impl Sender {
         path: Arc<Path>,
     ) -> Result<Self, Error> {
         if !Arc::ptr_eq(&path.submission, &transport.data.submission) {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::Internal,
                 "path and space must share the submission boundary",
-            ));
+            )
+            .into());
         }
         if path.sender_active.swap(true, Ordering::AcqRel) {
-            return Err(crate::error(
+            return Err(QuicError::with_default_fty(
                 ErrorKind::Internal,
                 "path already has a sending owner",
-            ));
+            )
+            .into());
         }
         transport
             .data
@@ -69,6 +72,7 @@ impl Sender {
             transport,
             path,
             buffer: BytesMut::zeroed(1200),
+            frames: Vec::new(),
             pending: None,
             heartbeat_pending: false,
             signals: Signals::all(),
@@ -90,11 +94,11 @@ impl Sender {
             return Ok(false);
         }
         if self.path.state() == PathState::Retired {
-            return Err(crate::error(ErrorKind::NoViablePath, "path retired"));
+            return Err(
+                QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
+            );
         }
-        self.transport
-            .requeue(self.transport.data.sent_packets.take_lost());
-        if !self.transport.data.sent_packets.has_capacity() {
+        if !self.transport.data.send_journal.has_capacity() {
             return Ok(false);
         }
         let tag_len = self.keys.tag_len();
@@ -104,12 +108,10 @@ impl Sender {
         constraints.capacity = constraints.capacity.saturating_sub(overhead);
         constraints.congestion = constraints.congestion.saturating_sub(overhead);
         constraints.anti_amplification = constraints.anti_amplification.saturating_sub(overhead);
-        let pn = self.transport.data.sent_packets.next_pn()?;
         self.buffer.resize(1200 - overhead, 0);
         let mut packet = OneRttPacket::new(
             std::mem::take(&mut self.buffer),
             OneRttHeader::new(Default::default(), self.path.dcid()),
-            pn,
             tag_len,
         )
         .map_err(packet_error)?;
@@ -149,20 +151,22 @@ impl Sender {
         );
         let mut ping = (self.heartbeat_pending || probe).then_some(PingFrame);
         let assembled = if self.heartbeat_pending {
-            packet.assemble(&mut constraints, [&mut ping])
+            packet.assemble(&constraints, &mut self.frames, [&mut ping])
         } else if !self.path.is_validated() {
             packet.assemble(
-                &mut constraints,
+                &constraints,
+                &mut self.frames,
                 [&mut ack, &mut response, &mut challenge, &mut ping],
             )
         } else {
             packet.assemble(
-                &mut constraints,
+                &constraints,
+                &mut self.frames,
                 [
                     &mut ack,
+                    &mut crypto,
                     &mut response,
                     &mut challenge,
-                    &mut crypto,
                     &mut reliable,
                     &mut ping,
                     &mut streams,
@@ -173,47 +177,48 @@ impl Sender {
             Ok(_) => {}
             Err(PacketError::Blocked(signals)) => {
                 self.signals |= signals;
-                self.transport.requeue(packet.abort(&mut constraints));
+                self.transport.requeue(self.frames.drain(..));
+                self.buffer = packet.into_buffer();
                 return Ok(false);
             }
             Err(error) => {
-                self.transport.requeue(packet.abort(&mut constraints));
+                self.transport.requeue(self.frames.drain(..));
                 return Err(packet_error(error));
             }
         }
-        if packet
-            .frames()
+        if self
+            .frames
             .iter()
             .any(|frame| matches!(frame, Frame::PathChallenge(_) | Frame::PathResponse(_)))
-            && packet.pad_to(1200 - overhead, &mut constraints).is_err()
+            && packet.pad_to(1200 - overhead, &constraints).is_err()
         {
-            self.transport.requeue(packet.abort(&mut constraints));
+            self.transport.requeue(self.frames.drain(..));
+            self.buffer = packet.into_buffer();
             return Ok(false);
         }
-        let frames = packet.frames().to_vec();
-        let pending = match packet.seal(&self.keys) {
+        let pending = match packet.seal(
+            &self.keys,
+            &self.transport.data.send_journal,
+            &mut self.frames,
+        ) {
             Ok(pending) => pending,
+            Err(PacketError::Blocked(signals)) => {
+                self.signals |= signals;
+                self.transport.requeue(self.frames.drain(..));
+                return Ok(false);
+            }
             Err(error) => {
-                self.transport.requeue(frames);
+                self.transport.requeue(self.frames.drain(..));
                 return Err(packet_error(error));
             }
         };
-        if !self.transport.data.sent_packets.pending(
-            pending.pn,
-            &self.path,
-            pending.generation,
-            &pending.frames,
-        ) {
-            self.transport.requeue(pending.frames);
-            return Ok(false);
-        }
         self.heartbeat_pending = false;
         self.pending = Some(pending);
         Ok(true)
     }
 
     /// A nonblocking submission. Pending retains this exact ciphertext; a subsequent
-    /// poll rechecks retirement, key generation and the largest submitted packet number.
+    /// poll rechecks retirement and send credit; PN and sealing generation stay fixed.
     pub fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
@@ -227,21 +232,14 @@ impl Sender {
     pub(crate) fn poll_send_with(
         &mut self,
         cx: &mut Context<'_>,
-        mut submit: impl FnMut(
-            &mut Context<'_>,
-            qbase::net::route::Pathway,
-            &[u8],
-        ) -> Poll<io::Result<usize>>,
+        mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<io::Result<usize>>,
     ) -> Poll<Result<bool, Error>> {
         let Some(packet) = &self.pending else {
             return Poll::Ready(Ok(false));
         };
         let data = self.transport.data.clone();
         let _submission = data.submission.lock().unwrap();
-        if !data.can_send()
-            || self.path.state() == PathState::Retired
-            || !data.sent_packets.can_submit(packet.pn)
-        {
+        if !data.can_send() || self.path.state() == PathState::Retired {
             self.abort_pending();
             return Poll::Ready(Ok(false));
         }
@@ -253,38 +251,37 @@ impl Sender {
             self.signals = Signals::CREDIT | Signals::CONGESTION;
             return Poll::Ready(Ok(false));
         }
-        let Some(result) = self.keys.with_generation(packet.generation, || {
-            submit(cx, self.path.pathway, &packet.bytes)
-        }) else {
-            self.abort_pending();
-            return Poll::Ready(Ok(false));
-        };
+        let result = submit(cx, self.path.pathway, &packet.bytes);
         match result {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => {
                 self.abort_pending();
-                Poll::Ready(Err(crate::error(
+                Poll::Ready(Err(QuicError::with_default_fty(
                     ErrorKind::NoViablePath,
                     error.to_string(),
-                )))
+                )
+                .into()))
             }
             Poll::Ready(Ok(submitted)) => {
                 // One datagram is atomic; qprotocol reports its entire UDP payload size.
                 assert_eq!(submitted, wire_len);
                 let packet = self.pending.take().unwrap();
-                self.path.on_sent(wire_len, &packet.frames);
+                let (retransmit_after, _) = self.path.cc.retransmit_and_expire_time(Epoch::Data);
+                data.send_journal.mark_sent(
+                    packet.pn,
+                    packet.in_flight,
+                    retransmit_after,
+                    self.path.cc.pto_base(Epoch::Data) * 3,
+                );
+                self.path.on_sent(wire_len, &self.frames);
+                self.frames.clear();
                 self.path.cc.on_pkt_sent(
                     Epoch::Data,
                     packet.pn,
                     packet.content.is_ack_eliciting(),
                     wire_len,
                     packet.in_flight,
-                    packet.ack,
-                );
-                data.sent_packets.on_sent(
-                    packet.pn,
-                    packet.in_flight,
-                    self.path.cc.pto_base(Epoch::Data) * 3,
+                    packet.largest_acked,
                 );
                 self.buffer = packet.bytes;
                 Poll::Ready(Ok(true))
@@ -296,7 +293,10 @@ impl Sender {
         if let Some(packet) = self.pending.take() {
             self.heartbeat_pending |= packet.content == qbase::packet::PacketContent::JustPing;
             self.transport
-                .requeue(self.transport.data.sent_packets.abort(packet.pn));
+                .data
+                .send_journal
+                .cancel_pending(packet.pn, &mut self.frames);
+            self.transport.requeue(self.frames.drain(..));
             self.buffer = packet.bytes;
         }
     }
@@ -309,10 +309,9 @@ impl Sender {
                 self.abort_pending();
                 return Ok(());
             }
-            self.path
-                .cc
-                .do_tick()
-                .map_err(|error| crate::error(ErrorKind::NoViablePath, error.to_string()))?;
+            self.path.cc.do_tick().map_err(|error| {
+                QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
+            })?;
             if self.prepare()? {
                 let wake = self.path.send_waker.clone();
                 let signals = self.signals;
@@ -347,7 +346,7 @@ impl Drop for Sender {
 fn packet_error(error: PacketError) -> Error {
     match error {
         PacketError::Connection(error) => error,
-        error => crate::error(ErrorKind::Internal, error.to_string()),
+        error => QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
     }
 }
 
@@ -369,7 +368,14 @@ pub fn acknowledge(
         .checked_shl(exponent as u32)
         .unwrap_or(VARINT_MAX)
         .min(VARINT_MAX);
-    let acknowledged = data.sent_packets.acknowledge(ack)?;
+    let acknowledged = data.send_journal.acknowledge(ack, |frame| match frame {
+        GuaranteedFrame::Crypto(frame) => data.crypto.outgoing().on_data_acked(frame),
+        GuaranteedFrame::Stream(frame) => streams.on_data_acked(*frame),
+        GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
+            qbase::frame::StreamCtlFrame::ResetStream(frame),
+        )) => streams.on_reset_acked(*frame),
+        _ => {}
+    })?;
     let ack = AckFrame::new(
         VarInt::from_u64(ack.largest()).unwrap(),
         VarInt::from_u64(delay).unwrap(),
@@ -378,26 +384,12 @@ pub fn acknowledge(
         ack.ecn(),
     );
     received_on.cc.on_ack_rcvd(Epoch::Data, &ack);
-    for (path, packets) in acknowledged {
-        if !Arc::ptr_eq(&path, received_on) {
-            path.cc.on_ack_rcvd(Epoch::Data, &ack);
-        }
-        for (_, generation, frames) in packets {
-            on_ack(generation);
-            for frame in frames {
-                match frame {
-                    Frame::Crypto(frame, ()) => data.crypto.outgoing().on_data_acked(&frame),
-                    Frame::Stream(frame, ()) => streams.on_data_acked(frame),
-                    Frame::StreamCtl(qbase::frame::StreamCtlFrame::ResetStream(frame)) => {
-                        streams.on_reset_acked(frame)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        path.send_waker
-            .wake_by(Signals::CONGESTION | Signals::TRANSPORT);
+    for generation in acknowledged {
+        on_ack(generation);
     }
+    received_on
+        .send_waker
+        .wake_by(Signals::CONGESTION | Signals::TRANSPORT);
     Ok(())
 }
 
@@ -417,7 +409,8 @@ mod tests {
         // The watchdog makes a spin a finite failing test rather than hanging the runtime.
         let watchdog = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            transport.close(crate::error(ErrorKind::Internal, "test watchdog"));
+            transport
+                .close(QuicError::with_default_fty(ErrorKind::Internal, "test watchdog").into());
         });
         let protocol = QuicProtocol::new();
         let mut running = Box::pin(sender.run(&protocol));

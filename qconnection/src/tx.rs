@@ -9,7 +9,7 @@ use qbase::{
         keys::DirectionalKeys,
         signal::KeyPhaseBit,
     },
-    util::ContinuousData,
+    util::Buffer,
 };
 use qevent::packet::PacketWriter as QEventPacketWriter;
 use qrecovery::journal::{ArcSentJournal, NewPacketGuard};
@@ -115,7 +115,7 @@ impl<F> AssemblePacket for PacketWriter<'_, '_, F> {
     }
 }
 
-impl<'b, GF, F, D: ContinuousData> RecordFrame<F, D> for PacketWriter<'b, '_, GF>
+impl<'b, GF, F, D: Buffer> RecordFrame<F, D> for PacketWriter<'b, '_, GF>
 where
     QEventPacketWriter<'b>: RecordFrame<F, D>,
     for<'f> &'f F: TryInto<GF>,
@@ -223,7 +223,7 @@ impl<F> AssemblePacket for TrivialPacketWriter<'_, '_, F> {
     }
 }
 
-impl<'b, GF, F, D: ContinuousData> RecordFrame<F, D> for TrivialPacketWriter<'b, '_, GF>
+impl<'b, GF, F, D: Buffer> RecordFrame<F, D> for TrivialPacketWriter<'b, '_, GF>
 where
     F: FrameFeature,
     QEventPacketWriter<'b>: RecordFrame<F, D>,

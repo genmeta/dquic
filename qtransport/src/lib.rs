@@ -32,11 +32,48 @@ pub type ReliableFrames = qrecovery::reliable::ArcReliableFrameDeque<qbase::fram
 pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ReliableFrames>>;
 pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ReliableFrames>>;
 
-fn error(
-    kind: qbase::error::ErrorKind,
-    reason: impl Into<std::borrow::Cow<'static, str>>,
-) -> Error {
-    qbase::error::QuicError::with_default_fty(kind, reason).into()
+use qbase::frame::{CryptoFrame, Frame, ReliableFrame, StreamFrame};
+
+/// Recovery descriptors; STREAM and CRYPTO payloads remain in their source buffers.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum GuaranteedFrame {
+    Stream(StreamFrame),
+    Crypto(CryptoFrame),
+    Reliable(ReliableFrame),
+}
+
+impl TryFrom<Frame<()>> for GuaranteedFrame {
+    type Error = Frame<()>;
+
+    fn try_from(frame: Frame<()>) -> Result<Self, Self::Error> {
+        let reliable = match frame {
+            Frame::Stream(frame, ()) => return Ok(Self::Stream(frame)),
+            Frame::Crypto(frame, ()) => return Ok(Self::Crypto(frame)),
+            Frame::NewToken(frame) => ReliableFrame::NewToken(frame),
+            Frame::MaxData(frame) => ReliableFrame::MaxData(frame),
+            Frame::DataBlocked(frame) => ReliableFrame::DataBlocked(frame),
+            Frame::NewConnectionId(frame) => ReliableFrame::NewConnectionId(frame),
+            Frame::RetireConnectionId(frame) => ReliableFrame::RetireConnectionId(frame),
+            Frame::HandshakeDone(frame) => ReliableFrame::HandshakeDone(frame),
+            Frame::AddAddress(frame) => ReliableFrame::AddAddress(frame),
+            Frame::RemoveAddress(frame) => ReliableFrame::RemoveAddress(frame),
+            Frame::PunchMeNow(frame) => ReliableFrame::PunchMeNow(frame),
+            Frame::PunchDone(frame) => ReliableFrame::PunchDone(frame),
+            Frame::StreamCtl(frame) => ReliableFrame::StreamCtl(frame),
+            frame => return Err(frame),
+        };
+        Ok(Self::Reliable(reliable))
+    }
+}
+
+impl From<GuaranteedFrame> for Frame<()> {
+    fn from(frame: GuaranteedFrame) -> Self {
+        match frame {
+            GuaranteedFrame::Stream(frame) => Self::Stream(frame, ()),
+            GuaranteedFrame::Crypto(frame) => Self::Crypto(frame, ()),
+            GuaranteedFrame::Reliable(frame) => frame.into(),
+        }
+    }
 }
 
 #[cfg(test)]

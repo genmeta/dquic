@@ -13,7 +13,7 @@ use qbase::{
         number::PacketNumber,
         signal::KeyPhaseBit,
     },
-    util::ContinuousData,
+    util::Buffer,
 };
 
 use crate::{
@@ -151,7 +151,7 @@ unsafe impl<'b> BufMut for PacketWriter<'b> {
     }
 }
 
-impl<'b, F, D: ContinuousData> RecordFrame<F, D> for PacketWriter<'b>
+impl<'b, F, D: Buffer> RecordFrame<F, D> for PacketWriter<'b>
 where
     for<'f> &'f F: Into<QEventFrame>,
     BasePacketWriter<'b>: RecordFrame<F, D>,
