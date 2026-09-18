@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use qbase::{
     Epoch,
@@ -121,6 +121,24 @@ impl CongestionController {
             self.set_loss_detection_timer();
         }
         self.pacer.on_sent(sent_bytes);
+    }
+
+    /// Record a submitted packet and the ACK carried by it under the same guard.
+    pub fn on_pkt_sent(
+        &mut self,
+        epoch: Epoch,
+        pn: u64,
+        is_ack_eliciting: bool,
+        sent_bytes: usize,
+        in_flight: bool,
+        ack: Option<u64>,
+    ) {
+        self.on_packet_sent(pn, epoch, is_ack_eliciting, in_flight, sent_bytes);
+        if let Some(largest_acked) = ack {
+            self.packet_spaces[epoch]
+                .rcvd_packets
+                .on_ack_sent(pn, largest_acked);
+        }
     }
 
     /// A.6. On Receiving a Datagram
@@ -521,6 +539,12 @@ impl ArcCC {
         ))))
     }
 
+    /// Borrow the controller across a nonblocking submission and its accounting.
+    /// Acquire this before recovery journals; release it before application callbacks.
+    pub fn lock(&self) -> MutexGuard<'_, CongestionController> {
+        self.0.lock().unwrap()
+    }
+
     /// Returns the PTO period without exponential loss-recovery backoff.
     pub fn pto_base(&self, epoch: Epoch) -> Duration {
         self.0.lock().unwrap().pto_base(epoch)
@@ -588,14 +612,8 @@ impl super::Transport for ArcCC {
         in_flight: bool,
         ack: Option<u64>,
     ) {
-        let mut guard = self.0.lock().unwrap();
-        guard.on_packet_sent(pn, epoch, is_ack_eliciting, in_flight, sent_bytes);
-
-        if let Some(largest_acked) = ack {
-            guard.packet_spaces[epoch]
-                .rcvd_packets
-                .on_ack_sent(pn, largest_acked);
-        }
+        self.lock()
+            .on_pkt_sent(epoch, pn, is_ack_eliciting, sent_bytes, in_flight, ack);
     }
 
     fn on_ack_rcvd(&self, epoch: Epoch, ack_frame: &AckFrame) {

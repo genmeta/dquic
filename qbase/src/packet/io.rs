@@ -331,7 +331,7 @@ macro_rules! frame_packages {
         impl<Target,D> Package<Target> for $($frame_with_data)*
         where
             Target: BufMut + RecordFrame<Frame<D>, D> + ?Sized,
-            D: ContinuousData + Clone,
+            D: Buffer + Clone,
             for<'b> &'b mut Target: WriteData<D>,
         {
             #[inline]
@@ -349,7 +349,7 @@ macro_rules! frame_packages {
             }
         }
     };
-    (impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for ($frame:ident, D) {} $($tail:tt)*) => {
+    (impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for ($frame:ident, D) {} $($tail:tt)*) => {
         frame_packages!{ @imp_data_frame ($frame, D) }
         frame_packages!{ @imp_data_frame &($frame, D) }
         frame_packages!{ $($tail)* }
@@ -371,9 +371,9 @@ frame_packages! {
     impl<Target: WriteFrame<Self>> Package<Target> for ReliableFrame {}
     impl<Target: WriteFrame<Self>> Package<Target> for PunchHelloFrame {}
     impl<Target: WriteFrame<Self>> Package<Target> for PunchDoneFrame {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (StreamFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (CryptoFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: ContinuousData> Package<Target> for (DatagramFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (StreamFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (CryptoFrame, D) {}
+    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (DatagramFrame, D) {}
 }
 
 pub enum Keys {

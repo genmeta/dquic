@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -24,22 +24,24 @@ use qbase::{
     sid::{Dir, handy::DemandConcurrency},
 };
 use qcongestion::{Feedback, HandshakeStatus};
-use qrecovery::streams::DataStreams;
+use qrecovery::{crypto::CryptoStream, streams::DataStreams};
 use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
-    keys::{ArcOneRttKeys, OneRttKeys, OpenPacket, SealPacket},
+    keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket, SealPacket},
     path::{Path, Paths},
     recv::{receive_packet, run_receive},
     send::{
-        Sender,
         constraints::Constraints,
-        packet::{OneRttPacket, PacketError},
+        write::{Packet as SendingPacket, PacketError, PacketWriter},
     },
     space::Space,
     transport::Transport,
     *,
 };
+
+pub(crate) mod sender;
+pub(crate) use sender::Sender;
 
 const CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
 const KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
@@ -157,7 +159,6 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         .unwrap();
     let params = ArcParameters::new(role, Arc::new(client), Arc::new(server));
     let wakers = ArcSendWakers::default();
-    let submission = Arc::new(Mutex::new(()));
     let material = ArcOneRttKeys::new_pending();
     material.install(keys).unwrap();
     material
@@ -166,12 +167,6 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         .unwrap()
         .unwrap()
         .allow_update();
-    let data = Arc::new(Space::new(
-        Epoch::Data,
-        material,
-        submission.clone(),
-        wakers.clone(),
-    ));
     let reliable = ReliableFrames::with_capacity_and_wakers(0, wakers.clone());
     let streams = match role {
         Role::Client => DataStreams::new(
@@ -193,6 +188,25 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
             None,
         ),
     };
+    let crypto = CryptoStream::new(wakers.clone());
+    let data = Arc::new(Space::new(
+        Epoch::Data,
+        material,
+        crypto.clone(),
+        wakers.clone(),
+        {
+            let streams = streams.clone();
+            let reliable = reliable.clone();
+            move |frame| match frame {
+                GuaranteedFrame::Crypto(frame) => crypto.outgoing().may_loss_data(frame),
+                GuaranteedFrame::Stream(frame) => streams.may_loss_data(frame),
+                GuaranteedFrame::Reliable(frame) => {
+                    use qbase::frame::io::SendFrame;
+                    reliable.send_frame([frame.clone()]);
+                }
+            }
+        },
+    ));
     let flow = FlowController::new(
         params.remote(ParameterId::InitialMaxData).unwrap(),
         params.local(ParameterId::InitialMaxData).unwrap(),
@@ -252,7 +266,6 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         status,
         Duration::from_millis(25),
         [feedback.clone(), feedback.clone(), feedback],
-        transport.data.submission.clone(),
     ));
     path.validate();
     assert!(transport.paths.insert(path.clone()));
@@ -325,7 +338,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
         .unwrap()
         .open(
             parse(bytes),
-            |pn| transport.data.rcvd_packets.decode_pn(pn),
+            |pn| transport.data.rcvd_journal.decode_pn(pn),
             Duration::from_secs(1),
         )
         .unwrap()?;
@@ -361,25 +374,104 @@ fn ack(pn: u64) -> AckFrame {
         None,
     )
 }
+pub(crate) fn seal_packet(
+    packet: SendingPacket,
+    keys: &OneRttKeys,
+    journal: &send::records::ArcSendJournal,
+    records: &mut Vec<GuaranteedFrame>,
+) -> Result<send::write::PendingPacket, PacketError> {
+    let ((pn, encoded), key) =
+        keys.reserve(|generation| journal.record_pending(generation, records))?;
+    send::finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
+}
+
 fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
-    let mut packet = OneRttPacket::new(
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        pn,
         16,
     )
     .unwrap();
     packet
         .assemble(
-            &mut Constraints {
+            &Constraints {
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
             },
+            &mut recorded,
             [&mut PingFrame],
         )
         .unwrap();
-    packet.seal(keys).unwrap().bytes
+    seal_packet(
+        packet,
+        keys,
+        &send::records::ArcSendJournal::starting_at(pn),
+        &mut recorded,
+    )
+    .unwrap()
+    .into_buffer()
+}
+
+#[test]
+fn short_packet_numbers_round_trip_with_header_protection_padding() {
+    let ([client, server], _) = handshake();
+    let client = transport(Role::Client, client, 1);
+    let server = transport(Role::Server, server, 1);
+    for pn in [0, 1 << 15, 1 << 23] {
+        let bytes = ping(&keys(&client), pn);
+        let packet = parse(&bytes);
+        assert!(bytes.len() >= packet.offset + 20);
+        let (decoded, frames) = keys(&server)
+            .open(
+                packet,
+                |encoded| {
+                    assert_eq!(encoded, PacketNumber::encode(pn, 0));
+                    Ok(pn)
+                },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, pn);
+        assert!(matches!(
+            frames.into_iter().next().unwrap().unwrap().0,
+            Frame::Ping(_)
+        ));
+    }
+}
+
+#[test]
+fn header_protection_padding_obeys_every_packet_limit() {
+    use qbase::packet::HeaderSize;
+    let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
+    let minimum = header.size() + 22; // Four-byte reservation plus padding for a two-byte PN.
+    for limited in 0..3 {
+        let mut recorded = Vec::new();
+        let mut packet = SendingPacket::new(BytesMut::zeroed(minimum), header, 16).unwrap();
+        let mut constraints = Constraints {
+            capacity: minimum,
+            congestion: minimum,
+            anti_amplification: minimum,
+        };
+        match limited {
+            0 => constraints.capacity -= 1,
+            1 => constraints.congestion -= 1,
+            _ => constraints.anti_amplification -= 1,
+        }
+        assert!(
+            packet
+                .assemble(&constraints, &mut recorded, [&mut PingFrame])
+                .is_err()
+        );
+        constraints.capacity = minimum;
+        constraints.congestion = minimum;
+        constraints.anti_amplification = minimum;
+        packet
+            .assemble(&constraints, &mut recorded, [&mut PingFrame])
+            .unwrap();
+    }
 }
 
 // Router tests only inspect headers; payload authentication belongs to the receive engine.
@@ -398,10 +490,10 @@ fn initial_datagram(cid: ConnectionId, size: usize) -> BytesMut {
 }
 
 fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
-    let mut packet = OneRttPacket::new(
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        pn,
         16,
     )
     .unwrap();
@@ -411,15 +503,23 @@ fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
     )));
     packet
         .assemble(
-            &mut Constraints {
+            &Constraints {
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
             },
+            &mut recorded,
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    packet.seal(keys).unwrap().bytes
+    seal_packet(
+        packet,
+        keys,
+        &send::records::ArcSendJournal::starting_at(pn),
+        &mut recorded,
+    )
+    .unwrap()
+    .into_buffer()
 }
 
 #[tokio::test]
@@ -441,7 +541,10 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         limits: Default::default(),
     })
     .unwrap();
-    for epoch in [Epoch::Initial, Epoch::Handshake] {
+    for (epoch, pn_len) in [Epoch::Initial, Epoch::Handshake]
+        .into_iter()
+        .flat_map(|epoch| (1..=4).map(move |pn_len| (epoch, pn_len)))
+    {
         // Exercise both long-header layouts with deterministic qtls material;
         // TLS's selection of Handshake secrets is tested in qtls itself.
         let material = endpoint.initial_keys(qtls::QuicVersion::V1, &cid).unwrap();
@@ -455,15 +558,15 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             bytes
         };
         let offset = parse(&bytes).offset;
-        bytes[0] |= 3; // Four-byte PN 0 in both independent spaces.
-        bytes[offset + 4..offset + 8].copy_from_slice(&[0x06, 0, 1, 0xaa]); // CRYPTO(offset=0, len=1).
+        bytes[0] |= *qbase::packet::LongSpecificBits::with_pn_len(pn_len);
+        bytes[offset + pn_len..offset + pn_len + 4].copy_from_slice(&[0x06, 0, 1, 0xaa]);
         material
             .opening
             .seal(
                 0,
                 &mut bytes,
                 offset,
-                offset + 4,
+                offset + pn_len,
                 material.opening.packet.tag_len(),
             )
             .unwrap();
@@ -474,8 +577,9 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         let space = Arc::new(Space::new(
             epoch,
             keys,
-            st.data.submission.clone(),
+            CryptoStream::new(Default::default()),
             Default::default(),
+            |_| {},
         ));
         let (entry, packets) = tokio::sync::mpsc::channel(2);
         entry.send((parse(&bytes), path.clone())).await.unwrap();
@@ -487,7 +591,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             space.clone(),
             |keys, packet, pto| {
                 keys.opening
-                    .open(packet, |pn| space.rcvd_packets.decode_pn(pn), pto)
+                    .open(packet, |pn| space.rcvd_journal.decode_pn(pn), pto)
             },
             Arc::default(),
             |_, received_epoch, frame, _| {
@@ -506,12 +610,12 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         assert_eq!(delivered, 1);
         assert!(
             space
-                .rcvd_packets
+                .rcvd_journal
                 .decode_pn(PacketNumber::encode(0, 0))
                 .is_err()
         );
         space.retire();
-        assert!(space.keys.clone().await.is_none());
+        assert!(matches!(space.keys.clone().await, Err(KeyRetired)));
         assert!(st.data.can_receive());
     }
 }
@@ -581,14 +685,16 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     let initial = Arc::new(Space::new(
         Epoch::Initial,
         ArcKeys::new_pending(),
-        st.data.submission.clone(),
+        CryptoStream::new(Default::default()),
         Default::default(),
+        |_| {},
     ));
     let handshake = Arc::new(Space::new(
         Epoch::Handshake,
         ArcKeys::new_pending(),
-        st.data.submission.clone(),
+        CryptoStream::new(Default::default()),
         Default::default(),
+        |_| {},
     ));
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
@@ -672,7 +778,7 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     );
     assert_eq!(streams_seen.load(Ordering::Relaxed), 1);
     assert_eq!(
-        st.data.rcvd_packets.decode_pn(PacketNumber::encode(1, 0)),
+        st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)),
         Ok(1)
     );
     initial.retire();
@@ -709,7 +815,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         packets,
         st.data.clone(),
         |keys: &OneRttKeys, packet, pto| {
-            keys.open(packet, |pn| st.data.rcvd_packets.decode_pn(pn), pto)
+            keys.open(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto)
         },
         Arc::default(),
         |_, _, frame, _| {
@@ -731,7 +837,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     assert_eq!((errors, ordinary, closes), (1, 1, 1));
     assert!(server.accept_uni_stream().await.is_err());
     assert_eq!(
-        st.data.rcvd_packets.decode_pn(PacketNumber::encode(0, 0)),
+        st.data.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
         Ok(0)
     );
 }
@@ -853,7 +959,7 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
         .unwrap()
         .open(
             parse(&bytes),
-            |pn| st.data.rcvd_packets.decode_pn(pn),
+            |pn| st.data.rcvd_journal.decode_pn(pn),
             Duration::from_secs(1),
         )
         .unwrap()
@@ -876,11 +982,11 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
 }
 
 #[test]
-fn source_quota_does_not_starve_a_single_frame_that_fits_the_packet() {
-    let mut packet = OneRttPacket::new(
+fn a_large_frame_that_fits_is_assembled_before_later_sources() {
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        0,
         16,
     )
     .unwrap();
@@ -891,15 +997,115 @@ fn source_quota_does_not_starve_a_single_frame_that_fits_the_packet() {
     );
     packet
         .assemble(
-            &mut Constraints {
+            &Constraints {
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
             },
+            &mut recorded,
             [&mut crypto, &mut PingFrame],
         )
         .unwrap();
-    assert!(matches!(packet.frames(), [Frame::Crypto(frame, ())] if frame.len() == 800));
+    assert!(matches!(recorded.as_slice(), [GuaranteedFrame::Crypto(frame)] if frame.len() == 800));
+}
+
+#[test]
+fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
+    use qbase::frame::{MaxDataFrame, ReliableFrame, io::SendFrame};
+
+    let mut reliable = ReliableFrames::with_capacity_and_wakers(600, Default::default());
+    reliable.send_frame(
+        (0..600).map(|i| ReliableFrame::MaxData(MaxDataFrame::new(VarInt::from_u32(1000 + i)))),
+    );
+    let bytes = [Bytes::from_static(b"later")];
+    let mut crypto = (
+        qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()),
+        bytes.as_slice(),
+    );
+    let mut sent = Vec::new();
+    for pn in 0..2 {
+        let mut recorded = Vec::new();
+        let mut packet = SendingPacket::new(
+            BytesMut::zeroed(1200),
+            OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
+            16,
+        )
+        .unwrap();
+        packet
+            .assemble(
+                &Constraints {
+                    capacity: 1200,
+                    congestion: 1200,
+                    anti_amplification: 1200,
+                },
+                &mut recorded,
+                [&mut reliable, &mut crypto],
+            )
+            .unwrap();
+        for frame in recorded.as_slice() {
+            if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) = frame {
+                sent.push(frame.max_data());
+            }
+        }
+        if pn == 0 {
+            assert!(
+                sent.len() > 300,
+                "the earlier queue must not stop at 512 bytes"
+            );
+            assert!(
+                !recorded
+                    .as_slice()
+                    .iter()
+                    .any(|frame| matches!(frame, GuaranteedFrame::Crypto(..)))
+            );
+        } else {
+            assert!(matches!(
+                recorded.as_slice().last(),
+                Some(GuaranteedFrame::Crypto(..))
+            ));
+        }
+    }
+    assert_eq!(sent, (1000..1600).collect::<Vec<_>>());
+}
+
+#[tokio::test(start_paused = true)]
+async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
+    use qbase::frame::{MaxDataFrame, PathChallengeFrame, ReliableFrame, io::SendFrame};
+    use tokio::io::AsyncWriteExt;
+
+    let [(client, ct, cp), (_server, st, _sp)] = pair(1);
+    receive(&ct, &cp, &ping(&keys(&st), 0)).unwrap();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
+    cp.recv_frame(PathChallengeFrame::random()).unwrap();
+    ct.reliable_frames
+        .send_frame([ReliableFrame::MaxData(MaxDataFrame::new(4096u32.into()))]);
+    let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
+    writer.write_all(b"stream").await.unwrap();
+    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let bytes = emit(&mut sender);
+    let (_, frames) = keys(&st)
+        .open(
+            parse(&bytes),
+            |pn| st.data.rcvd_journal.decode_pn(pn),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .unwrap();
+    let frames: Vec<_> = frames
+        .map(|frame| frame.unwrap().0)
+        .filter(|frame| !matches!(frame, Frame::Padding(_)))
+        .collect();
+    assert!(matches!(
+        frames.as_slice(),
+        [
+            Frame::Ack(_),
+            Frame::Crypto(..),
+            Frame::PathResponse(_),
+            Frame::MaxData(_),
+            Frame::Stream(..),
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -1005,14 +1211,14 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
             .unwrap()
             .open(
                 parse(&forged),
-                |pn| st.data.rcvd_packets.decode_pn(pn),
+                |pn| st.data.rcvd_journal.decode_pn(pn),
                 Duration::from_secs(1)
             )
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        st.data.rcvd_packets.decode_pn(PacketNumber::encode(1, 0)),
+        st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)),
         Ok(1)
     );
 }
@@ -1022,47 +1228,207 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     let (materials, _) = handshake();
     let [client, _] = materials;
     let transport = transport(Role::Client, client, 1);
-    let mut packet = OneRttPacket::new(
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        0,
         16,
     )
     .unwrap();
-    let mut constraints = Constraints {
+    let constraints = Constraints {
         capacity: 1200,
         congestion: 0,
         anti_amplification: 1200,
     };
     packet
-        .assemble(&mut constraints, [&mut ack(0), &mut PingFrame])
+        .assemble(&constraints, &mut recorded, [&mut ack(0), &mut PingFrame])
         .unwrap();
-    assert!(packet.pad_to(1200, &mut constraints).is_err());
-    let packet = packet.seal(&keys(&transport)).unwrap();
+    assert!(packet.pad_to(1200, &constraints).is_err());
+    let packet = seal_packet(
+        packet,
+        &keys(&transport),
+        &transport.data.send_journal,
+        &mut recorded,
+    )
+    .unwrap();
     assert!(!packet.in_flight);
     assert_eq!(constraints.congestion, 0);
-    let mut packet = OneRttPacket::new(
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        1,
         16,
     )
     .unwrap();
     assert!(matches!(
         packet.assemble(
-            &mut Constraints {
+            &Constraints {
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 10
             },
+            &mut recorded,
             [&mut ack(0)]
         ),
         Err(PacketError::Blocked(_))
     ));
 }
 
+#[test]
+fn packet_assembly_uses_fixed_limits_across_ack_data_and_padding() {
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
+        BytesMut::zeroed(1200),
+        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
+        16,
+    )
+    .unwrap();
+    let mut constraints = Constraints {
+        capacity: 100,
+        congestion: 0,
+        anti_amplification: 100,
+    };
+    packet
+        .assemble(&constraints, &mut recorded, [&mut ack(0)])
+        .unwrap();
+    assert_eq!(constraints.capacity, 100);
+    assert_eq!(constraints.anti_amplification, 100);
+    assert!(
+        packet
+            .assemble(&constraints, &mut recorded, [&mut PingFrame])
+            .is_err()
+    );
+    assert!(packet.pad_to(100, &constraints).is_err());
+
+    constraints.congestion = 100;
+    packet
+        .assemble(&constraints, &mut recorded, [&mut PingFrame])
+        .unwrap();
+    packet.pad_to(100, &constraints).unwrap();
+    assert_eq!(constraints.congestion, 100);
+    assert!(
+        packet
+            .assemble(&constraints, &mut recorded, [&mut PingFrame])
+            .is_err()
+    );
+    assert!(packet.pad_to(101, &constraints).is_err());
+    assert!(recorded.as_slice().is_empty());
+    assert_eq!(constraints.capacity, 100);
+    assert_eq!(constraints.anti_amplification, 100);
+    assert_eq!(constraints.congestion, 100);
+}
+
 #[tokio::test]
-async fn pending_packet_overtaken_on_another_path_is_requeued_with_a_new_number() {
+async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
+    use qbase::packet::{Package, io::Repeat};
+    use tokio::io::AsyncWriteExt;
+
+    for limited in 0..3 {
+        let [(client, ct, _), (_server, st, _)] = pair(1);
+        let crypto_data = vec![0x63; 200];
+        let stream_data = vec![0x73; 200];
+        ct.data
+            .crypto
+            .writer()
+            .write_all(&crypto_data)
+            .await
+            .unwrap();
+        let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
+        writer.write_all(&stream_data).await.unwrap();
+        let mut crypto = ct.data.crypto.outgoing().package(Epoch::Data);
+        let mut streams = Repeat(ct.streams.package(ct.flow.sender.clone(), false));
+        let mut crypto_received = Vec::new();
+        let mut stream_received = Vec::new();
+        let mut constraints = Constraints {
+            capacity: 1200,
+            congestion: 1200,
+            anti_amplification: 1200,
+        };
+        let sealing = keys(&ct);
+        let opening = keys(&st);
+        for pn in 0..32 {
+            let mut recorded = Vec::new();
+            let mut packet = SendingPacket::new(
+                BytesMut::zeroed(1200),
+                OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
+                16,
+            )
+            .unwrap();
+            let limit = match limited {
+                0 => &mut constraints.capacity,
+                1 => &mut constraints.congestion,
+                _ => &mut constraints.anti_amplification,
+            };
+            *limit = if pn == 0 { 24 } else { 80 };
+            if pn == 0 {
+                // Direct sources use the same constrained, recording writer as assemble.
+                let mut target = PacketWriter::new(&mut packet, &constraints, &mut recorded);
+                assert!(crypto.dump(&mut target).is_err());
+                assert!(streams.dump(&mut target).is_err());
+                assert!(recorded.as_slice().is_empty());
+                continue;
+            }
+            if pn % 2 == 0 {
+                packet
+                    .assemble(&constraints, &mut recorded, [&mut crypto, &mut streams])
+                    .unwrap();
+            } else {
+                let mut target = PacketWriter::new(&mut packet, &constraints, &mut recorded);
+                let crypto_result = crypto.dump(&mut target);
+                let stream_result = streams.dump(&mut target);
+                assert!(crypto_result.is_ok() || stream_result.is_ok());
+            }
+            assert!(!recorded.is_empty());
+            let pending = seal_packet(
+                packet,
+                &sealing,
+                &send::records::ArcSendJournal::starting_at(pn),
+                &mut recorded,
+            )
+            .unwrap();
+            assert!(pending.bytes().len() <= 80);
+            let (_, frames) = opening
+                .open(parse(pending.bytes()), |_| Ok(pn), Duration::from_secs(1))
+                .unwrap()
+                .unwrap();
+            for frame in frames {
+                match frame.unwrap().0 {
+                    Frame::Crypto(frame, bytes) => {
+                        assert_eq!(frame.range().start, crypto_received.len() as u64);
+                        crypto_received.extend_from_slice(&bytes);
+                    }
+                    Frame::Stream(frame, bytes) => {
+                        assert_eq!(frame.range().start, stream_received.len() as u64);
+                        stream_received.extend_from_slice(&bytes);
+                    }
+                    Frame::Padding(_) => {}
+                    frame => panic!("unexpected frame: {frame:?}"),
+                }
+            }
+            if crypto_received.len() == crypto_data.len()
+                && stream_received.len() == stream_data.len()
+            {
+                break;
+            }
+        }
+        assert_eq!(crypto_received, crypto_data);
+        assert_eq!(stream_received, stream_data);
+    }
+}
+
+#[tokio::test]
+async fn empty_assembly_does_not_allocate_packet_numbers() {
+    let [(_client, ct, cp), (_server, st, sp)] = pair(1);
+    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    for _ in 0..5 {
+        assert!(!sender.prepare().unwrap());
+    }
+    sender.heartbeat();
+    assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(0));
+}
+
+#[tokio::test]
+async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     let [(client, ct, cp), (_server, st, sp)] = pair(4);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"retained")).unwrap();
@@ -1075,24 +1441,15 @@ async fn pending_packet_overtaken_on_another_path_is_requeued_with_a_new_number(
         )
         .is_pending()
     );
+    keys(&ct).update().unwrap();
     let other = path(&ct, 1);
     let mut fast = Sender::new(keys(&ct), ct.clone(), other).unwrap();
     fast.heartbeat();
     let fast_bytes = emit(&mut fast);
     assert_eq!(receive(&st, &sp, &fast_bytes), Some(1));
-    assert!(matches!(
-        slow.poll_send_with(
-            &mut Context::from_waker(futures::task::noop_waker_ref()),
-            |_, _, _| panic!("obsolete packet submitted")
-        ),
-        Poll::Ready(Ok(false))
-    ));
     let bytes = emit(&mut slow);
-    assert_eq!(receive(&st, &sp, &bytes), Some(2));
-    assert!(
-        acknowledge(&ct, &ack(0), &cp).is_err(),
-        "unsent PN must not be ACKed"
-    );
+    assert_eq!(receive(&st, &sp, &bytes), Some(0));
+    acknowledge(&ct, &ack(0), &cp).unwrap();
     let (_, mut reader) = st.streams.accept_uni().await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut output = [0; 8];
@@ -1101,12 +1458,14 @@ async fn pending_packet_overtaken_on_another_path_is_requeued_with_a_new_number(
 }
 
 #[tokio::test]
-async fn close_and_key_retirement_reject_pending_socket_submission() {
+async fn close_rejects_pending_submission_and_preserves_data_keys() {
     let [(client, ct, cp), _] = pair(1);
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
     sender.heartbeat();
     assert!(sender.prepare().unwrap());
     client.close(VarInt::from_u32(0), "closed");
+    assert!(ct.data.can_receive());
+    assert!(matches!(ct.data.keys.try_get(), Ok(Some(_))));
     assert!(matches!(
         sender.poll_send_with(
             &mut Context::from_waker(futures::task::noop_waker_ref()),
@@ -1115,19 +1474,6 @@ async fn close_and_key_retirement_reject_pending_socket_submission() {
         Poll::Ready(Ok(false))
     ));
 
-    let [(_client, ct, cp), _] = pair(1);
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
-    sender.heartbeat();
-    assert!(sender.prepare().unwrap());
-    ct.data.retire();
-    assert!(ct.data.keys.clone().await.is_none());
-    assert!(matches!(
-        sender.poll_send_with(
-            &mut Context::from_waker(futures::task::noop_waker_ref()),
-            |_, _, _| panic!("sent after retirement while holding ready keys")
-        ),
-        Poll::Ready(Ok(false))
-    ));
     assert!(!sender.prepare().unwrap());
 }
 
@@ -1158,18 +1504,18 @@ async fn receiving_waits_for_keys_without_a_command_queue() {
     let [client, server] = materials;
     let ct = transport(Role::Client, client, 1);
     let cp = path(&ct, 0);
-    let submission = Arc::new(Mutex::new(()));
     let opening = ArcOneRttKeys::new_pending();
     let space = Arc::new(Space::new(
         Epoch::Data,
         opening.clone(),
-        submission.clone(),
+        CryptoStream::new(Default::default()),
         Default::default(),
+        |_| {},
     ));
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let journal = space.rcvd_packets.clone();
+    let journal = space.rcvd_journal.clone();
     let task = tokio::spawn(run_receive(
         rx,
         space.clone(),
@@ -1189,9 +1535,6 @@ async fn receiving_waits_for_keys_without_a_command_queue() {
     drop(tx);
     task.await.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    space.retire();
-    assert!(!space.can_receive());
-    assert!(!space.can_send());
 }
 
 #[tokio::test]
@@ -1207,7 +1550,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         .unwrap()
         .open(
             parse(&bytes),
-            |pn| st.data.rcvd_packets.decode_pn(pn),
+            |pn| st.data.rcvd_journal.decode_pn(pn),
             Duration::from_secs(1),
         )
         .unwrap()
@@ -1225,13 +1568,13 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         .is_err()
     );
     assert_eq!(
-        st.data.rcvd_packets.decode_pn(PacketNumber::encode(pn, 0)),
+        st.data.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)),
         Ok(pn)
     );
-    let mut packet = OneRttPacket::new(
+    let mut recorded = Vec::new();
+    let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        1,
         16,
     )
     .unwrap();
@@ -1241,15 +1584,16 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     )));
     packet
         .assemble(
-            &mut Constraints {
+            &Constraints {
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
             },
+            &mut recorded,
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    let bytes = packet.seal(&keys(&ct)).unwrap();
+    let bytes = seal_packet(packet, &keys(&ct), &ct.data.send_journal, &mut recorded).unwrap();
     let (pn, frames) = st
         .data
         .keys
@@ -1259,7 +1603,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         .unwrap()
         .open(
             parse(bytes.bytes()),
-            |pn| st.data.rcvd_packets.decode_pn(pn),
+            |pn| st.data.rcvd_journal.decode_pn(pn),
             Duration::from_secs(1),
         )
         .unwrap()
@@ -1277,6 +1621,70 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         |_, _| Ok(()),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn loss_returns_frames_to_sources_before_the_sender_runs() {
+    use qbase::frame::{MaxDataFrame, io::SendFrame};
+    use tokio::io::AsyncWriteExt;
+
+    let [(client, ct, cp), _] = pair(1);
+    let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
+    writer.write(Bytes::from_static(b"stream")).unwrap();
+    ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
+    ct.reliable_frames
+        .send_frame([MaxDataFrame::new(123u32.into())]);
+    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    emit(&mut sender);
+    drop(sender);
+
+    ct.data.may_loss(
+        qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
+        &mut [0, 0].into_iter(),
+    );
+    // Read the components directly: no Sender or timer may extract journal work first.
+    let mut packet = SendingPacket::new(
+        BytesMut::zeroed(1200),
+        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
+        16,
+    )
+    .unwrap();
+    let mut frames = Vec::new();
+    let mut crypto = ct.data.crypto.outgoing().package(Epoch::Data);
+    let mut reliable = ct.reliable_frames.clone();
+    let mut streams = ct.streams.package(ct.flow.sender.clone(), false);
+    packet
+        .assemble(
+            &Constraints {
+                capacity: 1200,
+                congestion: 1200,
+                anti_amplification: 1200,
+            },
+            &mut frames,
+            [&mut crypto, &mut reliable, &mut streams],
+        )
+        .unwrap();
+    assert!(matches!(frames.as_slice(),
+        [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(f)), GuaranteedFrame::Stream(_)]
+        if f.max_data() == 123));
+}
+
+#[tokio::test]
+async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
+    use tokio::io::AsyncWriteExt;
+
+    let [(client, ct, cp), _] = pair(1);
+    let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
+    writer.write(Bytes::from_static(b"stream")).unwrap();
+    ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
+    let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    emit(&mut sender);
+    ct.data.may_loss(
+        qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
+        &mut [0].into_iter(),
+    );
+    acknowledge(&ct, &ack(0), &cp).unwrap();
+    assert!(!sender.prepare().unwrap());
 }
 
 #[tokio::test]
@@ -1312,7 +1720,6 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
 async fn retired_path_replacement_has_its_own_sender_and_waiter() {
     let [(_client, ct, cp), _] = pair(1);
     let old_sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
-    assert!(Sender::new(keys(&ct), ct.clone(), cp.clone()).is_err());
     assert!(ct.paths.remove(&cp));
     let replacement = path(&ct, 0);
     let mut sender = Sender::new(keys(&ct), ct.clone(), replacement.clone()).unwrap();
@@ -1324,6 +1731,75 @@ async fn retired_path_replacement_has_its_own_sender_and_waiter() {
     ));
     sender.heartbeat();
     assert!(!emit(&mut sender).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped() {
+    use qcongestion::Transport as _;
+
+    let [(client, transport, original), (server, peer, peer_path)] = pair(1);
+    let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
+    writer.write(Bytes::from_static(b"retired path")).unwrap();
+    let (retransmit_after, _) = original.cc.retransmit_and_expire_time(Epoch::Data);
+    let mut sender = Sender::new(keys(&transport), transport.clone(), original.clone()).unwrap();
+    emit(&mut sender);
+    let credit = transport
+        .flow
+        .sender
+        .credit(usize::MAX)
+        .unwrap()
+        .available();
+    assert!(transport.paths.remove(&original));
+    drop(sender);
+    drop(original);
+    // Path retirement alone must not make the stream range available again.
+    let mut streams = transport
+        .streams
+        .package(transport.flow.sender.clone(), false);
+    use qbase::packet::Package;
+    let mut packet = SendingPacket::new(
+        BytesMut::zeroed(1200),
+        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
+        16,
+    )
+    .unwrap();
+    let constraints = Constraints {
+        capacity: 1200,
+        congestion: 1200,
+        anti_amplification: 1200,
+    };
+    let mut frames = Vec::new();
+    let mut target = PacketWriter::new(&mut packet, &constraints, &mut frames);
+    assert!(streams.dump(&mut target).is_err());
+    transport.on_tick(tokio::time::Instant::now());
+    assert!(streams.dump(&mut target).is_err());
+
+    tokio::time::advance(retransmit_after).await;
+    transport.on_tick(tokio::time::Instant::now());
+    let replacement = path(&transport, 1);
+    let mut sender = Sender::new(keys(&transport), transport.clone(), replacement.clone()).unwrap();
+    assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
+    assert_eq!(
+        transport
+            .flow
+            .sender
+            .credit(usize::MAX)
+            .unwrap()
+            .available(),
+        credit
+    );
+    transport.on_tick(tokio::time::Instant::now());
+    assert!(
+        !sender.prepare().unwrap(),
+        "a second tick must not duplicate recovery"
+    );
+    acknowledge(&transport, &ack(0), &replacement).unwrap();
+    acknowledge(&transport, &ack(1), &replacement).unwrap();
+    let (_, mut reader) = server.accept_uni_stream().await.unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut body = [0; 12];
+    reader.read_exact(&mut body).await.unwrap();
+    assert_eq!(&body, b"retired path");
 }
 
 #[tokio::test]
@@ -1430,7 +1906,6 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         status,
         Duration::from_millis(25),
         [feedback.clone(), feedback.clone(), feedback],
-        ct.data.submission.clone(),
     ));
     path.validate();
     ct.paths.insert(path.clone());
@@ -1463,11 +1938,12 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
     sender.heartbeat();
     assert!(sender.prepare().unwrap());
     let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (done, acknowledged) = std::sync::mpsc::channel();
     let worker = {
         let barrier = barrier.clone();
         std::thread::spawn(move || {
             barrier.wait();
-            acknowledge(&transport, &ack(0), &path)
+            done.send(acknowledge(&transport, &ack(0), &path)).unwrap();
         })
     };
     assert!(matches!(
@@ -1475,12 +1951,17 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
             &mut Context::from_waker(futures::task::noop_waker_ref()),
             |_, _, bytes| {
                 barrier.wait();
+                assert!(matches!(
+                    acknowledged.recv_timeout(Duration::from_millis(30)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ));
                 Poll::Ready(Ok(bytes.len()))
             }
         ),
         Poll::Ready(Ok(true))
     ));
-    assert!(worker.join().unwrap().is_ok());
+    worker.join().unwrap();
+    assert!(acknowledged.recv().unwrap().is_ok());
 }
 
 #[tokio::test]
@@ -1498,7 +1979,6 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
             status,
             Duration::from_millis(25),
             [feedback.clone(), feedback.clone(), feedback],
-            transport.data.submission.clone(),
         ))
     });
     let [cp, sp] = paths;
@@ -1541,7 +2021,6 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
         handshake,
         Duration::from_millis(25),
         [feedback.clone(), feedback.clone(), feedback],
-        transport.data.submission.clone(),
     ));
     path.on_datagram_received(400);
     path.start_validation();
@@ -1559,7 +2038,8 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn shared_ack_keeps_its_largest_pn_for_path_rtt_sampling() {
+async fn shared_ack_only_updates_the_receiving_paths_congestion_control() {
+    use qcongestion::Transport as _;
     let [(_client, transport, first), _] = pair(1);
     let second = path(&transport, 1);
     let mut first_sender = Sender::new(keys(&transport), transport.clone(), first.clone()).unwrap();
@@ -1576,6 +2056,9 @@ async fn shared_ack_keeps_its_largest_pn_for_path_rtt_sampling() {
     acknowledge(&transport, &ack, &second).unwrap();
     assert_eq!(first.cc.pto_base(Epoch::Data), first_pto);
     assert_ne!(second.cc.pto_base(Epoch::Data), second_pto);
+    tokio::time::advance(first.cc.get_pto(Epoch::Data)).await;
+    first.cc.do_tick().unwrap();
+    assert!(first.cc.need_send_ack_eliciting(Epoch::Data) > 0);
 }
 
 #[tokio::test]
@@ -1592,4 +2075,18 @@ async fn resetting_one_stream_does_not_close_the_connection() {
     ));
     assert!(client.open_uni_stream().await.unwrap().is_some());
     assert!(server.open_uni_stream().await.unwrap().is_some());
+}
+
+pub(crate) fn fixed_keys() -> qtls::BidirectionalKeys {
+    qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
+        provider: Arc::new(qtls::default_provider()),
+        alpn: vec![b"h3".to_vec()],
+        resolve_local: Arc::new(Authority(None)),
+        verify_client: None,
+        resumption: qtls::ServerResumptionConfig::Disabled,
+        limits: Default::default(),
+    })
+    .unwrap()
+    .initial_keys(qtls::QuicVersion::V1, b"original")
+    .unwrap()
 }

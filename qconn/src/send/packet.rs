@@ -190,10 +190,7 @@ macro_rules! packet {
                 Ok(self.content)
             }
 
-            fn write<D: ContinuousData>(
-                &mut self,
-                frame: &Frame<D>,
-            ) -> Result<PacketContent, Signals>
+            fn write<D: Buffer>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
             where
                 for<'a, 'b> &'a mut &'b mut [u8]: WriteData<D>,
             {
