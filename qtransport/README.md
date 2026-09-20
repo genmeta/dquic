@@ -28,8 +28,9 @@
 | `transport` | 保存确定性传入的 Data 组件；提供 on_tick 连接级恢复驱动和业务关闭入口 |
 | `space` | 每空间独立的恢复记录、CRYPTO 和不可复活的收发许可；仅 Initial/Handshake 提供 retire，Data 保留到连接收尾；没有父级回指 |
 | `keys` | Pending / Waiting(Waker) → Ready → Retired、异步就绪、1-RTT 代次、认证与 AEAD 用量；OpenPacket、SealPacket、私有 open_with 包保护基础实现 |
-| `router` | QuicRouter：CID → 有界 inbox，未知 Initial 进入有界新连接队列 |
-| `recv` | run / route_packets / run_receive / receive_packet / frame_dispatcher；通过闭包接入组件 |
+| `packet` | qtls 密钥驱动的 `CipherPacket<H>` / `PlainPacket<H>`；`channel` 提供四个加密级别的 typed channel |
+| `router` | Signpost → Inbox；RAII 路由守卫、CID registry、未知包 channel |
+| `recv` | run / run_receive / receive_packet / frame_dispatcher；各空间直接消费自己的 typed receiver |
 | `path` | 每路径一个 CC、路径验证/重试、反放大信用、按实例退役 |
 | `send` | 每路径一个 Sender，分空间组包、Burst 批量提交；独立的 `acknowledge` 函数供原组件管道捕获 |
 | `send/write` | 四种包型共用的 Packet、含 datagram.msg 的 buffer、带约束和记录的 PacketWriter、消费式 seal |
@@ -37,21 +38,23 @@
 
 建立连接的外部驱动按以下顺序工作：
 
-1. 创建 QuicRouter，将 qprotocol 接收回调接到 receive；qconn 消费 `(original_dcid, packet_receiver)` 新连接入口。客户端预建有界 channel，用 insert 注册自己的 CID。
+1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。将 `inbox` 注册到 Router，把 `(route, rcvd_pkt)` 传给 qconn。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
 2. 创建各 Space、keys 和 Path。Space/Path 各自管理原有状态，构造时不传额外同步锁；ArcKeys 只持有密钥状态锁。KeyState、ArcKeys 实现 Future<Output = Result<K, KeyRetired>>，用单读者 Waker 等待材料；Ready 返回 Ok(克隆句柄)，Retired 返回 Err(KeyRetired)。取得密钥后直接使用 opening/sealing；收包用具体解密函数接线，不再有 ReceiveKeys 或 with_ready/is_ready。
-3. 用 recv 函数接线：route_packets 只分流，run_receive 分层解密/去重，frame_dispatcher 捕获已有组件。全部组件就绪时可用 run 在同一协程内驱动这条链路；轻量握手阶段由 qconn 用下层函数和闭包组合。
+3. `rcvd_pkt.initial / handshake / zero_rtt / one_rtt` 分别具有对应 header 类型。每个空间把自己的 receiver 直接交给 `run_receive`，完成路径取得、记账、解密、去重和帧投递；不经过统一 Packet 队列和二次分流。
 4. 参数成型后准备 streams/flow，TLS 允许处理 Data 时安装其密钥。成熟时同一批组件传给 Transport，选定 ALPN 和同一个 closing 开关传给 ArcConnection::new；构造函数不重复握手校验。
-5. 每路径创建 Sender，传入 QuicProtocol、Pathway、CC、发送 FlowCtrl、共享 AntiAmplifier 和 send_waker。Sender 不持有 Path、Transport 或 keys。外部闭包同步 try_get 密钥（Ok(None) 尚未就绪，Ok(Some(keys)) 可用，Err(KeyRetired) 禁止继续使用该层发送），向 assemble_initial_packet / assemble_handshake_packet / assemble_0rtt_packet / assemble_1rtt_packet 传入 header、journal、Constraints 和 Package 源；burst 收集批次，poll_send 提交，或用 run 驱动两者。
-6. 应用关闭、接收错误、对端 CLOSE 切换 Connection 共享的 closing；同一收包引擎继续解密，只投递 CLOSE。原组件唤醒 accept/open/流读写并返回错误。qconn 负责 Closing/Draining、取消任务，以及 remove_connection 删除此 inbox 的全部 CID。
+5. 每路径创建 Sender，传入 QuicProtocol、Pathway、CC、共享 AntiAmplifier 和 send_waker。Sender 不持有 Path、Transport、flow 或 keys；STREAM 源从完整 Transport 取得发送流控，握手阶段无需预建零额度流控。外部闭包同步 try_get 密钥（Ok(None) 尚未就绪，Ok(Some(keys)) 可用，Err(KeyRetired) 禁止继续使用该层发送），向 assemble_initial_packet / assemble_handshake_packet / assemble_0rtt_packet / assemble_1rtt_packet 传入 header、journal、Constraints 和 Package 源；burst 收集批次，poll_send 提交，或用 run 驱动两者。
+6. 应用关闭、接收错误、对端 CLOSE 切换 Connection 共享的 closing；同一收包引擎继续解密，只投递 CLOSE。Closing/Draining 结束后 qconn 取消四级接收任务、清理 CID registry 并释放路由守卫；最后一个 `Inbox` sender 释放后 receiver 关闭。
 
-Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器、CID/token 管理实例由外部驱动持有；QuicRouter 实现已经在 qtransport，运行实例由外部持有，无隐式全局变量。
+Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器、CID/token 管理实例由外部驱动持有；QuicRouter 实现在 qtransport，支持独立实例和显式取得的全局实例。
+
+路由保留 `Signpost`、`QuicRouterEntry` 和 `QuicRouterRegistry`，不包含 `QuicRouterComponent`、admissibility 或 handler。`Way = (Pathway, Link)`。`receive` 解析 datagram 并为同一连接的 CID 别名只记一次字节数；未知包直接 `try_send` 到 connectless channel。`packet::channel::Inbox` 将 Data packet 按 header 类型投递，满 channel 时直接丢包。
 
 1-RTT 密钥分为固定的 `HeaderKeys { opening, sealing }` 和共享的 `OneRttPacketKeys`。
 `qtls::DirectionalKeys` 与 `OneRttKeys` 均实现 `keys::OpenPacket`、`keys::SealPacket`，
 分别提供 `open`、`seal`。`open` 统一接收 PTO，固定密钥忽略它；`SealPacket::Output`
 分别为 `()` 和 `(u64, KeyPhaseBit)`。两类 `open` 共用本模块的私有函数 `open_with`，仅接收 `decode_pn` 闭包；
 journal 在接线处捕获，不传入密钥层。使用扩展方法分别导入 `OpenPacket`、`SealPacket`。
-`ArcOneRttKeys.await` 返回 `Result<OneRttKeys, KeyRetired>`，Data 接收接入 `OneRttKeys::open`。
+`CipherPacket` 直接使用 qtls 的 `DirectionalKeys`、`HeaderProtectionKey` 和 `PacketKey`，qtransport 不直接依赖 rustls。`ArcOneRttKeys.await` 返回 `Result<OneRttKeys, KeyRetired>`，Data 接收接入 `OneRttKeys::open_packet` 并产出 `PlainPacket<OneRttHeader>`。
 `OneRttKeys::reserve` 在同一锁内固定密钥代次、领取 PN 并预留 AEAD 用量；返回的
 `OneRttSealingKey` 在锁外执行加密和头保护。`update/allow_update/on_ack/seal/tag_len` 均属于已就绪的
 `OneRttKeys`；`ArcOneRttKeys` 只安装、等待、同步取材和淘汰，不提供密钥操作的转调。包对象只提供

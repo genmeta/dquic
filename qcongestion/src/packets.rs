@@ -77,6 +77,10 @@ pub(crate) struct RcvdRecords {
 }
 
 impl RcvdRecords {
+    pub(crate) fn set_max_ack_delay(&mut self, delay: Duration) {
+        self.max_ack_delay = delay;
+    }
+
     pub(crate) fn new(epoch: Epoch, max_ack_delay: Duration) -> Self {
         Self {
             epoch,

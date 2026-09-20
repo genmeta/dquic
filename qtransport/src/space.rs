@@ -1,18 +1,20 @@
-//! One packet-number space. No parent connection or transport back-reference.
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+//! Packet-number spaces and recovery feedback. No parent connection back-reference.
+use std::sync::{Arc, Mutex};
 
 use qbase::{
     Epoch,
+    error::{ErrorKind, QuicError},
     net::tx::{ArcSendWakers, Signals},
 };
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
 use tokio::time::Instant;
 
-use crate::{GuaranteedFrame, keys::ArcKeys, send::records::ArcSendJournal};
+use crate::{
+    GuaranteedFrame,
+    keys::{ArcKeys, ArcOneRttKeys},
+    send::records::ArcSendJournal,
+};
 
 #[derive(Default)]
 enum Feedback {
@@ -56,77 +58,113 @@ impl qcongestion::Feedback for ArcFeedback {
     }
 }
 
+/// The complete set of packet-number spaces, sharing the already running early spaces.
+pub struct Spaces {
+    pub initial: Arc<Space<ArcKeys>>,
+    pub handshake: Arc<Space<ArcKeys>>,
+    pub data: Arc<Space<ArcOneRttKeys>>,
+}
+
 pub struct Space<K> {
     pub epoch: Epoch,
     pub keys: K,
     pub crypto: CryptoStream,
     pub send_journal: ArcSendJournal,
     pub rcvd_journal: ArcRcvdJournal,
-    receiving: AtomicBool,
-    sending: AtomicBool,
     pub send_wakers: ArcSendWakers,
 }
 
-impl<K> Space<K> {
-    /// Capture this space's frame owners in on_loss before starting CC or timer tasks.
-    /// Recovery callbacks must not reenter feedback, journal or CC.
+impl<K: Default> Space<K> {
+    /// Create pending keys and the CRYPTO stream together. CRYPTO loss is recovered
+    /// internally; on_loss only receives the remaining frame owners.
     pub fn new(
         epoch: Epoch,
-        keys: K,
-        crypto: CryptoStream,
         send_wakers: ArcSendWakers,
         on_loss: impl Fn(&GuaranteedFrame) + Send + Sync + 'static,
     ) -> Self {
+        let crypto = CryptoStream::new(send_wakers.clone());
+        let outgoing = crypto.outgoing();
         Self {
             epoch,
-            keys,
+            keys: K::default(),
             crypto,
-            send_journal: ArcSendJournal::new(on_loss),
+            send_journal: ArcSendJournal::new(move |frame| match frame {
+                GuaranteedFrame::Crypto(frame) => outgoing.may_loss_data(frame),
+                frame => on_loss(frame),
+            }),
             rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
-            receiving: true.into(),
-            sending: true.into(),
             send_wakers,
         }
     }
+}
 
+impl Space<ArcKeys> {
+    pub fn install_initial_keys(&self, keys: qtls::BidirectionalKeys) -> Result<(), crate::Error> {
+        self.keys.install(Arc::new(keys))?;
+        self.send_wakers.wake_all_by(Signals::KEYS);
+        Ok(())
+    }
+
+    pub fn install_hs_keys(&self, keys: qtls::InstalledKeys) -> Result<(), crate::Error> {
+        let qtls::InstalledKeys::Handshake(keys) = keys else {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::Internal,
+                "expected TLS Handshake keys",
+            )
+            .into());
+        };
+        self.install_initial_keys(keys)
+    }
+}
+
+impl Space<ArcOneRttKeys> {
+    pub fn install_1rtt_keys(&self, keys: qtls::InstalledKeys) -> Result<(), crate::Error> {
+        let qtls::InstalledKeys::OneRtt(keys) = keys else {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::Internal,
+                "expected TLS 1-RTT keys",
+            )
+            .into());
+        };
+        self.keys.install(keys)?;
+        self.send_wakers.wake_all_by(Signals::KEYS);
+        Ok(())
+    }
+}
+
+impl<K: Clone> Space<ArcKeys<K>> {
     /// Notify the same frame owners as CC loss feedback, independent of path lifetime.
     pub fn on_tick(&self, now: Instant) {
-        if self.can_send() {
+        if self.keys.try_get().is_ok() {
             self.send_journal
                 .on_tick(now, |frame| self.send_journal.recover(frame));
         }
     }
 
-    pub fn can_receive(&self) -> bool {
-        self.receiving.load(Ordering::Acquire)
-    }
-
-    pub fn can_send(&self) -> bool {
-        self.sending.load(Ordering::Acquire)
-    }
-
-    pub fn stop_receiving(&self) {
-        self.receiving.store(false, Ordering::Release);
-    }
-
-    pub fn stop_sending(&self) {
-        self.sending.store(false, Ordering::Release);
-        self.send_wakers.wake_all_by(Signals::all());
+    /// Discard this epoch permanently. Other spaces and the connection inbox remain live.
+    pub fn retire(&self) {
+        self.keys.retire();
+        self.crypto.sender.retire();
+        self.crypto.recver.retire();
     }
 }
 
-impl<K> Space<ArcKeys<K>> {
-    /// Discard this epoch permanently. Other spaces and the connection inbox remain live.
-    pub fn retire(&self) {
-        self.stop_receiving();
-        self.stop_sending();
-        self.keys.retire();
+impl Space<ArcOneRttKeys> {
+    /// Notify frame owners while Data packet keys remain live.
+    pub fn on_tick(&self, now: Instant) {
+        if self.keys.try_get().is_ok() {
+            self.send_journal
+                .on_tick(now, |frame| self.send_journal.recover(frame));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::atomic::AtomicUsize, time::Duration};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use qbase::frame::{MaxDataFrame, ReliableFrame};
     use qcongestion::Feedback as _;
@@ -150,15 +188,10 @@ mod tests {
 
         let recovered = Arc::new(AtomicUsize::new(0));
         let counter = recovered.clone();
-        let space = Space::new(
-            Epoch::Data,
-            (),
-            CryptoStream::new(Default::default()),
-            Default::default(),
-            move |_| {
-                counter.fetch_add(1, Ordering::Relaxed);
-            },
-        );
+        let space = Space::<ArcKeys<()>>::new(Epoch::Data, Default::default(), move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        space.keys.install(()).unwrap();
         feedback.start(space.send_journal.clone());
         let first = record(&space.send_journal);
         paths[0].may_loss(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());
@@ -169,7 +202,7 @@ mod tests {
         paths[1].may_loss(PacketLostTrigger::TimeThreshold, &mut [second].into_iter());
         assert_eq!(recovered.load(Ordering::Relaxed), 2);
         let third = record(&space.send_journal);
-        space.stop_sending();
+        space.keys.retire();
         feedback.retire();
         paths[0].may_loss(PacketLostTrigger::TimeThreshold, &mut [third].into_iter());
         space.on_tick(Instant::now() + Duration::from_secs(2));

@@ -10,6 +10,7 @@ mod send {
     use bytes::{BufMut, Bytes};
     use qbase::{
         Epoch,
+        error::{Error, ErrorKind, QuicError},
         frame::CryptoFrame,
         net::tx::{ArcSendWakers, Signals},
         packet::{Package, PacketContent},
@@ -56,11 +57,16 @@ mod send {
             {
                 waker.wake();
             }
+            if self.sndbuf.is_all_rcvd()
+                && let Some(waker) = self.flush_waker.take()
+            {
+                waker.wake();
+            }
         }
 
         fn may_loss_data(&mut self, crypto_frame: &CryptoFrame) {
+            self.sndbuf.may_loss_data(&crypto_frame.range());
             self.tx_wakers.wake_all_by(Signals::TRANSPORT);
-            self.sndbuf.may_loss_data(&crypto_frame.range())
         }
     }
 
@@ -102,7 +108,33 @@ mod send {
         }
     }
 
-    pub(super) type ArcSender = Arc<Mutex<Sender>>;
+    /// Sending half of a CRYPTO stream, independently retired from its receiving half.
+    #[derive(Debug, Clone)]
+    pub struct ArcSender(Arc<Mutex<Result<Sender, Error>>>);
+
+    impl ArcSender {
+        /// Abandon this encryption level's CRYPTO output and fail its writer with BrokenPipe.
+        pub fn retire(&self) {
+            self.on_error(
+                &QuicError::with_default_fty(ErrorKind::None, "CRYPTO sender retired").into(),
+            );
+        }
+
+        /// Preserve the first failure and wake the writer and any pending flush.
+        pub fn on_error(&self, error: &Error) {
+            let mut state = self.0.lock().unwrap();
+            if let Ok(sender) = state.as_mut() {
+                if let Some(waker) = sender.writable_waker.take() {
+                    waker.wake();
+                }
+                if let Some(waker) = sender.flush_waker.take() {
+                    waker.wake();
+                }
+                sender.tx_wakers.wake_all_by(Signals::TRANSPORT);
+                *state = Err(error.clone());
+            }
+        }
+    }
 
     /// Struct for crypto layer to send crypto data to the peer.
     ///
@@ -122,16 +154,27 @@ mod send {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            self.0.lock().unwrap().poll_write(cx, buf)
+            match self.0.0.lock().unwrap().as_mut() {
+                Ok(sender) => sender.poll_write(cx, buf),
+                Err(error) => Poll::Ready(Err(error.clone().into())),
+            }
         }
 
         fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            self.0.lock().unwrap().poll_flush(cx)
+            match self.0.0.lock().unwrap().as_mut() {
+                Ok(sender) => sender.poll_flush(cx),
+                Err(error) => Poll::Ready(Err(error.clone().into())),
+            }
         }
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            // 永远不会关闭，直到Connection级别的关闭
-            Poll::Ready(Ok(()))
+            Poll::Ready(match self.0.0.lock().unwrap().as_mut() {
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "CRYPTO has no graceful shutdown; retire its sender instead",
+                )),
+                Err(error) => Err(error.clone().into()),
+            })
         }
     }
 
@@ -143,7 +186,10 @@ mod send {
             for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
         {
             use std::ops::ControlFlow::*;
-            let mut inner = self.0.lock().unwrap();
+            let mut inner = self.0.0.lock().unwrap();
+            let Ok(inner) = inner.as_mut() else {
+                return Err(Signals::empty());
+            };
             if force {
                 inner.sndbuf.resend_flighting();
             }
@@ -172,12 +218,16 @@ mod send {
         /// Acknowledgment of data may free up a segment in the [`SendBuf`], thus waking up the
         /// writing task,
         pub fn on_data_acked(&self, crypto_frame: &CryptoFrame) {
-            self.0.lock().unwrap().on_data_acked(crypto_frame)
+            if let Ok(sender) = self.0.0.lock().unwrap().as_mut() {
+                sender.on_data_acked(crypto_frame);
+            }
         }
 
         /// Called when the crypto frame sent may loss.
         pub fn may_loss_data(&self, crypto_frame: &CryptoFrame) {
-            self.0.lock().unwrap().may_loss_data(crypto_frame)
+            if let Ok(sender) = self.0.0.lock().unwrap().as_mut() {
+                sender.may_loss_data(crypto_frame);
+            }
         }
     }
 
@@ -204,12 +254,12 @@ mod send {
     }
 
     pub(super) fn create(tx_wakers: ArcSendWakers) -> ArcSender {
-        Arc::new(Mutex::new(Sender {
+        ArcSender(Arc::new(Mutex::new(Ok(Sender {
             sndbuf: SendBuf::with_capacity(VARINT_MAX),
             writable_waker: None,
             flush_waker: None,
             tx_wakers,
-        }))
+        }))))
     }
 }
 
@@ -223,7 +273,7 @@ mod recv {
 
     use bytes::{BufMut, Bytes};
     use qbase::{
-        error::Error,
+        error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, io::ReceiveFrame},
         varint::VARINT_MAX,
     };
@@ -238,14 +288,26 @@ mod recv {
     }
 
     impl Recver {
-        fn recv(&mut self, offset: u64, data: Bytes) {
+        fn recv(&mut self, offset: u64, data: Bytes) -> Result<(), Error> {
             assert!(offset + data.len() as u64 <= VARINT_MAX);
+            // Bound sparse CRYPTO reassembly as well as contiguous TLS input.
+            if offset.saturating_add(data.len() as u64)
+                > self.rcvbuf.nread().saturating_add(256 * 1024)
+                || self.rcvbuf.segment_count() >= 1024
+            {
+                return Err(QuicError::with_default_fty(
+                    ErrorKind::CryptoBufferExceeded,
+                    "CRYPTO reassembly budget exceeded",
+                )
+                .into());
+            }
             self.rcvbuf.recv(offset, data);
             if self.rcvbuf.is_readable()
                 && let Some(waker) = self.read_waker.take()
             {
                 waker.wake()
             }
+            Ok(())
         }
 
         fn poll_read<T: BufMut>(
@@ -267,7 +329,29 @@ mod recv {
         }
     }
 
-    pub(super) type ArcRecver = Arc<Mutex<Recver>>;
+    /// Receiving half of a CRYPTO stream, independently retired from its sending half.
+    #[derive(Debug, Clone)]
+    pub struct ArcRecver(Arc<Mutex<Result<Recver, Error>>>);
+
+    impl ArcRecver {
+        /// End delivery to TLS and fail its reader with BrokenPipe.
+        pub fn retire(&self) {
+            self.on_error(
+                &QuicError::with_default_fty(ErrorKind::None, "CRYPTO receiver retired").into(),
+            );
+        }
+
+        /// Preserve the first failure and wake the pending reader.
+        pub fn on_error(&self, error: &Error) {
+            let mut state = self.0.lock().unwrap();
+            if let Ok(recver) = state.as_mut() {
+                if let Some(waker) = recver.read_waker.take() {
+                    waker.wake();
+                }
+                *state = Err(error.clone());
+            }
+        }
+    }
 
     /// Struct for crypto layer to read crypto data from the peer.
     #[derive(Debug, Clone)]
@@ -282,7 +366,10 @@ mod recv {
             cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
-            self.0.lock().unwrap().poll_read(cx, buf)
+            match self.0.0.lock().unwrap().as_mut() {
+                Ok(recver) => recver.poll_read(cx, buf),
+                Err(error) => Poll::Ready(Err(error.clone().into())),
+            }
         }
     }
 
@@ -290,31 +377,39 @@ mod recv {
         type Output = ();
 
         fn recv_frame(&self, (frame, data): (CryptoFrame, Bytes)) -> Result<Self::Output, Error> {
-            self.0.lock().unwrap().recv(frame.offset(), data);
-            Ok(())
+            match self.0.0.lock().unwrap().as_mut() {
+                Ok(recver) => recver.recv(frame.offset(), data),
+                Err(_) => Ok(()),
+            }
         }
     }
 
     pub(super) fn create() -> ArcRecver {
-        Arc::new(Mutex::new(Recver {
+        ArcRecver(Arc::new(Mutex::new(Ok(Recver {
             rcvbuf: RecvBuf::default(),
             read_waker: None,
-        }))
+        }))))
     }
 }
 
-use qbase::net::tx::ArcSendWakers;
-pub use recv::{CryptoStreamIncoming, CryptoStreamReader};
-pub use send::{CryptoStreamOutgoing, CryptoStreamWriter};
+use qbase::{error::Error, net::tx::ArcSendWakers};
+pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
+pub use send::{ArcSender, CryptoStreamOutgoing, CryptoStreamWriter};
 
 /// Crypto data stream.
 #[derive(Debug, Clone)]
 pub struct CryptoStream {
-    sender: send::ArcSender,
-    recver: recv::ArcRecver,
+    pub sender: ArcSender,
+    pub recver: ArcRecver,
 }
 
 impl CryptoStream {
+    /// Fail both directions with the connection error.
+    pub fn on_error(&self, error: &Error) {
+        self.sender.on_error(error);
+        self.recver.on_error(error);
+    }
+
     /// Create a new instance of [`CryptoStream`] with the given buffer size.
     pub fn new(tx_wakers: ArcSendWakers) -> Self {
         Self {
@@ -346,13 +441,243 @@ impl CryptoStream {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Wake, Waker},
+    };
+
     use qbase::{
+        error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, io::ReceiveFrame},
         varint::VarInt,
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
     use super::CryptoStream;
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct TestPacket(bytes::BytesMut);
+
+    // Safety: delegate storage and initialized-length updates to BytesMut.
+    unsafe impl bytes::BufMut for TestPacket {
+        fn remaining_mut(&self) -> usize {
+            64 - self.0.len()
+        }
+
+        unsafe fn advance_mut(&mut self, count: usize) {
+            unsafe { self.0.advance_mut(count) }
+        }
+
+        fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+            self.0.chunk_mut()
+        }
+    }
+
+    impl<D: qbase::util::Buffer> qbase::packet::RecordFrame<qbase::frame::Frame<D>, D> for TestPacket {
+        fn record_frame(&mut self, _: &qbase::frame::Frame<D>) {}
+    }
+
+    #[tokio::test]
+    async fn receiver_retirement_wakes_reader_and_preserves_crypto_retransmission() {
+        let stream = CryptoStream::new(Default::default());
+        let mut reader = stream.reader();
+        let mut writer = stream.writer();
+        writer.write_all(b"ServerHello").await.unwrap();
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0; 8];
+        assert!(
+            Pin::new(&mut reader)
+                .poll_read(&mut cx, &mut ReadBuf::new(&mut bytes))
+                .is_pending()
+        );
+        assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream
+            .outgoing()
+            .try_load_data_into(&mut packet, false)
+            .unwrap();
+
+        stream.recver.retire();
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            reader.read(&mut bytes).await.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+        let frame = CryptoFrame::new(0u32.into(), 11u32.into());
+        stream.outgoing().may_loss_data(&frame);
+        let mut retransmission = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream
+            .outgoing()
+            .try_load_data_into(&mut retransmission, false)
+            .unwrap();
+        assert_eq!(retransmission.0, packet.0);
+        stream.outgoing().on_data_acked(&frame);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+        writer.flush().await.unwrap();
+        stream
+            .incoming()
+            .recv_frame((
+                CryptoFrame::new(0u32.into(), 4u32.into()),
+                bytes::Bytes::from_static(b"late"),
+            ))
+            .unwrap();
+        assert!(reader.read(&mut bytes).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sender_retirement_wakes_flush_and_leaves_receiver_running() {
+        let stream = CryptoStream::new(Default::default());
+        let mut writer = stream.writer();
+        writer.write_all(b"pending").await.unwrap();
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+        stream.sender.retire();
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            writer.flush().await.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            stream.writer().write(b"late").await.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        assert!(
+            stream
+                .outgoing()
+                .try_load_data_into(&mut packet, true)
+                .is_err()
+        );
+        stream
+            .outgoing()
+            .on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
+        stream
+            .outgoing()
+            .may_loss_data(&CryptoFrame::new(0u32.into(), 7u32.into()));
+        assert!(packet.0.is_empty());
+        stream
+            .incoming()
+            .recv_frame((
+                CryptoFrame::new(0u32.into(), 4u32.into()),
+                bytes::Bytes::from_static(b"peer"),
+            ))
+            .unwrap();
+        let mut bytes = [0; 4];
+        stream.reader().read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"peer");
+    }
+
+    #[tokio::test]
+    async fn connection_error_wakes_both_sides_and_preserves_the_cause() {
+        let stream = CryptoStream::new(Default::default());
+        let mut reader = stream.reader();
+        let mut writer = stream.writer();
+        writer.write_all(b"pending").await.unwrap();
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0; 8];
+        assert!(
+            Pin::new(&mut reader)
+                .poll_read(&mut cx, &mut ReadBuf::new(&mut bytes))
+                .is_pending()
+        );
+        assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+
+        let error = Error::from(QuicError::with_default_fty(
+            ErrorKind::Crypto(40),
+            "handshake failed",
+        ));
+        stream.on_error(&error);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+        stream.on_error(&QuicError::with_default_fty(ErrorKind::Internal, "late error").into());
+        stream.sender.retire();
+        stream.recver.retire();
+        for failure in [
+            reader.read(&mut bytes).await.unwrap_err(),
+            stream.writer().write(b"late").await.unwrap_err(),
+            writer.flush().await.unwrap_err(),
+            writer.shutdown().await.unwrap_err(),
+        ] {
+            let cause = failure.get_ref().unwrap().downcast_ref::<Error>().unwrap();
+            assert_eq!(cause, &error);
+        }
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        assert!(
+            stream
+                .outgoing()
+                .try_load_data_into(&mut packet, true)
+                .is_err()
+        );
+        assert!(packet.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_unsupported_and_keeps_unacknowledged_data() {
+        let stream = CryptoStream::new(Default::default());
+        stream.writer().write_all(b"outgoing").await.unwrap();
+        assert_eq!(
+            stream.writer().shutdown().await.unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported,
+        );
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream
+            .outgoing()
+            .try_load_data_into(&mut packet, false)
+            .unwrap();
+        assert!(packet.0.ends_with(b"outgoing"));
+        stream.writer().write_all(b"still open").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn acknowledging_crypto_wakes_flush() {
+        let stream = CryptoStream::new(Default::default());
+        let mut writer = stream.writer();
+        writer.write_all(b"hello").await.unwrap();
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream
+            .outgoing()
+            .try_load_data_into(&mut packet, false)
+            .unwrap();
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+        stream
+            .outgoing()
+            .on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        writer.flush().await.unwrap();
+    }
+
+    #[test]
+    fn sparse_crypto_cannot_allocate_an_unbounded_handshake_buffer() {
+        let stream = CryptoStream::new(Default::default());
+        let result = stream.incoming().recv_frame((
+            CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)),
+            bytes::Bytes::from_static(b"x"),
+        ));
+        assert!(
+            matches!(result, Err(error) if error.kind() == qbase::error::ErrorKind::CryptoBufferExceeded)
+        );
+    }
 
     #[tokio::test]
     async fn test_read() {

@@ -1,6 +1,6 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     sync::{Arc, Mutex, RwLock, atomic::AtomicU16},
     time::Duration,
 };
@@ -14,6 +14,7 @@ use qbase::{
         route::Pathway,
         tx::{ArcSendWaker, Signals},
     },
+    time::PathIdleTimer,
 };
 use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, PathStatus, Transport as _};
 use tokio::time::Instant;
@@ -46,6 +47,7 @@ pub struct Path {
     pub send_waker: ArcSendWaker,
     responses: Mutex<VecDeque<PathResponseFrame>>,
     pub anti_amplifier: Arc<AntiAmplifier>,
+    pub activity: PathIdleTimer,
 }
 
 impl Path {
@@ -54,6 +56,7 @@ impl Path {
         dcid: ConnectionId,
         handshake: Arc<HandshakeStatus>,
         max_ack_delay: Duration,
+        activity: PathIdleTimer,
         feedback: [Arc<dyn Feedback>; 3],
     ) -> Self {
         let send_waker = ArcSendWaker::new();
@@ -73,6 +76,7 @@ impl Path {
             send_waker,
             responses: Mutex::new(VecDeque::new()),
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
+            activity,
         }
     }
 
@@ -220,40 +224,5 @@ impl ReceiveFrame<PathResponseFrame> for Path {
             self.validate();
         }
         Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct Paths {
-    entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
-}
-impl Paths {
-    pub fn insert(&self, path: Arc<Path>) -> bool {
-        let mut entries = self.entries.lock().unwrap();
-        if entries.contains_key(&path.pathway) {
-            return false;
-        }
-        entries.insert(path.pathway, path);
-        true
-    }
-    pub fn get(&self, pathway: &Pathway) -> Option<Arc<Path>> {
-        self.entries.lock().unwrap().get(pathway).cloned()
-    }
-    pub fn snapshot(&self) -> Vec<Arc<Path>> {
-        self.entries.lock().unwrap().values().cloned().collect()
-    }
-    /// Remove this exact retired instance, never a replacement at the same address.
-    pub fn remove(&self, path: &Arc<Path>) -> bool {
-        path.retire();
-        let mut entries = self.entries.lock().unwrap();
-        if entries
-            .get(&path.pathway)
-            .is_some_and(|current| Arc::ptr_eq(current, path))
-        {
-            entries.remove(&path.pathway);
-            true
-        } else {
-            false
-        }
     }
 }

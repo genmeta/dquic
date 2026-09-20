@@ -115,6 +115,12 @@ impl<K> ArcKeys<K> {
     }
 }
 
+impl<K> Default for ArcKeys<K> {
+    fn default() -> Self {
+        Self::new_pending()
+    }
+}
+
 /// Header protection does not change during a 1-RTT key update.
 pub struct HeaderKeys {
     pub opening: qtls::HeaderProtectionKey,
@@ -335,6 +341,12 @@ impl ArcOneRttKeys {
     }
 }
 
+impl Default for ArcOneRttKeys {
+    fn default() -> Self {
+        Self::new_pending()
+    }
+}
+
 impl Future for ArcOneRttKeys {
     type Output = Result<OneRttKeys, KeyRetired>;
 
@@ -344,6 +356,27 @@ impl Future for ArcOneRttKeys {
 }
 
 impl OneRttKeys {
+    pub fn open_packet<H>(
+        &self,
+        packet: crate::packet::CipherPacket<H>,
+        decode_pn: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
+        pto: Duration,
+    ) -> Result<Option<crate::packet::PlainPacket<H>>, Error>
+    where
+        H: crate::packet::RcvdPacketHeader,
+    {
+        packet.decrypt_short_packet(
+            &self.headers.opening,
+            decode_pn,
+            |pn, phase, header, body| {
+                self.packets
+                    .lock()
+                    .unwrap()
+                    .decrypt(pn, phase, header, body, pto)
+            },
+        )
+    }
+
     /// Allow the first local update when qconn confirms the handshake.
     /// Later updates are authorized by ACKs for the current sending generation.
     pub fn allow_update(&self) {

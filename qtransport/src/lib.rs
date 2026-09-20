@@ -16,6 +16,7 @@
 //! ```
 mod connection;
 pub mod keys;
+pub mod packet;
 pub mod path;
 pub mod recv;
 pub mod router;

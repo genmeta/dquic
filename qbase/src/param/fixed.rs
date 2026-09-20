@@ -15,7 +15,8 @@ pub struct ArcParameters {
 }
 
 impl ArcParameters {
-    /// The handshake owner must authenticate the supplied parameters before construction.
+    /// The handshake owner validates these values before construction and authenticates
+    /// them before exposing an established connection to the application.
     pub fn new(role: Role, client: Arc<ClientParameters>, server: Arc<ServerParameters>) -> Self {
         Self {
             role,

@@ -7,7 +7,7 @@ use qbase::{
         CryptoFrame, DatagramFrame, Frame, MaxDataFrame, PathChallengeFrame, PathResponseFrame,
         PingFrame, ReliableFrame,
     },
-    packet::{LongHeaderBuilder, Packet as ReceivedPacket, PacketReader},
+    packet::{LongHeaderBuilder, Packet as ParsedPacket, PacketReader},
 };
 
 use super::*;
@@ -22,7 +22,6 @@ fn sender(transport: &Transport, path: &Path) -> Sender {
         Arc::new(QuicProtocol::new()),
         path.pathway,
         path.cc.clone(),
-        transport.flow.sender.clone(),
         path.anti_amplifier.clone(),
         path.send_waker.clone(),
     )
@@ -37,7 +36,7 @@ fn long() -> LongHeaderBuilder {
     )
 }
 fn decode(bytes: &[u8]) -> qbase::packet::DataPacket {
-    let ReceivedPacket::Data(packet) = PacketReader::new(BytesMut::from(bytes), 8)
+    let ParsedPacket::Data(packet) = PacketReader::new(BytesMut::from(bytes), 8)
         .next()
         .unwrap()
         .unwrap()
@@ -421,12 +420,11 @@ async fn idle_stream_sender_yields_pending_instead_of_spinning_on_returned_credi
     let [(client, transport, path), _peer] = crate::tests::pair(1);
     let (_, _writer) = client.open_uni_stream().await.unwrap().unwrap();
     let mut sender = sender(&transport, &path);
+    let watchdog_path = path.clone();
     let watchdog = std::thread::spawn({
-        let transport = transport.clone();
         move || {
             std::thread::sleep(Duration::from_millis(50));
-            transport
-                .close(QuicError::with_default_fty(ErrorKind::Internal, "test watchdog").into());
+            watchdog_path.retire();
         }
     });
     let mut running = Box::pin(sender.run(
@@ -436,8 +434,8 @@ async fn idle_stream_sender_yields_pending_instead_of_spinning_on_returned_credi
             };
             crate::tests::sender::assemble_data(sender, limit, &keys, &transport, &path, false)
         },
-        || transport.data.can_send(),
-        |_| transport.data.can_send(),
+        || path.state() != crate::path::PathState::Retired,
+        |_| path.state() != crate::path::PathState::Retired,
         |packet| path.on_packet_sent(packet),
     ));
     assert!(futures::poll!(&mut running).is_pending());
@@ -446,7 +444,7 @@ async fn idle_stream_sender_yields_pending_instead_of_spinning_on_returned_credi
 }
 
 #[tokio::test]
-async fn sent_callback_can_acknowledge_stop_sending_and_retire_path() {
+async fn sent_callback_can_acknowledge_and_retire_path() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
     let mut sender = sender(&transport, &path);
     let keys = transport.data.keys.try_get().unwrap().unwrap();
@@ -478,12 +476,10 @@ async fn sent_callback_can_acknowledge_stop_sending_and_retire_path() {
                     .acknowledge(&ack(packet.pn), |_| {})
                     .unwrap();
                 path.validate();
-                transport.data.stop_sending();
                 path.retire();
             },
         ),
         Poll::Ready(Ok(1))
     ));
-    assert!(!transport.data.can_send());
     assert_eq!(path.state(), crate::path::PathState::Retired);
 }

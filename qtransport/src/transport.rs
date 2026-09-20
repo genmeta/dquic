@@ -4,7 +4,7 @@ use qbase::flow::FlowController;
 use qrecovery::streams::DataStreams;
 use tokio::time::Instant;
 
-use crate::{ArcParameters, Error, ReliableFrames, keys::ArcOneRttKeys, path::Paths, space::Space};
+use crate::{ArcParameters, Error, ReliableFrames, keys::ArcOneRttKeys, space::Space};
 
 /// Fully constructed application-data components, shared with the original receive pipes.
 pub struct Transport {
@@ -13,7 +13,6 @@ pub struct Transport {
     pub streams: DataStreams<ReliableFrames>,
     pub flow: FlowController<ReliableFrames>,
     pub reliable_frames: ReliableFrames,
-    pub paths: Arc<Paths>,
 }
 
 impl Transport {
@@ -23,7 +22,6 @@ impl Transport {
         streams: DataStreams<ReliableFrames>,
         flow: FlowController<ReliableFrames>,
         reliable_frames: ReliableFrames,
-        paths: Arc<Paths>,
     ) -> Self {
         Self {
             data,
@@ -31,18 +29,17 @@ impl Transport {
             streams,
             flow,
             reliable_frames,
-            paths,
         }
     }
 
     /// Terminate business use. The external driver retains the receive route and close keys.
     pub fn close(&self, error: Error) {
-        self.data.stop_sending();
+        self.data.crypto.on_error(&error);
         self.streams.on_conn_error(&error);
         self.flow.on_conn_error(&error);
     }
 
-    /// Drive recovery from the connection's timer while Data sending is enabled.
+    /// Drive recovery from the connection's timer while Data keys remain live.
     /// Keep ticking even when no path sender remains; recovered data can await a new path.
     pub fn on_tick(&self, now: Instant) {
         self.data.on_tick(now);

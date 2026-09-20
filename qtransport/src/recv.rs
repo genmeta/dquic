@@ -18,18 +18,20 @@ use qbase::{
         NewTokenFrame, RetireConnectionIdFrame, io::ReceiveFrame,
     },
     net::route::{Link, Pathway},
-    packet::{DataHeader, DataPacket, Packet, PacketContent, long},
+    packet::{GetType, PacketContent},
     varint::VARINT_MAX,
 };
 use qcongestion::Transport as _;
 use qrecovery::{crypto::CryptoStream, streams::DataStreams};
-use tokio::sync::mpsc;
 
 use crate::{
     ArcParameters, Error, ReliableFrames,
-    keys::{ArcKeys, ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket},
+    keys::{ArcKeys, ArcOneRttKeys, KeyRetired, OneRttKeys},
+    packet::{
+        CipherPacket, PlainPacket,
+        channel::{PacketReceiver, RcvdPacket},
+    },
     path::Path,
-    router::{PACKET_QUEUE_CAPACITY, ReceivedPacket},
     space::Space,
 };
 
@@ -75,8 +77,8 @@ pub fn frame_dispatcher(
             Frame::PathResponse(frame) => path.recv_frame(frame),
             Frame::Close(frame) => {
                 closing.store(true, Ordering::Release);
-                data.stop_sending();
                 let error = Error::from(frame.clone());
+                data.crypto.on_error(&error);
                 streams.on_conn_error(&error);
                 flow.on_conn_error(&error);
                 on_close(epoch, frame, path)
@@ -86,67 +88,36 @@ pub fn frame_dispatcher(
     }
 }
 
-/// Demultiplex without awaiting keys or downstream queue capacity.
-pub async fn route_packets(
-    mut inbox: mpsc::Receiver<ReceivedPacket>,
-    entries: [mpsc::Sender<(DataPacket, Arc<Path>)>; 3],
-    mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
-    mut on_unprotected: impl FnMut(Packet, Pathway, Link),
-) {
-    while let Some((packet, pathway, link, size)) = inbox.recv().await {
-        let Some(path) = path_for(pathway, link) else {
-            continue;
-        };
-        if size != 0 {
-            path.on_datagram_received(size);
-        }
-        match packet {
-            Packet::Data(packet) => {
-                let epoch = match packet.header {
-                    DataHeader::Long(long::DataHeader::Initial(_)) => Epoch::Initial,
-                    DataHeader::Long(long::DataHeader::Handshake(_)) => Epoch::Handshake,
-                    DataHeader::Short(_) => Epoch::Data,
-                    // 0-RTT is not enabled by this transport.
-                    _ => continue,
-                };
-                let _ = entries[epoch].try_send((packet, path));
-            }
-            packet => on_unprotected(packet, pathway, link),
-        }
-    }
-}
-
 /// One coroutine drives all receive spaces. A pending Handshake key does not block Initial/Data.
-/// qconn owns spawning/cancellation, path creation, TLS progression and final route removal.
+/// qconn owns spawning and queue closure, path creation, TLS progression and final route removal.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    inbox: mpsc::Receiver<ReceivedPacket>,
+    rcvd_pkt: RcvdPacket,
     initial: Arc<Space<ArcKeys>>,
     handshake: Arc<Space<ArcKeys>>,
     data: Arc<Space<ArcOneRttKeys>>,
     closing: Arc<AtomicBool>,
-    path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    path_for: impl Fn(Pathway, Link) -> Option<Arc<Path>> + Sync,
     dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
     on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
-    on_unprotected: impl FnMut(Packet, Pathway, Link),
     on_error: impl Fn(Error),
 ) {
-    let (initial_entry, initial_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
-    let (handshake_entry, handshake_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
-    let (data_entry, data_packets) = mpsc::channel(PACKET_QUEUE_CAPACITY);
+    let RcvdPacket {
+        initial: initial_rx,
+        handshake: handshake_rx,
+        zero_rtt: _,
+        one_rtt: one_rtt_rx,
+    } = rcvd_pkt;
     tokio::join!(
-        route_packets(
-            inbox,
-            [initial_entry, handshake_entry, data_entry],
-            path_for,
-            on_unprotected
-        ),
         run_receive(
-            initial_packets,
+            initial_rx,
             initial.clone(),
-            |keys, packet, pto| {
-                keys.opening
-                    .open(packet, |pn| initial.rcvd_journal.decode_pn(pn), pto)
+            &path_for,
+            |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
+                packet
+                    .decrypt_long_packet(&keys.opening, |pn| initial.rcvd_journal.decode_pn(pn))
+                    .transpose()
+                    .map_err(Into::into)
             },
             closing.clone(),
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
@@ -154,11 +125,14 @@ pub async fn run(
             &on_error
         ),
         run_receive(
-            handshake_packets,
+            handshake_rx,
             handshake.clone(),
-            |keys, packet, pto| {
-                keys.opening
-                    .open(packet, |pn| handshake.rcvd_journal.decode_pn(pn), pto)
+            &path_for,
+            |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
+                packet
+                    .decrypt_long_packet(&keys.opening, |pn| handshake.rcvd_journal.decode_pn(pn))
+                    .transpose()
+                    .map_err(Into::into)
             },
             closing.clone(),
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
@@ -166,10 +140,11 @@ pub async fn run(
             &on_error
         ),
         run_receive(
-            data_packets,
+            one_rtt_rx,
             data.clone(),
+            &path_for,
             |keys: &OneRttKeys, packet, pto| {
-                keys.open(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
+                keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
             },
             closing,
             |keys, epoch, frame, path| {
@@ -254,42 +229,35 @@ pub fn receive_packet<K>(
 }
 
 /// One key waiter per space. Closing keeps this same engine alive for CLOSE frames.
-/// Retirement ends only this space; qconn cancels the whole task after draining.
+/// Retirement ends only this space; closing the inbox ends idle packet waits.
 /// Dispatch receives the same ready material used to open the packet.
-pub async fn run_receive<K, M>(
-    mut packets: mpsc::Receiver<(DataPacket, Arc<Path>)>,
+#[allow(clippy::too_many_arguments)]
+pub async fn run_receive<H, K, M>(
+    mut packets: PacketReceiver<H>,
     space: Arc<Space<K>>,
-    mut open: impl FnMut(&M, DataPacket, Duration) -> Result<Option<(u64, FrameReader)>, Error>,
+    mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
     closing: Arc<AtomicBool>,
     mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
 ) where
+    H: GetType,
     K: Clone + Future<Output = Result<M, KeyRetired>>,
 {
-    while let Some((packet, path)) = packets.recv().await {
-        let epoch = match packet.header {
-            DataHeader::Long(long::DataHeader::Initial(_)) => Epoch::Initial,
-            DataHeader::Long(long::DataHeader::Handshake(_)) => Epoch::Handshake,
-            DataHeader::Short(_) => Epoch::Data,
-            _ => continue,
-        };
-        if epoch != space.epoch {
+    while let Some((packet, pathway, link)) = packets.recv().await {
+        let Some(path) = path_for(pathway, link) else {
             continue;
-        }
-        if !space.can_receive() {
-            break;
-        }
+        };
+        path.on_datagram_received(packet.payload_len());
+        let epoch = space.epoch;
         let Ok(keys) = space.keys.clone().await else {
             break;
         };
-        if !space.can_receive() {
-            break;
-        }
         let result = open(&keys, packet, path.cc.get_pto(epoch)).and_then(|opened| {
-            if let Some((pn, frames)) = opened
-                && space.can_receive()
-            {
+            if let Some(packet) = opened {
+                let pn = packet.pn();
+                let frames = FrameReader::new(packet.body(), packet.get_type());
                 receive_packet(
                     pn,
                     frames,

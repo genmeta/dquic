@@ -118,6 +118,10 @@ impl ArcRtt {
         Self(Arc::new(Mutex::new(Rtt::default())))
     }
 
+    pub(crate) fn set_max_ack_delay(&self, delay: Duration) {
+        self.0.lock().unwrap().max_ack_delay = delay;
+    }
+
     pub fn update(&self, latest_rtt: Duration, ack_delay: Duration, is_handshake_confirmed: bool) {
         self.0
             .lock()

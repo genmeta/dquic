@@ -22,6 +22,8 @@ impl TlsAlert {
 
 #[derive(Debug, Error)]
 pub enum TlsConfigError {
+    #[error("root certificates have not been configured")]
+    RootCertsNotSet,
     #[error("TLS configuration is invalid: {0}")]
     Invalid(String),
     #[error("the selected crypto provider has no QUIC-capable TLS 1.3 cipher suite")]
@@ -36,6 +38,8 @@ pub enum InvalidLocalAuthority {
     InvalidName,
     #[error("authority certificate chain is empty")]
     EmptyCertificateChain,
+    #[error("authority OCSP staple is empty")]
+    EmptyOcsp,
     #[error("authority leaf certificate is invalid: {0}")]
     InvalidCertificate(String),
     #[error("authority private key is invalid or does not match its certificate: {0}")]

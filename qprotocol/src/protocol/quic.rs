@@ -34,6 +34,10 @@ impl Default for QuicProtocol {
 }
 
 impl QuicProtocol {
+    pub fn global() -> &'static Arc<Self> {
+        crate::Dock::global().topology().quic()
+    }
+
     pub fn new() -> Self {
         Self {
             sockets: DashMap::new(),
