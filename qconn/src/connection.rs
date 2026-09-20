@@ -1,178 +1,77 @@
-use std::sync::{Arc, RwLock, Weak};
+use std::{sync::Arc, time::Duration};
 
-use bytes::Bytes;
-use qbase::{
-    error::{AppError, Error},
-    param::{ClientParameters, ServerParameters},
-    role::Role,
-    sid::StreamId,
-    varint::VarInt,
-};
+use qbase::error::Error;
+use qtransport::transport::Transport;
+use tokio::time::Instant;
 
-use crate::{
-    data::{DataPlane, StreamReader, StreamWriter},
-    lifecycle::CloseState,
-    transport::Transport,
-};
+use crate::handshake::{Connecting, incoming::Incoming};
 
-/// A mature QUIC connection. Keep a connection handle alive while using its
-/// streams; dropping the last handle requests connection closure.
-#[derive(Clone)]
-pub struct ArcConnection(Arc<Connection>);
-
-pub(crate) struct Connection {
-    role: Role,
-    alpn: Option<Bytes>,
-    client_parameters: Arc<ClientParameters>,
-    server_parameters: Arc<ServerParameters>,
-    close: Arc<CloseState>,
-    active: RwLock<Option<Active>>,
-}
-
-struct Active {
-    data: Arc<DataPlane>,
-    transport: Arc<Transport>,
-}
-
-pub(crate) fn promote(
-    transport: Arc<Transport>,
-    alpn: Option<Bytes>,
-) -> Result<ArcConnection, Error> {
-    transport.close.ensure_open()?;
-    let data = transport
-        .data
-        .get()
-        .ok_or_else(|| crate::internal("connection has no data components"))?
-        .clone();
-    let (client_parameters, server_parameters) = {
-        let parameters = data.parameters.lock_guard()?;
-        if !parameters.is_remote_params_ready() {
-            return Err(crate::internal("connection parameters are incomplete"));
-        }
-        (
-            parameters.client().unwrap().clone(),
-            parameters.server().unwrap().clone(),
-        )
-    };
-    if *transport.control.phase.borrow() != crate::control::Phase::Active {
-        return Err(crate::internal("connection has not completed TLS"));
-    }
-    Ok(ArcConnection(Arc::new(Connection {
-        role: transport.control.role,
-        alpn,
-        client_parameters,
-        server_parameters,
-        close: transport.close.clone(),
-        active: RwLock::new(Some(Active { data, transport })),
-    })))
-}
-
-impl ArcConnection {
-    pub fn role(&self) -> Role {
-        self.0.role
-    }
-    pub fn alpn(&self) -> Option<&[u8]> {
-        self.0.alpn.as_deref()
-    }
-    pub fn client_parameters(&self) -> &ClientParameters {
-        &self.0.client_parameters
-    }
-    pub fn server_parameters(&self) -> &ServerParameters {
-        &self.0.server_parameters
-    }
-
-    fn data(&self) -> Result<Arc<DataPlane>, Error> {
-        let active = self.0.active.read().unwrap();
-        self.0.close.ensure_open()?;
-        Ok(active
-            .as_ref()
-            .expect("open connection retains active components")
-            .data
-            .clone())
-    }
-
-    pub async fn open_bi_stream(
-        &self,
-    ) -> Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error> {
-        let data = self.data()?;
-        data.streams.open_bi(&data.parameters).await
-    }
-
-    pub async fn open_uni_stream(&self) -> Result<Option<(StreamId, StreamWriter)>, Error> {
-        let data = self.data()?;
-        data.streams.open_uni(&data.parameters).await
-    }
-
-    pub async fn accept_bi_stream(
-        &self,
-    ) -> Result<(StreamId, (StreamReader, StreamWriter)), Error> {
-        let data = self.data()?;
-        data.streams.accept_bi(&data.parameters).await
-    }
-
-    pub async fn accept_uni_stream(&self) -> Result<(StreamId, StreamReader), Error> {
-        self.data()?.streams.accept_uni().await
-    }
-
-    pub fn has_viable_path(&self) -> bool {
-        self.0
-            .active
-            .read()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|active| {
-                active
-                    .transport
-                    .paths
-                    .snapshot()
-                    .iter()
-                    .any(|path| !path.failed.load(std::sync::atomic::Ordering::Acquire))
-            })
-    }
-
-    pub fn close(&self, code: VarInt, reason: &str) -> Result<(), Error> {
-        let error = Error::App(AppError::new(code, reason.to_owned()));
-        if !self.0.close.request(error.clone()) {
-            return Err(self.0.close.reason().unwrap());
-        }
-        self.0.release(&error);
-        Ok(())
-    }
-
-    pub async fn closed(&self) -> Error {
-        self.0.close.closed().await
-    }
-
-    pub(crate) fn downgrade(&self) -> Weak<Connection> {
-        Arc::downgrade(&self.0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn transport(&self) -> Arc<Transport> {
-        self.0
-            .active
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .transport
-            .clone()
-    }
+/// Owned exclusively by lifecycle::drive. Application handles belong to qtransport.
+pub(crate) enum Connection {
+    Incoming(Incoming),
+    Connecting(Box<Connecting>),
+    Active {
+        tls: Box<qtls::EstablishedTls>,
+        transport: Arc<Transport>,
+    },
+    Closing {
+        error: Error,
+        until: Instant,
+    },
+    Draining {
+        until: Instant,
+    },
+    Terminated,
 }
 
 impl Connection {
-    pub(crate) fn release(&self, error: &Error) {
-        let active = self.active.write().unwrap().take();
-        if let Some(active) = active {
-            active.data.on_error(error);
+    pub(crate) fn close(&mut self, error: Error, grace: Duration) {
+        if matches!(
+            self,
+            Self::Incoming(_) | Self::Connecting(_) | Self::Active { .. }
+        ) {
+            *self = Self::Closing {
+                error,
+                until: Instant::now() + grace,
+            };
         }
+    }
+
+    pub(crate) fn drain(&mut self, grace: Duration) {
+        let until = match self {
+            Self::Closing { until, .. } => *until,
+            Self::Draining { .. } | Self::Terminated => return,
+            _ => Instant::now() + grace,
+        };
+        *self = Self::Draining { until };
     }
 }
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        self.close
-            .request(AppError::new(0u32.into(), "last connection handle dropped").into());
-        self.release(&self.close.reason().unwrap());
+#[cfg(test)]
+mod tests {
+    use qbase::error::{ErrorKind, QuicError};
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn late_errors_and_peer_close_preserve_the_first_closing_deadline() {
+        let mut connection = Connection::Incoming(Incoming::default());
+        let error = QuicError::with_default_fty(ErrorKind::ConnectionRefused, "first cause");
+        connection.close(error.clone().into(), Duration::from_secs(3));
+        let until = match &connection {
+            Connection::Closing { until, .. } => *until,
+            _ => panic!(),
+        };
+        tokio::time::advance(Duration::from_secs(1)).await;
+        connection.close(
+            QuicError::with_default_fty(ErrorKind::Internal, "late error").into(),
+            Duration::from_secs(30),
+        );
+        assert!(
+            matches!(&connection, Connection::Closing { error: first, until: end } if first.kind() == error.kind() && *end == until)
+        );
+        connection.drain(Duration::from_secs(30));
+        connection.close(error.into(), Duration::from_secs(30));
+        assert!(matches!(connection, Connection::Draining { until: end } if end == until));
     }
 }

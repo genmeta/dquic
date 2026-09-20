@@ -233,7 +233,7 @@ pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 
     .zip(summaries)
     .map(|(transport, summary)| {
         let path = path(&transport, 0);
-        let conn = ArcConnection::new(transport.clone(), summary.alpn.unwrap(), Arc::default());
+        let conn = ArcConnection::new(transport.clone(), summary.alpn.unwrap(), Default::default());
         (conn, transport, path)
     })
     .collect::<Vec<_>>()
@@ -259,7 +259,9 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         transport.parameters.role() == Role::Server,
     ));
     status.handshake_confirmed();
-    let feedback: Arc<dyn Feedback> = transport.data.clone();
+    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
+        transport.data.send_journal.clone(),
+    ));
     let path = Arc::new(Path::new(
         pathway,
         ConnectionId::from_slice(b"original"),
@@ -643,7 +645,7 @@ async fn router_bounds_incoming_and_packet_queues_and_credits_aliases_once() {
     // A full new-connection queue does not interfere with existing routes.
     router.receive(initial_datagram(alias, 1200), link.into(), link, 8);
     assert!(router.get(&alias).is_none());
-    let (accepted, mut packets) = incoming.try_recv().unwrap();
+    let (accepted, mut packets, _) = incoming.try_recv().unwrap();
     assert_eq!(accepted, cid);
     assert!(incoming.try_recv().is_err());
     for _ in 0..8 {
@@ -681,7 +683,8 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     use crate::{keys::ArcKeys, router::QuicRouter};
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
     let closing = Arc::new(AtomicBool::new(false));
-    let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), closing.clone());
+    let close = ArcReceiving::default();
+    let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), close.clone());
     let initial = Arc::new(Space::new(
         Epoch::Initial,
         ArcKeys::new_pending(),
@@ -725,7 +728,7 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     );
     let cid = ConnectionId::from_slice(b"original");
     router.receive(initial_datagram(cid, 1200), link.into(), link, 8);
-    let (_, inbox) = incoming.recv().await.unwrap();
+    let (_, inbox, _) = incoming.recv().await.unwrap();
     let route = router.get(&cid).unwrap();
     // This handshake packet also waits for keys; neither wait may block Data.
     let mut packet = parse(&initial_datagram(cid, 1200));
@@ -741,7 +744,7 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
         initial.clone(),
         handshake.clone(),
         st.data.clone(),
-        closing,
+        closing.clone(),
         move |_, _| Some(sp.clone()),
         move |epoch, frame, path, on_ack| {
             if matches!(frame, Frame::Stream(_, _)) {
@@ -765,8 +768,13 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     let mut body = [0; 12];
     reader.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"wired stream");
-    // The same Connection switch changes the existing engine; no replacement topology.
+    // The lifecycle owner consumes the close reason and switches the existing engine.
     server.close(VarInt::from_u32(0), "done");
+    assert!(matches!(
+        close.await.unwrap(),
+        Some(crate::CloseReason::App(_))
+    ));
+    closing.store(true, Ordering::Release);
     router.receive(ping(&keys(&ct), 1), link.into(), link, 8);
     router.receive(close_packet(&keys(&ct), 2), link.into(), link, 8);
     assert!(
@@ -1638,7 +1646,7 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     emit(&mut sender);
     drop(sender);
 
-    ct.data.may_loss(
+    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0, 0].into_iter(),
     );
@@ -1679,7 +1687,7 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     emit(&mut sender);
-    ct.data.may_loss(
+    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
@@ -1695,7 +1703,7 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     let dropped = emit(&mut sender);
     let credit = ct.flow.sender.credit(usize::MAX).unwrap().available();
-    ct.data.may_loss(
+    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
@@ -1899,7 +1907,9 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     protocol.register(local, &socket).unwrap();
     let status = Arc::new(HandshakeStatus::new(false));
     status.handshake_confirmed();
-    let feedback: Arc<dyn Feedback> = ct.data.clone();
+    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
+        ct.data.send_journal.clone(),
+    ));
     let path = Arc::new(Path::new(
         pathway,
         ConnectionId::from_slice(b"original"),
@@ -1972,7 +1982,9 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
             transport.parameters.role() == Role::Server,
         ));
         status.handshake_confirmed();
-        let feedback: Arc<dyn Feedback> = transport.data.clone();
+        let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
+            transport.data.send_journal.clone(),
+        ));
         Arc::new(Path::new(
             pathway,
             ConnectionId::from_slice(b"original"),
@@ -2014,7 +2026,9 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     let [(_client, transport, original), _] = pair(1);
     let handshake = Arc::new(HandshakeStatus::new(false));
     handshake.handshake_confirmed();
-    let feedback: Arc<dyn Feedback> = transport.data.clone();
+    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
+        transport.data.send_journal.clone(),
+    ));
     let path = Arc::new(Path::new(
         original.pathway,
         original.dcid(),

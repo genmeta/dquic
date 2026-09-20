@@ -23,7 +23,7 @@ pub mod send;
 pub mod space;
 pub mod transport;
 
-pub use connection::ArcConnection;
+pub use connection::{ArcConnection, CloseReason};
 pub use qbase::{
     error::Error, param::fixed::ArcParameters, role::Role, sid::StreamId, varint::VarInt,
 };

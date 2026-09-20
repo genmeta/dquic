@@ -429,6 +429,11 @@ impl Sender {
         }
     }
 
+    /// Wait for the conditions that blocked the last burst, without waking on unrelated credit.
+    pub async fn wait(&self) {
+        self.send_waker.wait_for(self.signals).await;
+    }
+
     /// The caller's closures capture the spaces, keys and source components.
     pub async fn run(
         &mut self,
@@ -455,7 +460,7 @@ impl Sender {
                 }
             }
             tokio::select! {
-                _ = self.send_waker.wait_for(self.signals) => {},
+                _ = self.wait() => {},
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {},
             }
         }

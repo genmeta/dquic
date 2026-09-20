@@ -183,7 +183,8 @@ pub async fn run(
 
 /// Dispatch must synchronously accept ownership or return a terminal error. A full
 /// reliable pipe is an error, never an ACK followed by silent frame loss.
-/// on_processed executes before CRYPTO can wake the TLS driver.
+/// on_processed executes before CRYPTO can wake the TLS driver. In Closing it
+/// reports authenticated packets so the owner can schedule a rate-limited CLOSE reply.
 pub fn receive_packet<K>(
     pn: u64,
     frames: FrameReader,
@@ -194,6 +195,7 @@ pub fn receive_packet<K>(
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
 ) -> Result<PacketContent, Error> {
     if closing.load(Ordering::Acquire) {
+        on_processed(space.epoch, path)?;
         for frame in frames {
             let Ok((frame, _)) = frame else { break };
             if matches!(frame, Frame::Close(_)) {
@@ -203,6 +205,8 @@ pub fn receive_packet<K>(
         }
         return Ok(PacketContent::default());
     }
+
+    // TODO: 创建啥 Vec，开销就大了，后面要整改
     let mut decoded = Vec::new();
     let mut content = PacketContent::default();
     for frame in frames {
