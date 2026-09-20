@@ -16,7 +16,6 @@ use constraints::{AntiAmplifier, Constraints};
 use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
-    flow::ArcSendControler,
     frame::AckFrame,
     net::{
         route::Pathway,
@@ -34,13 +33,13 @@ use qprotocol::protocol::quic::QuicProtocol;
 use records::ArcSendJournal;
 use write::{Packet, PacketError, PacketWriter, PendingPacket};
 
-use crate::{Error, GuaranteedFrame, ReliableFrames, keys::OneRttKeys, path::Path};
+use crate::{Error, GuaranteedFrame, keys::OneRttKeys, path::Path};
 
-pub struct Sender {
+/// Reusable per-path batch storage and submission state.
+pub struct Burst {
     protocol: Arc<QuicProtocol>,
     pub pathway: Pathway,
     pub congestion: ArcCC,
-    pub flow: ArcSendControler<ReliableFrames>,
     anti_amplifier: Arc<AntiAmplifier>,
     send_waker: ArcSendWaker,
     buffers: Vec<BytesMut>,
@@ -49,12 +48,14 @@ pub struct Sender {
     signals: Signals,
 }
 
-impl Sender {
+/// Compatibility name for callers that have not separated their sending policy yet.
+pub type Sender = Burst;
+
+impl Burst {
     pub fn new(
         protocol: Arc<QuicProtocol>,
         pathway: Pathway,
         congestion: ArcCC,
-        flow: ArcSendControler<ReliableFrames>,
         anti_amplifier: Arc<AntiAmplifier>,
         send_waker: ArcSendWaker,
     ) -> Self {
@@ -62,7 +63,6 @@ impl Sender {
             protocol,
             pathway,
             congestion,
-            flow,
             anti_amplifier,
             send_waker,
             buffers: Vec::new(),

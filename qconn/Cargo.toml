@@ -2,31 +2,23 @@
 name = "qconn"
 version.workspace = true
 edition.workspace = true
-description = "Endpoint-oriented QUIC connections built on qprotocol and qtls"
-readme.workspace = true
-repository.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sequential QUIC handshake growth on qtls and qtransport"
 
 [dependencies]
-bytes = { workspace = true }
-qbase = { workspace = true }
+bytes.workspace = true
+qbase.workspace = true
+qcongestion.workspace = true
 qprotocol = { path = "../qprotocol" }
+qrecovery.workspace = true
+qtls.workspace = true
 qtransport = { path = "../qtransport" }
-qtls = { workspace = true }
-qrecovery = { workspace = true }
-qcongestion = { workspace = true }
-qinterface = { workspace = true }
-qresolve = { workspace = true }
-qudp = { workspace = true }
-futures = { workspace = true }
-bitflags = { workspace = true }
-rustls-native-certs = { workspace = true }
-tokio-util = { workspace = true, features = ["rt"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
-thiserror = { workspace = true }
-rustls = { workspace = true, features = ["ring"] }
-tls-backend = { package = "rustls", git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std", "ring"] }
 
 [dev-dependencies]
+qudp.workspace = true
+futures.workspace = true
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tls-backend = { package = "rustls", git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std", "ring"] }

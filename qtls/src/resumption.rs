@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     LocalAuthority, RemoteAuthority, StoreError, TlsLimits,
-    handshake::{ClientResolver, PeerState, ServerVerifier},
+    handshake::{OptionalClientCert, PeerState, ServerVerifier},
 };
 
 const RECORD_MAGIC: &[u8; 4] = b"QTS1";
@@ -282,7 +282,7 @@ pub(crate) struct ClientStoreAdapter {
     store: Arc<dyn ResumptionStore>,
     seal_keys: Arc<SessionSealKeyRing>,
     verifier: Arc<ServerVerifier>,
-    resolver: Arc<ClientResolver>,
+    client_cert: Arc<OptionalClientCert>,
     peer: PeerState,
     limits: TlsLimits,
     kx_hints: Mutex<Vec<(ServerName<'static>, NamedGroup)>>,
@@ -297,7 +297,7 @@ impl ClientStoreAdapter {
         store: Arc<dyn ResumptionStore>,
         seal_keys: Arc<SessionSealKeyRing>,
         verifier: Arc<ServerVerifier>,
-        resolver: Arc<ClientResolver>,
+        client_cert: Arc<OptionalClientCert>,
         peer: PeerState,
         limits: TlsLimits,
     ) -> Self {
@@ -308,7 +308,7 @@ impl ClientStoreAdapter {
             store,
             seal_keys,
             verifier,
-            resolver,
+            client_cert,
             peer,
             limits,
             kx_hints: Mutex::new(Vec::new()),
@@ -414,12 +414,12 @@ impl ClientSessionStore for ClientStoreAdapter {
         }
         let plaintext = self.seal_keys.open(&key, &session)?;
         let (context, encoded) = SessionContext::decode(&plaintext, self.limits)?;
-        context.restore_client(&self.peer, &self.resolver, &self.provider)?;
+        context.restore_client(&self.peer, &self.client_cert)?;
         Tls13ClientSessionValue::decode_resumption_state(
             encoded,
             &self.provider,
             self.verifier.clone(),
-            self.resolver.clone(),
+            self.client_cert.clone(),
         )
         .ok()
     }
@@ -654,14 +654,9 @@ impl SessionContext {
         )
     }
 
-    fn restore_client(
-        self,
-        peer: &PeerState,
-        resolver: &ClientResolver,
-        provider: &rustls::crypto::CryptoProvider,
-    ) -> Option<()> {
+    fn restore_client(self, peer: &PeerState, client_cert: &OptionalClientCert) -> Option<()> {
         let local = match self.local {
-            Some(expected) => Some(resolver.rebind(&expected, provider)?),
+            Some(expected) => Some(client_cert.rebind(&expected)?),
             None => None,
         };
         let remote = self.remote?.into_remote()?;

@@ -1,310 +1,351 @@
-//! Adapt signing capabilities across the two existing rustls dependencies.
-//! No encoded private key crosses this boundary.
-use std::sync::Arc;
+//! Async views of independent TLS outputs. No packet or connection state lives here.
+mod io;
 
-use qbase::endpoint::LocalAuthority;
+use std::{
+    collections::VecDeque,
+    future::poll_fn,
+    sync::{Arc, Mutex},
+    task::{Poll, Waker},
+};
 
-#[derive(Debug)]
-pub(crate) struct Verifier(pub(crate) Arc<dyn rustls::client::danger::ServerCertVerifier>);
+use bytes::{Bytes, BytesMut};
+pub(crate) use io::read_tls_to_crypto_stream;
+pub use io::{read_crypto_stream_to_tls, write_crypto};
+use qbase::{
+    error::{Error, ErrorKind, QuicError},
+    param::{ClientParameters, ServerParameters, WriteParameters},
+};
+use qtls::{CryptoLevel, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
 
-impl qtls::VerifyIdentity for Verifier {
-    fn verify(
-        &self,
-        expected: Option<&str>,
-        certificates: &[qtls::CertificateDer<'_>],
-        ocsp: Option<&[u8]>,
-        now: qtls::UnixTime,
-    ) -> Result<Option<Arc<str>>, qtls::CertificateError> {
-        let name = expected.ok_or(qtls::CertificateError::NotValidForName)?;
-        let server_name = qtls::ServerName::try_from(name)
-            .map_err(|_| qtls::CertificateError::NotValidForName)?;
-        let (leaf, intermediates) = certificates
-            .split_first()
-            .ok_or(qtls::CertificateError::BadEncoding)?;
-        self.0
-            .verify_server_cert(
-                leaf,
-                intermediates,
-                &server_name,
-                ocsp.unwrap_or_default(),
-                now,
-            )
-            .map_err(|_| qtls::CertificateError::ApplicationVerificationFailure)?;
-        Ok(Some(name.into()))
-    }
+/// One reader for CRYPTO output, and one growing coroutine for handshake results.
+#[derive(Clone)]
+pub struct TlsContext(Arc<Mutex<Result<Tls, Error>>>);
+
+enum Backend {
+    Handshake(Box<TlsHandshake>),
+    Established(Box<qtls::EstablishedTls>),
+    // Used only while moving the completed handshake into Established under the lock.
+    Closed,
 }
 
-pub(crate) fn local_authority(
-    local: &LocalAuthority,
-) -> Result<qtls::LocalAuthority, qtls::InvalidLocalAuthority> {
-    qtls::LocalAuthority::from_signing_key(
-        local.name().into(),
-        local.cert_chain().to_vec(),
-        Arc::new(SigningKey(local.signing_key().clone())),
-        local.ocsp().map(<[u8]>::to_vec),
-    )
+struct Tls {
+    backend: Backend,
+    messages: VecDeque<(CryptoLevel, Bytes)>,
+    keys: VecDeque<InstalledKeys>,
+    hello: Option<(Option<Arc<str>>, Bytes)>,
+    summary: Option<HandshakeSummary>,
+    pending_bytes: usize,
+    max_pending_bytes: usize,
+    message_waker: Option<Waker>,
+    level_wakers: [Option<Waker>; 3],
+    key_waker: Option<Waker>,
+    hello_waker: Option<Waker>,
+    finished_waker: Option<Waker>,
 }
 
-#[derive(Debug)]
-struct SigningKey(Arc<dyn rustls::sign::SigningKey>);
-
-impl tls_backend::sign::SigningKey for SigningKey {
-    fn choose_scheme(
-        &self,
-        offered: &[tls_backend::SignatureScheme],
-    ) -> Option<Box<dyn tls_backend::sign::Signer>> {
-        let offered = offered
-            .iter()
-            .map(|scheme| rustls::SignatureScheme::from(u16::from(*scheme)))
-            .collect::<Vec<_>>();
-        self.0
-            .choose_scheme(&offered)
-            .map(|signer| Box::new(Signer(signer)) as Box<dyn tls_backend::sign::Signer>)
+impl TlsContext {
+    pub fn client(
+        endpoint: &qtls::TlsClient,
+        server_name: qtls::ServerName<'static>,
+        parameters: &ClientParameters,
+    ) -> Result<Self, Error> {
+        let max_pending_bytes = endpoint.max_flight_bytes();
+        let mut encoded = BytesMut::new();
+        encoded.put_parameters(parameters);
+        let tls = endpoint
+            .start(qtls::ClientStart {
+                server_name,
+                quic_version: qtls::QuicVersion::V1,
+                local_transport_parameters: encoded.freeze(),
+            })
+            .map_err(tls_error)?;
+        Self::new(tls, max_pending_bytes)
     }
 
-    fn public_key(&self) -> Option<tls_backend::pki_types::SubjectPublicKeyInfoDer<'_>> {
-        self.0.public_key()
-    }
-
-    fn algorithm(&self) -> tls_backend::SignatureAlgorithm {
-        tls_backend::SignatureAlgorithm::from(u8::from(self.0.algorithm()))
-    }
-}
-
-#[derive(Debug)]
-struct Signer(Box<dyn rustls::sign::Signer>);
-
-impl tls_backend::sign::Signer for Signer {
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, tls_backend::Error> {
-        self.0
-            .sign(message)
-            .map_err(|error| tls_backend::Error::General(error.to_string()))
-    }
-
-    fn scheme(&self) -> tls_backend::SignatureScheme {
-        tls_backend::SignatureScheme::from(u16::from(self.0.scheme()))
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use bytes::Bytes;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-
-    use super::*;
-
-    const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-    const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-    const CLIENT_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
-    const CLIENT_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/client.key");
-
-    fn authority(name: &str, certificate: &[u8], key: &[u8]) -> LocalAuthority {
-        qbase::endpoint::Endpoint::new(
-            &rustls::crypto::ring::default_provider(),
-            name,
-            vec![CertificateDer::from_pem_slice(certificate).unwrap()],
-            PrivateKeyDer::from_pem_slice(key).unwrap(),
-            None,
-        )
-        .unwrap()
-        .into()
-    }
-
-    #[derive(Debug)]
-    struct Authority(Option<qtls::LocalAuthority>);
-
-    impl qtls::ResolveServerAuthority for Authority {
-        fn resolve(
-            &self,
-            request: qtls::ServerCredentialRequest<'_>,
-        ) -> Option<qtls::LocalAuthority> {
-            self.0
-                .as_ref()
-                .filter(|local| Some(local.name()) == request.server_name)
-                .cloned()
+    pub fn server(
+        endpoint: &qtls::TlsServer,
+        version: qtls::QuicVersion,
+        parameters: Bytes,
+        hello: qtls::incoming::ClientHello,
+    ) -> Result<(Self, Arc<ClientParameters>), Error> {
+        let client_parameters = Arc::new(ClientParameters::parse_from_bytes(
+            hello.transport_parameters(),
+        )?);
+        let tls = endpoint.start(version, parameters).map_err(tls_error)?;
+        let context = Self::new(tls, endpoint.max_flight_bytes())?;
+        context.write_msg(CryptoLevel::Initial, hello.encoded())?;
+        if let Ok(tls) = context.0.lock().unwrap().as_mut() {
+            tls.hello = None;
         }
+        Ok((context, client_parameters))
     }
 
-    impl qtls::ResolveClientAuthority for Authority {
-        fn resolve(&self, _: qtls::ClientCertificateRequest<'_>) -> Option<qtls::LocalAuthority> {
-            self.0.clone()
-        }
-        fn has_authority(&self) -> bool {
-            self.0.is_some()
-        }
+    /// Wrap a configured client or server backend. Server endpoint selection is external.
+    /// The byte limit bounds TLS output waiting for the CRYPTO writer, independently of
+    /// the backend's limits on received handshake messages and individual output flights.
+    pub fn new(tls: TlsHandshake, max_pending_bytes: usize) -> Result<Self, Error> {
+        let mut tls = Tls {
+            backend: Backend::Handshake(Box::new(tls)),
+            messages: VecDeque::new(),
+            keys: VecDeque::new(),
+            hello: None,
+            summary: None,
+            pending_bytes: 0,
+            max_pending_bytes,
+            message_waker: None,
+            level_wakers: [None, None, None],
+            key_waker: None,
+            hello_waker: None,
+            finished_waker: None,
+        };
+        tls.collect()?;
+        Ok(Self(Arc::new(Mutex::new(Ok(tls)))))
     }
 
-    // Fixture-only pinning; production must supply its own trust/name policy.
-    #[derive(Debug)]
-    struct PinnedCertificate(&'static str, CertificateDer<'static>);
-
-    pub(crate) fn verifier(
-        name: &'static str,
-        certificate: &[u8],
-    ) -> Arc<dyn qtls::VerifyIdentity> {
-        Arc::new(PinnedCertificate(
-            name,
-            CertificateDer::from_pem_slice(certificate).unwrap(),
-        ))
-    }
-
-    impl qtls::VerifyIdentity for PinnedCertificate {
-        fn verify(
-            &self,
-            expected: Option<&str>,
-            certificates: &[CertificateDer<'_>],
-            _: Option<&[u8]>,
-            _: qtls::UnixTime,
-        ) -> Result<Option<Arc<str>>, qtls::CertificateError> {
-            if certificates != [self.1.clone()] {
-                return Err(qtls::CertificateError::UnknownIssuer);
+    /// Read output bytes, not necessarily one complete TLS message. Cancellation is safe.
+    pub async fn read_msg(&self) -> Result<(CryptoLevel, Bytes), Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some((level, bytes)) = tls.messages.pop_front() {
+                tls.pending_bytes -= bytes.len();
+                Poll::Ready(Ok((level, bytes)))
+            } else {
+                tls.message_waker = Some(cx.waker().clone());
+                Poll::Pending
             }
-            if expected.is_some_and(|name| name != self.0) {
-                return Err(qtls::CertificateError::NotValidForName);
+        })
+        .await
+    }
+
+    pub(crate) async fn read_msg_at(&self, level: CryptoLevel) -> Result<Bytes, Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(index) = tls
+                .messages
+                .iter()
+                .position(|(message_level, _)| *message_level == level)
+            {
+                let (_, bytes) = tls.messages.remove(index).unwrap();
+                tls.pending_bytes -= bytes.len();
+                Poll::Ready(Ok(bytes))
+            } else {
+                tls.level_wakers[level_index(level)] = Some(cx.waker().clone());
+                Poll::Pending
             }
-            Ok(Some(self.0.into()))
+        })
+        .await
+    }
+
+    /// Feed contiguous CRYPTO input and publish all resulting facts without awaiting consumers.
+    pub fn write_msg(&self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+        let mut guard = self.0.lock().unwrap();
+        let tls = guard.as_mut().map_err(|error| error.clone())?;
+        let result = tls.write(level, bytes);
+        if let Err(error) = &result {
+            tls.wake_all();
+            *guard = Err(error.clone());
+        }
+        result
+    }
+
+    /// Wait for server parameters in EncryptedExtensions, after installing Handshake keys.
+    pub async fn read_server_hello(&self) -> Result<ServerParameters, Error> {
+        let (_, bytes) = self.read_hello().await?;
+        Ok(ServerParameters::parse_from_bytes(&bytes)?)
+    }
+
+    /// The caller has already selected/configured the server TLS endpoint.
+    /// A missing SNI is preserved for the caller's endpoint policy to decide.
+    pub async fn read_client_hello(&self) -> Result<(Option<Arc<str>>, ClientParameters), Error> {
+        let (name, bytes) = self.read_hello().await?;
+        Ok((name, ClientParameters::parse_from_bytes(&bytes)?))
+    }
+
+    async fn read_hello(&self) -> Result<(Option<Arc<str>>, Bytes), Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(hello) = tls.hello.take() {
+                Poll::Ready(Ok(hello))
+            } else {
+                tls.hello_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Consume the next key installation; cancelling a pending wait consumes nothing.
+    pub async fn read_keys(&self) -> Result<InstalledKeys, Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(keys) = tls.keys.pop_front() {
+                Poll::Ready(Ok(keys))
+            } else {
+                tls.key_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Consume the authenticated result. This does not wait for QUIC HANDSHAKE_DONE.
+    pub async fn finished(&self) -> Result<HandshakeSummary, Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(summary) = tls.summary.take() {
+                Poll::Ready(Ok(summary))
+            } else {
+                tls.finished_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Wake every TLS consumer and release queued bytes and key material.
+    pub fn on_error(&self, error: Error) {
+        let mut guard = self.0.lock().unwrap();
+        if let Ok(tls) = guard.as_mut() {
+            tls.wake_all();
+            *guard = Err(error);
         }
     }
+}
 
-    pub(crate) fn pair(mutual: bool) -> (qtls::TlsHandshake, qtls::TlsHandshake) {
-        let provider = Arc::new(qtls::default_provider());
-        let server = authority("localhost", SERVER_CERT, SERVER_KEY);
-        let client = authority("client", CLIENT_CERT, CLIENT_KEY);
-        let client_tls = qtls::ClientTlsEndpoint::new(qtls::ClientTlsConfig {
-            provider: provider.clone(),
-            alpn: vec![b"qconn".to_vec()],
-            resolve_local: Arc::new(Authority(mutual.then(|| local_authority(&client).unwrap()))),
-            verify_server: Arc::new(PinnedCertificate(
-                "localhost",
-                server.cert_chain()[0].clone(),
-            )),
-            resumption: qtls::ClientResumptionConfig::Disabled,
-            limits: qtls::TlsLimits::default(),
-        })
-        .unwrap();
-        let server_tls = qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
-            provider,
-            alpn: vec![b"qconn".to_vec()],
-            resolve_local: Arc::new(Authority(Some(local_authority(&server).unwrap()))),
-            verify_client: mutual.then(|| {
-                Arc::new(PinnedCertificate("client", client.cert_chain()[0].clone()))
-                    as Arc<dyn qtls::VerifyIdentity>
-            }),
-            resumption: qtls::ServerResumptionConfig::Disabled,
-            limits: qtls::TlsLimits::default(),
-        })
-        .unwrap();
-        (
-            client_tls
-                .start(qtls::ClientStart {
-                    server_name: "localhost".try_into().unwrap(),
-                    quic_version: qtls::QuicVersion::V1,
-                    local_transport_parameters: Bytes::from_static(b"client parameters"),
-                })
-                .unwrap(),
-            server_tls
-                .start(
-                    qtls::QuicVersion::V1,
-                    Bytes::from_static(b"server parameters"),
-                )
-                .unwrap(),
-        )
+impl Tls {
+    fn write(&mut self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+        match &mut self.backend {
+            Backend::Handshake(tls) => tls.receive_crypto(level, bytes).map_err(tls_error)?,
+            Backend::Established(tls) => {
+                if level != CryptoLevel::OneRtt {
+                    return Err(QuicError::with_default_fty(
+                        ErrorKind::ProtocolViolation,
+                        "post-handshake CRYPTO at an earlier encryption level",
+                    )
+                    .into());
+                }
+                return tls.receive_post_handshake(bytes).map_err(tls_error);
+            }
+            Backend::Closed => unreachable!("backend is moved under the context lock"),
+        }
+        self.collect()
     }
 
-    pub(crate) fn initial_keys() -> qtls::BidirectionalKeys {
-        qtls::ServerTlsEndpoint::new(qtls::ServerTlsConfig {
-            provider: Arc::new(qtls::default_provider()),
-            alpn: vec![b"qconn".to_vec()],
-            resolve_local: Arc::new(Authority(None)),
-            verify_client: None,
-            resumption: qtls::ServerResumptionConfig::Disabled,
-            limits: qtls::TlsLimits::default(),
-        })
-        .unwrap()
-        .initial_keys(qtls::QuicVersion::V1, b"original")
-        .unwrap()
-    }
-
-    pub(crate) fn handshake(mutual: bool) -> [qtls::OneRttKeyMaterial; 2] {
-        let (client, server) = pair(mutual);
-        let mut peers = [client, server];
-        let mut keys = [None, None];
-        let mut completed = [None, None];
-        let mut parameters = [false, false];
-        for _ in 0..16 {
-            let mut progress = false;
-            for i in 0..2 {
-                while let Some(event) = peers[i].next_event() {
-                    progress = true;
-                    match event {
-                        qtls::TlsEvent::WriteCrypto { level, bytes } => {
-                            peers[1 - i].receive_crypto(level, &bytes).unwrap()
-                        }
-                        qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(material)) => {
-                            keys[i] = Some(material)
-                        }
-                        qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::Handshake(_)) => {}
-                        qtls::TlsEvent::ClientHello {
-                            server_name,
-                            transport_parameters,
-                        } => {
-                            assert_eq!(i, 1);
-                            assert_eq!(server_name.as_deref(), Some("localhost"));
-                            assert_eq!(transport_parameters.as_ref(), b"client parameters");
-                            parameters[i] = true;
-                        }
-                        qtls::TlsEvent::ServerTransportParameters(bytes) => {
-                            assert_eq!(i, 0);
-                            assert_eq!(bytes.as_ref(), b"server parameters");
-                            parameters[i] = true;
-                        }
-                        qtls::TlsEvent::HandshakeComplete(summary) => {
-                            assert!(parameters[i] && keys[i].is_some());
-                            assert!(completed[i].replace(summary).is_none());
-                        }
-                        _ => panic!("unexpected TLS event"),
+    fn collect(&mut self) -> Result<(), Error> {
+        while let Backend::Handshake(tls) = &mut self.backend {
+            let Some(event) = tls.next_event() else { break };
+            match event {
+                TlsEvent::WriteCrypto { level, bytes } => {
+                    if bytes.len() > self.max_pending_bytes - self.pending_bytes {
+                        return Err(QuicError::with_default_fty(
+                            ErrorKind::CryptoBufferExceeded,
+                            "pending TLS output exceeds its byte limit",
+                        )
+                        .into());
+                    }
+                    self.pending_bytes += bytes.len();
+                    self.messages.push_back((level, bytes));
+                    if let Some(waker) = self.message_waker.take() {
+                        waker.wake();
+                    }
+                    if let Some(waker) = self.level_wakers[level_index(level)].take() {
+                        waker.wake();
                     }
                 }
-            }
-            if !progress {
-                break;
+                TlsEvent::InstallKeys(keys) => {
+                    self.keys.push_back(keys);
+                    if let Some(waker) = self.key_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::ClientHello {
+                    server_name,
+                    transport_parameters,
+                } => {
+                    self.hello = Some((server_name, transport_parameters));
+                    if let Some(waker) = self.hello_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::ServerTransportParameters(parameters) => {
+                    self.hello = Some((None, parameters));
+                    if let Some(waker) = self.hello_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::HandshakeComplete(summary) => {
+                    self.summary = Some(summary);
+                    if let Some(waker) = self.finished_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::Alert(alert) => return Err(tls_error(qtls::TlsError::Alert(alert))),
             }
         }
-        let [client, server] = completed.map(Option::unwrap);
-        assert_eq!(client.local.is_some(), mutual);
-        assert_eq!(server.remote.is_some(), mutual);
-        assert_eq!(client.remote.unwrap().name(), "localhost");
-        assert_eq!(server.local.unwrap().name(), "localhost");
-        let [client, server] = peers.map(|tls| tls.finish().unwrap());
-        let mut client_exporter = [0; 32];
-        let mut server_exporter = [0; 32];
-        client
-            .export_keying_material(&mut client_exporter, b"qconn integration", None)
-            .unwrap();
-        server
-            .export_keying_material(&mut server_exporter, b"qconn integration", None)
-            .unwrap();
-        assert_eq!(client_exporter, server_exporter);
-        keys.map(Option::unwrap)
+        if matches!(&self.backend, Backend::Handshake(tls) if tls.is_complete()) {
+            let Backend::Handshake(tls) = std::mem::replace(&mut self.backend, Backend::Closed)
+            else {
+                unreachable!()
+            };
+            self.backend = Backend::Established(Box::new(tls.finish().expect("completed TLS")));
+        }
+        Ok(())
     }
 
-    #[test]
-    fn loaded_qbase_keys_complete_mutual_and_anonymous_tls_handshakes() {
-        handshake(true);
-        handshake(false);
+    fn wake_all(&mut self) {
+        for waker in [
+            self.message_waker.take(),
+            self.key_waker.take(),
+            self.hello_waker.take(),
+            self.finished_waker.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            waker.wake();
+        }
+        for waker in self.level_wakers.iter_mut().filter_map(Option::take) {
+            waker.wake();
+        }
     }
+}
 
-    #[test]
-    fn invalid_material_is_rejected_at_handshake_credential_creation() {
-        let local = authority("localhost", CLIENT_CERT, SERVER_KEY);
-        assert!(matches!(
-            local_authority(&local),
-            Err(qtls::InvalidLocalAuthority::InvalidPrivateKey(_))
-        ));
-        let local = authority("not a dns name", SERVER_CERT, SERVER_KEY);
-        assert!(matches!(
-            local_authority(&local),
-            Err(qtls::InvalidLocalAuthority::InvalidName)
-        ));
+fn level_index(level: CryptoLevel) -> usize {
+    match level {
+        CryptoLevel::Initial => 0,
+        CryptoLevel::Handshake => 1,
+        CryptoLevel::OneRtt => 2,
     }
+}
+
+pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
+    let kind = match &error {
+        qtls::TlsError::Alert(alert) => ErrorKind::Crypto(alert.description()),
+        qtls::TlsError::Peer(qtls::PeerTlsError::ResourceLimit { .. }) => {
+            ErrorKind::CryptoBufferExceeded
+        }
+        qtls::TlsError::Peer(_) => ErrorKind::Crypto(40),
+        _ => ErrorKind::Internal,
+    };
+    QuicError::with_default_fty(kind, error.to_string()).into()
 }

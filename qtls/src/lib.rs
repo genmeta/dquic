@@ -7,16 +7,14 @@ mod authority;
 mod config;
 mod error;
 mod handshake;
+pub mod incoming;
 pub mod keys;
+mod ocsp;
 mod resumption;
+mod root;
 
-pub use authority::{
-    ClientCertificateRequest, LocalAuthority, RemoteAuthority, ResolveClientAuthority,
-    ResolveServerAuthority, ServerCredentialRequest, SignError, VerifyIdentity,
-};
-pub use config::{
-    ClientStart, ClientTlsConfig, ClientTlsEndpoint, ServerTlsConfig, ServerTlsEndpoint, TlsLimits,
-};
+pub use authority::{LocalAuthority, RemoteAuthority, SignError};
+pub use config::{ClientStart, ClientTlsConfig, ServerTlsConfig, TlsClient, TlsLimits, TlsServer};
 pub use error::{
     CertificateError, CryptoError, ExporterError, HandshakeNotComplete, InvalidLocalAuthority,
     PeerTlsError, StoreError, TlsAlert, TlsConfigError, TlsError, TlsInvariantError,
@@ -32,6 +30,7 @@ pub use resumption::{
     ClientResumptionConfig, MemoryResumptionStore, ResumptionKey, ResumptionStore,
     ServerResumptionConfig, SessionSealKeyRing, StoredSession, TicketKeyRing,
 };
+pub use root::RootCerts;
 /// Default provider for the enabled qtls backend; AWS-LC takes precedence over ring.
 #[cfg(feature = "aws-lc-rs")]
 pub use rustls::crypto::aws_lc_rs::default_provider;
@@ -39,8 +38,10 @@ pub use rustls::crypto::aws_lc_rs::default_provider;
 #[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
 pub use rustls::crypto::ring::default_provider;
 pub use rustls::{
-    SignatureScheme,
+    Error as RustlsError, SignatureScheme,
+    crypto::{CryptoProvider, WebPkiSupportedAlgorithms},
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    sign::SigningKey,
 };
 
 /// QUIC versions whose TLS labels and Initial salts are supported by this crate.

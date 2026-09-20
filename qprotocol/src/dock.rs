@@ -1,4 +1,8 @@
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+};
 
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
@@ -12,6 +16,18 @@ pub struct Dock {
 }
 
 impl Dock {
+    /// Process-wide socket dock and its single protocol topology.
+    pub fn global() -> &'static Arc<Self> {
+        static DOCK: OnceLock<Arc<Dock>> = OnceLock::new();
+        DOCK.get_or_init(|| {
+            Self::new(Arc::new(Topology::new(
+                Arc::new(crate::StunProtocol::new()),
+                Arc::new(crate::ForwardProtocol::new()),
+                Arc::new(crate::QuicProtocol::new()),
+            )))
+        })
+    }
+
     pub fn new(topology: Arc<Topology>) -> Arc<Self> {
         Arc::new(Self {
             sockets: DashMap::new(),

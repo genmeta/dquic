@@ -539,6 +539,16 @@ impl ArcCC {
         ))))
     }
 
+    /// Install negotiated local ACK scheduling and peer ACK/PTO bounds.
+    pub fn set_ack_delays(&self, local: Duration, peer: Duration) {
+        let mut guard = self.0.lock().unwrap();
+        guard.max_ack_delay = peer;
+        guard.rtt.set_max_ack_delay(peer);
+        guard.packet_spaces[Epoch::Data]
+            .rcvd_packets
+            .set_max_ack_delay(local);
+    }
+
     /// Borrow the controller across a nonblocking submission and its accounting.
     /// Acquire this before recovery journals; release it before application callbacks.
     pub fn lock(&self) -> MutexGuard<'_, CongestionController> {
@@ -694,6 +704,24 @@ mod tests {
     fn controller() -> CongestionController {
         let feedback: Arc<dyn Feedback> = Arc::new(NoopFeedback);
         controller_with_feedback(feedback)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn negotiated_ack_delays_separate_local_scheduling_from_peer_pto() {
+        use crate::Transport;
+        let cc = ArcCC(Arc::new(Mutex::new(controller())));
+        let initial_pto = cc.pto_base(Epoch::Initial);
+        let data_pto = cc.pto_base(Epoch::Data);
+        cc.set_ack_delays(Duration::from_millis(3), Duration::from_millis(55));
+        assert_eq!(cc.pto_base(Epoch::Initial), initial_pto);
+        assert_eq!(
+            cc.pto_base(Epoch::Data),
+            data_pto + Duration::from_millis(30)
+        );
+        cc.on_pkt_rcvd(Epoch::Data, 0, true);
+        assert!(cc.need_ack(Epoch::Data).is_none());
+        tokio::time::advance(Duration::from_millis(4)).await;
+        assert!(cc.need_ack(Epoch::Data).is_some());
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //!
 #![allow(clippy::all)]
 use std::{
-    ops::{Index, IndexMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
@@ -171,6 +171,41 @@ impl<I: Unpin> Future for Receiving<I> {
 #[derive(Debug, Clone)]
 pub struct ArcReceiving<I>(Arc<Mutex<Receiving<I>>>);
 
+/// A pending assignment, submitted when the guard is dropped.
+///
+/// The slot starts empty and does not expose an already received value.
+/// Leaving it empty does not change the receiver. No lock is held until submission.
+#[must_use = "assign a value to the guard to submit it on drop"]
+pub struct ReceivingGuard<'a, I> {
+    receiving: &'a ArcReceiving<I>,
+    item: Option<I>,
+}
+
+impl<I> Deref for ReceivingGuard<'_, I> {
+    type Target = Option<I>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
+}
+
+impl<I> DerefMut for ReceivingGuard<'_, I> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.item
+    }
+}
+
+impl<I> Drop for ReceivingGuard<'_, I> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(item) = self.item.take() {
+            self.receiving.obtain(item);
+        }
+    }
+}
+
 impl<I> Default for ArcReceiving<I> {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(Receiving::Pending)))
@@ -178,8 +213,37 @@ impl<I> Default for ArcReceiving<I> {
 }
 
 impl<I> ArcReceiving<I> {
+    /// Submits the first value and wakes the waiter, if any.
+    #[inline]
     pub fn obtain(&self, item: I) {
         self.0.lock().unwrap().obtain(item);
+    }
+
+    /// Submits a value with the same semantics as [`Self::obtain`].
+    #[inline]
+    pub fn set(&self, item: I) {
+        self.obtain(item);
+    }
+
+    /// Returns an empty assignment slot, submitted when its guard is dropped.
+    ///
+    /// ```
+    /// let receiving = qbase::ArcReceiving::default();
+    /// *receiving.as_mut() = Some(7);
+    /// # assert_eq!(futures::executor::block_on(receiving).unwrap(), Some(7));
+    /// ```
+    #[inline]
+    pub fn as_mut(&self) -> ReceivingGuard<'_, I> {
+        ReceivingGuard {
+            receiving: self,
+            item: None,
+        }
+    }
+
+    /// Submits a value with the same semantics as [`Self::obtain`].
+    #[inline]
+    pub fn with(&self, item: I) {
+        self.obtain(item);
     }
 
     pub fn cancel(&self) {
@@ -270,5 +334,81 @@ mod tests {
             poll(&mut receiving, waker),
             Poll::Ready(Ok(Some(7)))
         ));
+    }
+
+    #[test]
+    fn assignment_wakes_waiter_only_when_guard_is_dropped() {
+        let receiving = ArcReceiving::default();
+        let mut reader = receiving.clone();
+        let counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(counter.clone());
+        let mut guard = receiving.as_mut();
+        *guard = Some(7);
+
+        assert!(poll(&mut reader, &waker).is_pending());
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        drop(guard);
+
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            poll(&mut reader, &waker),
+            Poll::Ready(Ok(Some(7)))
+        ));
+        receiving.set(9);
+        assert!(matches!(poll(&mut reader, &waker), Poll::Ready(Ok(None))));
+    }
+
+    #[test]
+    fn empty_assignment_keeps_waiting() {
+        let mut receiving = ArcReceiving::default();
+        let counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(counter.clone());
+        assert!(poll(&mut receiving, &waker).is_pending());
+
+        assert!(receiving.as_mut().is_none());
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert!(poll(&mut receiving, &waker).is_pending());
+
+        receiving.set(7);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            poll(&mut receiving, &waker),
+            Poll::Ready(Ok(Some(7)))
+        ));
+    }
+
+    #[test]
+    fn assignment_does_not_overwrite_a_concurrent_submission() {
+        let receiving = ArcReceiving::default();
+        let mut guard = receiving.as_mut();
+        *guard = Some(9);
+        receiving.set(7);
+        drop(guard);
+        receiving.with(11);
+
+        assert_eq!(futures::executor::block_on(receiving).unwrap(), Some(7));
+    }
+
+    #[test]
+    fn assignment_does_not_reopen_cancelled_receiver() {
+        let receiving = ArcReceiving::default();
+        let mut guard = receiving.as_mut();
+        *guard = Some(7);
+        receiving.cancel();
+        drop(guard);
+
+        assert!(futures::executor::block_on(receiving).is_err());
+    }
+
+    #[tokio::test]
+    async fn with_wakes_async_receiver() {
+        let receiving = ArcReceiving::default();
+        let writer = receiving.clone();
+        let (result, ()) = tokio::join!(receiving, async {
+            tokio::task::yield_now().await;
+            writer.with(7);
+        });
+
+        assert_eq!(result.unwrap(), Some(7));
     }
 }

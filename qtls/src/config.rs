@@ -4,17 +4,16 @@ use bytes::Bytes;
 use rustls::{ClientConfig, ServerConfig, pki_types::ServerName};
 
 use crate::{
-    BidirectionalKeys, ClientResumptionConfig, QuicVersion, ResolveClientAuthority,
-    ResolveServerAuthority, ServerResumptionConfig, TlsConfigError, TlsError, TlsHandshake,
-    VerifyIdentity,
+    BidirectionalKeys, ClientResumptionConfig, LocalAuthority, QuicVersion, RootCerts,
+    ServerResumptionConfig, TlsConfigError, TlsError, TlsHandshake,
     handshake::{PeerState, Role},
+    root::RootCertsSnapshot,
 };
 
 pub struct ClientTlsConfig {
     pub provider: Arc<rustls::crypto::CryptoProvider>,
     pub alpn: Vec<Vec<u8>>,
-    pub resolve_local: Arc<dyn ResolveClientAuthority>,
-    pub verify_server: Arc<dyn VerifyIdentity>,
+    pub local: Option<LocalAuthority>,
     pub resumption: ClientResumptionConfig,
     pub limits: TlsLimits,
 }
@@ -22,8 +21,7 @@ pub struct ClientTlsConfig {
 pub struct ServerTlsConfig {
     pub provider: Arc<rustls::crypto::CryptoProvider>,
     pub alpn: Vec<Vec<u8>>,
-    pub resolve_local: Arc<dyn ResolveServerAuthority>,
-    pub verify_client: Option<Arc<dyn VerifyIdentity>>,
+    pub local: LocalAuthority,
     pub resumption: ServerResumptionConfig,
     pub limits: TlsLimits,
 }
@@ -57,25 +55,25 @@ pub struct ClientStart {
     pub local_transport_parameters: Bytes,
 }
 
-pub struct ClientTlsEndpoint {
+pub struct TlsClient {
     provider: Arc<rustls::crypto::CryptoProvider>,
+    roots: RootCertsSnapshot,
     alpn: Arc<[Vec<u8>]>,
-    resolve_local: Arc<dyn ResolveClientAuthority>,
-    verify_server: Arc<dyn VerifyIdentity>,
+    local: Option<LocalAuthority>,
     resumption: ClientResumptionConfig,
     limits: TlsLimits,
 }
 
-pub struct ServerTlsEndpoint {
+pub struct TlsServer {
     provider: Arc<rustls::crypto::CryptoProvider>,
+    roots: RootCertsSnapshot,
     alpn: Arc<[Vec<u8>]>,
-    resolve_local: Arc<dyn ResolveServerAuthority>,
-    verify_client: Option<Arc<dyn VerifyIdentity>>,
+    local: LocalAuthority,
     resumption: ServerResumptionConfig,
     limits: TlsLimits,
 }
 
-impl ClientTlsEndpoint {
+impl TlsClient {
     pub fn new(config: ClientTlsConfig) -> Result<Self, TlsConfigError> {
         validate_config(&config.provider, &config.alpn, config.limits)?;
         #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
@@ -86,9 +84,9 @@ impl ClientTlsEndpoint {
         }
         Ok(Self {
             provider: config.provider,
+            roots: RootCerts::get()?,
             alpn: config.alpn.into(),
-            resolve_local: config.resolve_local,
-            verify_server: config.verify_server,
+            local: config.local,
             resumption: config.resumption,
             limits: config.limits,
         })
@@ -107,16 +105,20 @@ impl ClientTlsEndpoint {
         )
     }
 
+    pub fn max_flight_bytes(&self) -> usize {
+        self.limits.max_flight_bytes
+    }
+
     pub fn start(&self, input: ClientStart) -> Result<TlsHandshake, TlsError> {
         let peer = PeerState::new();
         let verifier = Arc::new(crate::handshake::ServerVerifier::new(
-            self.verify_server.clone(),
+            self.roots.clone(),
             self.provider.clone(),
             peer.clone(),
             self.limits,
-        ));
-        let resolver = Arc::new(crate::handshake::ClientResolver::new(
-            self.resolve_local.clone(),
+        )?);
+        let client_cert = Arc::new(crate::handshake::OptionalClientCert::new(
+            self.local.clone(),
             peer.clone(),
             self.limits,
         ));
@@ -126,7 +128,7 @@ impl ClientTlsEndpoint {
             .map_err(|error| TlsConfigError::Invalid(error.to_string()))?
             .dangerous()
             .with_custom_certificate_verifier(verifier.clone())
-            .with_client_cert_resolver(resolver.clone());
+            .with_client_cert_resolver(client_cert.clone());
         config.alpn_protocols = self.alpn.to_vec();
         config.enable_early_data = false;
         config.resumption = match &self.resumption {
@@ -143,7 +145,7 @@ impl ClientTlsEndpoint {
                     store.clone(),
                     seal_keys.clone(),
                     verifier,
-                    resolver,
+                    client_cert,
                     peer.clone(),
                     self.limits,
                 ),
@@ -168,7 +170,7 @@ impl ClientTlsEndpoint {
     }
 }
 
-impl ServerTlsEndpoint {
+impl TlsServer {
     pub fn new(config: ServerTlsConfig) -> Result<Self, TlsConfigError> {
         validate_config(&config.provider, &config.alpn, config.limits)?;
         #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
@@ -179,9 +181,9 @@ impl ServerTlsEndpoint {
         }
         Ok(Self {
             provider: config.provider,
+            roots: RootCerts::get()?,
             alpn: config.alpn.into(),
-            resolve_local: config.resolve_local,
-            verify_client: config.verify_client,
+            local: config.local,
             resumption: config.resumption,
             limits: config.limits,
         })
@@ -200,14 +202,18 @@ impl ServerTlsEndpoint {
         )
     }
 
+    pub fn max_flight_bytes(&self) -> usize {
+        self.limits.max_flight_bytes
+    }
+
     pub fn start(
         &self,
         quic_version: QuicVersion,
         local_transport_parameters: Bytes,
     ) -> Result<TlsHandshake, TlsError> {
         let peer = PeerState::new();
-        let resolver = Arc::new(crate::handshake::ServerResolver::new(
-            self.resolve_local.clone(),
+        let server_cert = Arc::new(crate::handshake::FixedServerCert::new(
+            self.local.clone(),
             peer.clone(),
             self.limits,
         ));
@@ -215,17 +221,15 @@ impl ServerTlsEndpoint {
         let builder = ServerConfig::builder_with_provider(self.provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
-        let mut config = match &self.verify_client {
-            Some(verify_client) => builder
-                .with_client_cert_verifier(Arc::new(crate::handshake::ClientVerifier::new(
-                    verify_client.clone(),
-                    self.provider.clone(),
-                    peer.clone(),
-                    self.limits,
-                )))
-                .with_cert_resolver(resolver),
-            None => builder.with_no_client_auth().with_cert_resolver(resolver),
-        };
+        let verify_client = Arc::new(crate::handshake::ClientVerifier::new(
+            self.roots.clone(),
+            self.provider.clone(),
+            peer.clone(),
+            self.limits,
+        )?);
+        let mut config = builder
+            .with_client_cert_verifier(verify_client)
+            .with_cert_resolver(server_cert);
         config.alpn_protocols = self.alpn.to_vec();
         config.max_early_data_size = 0;
         configure_server_resumption(

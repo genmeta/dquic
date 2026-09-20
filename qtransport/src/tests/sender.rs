@@ -31,7 +31,6 @@ impl Sender {
             Arc::new(QuicProtocol::new()),
             path.pathway,
             path.cc.clone(),
-            transport.flow.sender.clone(),
             path.anti_amplifier.clone(),
             path.send_waker.clone(),
         );
@@ -49,9 +48,6 @@ impl Sender {
     pub(crate) fn prepare(&mut self) -> Result<bool, Error> {
         if self.inner.pending().next().is_some() {
             return Ok(true);
-        }
-        if !self.transport.data.can_send() {
-            return Ok(false);
         }
         if self.path.state() == PathState::Retired {
             return Err(
@@ -88,7 +84,7 @@ impl Sender {
             .poll_send_with(
                 cx,
                 |cx, path, packets| submit(cx, path, &packets[0]).map(|result| result.map(|_| 1)),
-                |_| self.transport.data.can_send() && self.path.state() != PathState::Retired,
+                |_| self.path.state() != PathState::Retired,
                 |packet| self.path.on_packet_sent(packet),
             )
             .map(|result| result.map(|n| n != 0))
@@ -102,7 +98,7 @@ impl Sender {
             .poll_send_with(
                 cx,
                 |cx, pathway, packets| protocol.poll_send(cx, pathway, packets),
-                |_| self.transport.data.can_send() && self.path.state() != PathState::Retired,
+                |_| self.path.state() != PathState::Retired,
                 |packet| self.path.on_packet_sent(packet),
             )
             .map(|result| result.map(|n| n != 0))
@@ -153,7 +149,11 @@ pub(crate) fn assemble_data(
     let mut challenge = path.challenge()?;
     let mut crypto = transport.data.crypto.outgoing().package(Epoch::Data);
     let mut reliable = transport.reliable_frames.clone();
-    let mut streams = Repeat(transport.streams.package(sender.flow.clone(), false));
+    let mut streams = Repeat(
+        transport
+            .streams
+            .package(transport.flow.sender.clone(), false),
+    );
     let mut ping =
         (heartbeat || path.cc.need_send_ack_eliciting(Epoch::Data) != 0).then_some(PingFrame);
     let header = OneRttHeader::new(Default::default(), path.dcid());

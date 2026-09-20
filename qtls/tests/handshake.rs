@@ -1,26 +1,24 @@
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, CertificateError, ClientCertificateRequest, ClientResumptionConfig,
-    ClientStart, ClientTlsConfig, ClientTlsEndpoint, CryptoLevel, HandshakeSummary, InstalledKeys,
-    LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial, PrivateKeyDer, QuicVersion,
-    ResolveClientAuthority, ResolveServerAuthority, ServerCredentialRequest,
-    ServerResumptionConfig, ServerTlsConfig, ServerTlsEndpoint, SessionSealKeyRing,
-    SignatureScheme, TicketKeyRing, TlsEvent, TlsHandshake, TlsLimits, UnixTime, VerifyIdentity,
-    default_provider as crypto_provider,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, CryptoLevel,
+    HandshakeSummary, InstalledKeys, LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial,
+    PrivateKeyDer, QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig,
+    SessionSealKeyRing, SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake,
+    TlsLimits, TlsServer, default_provider as crypto_provider,
 };
 use rustls::pki_types::pem::PemObject;
 
 const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
 const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
 const CLIENT_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
 const CLIENT_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/client.key");
-const SERVER_OCSP: &[u8] = b"server-ocsp";
-const CLIENT_OCSP: &[u8] = b"client-ocsp";
+const SERVER_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
+const SERVER_REVOKED_OCSP: &[u8] =
+    include_bytes!("../../tests/keychain/localhost/server-revoked.ocsp");
+const CLIENT_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/client.ocsp");
 
 fn ticket_key_ring() -> TicketKeyRing {
     #[cfg(feature = "aws-lc-rs")]
@@ -28,73 +26,6 @@ fn ticket_key_ring() -> TicketKeyRing {
     #[cfg(not(feature = "aws-lc-rs"))]
     let ticketer = rustls::crypto::ring::Ticketer::new().unwrap();
     TicketKeyRing::new(ticketer)
-}
-
-#[derive(Debug)]
-struct FixedServerAuthority(LocalAuthority);
-
-impl ResolveServerAuthority for FixedServerAuthority {
-    fn resolve(&self, request: ServerCredentialRequest<'_>) -> Option<LocalAuthority> {
-        assert_eq!(request.server_name, Some("localhost"));
-        assert!(request.alpn.contains(&b"h3".as_slice()));
-        Some(self.0.clone())
-    }
-}
-
-#[derive(Debug)]
-struct FixedClientAuthority(Option<LocalAuthority>);
-
-impl ResolveClientAuthority for FixedClientAuthority {
-    fn resolve(&self, request: ClientCertificateRequest<'_>) -> Option<LocalAuthority> {
-        assert!(!request.signature_schemes.is_empty());
-        self.0.clone()
-    }
-
-    fn has_authority(&self) -> bool {
-        self.0.is_some()
-    }
-}
-
-struct RecordingVerifier {
-    identity: Arc<str>,
-    observed_ocsp: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
-    reject_ocsp: bool,
-}
-
-impl fmt::Debug for RecordingVerifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RecordingVerifier")
-            .field("identity", &self.identity)
-            .finish_non_exhaustive()
-    }
-}
-
-impl VerifyIdentity for RecordingVerifier {
-    fn verify(
-        &self,
-        expected: Option<&str>,
-        certificates: &[CertificateDer<'_>],
-        ocsp: Option<&[u8]>,
-        _now: UnixTime,
-    ) -> Result<Option<Arc<str>>, CertificateError> {
-        if certificates.is_empty() {
-            return Ok(None);
-        }
-        if let Some(expected) = expected
-            && expected != self.identity.as_ref()
-        {
-            return Err(CertificateError::NotValidForName);
-        }
-        self.observed_ocsp
-            .lock()
-            .unwrap()
-            .push(ocsp.map(<[u8]>::to_vec));
-        if self.reject_ocsp {
-            return Err(CertificateError::InvalidOcspResponse);
-        }
-        Ok(Some(self.identity.clone()))
-    }
 }
 
 struct Observed {
@@ -120,47 +51,24 @@ impl Observed {
 }
 
 #[test]
-fn mutual_auth_transports_both_ocsp_staples_and_publishes_authorities() {
+fn mutual_auth_publishes_both_authorities() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let server_authority = authority(
-        &provider,
-        "localhost",
-        SERVER_CERT,
-        SERVER_KEY,
-        Some(SERVER_OCSP),
-    );
-    let client_authority = authority(
-        &provider,
-        "client",
-        CLIENT_CERT,
-        CLIENT_KEY,
-        Some(CLIENT_OCSP),
-    );
-    let server_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
-    let client_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
+    let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
+    let client_authority = authority(&provider, "client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP);
 
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(Some(client_authority))),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: client_observed_ocsp.clone(),
-            reject_ocsp: false,
-        }),
+        local: Some(client_authority),
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(server_authority)),
-        verify_client: Some(Arc::new(RecordingVerifier {
-            identity: Arc::from("client"),
-            observed_ocsp: server_observed_ocsp.clone(),
-            reject_ocsp: false,
-        })),
+        local: server_authority,
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -169,14 +77,6 @@ fn mutual_auth_transports_both_ocsp_staples_and_publishes_authorities() {
     let (client_tls, server_tls, mut client_events, mut server_events) =
         handshake(&client, &server).unwrap();
 
-    assert_eq!(
-        client_observed_ocsp.lock().unwrap().as_slice(),
-        &[Some(SERVER_OCSP.to_vec())]
-    );
-    assert_eq!(
-        server_observed_ocsp.lock().unwrap().as_slice(),
-        &[Some(CLIENT_OCSP.to_vec())]
-    );
     assert_eq!(
         client_events.parameters.as_deref(),
         Some(b"server-params".as_slice())
@@ -220,30 +120,21 @@ fn mutual_auth_transports_both_ocsp_staples_and_publishes_authorities() {
 
 #[test]
 fn anonymous_client_completes_without_remote_authority() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, None);
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
+    let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(None)),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: Arc::new(Mutex::new(Vec::new())),
-            reject_ocsp: false,
-        }),
+        local: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(server_authority)),
-        verify_client: Some(Arc::new(RecordingVerifier {
-            identity: Arc::from("client"),
-            observed_ocsp: Arc::new(Mutex::new(Vec::new())),
-            reject_ocsp: false,
-        })),
+        local: server_authority,
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -255,29 +146,124 @@ fn anonymous_client_completes_without_remote_authority() {
 }
 
 #[test]
-fn stateful_resumption_restores_authorities_without_revalidating_the_certificate() {
+fn server_certificate_requires_current_matching_good_ocsp() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let client_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
-    let server_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
-    let store = Arc::new(MemoryResumptionStore::new(16));
-    let client_seal_keys = Arc::new(SessionSealKeyRing::new(7, [0x17; 32]));
-    let server_seal_keys = Arc::new(SessionSealKeyRing::new(9, [0x29; 32]));
-
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(Some(authority(
+        local: None,
+        resumption: ClientResumptionConfig::Disabled,
+        limits: TlsLimits::default(),
+    })
+    .unwrap();
+
+    assert!(
+        LocalAuthority::new(
+            &provider,
+            "localhost".into(),
+            vec![CertificateDer::from_pem_slice(SERVER_CERT).unwrap()],
+            PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(),
+            Vec::new(),
+        )
+        .is_err()
+    );
+
+    for ocsp in [CLIENT_OCSP, SERVER_REVOKED_OCSP] {
+        let server = TlsServer::new(ServerTlsConfig {
+            provider: provider.clone(),
+            alpn: vec![b"h3".to_vec()],
+            local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, ocsp),
+            resumption: ServerResumptionConfig::Disabled,
+            limits: TlsLimits::default(),
+        })
+        .unwrap();
+        assert!(handshake(&client, &server).is_err());
+    }
+
+    let mut invalid_signature = SERVER_OCSP.to_vec();
+    let signature = invalid_signature
+        .windows(3)
+        .position(|bytes| bytes == [0x03, 0x48, 0x00])
+        .unwrap()
+        + 3;
+    invalid_signature[signature] ^= 1;
+    let server = TlsServer::new(ServerTlsConfig {
+        provider: provider.clone(),
+        alpn: vec![b"h3".to_vec()],
+        local: authority(
+            &provider,
+            "localhost",
+            SERVER_CERT,
+            SERVER_KEY,
+            &invalid_signature,
+        ),
+        resumption: ServerResumptionConfig::Disabled,
+        limits: TlsLimits::default(),
+    })
+    .unwrap();
+    assert!(handshake(&client, &server).is_err());
+}
+
+#[test]
+fn presented_client_certificate_requires_matching_ocsp() {
+    set_roots();
+    let provider = Arc::new(crypto_provider());
+
+    assert!(
+        LocalAuthority::new(
+            &provider,
+            "client".into(),
+            vec![CertificateDer::from_pem_slice(CLIENT_CERT).unwrap()],
+            PrivateKeyDer::from_pem_slice(CLIENT_KEY).unwrap(),
+            Vec::new(),
+        )
+        .is_err()
+    );
+
+    let client = TlsClient::new(ClientTlsConfig {
+        provider: provider.clone(),
+        alpn: vec![b"h3".to_vec()],
+        local: Some(authority(
             &provider,
             "client",
             CLIENT_CERT,
             CLIENT_KEY,
-            Some(CLIENT_OCSP),
-        )))),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: client_observed_ocsp.clone(),
-            reject_ocsp: false,
-        }),
+            SERVER_OCSP,
+        )),
+        resumption: ClientResumptionConfig::Disabled,
+        limits: TlsLimits::default(),
+    })
+    .unwrap();
+    let server = TlsServer::new(ServerTlsConfig {
+        provider: provider.clone(),
+        alpn: vec![b"h3".to_vec()],
+        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
+        resumption: ServerResumptionConfig::Disabled,
+        limits: TlsLimits::default(),
+    })
+    .unwrap();
+    assert!(handshake(&client, &server).is_err());
+}
+
+#[test]
+fn stateful_resumption_restores_authorities_without_revalidating_the_certificate() {
+    set_roots();
+    let provider = Arc::new(crypto_provider());
+    let store = Arc::new(MemoryResumptionStore::new(16));
+    let client_seal_keys = Arc::new(SessionSealKeyRing::new(7, [0x17; 32]));
+    let server_seal_keys = Arc::new(SessionSealKeyRing::new(9, [0x29; 32]));
+
+    let client = TlsClient::new(ClientTlsConfig {
+        provider: provider.clone(),
+        alpn: vec![b"h3".to_vec()],
+        local: Some(authority(
+            &provider,
+            "client",
+            CLIENT_CERT,
+            CLIENT_KEY,
+            CLIENT_OCSP,
+        )),
         resumption: ClientResumptionConfig::Enabled {
             namespace: Arc::from("integration-test"),
             store: store.clone(),
@@ -286,21 +272,10 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(authority(
-            &provider,
-            "localhost",
-            SERVER_CERT,
-            SERVER_KEY,
-            None,
-        ))),
-        verify_client: Some(Arc::new(RecordingVerifier {
-            identity: Arc::from("client"),
-            observed_ocsp: server_observed_ocsp.clone(),
-            reject_ocsp: false,
-        })),
+        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Stateful {
             namespace: Arc::from("integration-test"),
             store,
@@ -311,8 +286,6 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     .unwrap();
 
     let (_, _, first_client, first_server) = handshake(&client, &server).unwrap();
-    assert_eq!(client_observed_ocsp.lock().unwrap().len(), 1);
-    assert_eq!(server_observed_ocsp.lock().unwrap().len(), 1);
     assert_eq!(
         first_client.summary.unwrap().remote.unwrap().name(),
         "localhost"
@@ -323,16 +296,6 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     );
 
     let (_, _, second_client, second_server) = handshake(&client, &server).unwrap();
-    assert_eq!(
-        client_observed_ocsp.lock().unwrap().len(),
-        1,
-        "a resumed handshake must use the authenticated stored server authority"
-    );
-    assert_eq!(
-        server_observed_ocsp.lock().unwrap().len(),
-        1,
-        "a resumed handshake must use the authenticated stored client authority"
-    );
     let second_client_summary = second_client.summary.unwrap();
     assert_eq!(second_client_summary.local.unwrap().name(), "client");
     assert_eq!(second_client_summary.remote.unwrap().name(), "localhost");
@@ -341,52 +304,38 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
         "client"
     );
 
-    let fallback_server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let fallback_server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(authority(
-            &provider,
-            "localhost",
-            SERVER_CERT,
-            SERVER_KEY,
-            None,
-        ))),
-        verify_client: None,
+        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
     .unwrap();
     let (_, _, fallback_client, fallback_server) = handshake(&client, &fallback_server).unwrap();
     let fallback_client = fallback_client.summary.unwrap();
-    assert!(
-        fallback_client.local.is_none(),
-        "a rejected PSK must not publish the remembered client authority"
-    );
+    assert_eq!(fallback_client.local.unwrap().name(), "client");
     assert_eq!(fallback_client.remote.unwrap().name(), "localhost");
-    assert!(fallback_server.summary.unwrap().remote.is_none());
-    assert_eq!(client_observed_ocsp.lock().unwrap().len(), 2);
+    assert_eq!(
+        fallback_server.summary.unwrap().remote.unwrap().name(),
+        "client"
+    );
 }
 
 #[test]
 fn stateless_resumption_restores_the_verified_client_authority() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let client_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
-    let server_observed_ocsp = Arc::new(Mutex::new(Vec::new()));
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(Some(authority(
+        local: Some(authority(
             &provider,
             "client",
             CLIENT_CERT,
             CLIENT_KEY,
-            Some(CLIENT_OCSP),
-        )))),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: client_observed_ocsp.clone(),
-            reject_ocsp: false,
-        }),
+            CLIENT_OCSP,
+        )),
         resumption: ClientResumptionConfig::Enabled {
             namespace: Arc::from("stateless-test"),
             store: Arc::new(MemoryResumptionStore::new(8)),
@@ -395,21 +344,10 @@ fn stateless_resumption_restores_the_verified_client_authority() {
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(authority(
-            &provider,
-            "localhost",
-            SERVER_CERT,
-            SERVER_KEY,
-            None,
-        ))),
-        verify_client: Some(Arc::new(RecordingVerifier {
-            identity: Arc::from("client"),
-            observed_ocsp: server_observed_ocsp.clone(),
-            reject_ocsp: false,
-        })),
+        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Stateless {
             ticket_keys: Arc::new(ticket_key_ring()),
         },
@@ -420,8 +358,6 @@ fn stateless_resumption_restores_the_verified_client_authority() {
     handshake(&client, &server).unwrap();
     let (_, _, client_events, server_events) = handshake(&client, &server).unwrap();
 
-    assert_eq!(client_observed_ocsp.lock().unwrap().len(), 1);
-    assert_eq!(server_observed_ocsp.lock().unwrap().len(), 1);
     let client_summary = client_events.summary.unwrap();
     assert_eq!(client_summary.local.unwrap().name(), "client");
     assert_eq!(client_summary.remote.unwrap().name(), "localhost");
@@ -432,71 +368,27 @@ fn stateless_resumption_restores_the_verified_client_authority() {
 }
 
 #[test]
-fn verifier_can_reject_a_stapled_ocsp_response() {
-    let provider = Arc::new(crypto_provider());
-    let server_authority = authority(
-        &provider,
-        "localhost",
-        SERVER_CERT,
-        SERVER_KEY,
-        Some(SERVER_OCSP),
-    );
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
-        provider: provider.clone(),
-        alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(None)),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: Arc::new(Mutex::new(Vec::new())),
-            reject_ocsp: true,
-        }),
-        resumption: ClientResumptionConfig::Disabled,
-        limits: TlsLimits::default(),
-    })
-    .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
-        provider,
-        alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(server_authority)),
-        verify_client: None,
-        resumption: ServerResumptionConfig::Disabled,
-        limits: TlsLimits::default(),
-    })
-    .unwrap();
-
-    let error = handshake(&client, &server)
-        .err()
-        .expect("the client certificate must be rejected");
-    assert!(error.to_string().contains("alert"));
-}
-
-#[test]
 fn initial_keys_interoperate_for_v1_and_v2() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(None)),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: Arc::new(Mutex::new(Vec::new())),
-            reject_ocsp: false,
-        }),
+        local: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = ServerTlsEndpoint::new(ServerTlsConfig {
+    let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedServerAuthority(authority(
+        local: authority(
             &Arc::new(crypto_provider()),
             "localhost",
             SERVER_CERT,
             SERVER_KEY,
-            None,
-        ))),
-        verify_client: None,
+            SERVER_OCSP,
+        ),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -529,16 +421,12 @@ fn initial_keys_interoperate_for_v1_and_v2() {
 
 #[test]
 fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
+    set_roots();
     let provider = Arc::new(crypto_provider());
-    let client = ClientTlsEndpoint::new(ClientTlsConfig {
+    let client = TlsClient::new(ClientTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        resolve_local: Arc::new(FixedClientAuthority(None)),
-        verify_server: Arc::new(RecordingVerifier {
-            identity: Arc::from("localhost"),
-            observed_ocsp: Arc::new(Mutex::new(Vec::new())),
-            reject_ocsp: false,
-        }),
+        local: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -564,12 +452,16 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
     assert!(terminal.to_string().contains("terminal state"));
 }
 
+fn set_roots() {
+    RootCerts::set([CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();
+}
+
 fn authority(
     provider: &rustls::crypto::CryptoProvider,
     name: &str,
     certificate_pem: &[u8],
     key_pem: &[u8],
-    ocsp: Option<&[u8]>,
+    ocsp: &[u8],
 ) -> LocalAuthority {
     let certificate = CertificateDer::from_pem_slice(certificate_pem).unwrap();
     let key = PrivateKeyDer::from_pem_slice(key_pem).unwrap();
@@ -578,14 +470,14 @@ fn authority(
         Arc::from(name),
         vec![certificate],
         key,
-        ocsp.map(<[u8]>::to_vec),
+        ocsp.to_vec(),
     )
     .unwrap()
 }
 
 fn handshake(
-    client: &ClientTlsEndpoint,
-    server: &ServerTlsEndpoint,
+    client: &TlsClient,
+    server: &TlsServer,
 ) -> Result<(TlsHandshake, TlsHandshake, Observed, Observed), qtls::TlsError> {
     let mut client = client.start(ClientStart {
         server_name: "localhost".try_into().unwrap(),
@@ -668,7 +560,7 @@ fn test_direction(sealing: &qtls::PacketKey, opening: &qtls::PacketKey) {
 #[test]
 fn authority_signs_without_exposing_the_signing_key() {
     let provider = crypto_provider();
-    let authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, None);
+    let authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
     let signature = authority
         .sign(SignatureScheme::ECDSA_NISTP256_SHA256, b"message")
         .unwrap();

@@ -1,21 +1,21 @@
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 use rustls::{
-    DistinguishedName, SignatureScheme,
-    pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime},
+    SignatureScheme,
+    pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer},
     sign::{CertifiedKey, SigningKey},
 };
 use x509_parser::prelude::FromDer;
 
+use crate::InvalidLocalAuthority;
 pub use crate::error::SignError;
-use crate::{CertificateError, InvalidLocalAuthority};
 
 #[derive(Clone, Debug)]
 pub struct LocalAuthority {
     name: Arc<str>,
     certificates: Arc<[CertificateDer<'static>]>,
     public_key: SubjectPublicKeyInfoDer<'static>,
-    ocsp: Option<Arc<[u8]>>,
+    ocsp: Vec<u8>,
     signing_key: Arc<dyn SigningKey>,
 }
 
@@ -28,7 +28,7 @@ impl LocalAuthority {
         name: Arc<str>,
         certificates: Vec<CertificateDer<'static>>,
         signing_key: Arc<dyn SigningKey>,
-        ocsp: Option<Vec<u8>>,
+        ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
         let public_key = extract_public_key(&certificates)?;
         let certified_key = CertifiedKey::new(certificates, signing_key);
@@ -44,7 +44,7 @@ impl LocalAuthority {
         name: Arc<str>,
         certificates: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
-        ocsp: Option<Vec<u8>>,
+        ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
         let public_key = extract_public_key(&certificates)?;
         let certified_key = CertifiedKey::from_der(certificates, private_key, provider)
@@ -57,17 +57,20 @@ impl LocalAuthority {
         name: Arc<str>,
         mut certified_key: CertifiedKey,
         public_key: SubjectPublicKeyInfoDer<'static>,
-        ocsp: Option<Vec<u8>>,
+        ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
         rustls::pki_types::DnsName::try_from(name.as_ref())
             .map_err(|_| InvalidLocalAuthority::InvalidName)?;
+        if ocsp.is_empty() {
+            return Err(InvalidLocalAuthority::EmptyOcsp);
+        }
 
-        certified_key.ocsp = ocsp.clone();
+        certified_key.ocsp = Some(ocsp.clone());
         Ok(Self {
             name,
             certificates: certified_key.cert.into(),
             public_key,
-            ocsp: ocsp.map(Arc::from),
+            ocsp,
             signing_key: certified_key.key,
         })
     }
@@ -84,8 +87,8 @@ impl LocalAuthority {
         &self.public_key
     }
 
-    pub fn ocsp(&self) -> Option<&[u8]> {
-        self.ocsp.as_deref()
+    pub fn ocsp(&self) -> &[u8] {
+        &self.ocsp
     }
 
     /// Signs an unhashed message using the hash and encoding implied by `scheme`.
@@ -101,7 +104,7 @@ impl LocalAuthority {
         Arc::new(CertifiedKey {
             cert: self.certificates.to_vec(),
             key: self.signing_key.clone(),
-            ocsp: self.ocsp.as_deref().map(<[u8]>::to_vec),
+            ocsp: Some(self.ocsp.to_vec()),
         })
     }
 }
@@ -143,45 +146,6 @@ impl RemoteAuthority {
 
     pub fn public_key(&self) -> &SubjectPublicKeyInfoDer<'static> {
         &self.public_key
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ServerCredentialRequest<'a> {
-    pub server_name: Option<&'a str>,
-    pub signature_schemes: &'a [SignatureScheme],
-    pub alpn: &'a [&'a [u8]],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ClientCertificateRequest<'a> {
-    pub root_hint_subjects: &'a [&'a [u8]],
-    pub signature_schemes: &'a [SignatureScheme],
-}
-
-pub trait ResolveServerAuthority: Debug + Send + Sync {
-    fn resolve(&self, hello: ServerCredentialRequest<'_>) -> Option<LocalAuthority>;
-}
-
-pub trait ResolveClientAuthority: Debug + Send + Sync {
-    fn resolve(&self, request: ClientCertificateRequest<'_>) -> Option<LocalAuthority>;
-
-    fn has_authority(&self) -> bool {
-        true
-    }
-}
-
-pub trait VerifyIdentity: Debug + Send + Sync {
-    fn verify(
-        &self,
-        expected: Option<&str>,
-        certificates: &[CertificateDer<'_>],
-        ocsp: Option<&[u8]>,
-        now: UnixTime,
-    ) -> Result<Option<Arc<str>>, CertificateError>;
-
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
     }
 }
 

@@ -8,22 +8,22 @@ use bytes::Bytes;
 use rustls::{
     DigitallySignedStruct, DistinguishedName, SignatureScheme,
     client::{
-        ResolvesClientCert,
+        ResolvesClientCert, WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     },
     pki_types::{CertificateDer, ServerName, UnixTime},
     server::{
-        ClientHello, ResolvesServerCert,
+        ClientHello, ResolvesServerCert, WebPkiClientVerifier,
         danger::{ClientCertVerified, ClientCertVerifier},
     },
     sign::CertifiedKey,
 };
+use x509_parser::{extensions::GeneralName, prelude::FromDer};
 
 use crate::{
-    BidirectionalKeys, CertificateError, ClientCertificateRequest, ExporterError,
-    HandshakeNotComplete, LocalAuthority, OneRttKeyMaterial, PeerTlsError, RemoteAuthority,
-    ResolveClientAuthority, ResolveServerAuthority, ServerCredentialRequest, TlsAlert, TlsError,
-    TlsInvariantError, TlsLimits, VerifyIdentity,
+    BidirectionalKeys, CertificateError, ExporterError, HandshakeNotComplete, LocalAuthority,
+    OneRttKeyMaterial, PeerTlsError, RemoteAuthority, TlsAlert, TlsConfigError, TlsError,
+    TlsInvariantError, TlsLimits, root::RootCertsSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,57 +368,51 @@ pub(crate) fn map_rustls_error(error: rustls::Error) -> TlsError {
     PeerTlsError::Protocol(error.to_string()).into()
 }
 
-pub(crate) struct ServerResolver {
-    inner: Arc<dyn ResolveServerAuthority>,
+pub(crate) struct FixedServerCert {
+    local: LocalAuthority,
     peer: PeerState,
     limits: TlsLimits,
 }
 
-impl ServerResolver {
-    pub fn new(inner: Arc<dyn ResolveServerAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
+impl FixedServerCert {
+    pub fn new(local: LocalAuthority, peer: PeerState, limits: TlsLimits) -> Self {
         Self {
-            inner,
+            local,
             peer,
             limits,
         }
     }
 }
 
-impl fmt::Debug for ServerResolver {
+impl fmt::Debug for FixedServerCert {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ServerResolver")
+            .debug_struct("FixedServerCert")
             .finish_non_exhaustive()
     }
 }
 
-impl ResolvesServerCert for ServerResolver {
-    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let alpn: Vec<&[u8]> = hello.alpn().map(Iterator::collect).unwrap_or_default();
-        let authority = self.inner.resolve(ServerCredentialRequest {
-            server_name: hello.server_name(),
-            signature_schemes: hello.signature_schemes(),
-            alpn: &alpn,
-        })?;
-        if !authority_within_limits(&authority, self.limits) {
+impl ResolvesServerCert for FixedServerCert {
+    fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        if !authority_within_limits(&self.local, self.limits) {
             return None;
         }
-        let certified_key = authority.certified_key();
-        self.peer.authorities.lock().ok()?.local = Some(authority);
+        let certified_key = self.local.certified_key();
+        self.peer.authorities.lock().ok()?.local = Some(self.local.clone());
         Some(certified_key)
     }
 }
 
-pub(crate) struct ClientResolver {
-    inner: Arc<dyn ResolveClientAuthority>,
+pub(crate) struct OptionalClientCert {
+    local: Option<LocalAuthority>,
     peer: PeerState,
     limits: TlsLimits,
 }
 
-impl ClientResolver {
-    pub fn new(inner: Arc<dyn ResolveClientAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
+impl OptionalClientCert {
+    pub fn new(local: Option<LocalAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
         Self {
-            inner,
+            local,
             peer,
             limits,
         }
@@ -427,50 +421,36 @@ impl ClientResolver {
     pub(crate) fn rebind(
         &self,
         expected: &crate::resumption::AuthorityProjection,
-        provider: &rustls::crypto::CryptoProvider,
     ) -> Option<LocalAuthority> {
-        let signature_schemes = provider
-            .signature_verification_algorithms
-            .supported_schemes();
-        let authority = self.inner.resolve(ClientCertificateRequest {
-            root_hint_subjects: &[],
-            signature_schemes: &signature_schemes,
-        })?;
-        if !authority_within_limits(&authority, self.limits) || !expected.matches(&authority) {
+        let authority = self.local.as_ref()?;
+        if !authority_within_limits(authority, self.limits) || !expected.matches(authority) {
             return None;
         }
-        Some(authority)
+        Some(authority.clone())
     }
 }
 
-impl fmt::Debug for ClientResolver {
+impl fmt::Debug for OptionalClientCert {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ClientResolver")
+            .debug_struct("OptionalClientCert")
             .finish_non_exhaustive()
     }
 }
 
-impl ResolvesClientCert for ClientResolver {
-    fn resolve(
-        &self,
-        root_hint_subjects: &[&[u8]],
-        signature_schemes: &[SignatureScheme],
-    ) -> Option<Arc<CertifiedKey>> {
-        let authority = self.inner.resolve(ClientCertificateRequest {
-            root_hint_subjects,
-            signature_schemes,
-        })?;
-        if !authority_within_limits(&authority, self.limits) {
+impl ResolvesClientCert for OptionalClientCert {
+    fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+        let authority = self.local.as_ref()?;
+        if !authority_within_limits(authority, self.limits) {
             return None;
         }
         let certified_key = authority.certified_key();
-        self.peer.authorities.lock().ok()?.local = Some(authority);
+        self.peer.authorities.lock().ok()?.local = Some(authority.clone());
         Some(certified_key)
     }
 
     fn has_certs(&self) -> bool {
-        self.inner.has_authority()
+        self.local.is_some()
     }
 }
 
@@ -482,11 +462,12 @@ fn authority_within_limits(authority: &LocalAuthority, limits: TlsLimits) -> boo
             .map(|certificate| certificate.as_ref().len())
             .sum::<usize>()
             <= limits.max_certificate_chain_bytes
-        && authority.ocsp().map_or(0, <[u8]>::len) <= limits.max_ocsp_bytes
+        && authority.ocsp().len() <= limits.max_ocsp_bytes
 }
 
 pub(crate) struct ServerVerifier {
-    inner: Arc<dyn VerifyIdentity>,
+    inner: Arc<dyn ServerCertVerifier>,
+    roots: RootCertsSnapshot,
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
     peer: PeerState,
     limits: TlsLimits,
@@ -494,17 +475,22 @@ pub(crate) struct ServerVerifier {
 
 impl ServerVerifier {
     pub fn new(
-        inner: Arc<dyn VerifyIdentity>,
+        roots: RootCertsSnapshot,
         provider: Arc<rustls::crypto::CryptoProvider>,
         peer: PeerState,
         limits: TlsLimits,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TlsConfigError> {
+        let algorithms = provider.signature_verification_algorithms;
+        let inner = WebPkiServerVerifier::builder_with_provider(roots.store.clone(), provider)
+            .build()
+            .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
+        Ok(Self {
             inner,
-            algorithms: provider.signature_verification_algorithms,
+            roots,
+            algorithms,
             peer,
             limits,
-        }
+        })
     }
 }
 
@@ -527,20 +513,25 @@ impl ServerCertVerifier for ServerVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let certificates = chain(end_entity, intermediates);
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
-        let expected = match server_name {
-            ServerName::DnsName(name) => name.as_ref(),
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        crate::ocsp::verify(
+            ocsp_response,
+            end_entity,
+            intermediates,
+            &self.roots,
+            now,
+            self.algorithms,
+        )?;
+        let name: Arc<str> = match server_name {
+            ServerName::DnsName(name) => Arc::from(name.as_ref()),
             _ => return Err(CertificateError::NotValidForName.into()),
         };
-        let name = self
-            .inner
-            .verify(
-                Some(expected),
-                &certificates,
-                optional_ocsp(ocsp_response),
-                now,
-            )
-            .map_err(rustls::Error::InvalidCertificate)?
-            .ok_or(CertificateError::ApplicationVerificationFailure)?;
         let authority = RemoteAuthority::new(name, &certificates)
             .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
         self.peer
@@ -557,7 +548,8 @@ impl ServerCertVerifier for ServerVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, certificate, signature, &self.algorithms)
+        self.inner
+            .verify_tls12_signature(message, certificate, signature)
     }
 
     fn verify_tls13_signature(
@@ -566,16 +558,18 @@ impl ServerCertVerifier for ServerVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, certificate, signature, &self.algorithms)
+        self.inner
+            .verify_tls13_signature(message, certificate, signature)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algorithms.supported_schemes()
+        self.inner.supported_verify_schemes()
     }
 }
 
 pub(crate) struct ClientVerifier {
-    inner: Arc<dyn VerifyIdentity>,
+    inner: Arc<dyn ClientCertVerifier>,
+    roots: RootCertsSnapshot,
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
     peer: PeerState,
     limits: TlsLimits,
@@ -583,17 +577,22 @@ pub(crate) struct ClientVerifier {
 
 impl ClientVerifier {
     pub fn new(
-        inner: Arc<dyn VerifyIdentity>,
+        roots: RootCertsSnapshot,
         provider: Arc<rustls::crypto::CryptoProvider>,
         peer: PeerState,
         limits: TlsLimits,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TlsConfigError> {
+        let algorithms = provider.signature_verification_algorithms;
+        let inner = WebPkiClientVerifier::builder_with_provider(roots.store.clone(), provider)
+            .build()
+            .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
+        Ok(Self {
             inner,
-            algorithms: provider.signature_verification_algorithms,
+            roots,
+            algorithms,
             peer,
             limits,
-        }
+        })
     }
 }
 
@@ -640,11 +639,17 @@ impl ClientCertVerifier for ClientVerifier {
     ) -> Result<ClientCertVerified, rustls::Error> {
         let certificates = chain(end_entity, intermediates);
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
-        let name = self
-            .inner
-            .verify(None, &certificates, optional_ocsp(ocsp_response), now)
-            .map_err(rustls::Error::InvalidCertificate)?
-            .ok_or(CertificateError::ApplicationVerificationFailure)?;
+        self.inner
+            .verify_client_cert_with_ocsp(end_entity, intermediates, ocsp_response, now)?;
+        crate::ocsp::verify(
+            ocsp_response,
+            end_entity,
+            intermediates,
+            &self.roots,
+            now,
+            self.algorithms,
+        )?;
+        let name = certificate_name(end_entity)?;
         let authority = RemoteAuthority::new(name, &certificates)
             .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
         self.peer
@@ -661,7 +666,8 @@ impl ClientCertVerifier for ClientVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, certificate, signature, &self.algorithms)
+        self.inner
+            .verify_tls12_signature(message, certificate, signature)
     }
 
     fn verify_tls13_signature(
@@ -670,11 +676,12 @@ impl ClientCertVerifier for ClientVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, certificate, signature, &self.algorithms)
+        self.inner
+            .verify_tls13_signature(message, certificate, signature)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algorithms.supported_schemes()
+        self.inner.supported_verify_schemes()
     }
 }
 
@@ -687,8 +694,23 @@ fn chain<'a>(
         .collect()
 }
 
-fn optional_ocsp(response: &[u8]) -> Option<&[u8]> {
-    (!response.is_empty()).then_some(response)
+fn certificate_name(certificate: &CertificateDer<'_>) -> Result<Arc<str>, rustls::Error> {
+    let (_, certificate) =
+        x509_parser::certificate::X509Certificate::from_der(certificate.as_ref())
+            .map_err(|_| CertificateError::BadEncoding)?;
+    let name = certificate
+        .subject_alternative_name()
+        .map_err(|_| CertificateError::BadEncoding)?
+        .into_iter()
+        .flat_map(|extension| extension.value.general_names.iter())
+        .find_map(|name| match name {
+            GeneralName::DNSName(name) => Some(*name),
+            _ => None,
+        })
+        .ok_or(CertificateError::NotValidForName)?;
+    rustls::pki_types::DnsName::try_from(name.to_owned())
+        .map_err(|_| CertificateError::NotValidForName)?;
+    Ok(Arc::from(name))
 }
 
 fn validate_peer_limits(
