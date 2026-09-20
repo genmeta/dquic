@@ -21,14 +21,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     endpoint::{Connected, Endpoint, External, Internal, Loopback, Scope},
-    handshake::incoming::Incoming,
     listener::Listener,
-    router::Router,
 };
 
 pub(crate) struct Network {
     pub(crate) listener: Arc<Listener>,
-    pub(crate) router: Arc<Router>,
+    pub(crate) router: Arc<qtransport::router::QuicRouter>,
     pub(crate) protocol: Arc<qprotocol::QuicProtocol>,
     pub(crate) dock: Arc<qprotocol::Dock>,
     pub(crate) addresses: qprotocol::AddressBook,
@@ -86,10 +84,10 @@ impl Network {
     ) -> Result<Arc<Self>, Error> {
         let (incoming, queue) = mpsc::channel(32);
         let (clients, connecting) = mpsc::channel(32);
-        let router = Router::new(incoming);
+        let router = Arc::new(qtransport::router::QuicRouter::new(incoming));
         let protocol = Arc::new(qprotocol::QuicProtocol::new());
         let routes = router.clone();
-        protocol.on_receive(move |bytes, pathway, link| routes.receive(bytes, pathway, link));
+        protocol.on_receive(move |bytes, pathway, link| routes.receive(bytes, pathway, link, 8));
         let dock = qprotocol::Dock::new(Arc::new(qprotocol::topology::Topology::new(
             Arc::new(qprotocol::StunProtocol::new()),
             Arc::new(qprotocol::ForwardProtocol::new()),
@@ -339,7 +337,11 @@ impl Network {
     )]
     async fn incoming(
         network: Arc<Self>,
-        mut incoming: mpsc::Receiver<Incoming>,
+        mut incoming: mpsc::Receiver<(
+            qbase::cid::ConnectionId,
+            mpsc::Receiver<qtransport::router::ReceivedPacket>,
+            tokio::time::Instant,
+        )>,
         mut clients: mpsc::Receiver<(
             Option<Endpoint>,
             String,
@@ -365,12 +367,21 @@ impl Network {
                     processing.remove(&id);
                 }
                 incoming = incoming.recv(), if processing.len() < 8 => {
-                    let Some(incoming) = incoming else { break };
+                    let Some((cid, inbox, received_at)) = incoming else { break };
                     let timeout = network.listener.idle_timeout();
-                    if timeout != std::time::Duration::ZERO && incoming.received_at.elapsed() >= timeout { continue }
-                    let task = tasks.spawn(crate::lifecycle::run_server(network.clone(), incoming, matured.clone()));
+                    if timeout != std::time::Duration::ZERO && received_at.elapsed() >= timeout {
+                        if let Some(packets) = network.router.get(&cid) { network.router.remove_connection(&packets); }
+                        continue;
+                    }
+                    let task = tasks.spawn(crate::lifecycle::run_server(network.clone(), cid, inbox, received_at, matured.clone()));
                     processing.insert(task.id());
                 }
+            }
+        }
+        incoming.close();
+        while let Some((cid, _, _)) = incoming.recv().await {
+            if let Some(packets) = network.router.get(&cid) {
+                network.router.remove_connection(&packets);
             }
         }
         while tasks.join_next().await.is_some() {}
@@ -426,18 +437,24 @@ mod tests {
         )
         .unwrap();
         network.bind_scope(Loopback).unwrap();
-        if lose_handshake {
-            let routes = network.router.clone();
-            let dropped = std::sync::atomic::AtomicBool::new(false);
-            network.protocol.on_receive(move |bytes, pathway, link| {
-                if bytes.first().is_some_and(|first| first & 0xf0 == 0xe0)
-                    && !dropped.swap(true, Ordering::AcqRel)
-                {
+        let primary = Arc::new(OnceLock::new());
+        let routes = network.router.clone();
+        let observed = primary.clone();
+        let data_received = Arc::new(Mutex::new(HashMap::<EndpointAddr, usize>::new()));
+        let counts = data_received.clone();
+        let dropped = std::sync::atomic::AtomicBool::new(false);
+        network.protocol.on_receive(move |bytes, pathway, link| {
+            if bytes.first().is_some_and(|first| first & 0x80 == 0) {
+                *counts.lock().unwrap().entry(pathway.local()).or_default() += 1;
+            }
+            if bytes.first().is_some_and(|first| first & 0xf0 == 0xe0) {
+                let _ = observed.set(pathway);
+                if lose_handshake && !dropped.swap(true, Ordering::AcqRel) {
                     return;
                 }
-                routes.receive(bytes, pathway, link);
-            });
-        }
+            }
+            routes.receive(bytes, pathway, link, 8);
+        });
         let server = endpoint("localhost", CERT, KEY);
         let (accepted, mut connections) = mpsc::channel(1);
         network
@@ -461,23 +478,7 @@ mod tests {
         assert_eq!(remote.is_some(), mutual);
         assert_eq!(local.name(), "localhost");
         assert_eq!(accepted.role(), Role::Server);
-        assert_eq!(accepted.alpn(), Some(b"qconn".as_slice()));
-
-        let transport = client.transport();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let paths = transport.paths.snapshot();
-                if paths
-                    .iter()
-                    .all(|path| path.verified.load(Ordering::Acquire))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("remaining candidates were not validated after confirmation");
+        assert_eq!(accepted.alpn(), b"qconn".as_slice());
 
         let (_, (mut client_reader, mut client_writer)) =
             client.open_bi_stream().await.unwrap().unwrap();
@@ -505,16 +506,18 @@ mod tests {
         assert_eq!(received, payload);
 
         network.listener.unregister(&server).unwrap();
+        let mut removed = None;
         if lose_path {
             assert!(
-                transport.paths.snapshot().len() > 1,
+                network.sockets.lock().unwrap().len() > 1,
                 "test requires IPv4 and IPv6 loopback"
             );
-            let preferred = transport.paths.preferred().unwrap();
+            let preferred = *primary.get().unwrap();
             let socket = network.protocol.find_socket(preferred.local()).unwrap();
             network.protocol.unregister(preferred.local(), &socket);
             network.dock.remove(&socket);
             network.addresses.remove_bound(socket.local_addr().unwrap());
+            removed = Some((preferred.local(), socket));
         }
         // Unregistering affects incubation/delivery, not this established pair.
         client_writer.write_all(b"!").await.unwrap();
@@ -523,10 +526,131 @@ mod tests {
             server_writer.write_all(b"?").await.unwrap();
             client_reader.read_exact(&mut [0]).await.unwrap();
         }
-        client.close(0u32.into(), "test complete").unwrap();
-        let _ = client.closed().await;
-        let _ = accepted.closed().await;
+        if let Some((local, socket)) = removed {
+            let previous = data_received
+                .lock()
+                .unwrap()
+                .get(&local)
+                .copied()
+                .unwrap_or(0);
+            network.protocol.register(local, &socket).unwrap();
+            network.dock.add(socket.clone()).unwrap();
+            network
+                .addresses
+                .insert_inner(socket.local_addr().unwrap(), local)
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if data_received
+                        .lock()
+                        .unwrap()
+                        .get(&local)
+                        .copied()
+                        .unwrap_or(0)
+                        >= previous + 2
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("restored address did not start path validation");
+            let backup = network
+                .sockets
+                .lock()
+                .unwrap()
+                .values()
+                .find(|candidate| candidate.local_addr().unwrap() != socket.local_addr().unwrap())
+                .unwrap()
+                .clone();
+            let bound = backup.local_addr().unwrap();
+            network
+                .protocol
+                .unregister(EndpointAddr::direct(bound), &backup);
+            network.dock.remove(&backup);
+            network.addresses.remove_bound(bound);
+            client_writer.write_all(b"restored").await.unwrap();
+            let mut bytes = [0; 8];
+            server_reader.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"restored");
+            server_writer.write_all(b"restored").await.unwrap();
+            client_reader.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"restored");
+        }
+        client.clone().close(0u32.into(), "test complete");
         assert!(client.open_uni_stream().await.is_err());
+        assert!(accepted.accept_uni_stream().await.is_err());
+        assert!(server_writer.write_all(b"closed").await.is_err());
+        network.stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_connect_removes_the_original_inbox_routes() {
+        use qbase::packet::{DataHeader, GetScid, Packet, PacketReader, long};
+        let network = Network::new(crate::tls::tests::verifier("localhost", CERT), None).unwrap();
+        network.bind_scope(Loopback).unwrap();
+        network
+            .listener
+            .register(
+                Arc::new(endpoint("localhost", CERT, KEY)),
+                Loopback,
+                Arc::new(|_| panic!("cancelled handshake delivered")),
+            )
+            .unwrap();
+        let (sent, mut initials) = mpsc::channel(1);
+        network.protocol.on_receive(move |bytes, _, _| {
+            for packet in PacketReader::new(bytes, 8) {
+                if let Ok(Packet::Data(packet)) = packet
+                    && let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header
+                {
+                    let _ = sent.try_send(*header.scid());
+                }
+            }
+        });
+        let connecting = {
+            let network = network.clone();
+            tokio::spawn(async move { network.connect(None, "localhost").await })
+        };
+        let cid = tokio::time::timeout(Duration::from_secs(2), initials.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let inbox = network.router.get(&cid).unwrap();
+        connecting.abort();
+        assert!(matches!(connecting.await, Err(error) if error.is_cancelled()));
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while network.router.get(&cid).is_some() || !inbox.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled handshake leaked routes or receive task");
+        network.stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn certificate_failure_never_delivers_a_mature_connection() {
+        let network =
+            Network::new(crate::tls::tests::verifier("localhost", CLIENT_CERT), None).unwrap();
+        network.bind_scope(Loopback).unwrap();
+        let (delivered, mut accepted) = mpsc::channel(1);
+        network
+            .listener
+            .register(
+                Arc::new(endpoint("localhost", CERT, KEY)),
+                Loopback,
+                Arc::new(move |conn| {
+                    let _ = delivered.try_send(conn);
+                }),
+            )
+            .unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), network.connect(None, "localhost"))
+                .await
+                .unwrap();
+        assert!(matches!(result, Err(error) if matches!(error.kind(), ErrorKind::Crypto(_))));
+        assert!(accepted.try_recv().is_err());
         network.stop.cancel();
     }
 

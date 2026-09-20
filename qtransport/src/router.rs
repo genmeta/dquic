@@ -10,7 +10,7 @@ use qbase::{
     net::route::{Link, Pathway},
     packet::{DataHeader, GetDcid, Packet, PacketReader, long},
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 
 /// The last field credits one UDP datagram, once per connection; subsequent packets carry zero.
 pub type ReceivedPacket = (Packet, Pathway, Link, usize);
@@ -18,11 +18,13 @@ pub const PACKET_QUEUE_CAPACITY: usize = 32;
 
 pub struct QuicRouter {
     routes: Mutex<HashMap<ConnectionId, mpsc::Sender<ReceivedPacket>>>,
-    incoming: mpsc::Sender<(ConnectionId, mpsc::Receiver<ReceivedPacket>)>,
+    incoming: mpsc::Sender<(ConnectionId, mpsc::Receiver<ReceivedPacket>, Instant)>,
 }
 
 impl QuicRouter {
-    pub fn new(incoming: mpsc::Sender<(ConnectionId, mpsc::Receiver<ReceivedPacket>)>) -> Self {
+    pub fn new(
+        incoming: mpsc::Sender<(ConnectionId, mpsc::Receiver<ReceivedPacket>, Instant)>,
+    ) -> Self {
         Self {
             routes: Mutex::new(HashMap::new()),
             incoming,
@@ -98,7 +100,7 @@ impl QuicRouter {
             let _ = sender.try_send((packet, pathway, link, size));
             credited.push(sender.clone());
             routes.insert(cid, sender);
-            slot.send((cid, receiver));
+            slot.send((cid, receiver, Instant::now()));
         }
     }
 }

@@ -355,7 +355,7 @@ impl OneRttKeys {
         self.packets.lock().unwrap().update()
     }
 
-    pub(crate) fn on_ack(&self, generation: u64) {
+    pub fn on_ack(&self, generation: u64) {
         let mut packets = self.packets.lock().unwrap();
         if generation != 0 && packets.keys.back().unwrap().generation == generation {
             packets.can_update = true;
