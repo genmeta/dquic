@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
+use bytes::Bytes;
 use qbase::{
     Epoch, GetEpoch,
     error::{Error, QuicError},
@@ -258,7 +259,7 @@ fn frame_dispathcer(
     space: &DataSpace,
     components: &Components,
     event_broker: &ArcEventBroker,
-) -> impl for<'p> Fn(Frame, Type, &'p Path) + use<> {
+) -> impl for<'p> Fn(Frame<Bytes>, Type, &'p Path) + use<> {
     let (ack_frames_entry, rcvd_ack_frames) = mpsc::unbounded_channel();
     // 连接级的
     let (max_data_frames_entry, rcvd_max_data_frames) = mpsc::unbounded_channel();
@@ -354,7 +355,7 @@ fn frame_dispathcer(
         event_broker.clone(),
     );
     let event_broker = event_broker.clone();
-    move |frame: Frame, pty: packet::Type, path: &Path| match frame {
+    move |frame: Frame<Bytes>, pty: packet::Type, path: &Path| match frame {
         Frame::Ack(f) => {
             path.cc().on_ack_rcvd(Epoch::Data, &f);
             _ = ack_frames_entry.send(f)
@@ -424,7 +425,7 @@ async fn parse_normal_zero_rtt_packet(
     ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedZeroRttFrom,
     space: &DataSpace,
     components: &Components,
-    dispatch_frame: impl Fn(Frame, Type, &Path),
+    dispatch_frame: impl Fn(Frame<Bytes>, Type, &Path),
 ) -> Result<(), Error> {
     let Some(packet) = space.decrypt_0rtt_packet(packet).await.transpose()? else {
         return Ok(());
@@ -468,7 +469,7 @@ async fn parse_normal_one_rtt_packet(
     ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedOneRttFrom,
     space: &DataSpace,
     components: &Components,
-    dispatch_frame: impl Fn(Frame, Type, &Path),
+    dispatch_frame: impl Fn(Frame<Bytes>, Type, &Path),
 ) -> Result<(), Error> {
     let Some(packet) = space.decrypt_1rtt_packet(packet).await.transpose()? else {
         return Ok(());

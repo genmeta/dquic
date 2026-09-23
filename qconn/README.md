@@ -7,11 +7,11 @@
 - `InitialPhase`：仅有 Initial Space、SCID 和 ODCID；创建它时不分配 Handshake Space。
 - `MaturePhase`：通过 qtransport::space::Spaces 保存 initial、handshake、data 三个空间，另持有 SCID、DataStreams、FlowController、可靠帧与确定的 ArcParameters；不保存 InitialPhase 引用。
 - `ArcConnPhase`：Initial 只有 Initial space；Connecting 增加 Handshake space；参数齐备进入 Handshaking；客户端收到 HANDSHAKE_DONE 后进入 Mature。每条路径每轮 Burst 重新取快照。
-- `client_growing`：接收外部已注册的 Router channel，推进 TLS、连接空间接收拓扑和关闭流程；不添加路径、不启动包发送任务。
-- `ClientState`：由外部创建，与客户端成长协程及路径发送任务共享恢复入口、握手状态、关闭状态和路径信息；不提前分配 Handshake/Data space 或参数相关组件。
-- `server_growing`：服务端入口仍通过 `started` 提供路径发送入口。
+- `Paths`：连接级外部控制项，持有 `ArcConnPhase`、空闲计时、关闭状态、拥塞反馈和当前路径。
+- `client_growing`：接收 `Paths` 与外部已注册的 Router channel，推进 TLS、连接空间接收拓扑和关闭流程。
+- `server_growing`：从传入的 `Paths` 取得同一份阶段、路径及关闭状态，推进服务端连接。
 - 路径发送任务：每轮 Burst 读取阶段材料，结合本路径的 ACK、Challenge、Response、心跳及发送约束，依次尝试 Initial、Handshake、Data，再批量发送。Phase 不提供 assemble/send 方法。
-- `qtransport::path::Paths`：只登记连接当前的 Path。qconn 生成的 `AddPath` 负责创建 Path 并启动该路径唯一的 detached 发送任务。
+- `Paths::add_path`：创建并登记 `Path`，在 `Path` 上记录是否为握手选中路径，并启动该路径唯一的发送任务。重复添加同一 `Pathway` 返回已有路径。
 
 ## 全局入口
 
@@ -25,25 +25,21 @@
 
 ## 使用
 
-客户端调用者准备 TLS context、本地参数、Initial keys、关闭信号和 `qtransport::path::Paths`，向 Router 注册 SCID。`client_sender` 返回由调用者使用的路径发送入口；`client_growing` 接收同一份共享状态及 `(route, rcvd_pkt)`。服务端的原始 DCID 由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
+客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
 
 ```rust,ignore
 let phase = ArcConnPhase::new(InitialPhase::new(scid, original_dcid, initial_keys));
-let closed = ArcReceiving::default();
-let paths = Arc::new(qtransport::path::Paths::default());
+let paths = qconn::Paths::new(Role::Client, phase, idle);
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
-let route = QuicRouter::global().insert(scid.into(), inbox);
-let state = Arc::new(qconn::ClientState::new(&phase, paths, idle, closed));
-let add_path = qconn::client_sender(phase.clone(), state.clone());
+let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
 
-// 调用者决定何时添加路径并启动其发送任务，也可保留入口以便后续添加路径。
-add_path(pathway)?;
+paths.add_path(pathway, original_dcid)?;
 qconn::client_growing(
-    phase,
+    paths,
     tls,
     local,
-    (route, rcvd_pkt),
-    state,
+    cid_registry,
+    rcvd_pkt,
     tokens,
     |result| {
         // 回调只调用一次：TLS 验证后交付身份和连接，失败时交付建连错误。
@@ -58,11 +54,11 @@ qconn::client_growing(
 
 客户端首先启动 Initial 接收与 TLS/CRYPTO 接线。取得 Handshake keys 后才建立 Handshake space，退役 Initial CRYPTO 两端，启动 Handshake 收包及 CRYPTO 输入。TLS 输出任务等待各 level 的 CRYPTO stream 就绪，不负责组包或发送。
 
-server parameters 到达后才创建可靠帧、成对 CID 管理、DataStreams、FlowController 和 Data space，进入 Handshaking。取得 1-RTT keys 并完成 TLS 验证后退役 Handshake CRYPTO recver、开放 Data 接收并交付应用连接。Handshake CRYPTO sender 保留 Finished 的恢复能力，直到 HANDSHAKE_DONE 才退役并进入 Mature。实际发送 Handshake 包的通知仍用于退役 Initial 包空间。
+server parameters 到达后才创建可靠帧、成对 CID 管理、DataStreams、FlowController 和 Data space，进入 Handshaking。取得 1-RTT keys 并完成 TLS 验证后退役 Handshake CRYPTO recver、开放 Data 接收并交付应用连接。Handshake CRYPTO sender 保留 Finished 的恢复能力，直到 HANDSHAKE_DONE 才退役并进入 Mature。客户端实际发送 Handshake 包后退役 Initial 包空间。
 
 外层 select 覆盖每次 TLS 等待、HANDSHAKE_DONE 等待和成熟阶段，close 可在任一阶段打断成长。关闭只处理已经建立的空间，不为清理预建 Handshake 或 Data。
 
-客户端的三个 CC feedback 由外部 ClientState 持有。Handshake/Data journal 就绪后由 growing 接线；尚未创建的空间保持 Pending。Phase 不保存 feedback 数组。
+三个 CC feedback 由 `Paths` 持有。各路径发送任务观察阶段变化，在 Handshake/Data journal 就绪后接线；尚未创建的空间保持 Pending。Phase 不保存 feedback 数组。
 
 Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间密钥；没有统一 Packet 队列或中间分流任务。Closing 期间这些任务继续接收 CLOSE；Draining 结束后 growing 取消接收任务、淘汰密钥并释放 CID 与路由守卫。额外 ODCID entry 的拥有者在协程退出后释放它。
 

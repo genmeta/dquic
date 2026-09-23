@@ -450,7 +450,7 @@ pub enum ReliableFrame {
 ///
 /// The data frames' body are stored in the second field.
 #[derive(Debug, Clone, From, TryInto, Eq, PartialEq)]
-pub enum Frame<D = Bytes> {
+pub enum Frame<D = ()> {
     /// PADDING frame, see [`PaddingFrame`].
     Padding(PaddingFrame),
     /// PING frame, see [`PingFrame`].
@@ -689,7 +689,7 @@ impl FrameReader {
 }
 
 impl Iterator for FrameReader {
-    type Item = Result<(Frame, FrameType), Error>;
+    type Item = Result<(Frame<Bytes>, FrameType), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.payload.is_empty() {

@@ -92,6 +92,7 @@ pub trait WriteParameter {
             ParameterValue::Bytes(bytes) => self.put_bytes_parameter(id, bytes),
             ParameterValue::ConnectionId(cid) => self.put_cid_parameter(id, cid),
             ParameterValue::Duration(dur) => self.put_duration_parameter(id, dur),
+            ParameterValue::False => {}
             ParameterValue::True => self.put_bool_parameter(id),
             ParameterValue::PreferredAddress(addr) => {
                 self.put_preferred_address_parameter(id, addr)

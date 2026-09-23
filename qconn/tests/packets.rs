@@ -11,6 +11,7 @@ use bytes::BytesMut;
 use qbase::{
     cid::ConnectionId,
     net::{addr::EndpointAddr, route::Pathway},
+    role::Role,
     time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
@@ -90,7 +91,7 @@ async fn dropping_old_client_route_preserves_replacement() {
 async fn client_waits_for_keys_before_creating_handshake_space() {
     use futures::FutureExt;
     let cid = ConnectionId::random_gen(8);
-    let phase = ArcConnPhase::new(InitialPhase::new(
+    let phase = ArcConnPhase::initial(InitialPhase::new(
         cid,
         ConnectionId::from_slice(b"original"),
         initial_keys(false),
@@ -98,8 +99,8 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let (endpoint, _) = common::endpoints(false);
     let (parameters, _) = common::parameters();
     let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
-    let paths = Arc::new(Paths::new(phase.clone()));
     let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
+    let paths = Paths::new(Role::Client, phase.clone(), idle);
     let (inbox, rcvd_pkt) = channel::new();
     let router = QuicRouter::global();
     let route = router.insert(cid.into(), inbox.clone());
@@ -109,13 +110,11 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let cid_registry =
         router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
     let growing = client_growing(
-        phase.clone(),
-        tls.clone(),
         parameters,
-        cid_registry,
-        rcvd_pkt,
         paths,
-        idle,
+        rcvd_pkt,
+        tls.clone(),
+        cid_registry,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         |result| assert!(result.is_err()),
     );
@@ -154,11 +153,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         packet::LongHeaderBuilder,
     };
     use qtls::CryptoLevel;
-    use qtransport::{
-        path::Path,
-        send::{Burst, constraints::Constraints, records::ArcSendJournal},
-        space::ArcFeedback,
-    };
+    use qtransport::send::{self, constraints::Constraints, records::ArcSendJournal};
 
     let [tls, server_tls] =
         common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
@@ -171,31 +166,25 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert_eq!(flight[0], 8);
     let parameters_end = 4 + u32::from_be_bytes([0, flight[1], flight[2], flight[3]]) as usize;
     let cid = ConnectionId::random_gen(8);
-    let phase = ArcConnPhase::new(InitialPhase::new(
+    let phase = ArcConnPhase::initial(InitialPhase::new(
         cid,
         ConnectionId::from_slice(b"original"),
         initial_keys(false),
     ));
-    let paths = Arc::new(Paths::new(phase.clone()));
     let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
+    let paths = Paths::new(Role::Client, phase.clone(), idle);
+    let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let local = EndpointAddr::direct(socket.local_addr().unwrap());
+    QuicProtocol::global().register(local, &socket).unwrap();
     let link = Link::new(
-        "127.0.0.1:30001".parse().unwrap(),
+        socket.local_addr().unwrap(),
         "127.0.0.1:30002".parse().unwrap(),
     );
     let pathway = Pathway::new(
         EndpointAddr::direct(link.src),
         EndpointAddr::direct(link.dst),
     );
-    let path = Arc::new(Path::new(
-        pathway,
-        ConnectionId::from_slice(b"original"),
-        Arc::new(qcongestion::HandshakeStatus::new(false)),
-        Duration::from_millis(25),
-        idle.timer(),
-        std::array::from_fn(|_| Arc::new(ArcFeedback::default()) as Arc<dyn qcongestion::Feedback>),
-    ));
-    assert!(paths.insert(path.clone()));
-    // Register a path without a sender. Growing must never start network output for it.
+    let path = paths.add_path(pathway).unwrap();
     let router = Arc::new(QuicRouter::new());
     let (inbox, rcvd_pkt) = channel::new();
     let route = router.insert(cid.into(), inbox.clone());
@@ -207,49 +196,49 @@ async fn close_at_client_stage(wait: ClientWait) {
     let (delivered, mut delivery) = oneshot::channel();
     let (parameters, _) = common::parameters();
     let growing = tokio::spawn(client_growing(
-        phase.clone(),
-        tls.clone(),
         parameters,
-        cid_registry,
-        rcvd_pkt,
         paths.clone(),
-        idle,
+        rcvd_pkt,
+        tls.clone(),
+        cid_registry,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         move |result| {
             let _ = delivered.send(result);
         },
     ));
-    let mut burst = Burst::new(
-        Arc::new(QuicProtocol::new()),
-        pathway,
-        path.cc.clone(),
-        path.anti_amplifier.clone(),
-        path.send_waker.clone(),
-    );
+    let mut buffers = vec![BytesMut::with_capacity(1200)];
+    let mut send_frames = Vec::new();
+    let mut pns = std::collections::VecDeque::new();
+    let mut signals = qbase::net::tx::Signals::empty();
     let hello_len = hello.len();
     let bytes = [hello];
     let mut crypto = (
         CryptoFrame::new(0u32.into(), (hello_len as u32).into()),
         bytes.as_slice(),
     );
-    let packet = burst
-        .assemble_initial_packet(
-            &initial_keys(true).sealing,
-            LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"server00")).initial(vec![]),
-            &ArcSendJournal::default(),
-            &Constraints {
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            [&mut crypto],
-        )
-        .unwrap()
-        .unwrap();
+    let packet = send::assemble_long_packet(
+        pathway,
+        &path.cc,
+        &mut buffers,
+        &mut send_frames,
+        &mut pns,
+        &mut signals,
+        &initial_keys(true).sealing,
+        LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"server00")).initial(vec![]),
+        &ArcSendJournal::default(),
+        &Constraints {
+            capacity: 1200,
+            congestion: 1200,
+            anti_amplification: 1200,
+        },
+        [&mut crypto],
+    )
+    .unwrap()
+    .unwrap();
     router.receive(BytesMut::from(packet.bytes()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let ConnPhase::Connecting(connecting) = phase.get() {
+            if let ConnPhase::Handshake(connecting) = phase.get() {
                 break connecting.handshake.clone();
             }
             tokio::task::yield_now().await;
@@ -261,16 +250,12 @@ async fn close_at_client_stage(wait: ClientWait) {
         delivery.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    assert!(
-        phase
-            .get()
-            .initial()
-            .crypto
-            .writer()
-            .write(&[])
-            .await
-            .is_err()
-    );
+    let initial = match phase.get() {
+        ConnPhase::Initial(phase) => phase.initial.clone(),
+        ConnPhase::Handshake(phase) => phase.initial.initial.clone(),
+        ConnPhase::Mature(phase) => phase.spaces.initial.clone(),
+    };
+    assert!(initial.crypto.writer().write(&[]).await.is_err());
     assert!(matches!(
         handshake.crypto.writer().write(&[]).now_or_never(),
         Some(Ok(0))
@@ -286,13 +271,13 @@ async fn close_at_client_stage(wait: ClientWait) {
             ))
             .unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !matches!(phase.get(), ConnPhase::Handshaking(_)) {
+            while !matches!(phase.get(), ConnPhase::Mature(_)) {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        let ConnPhase::Handshaking(material) = phase.get() else {
+        let ConnPhase::Mature(material) = phase.get() else {
             unreachable!()
         };
         assert!(material.spaces.data.keys.try_get().unwrap().is_none());
@@ -317,7 +302,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        assert!(matches!(phase.get(), ConnPhase::Handshaking(_)));
+        assert!(matches!(phase.get(), ConnPhase::Mature(_)));
         assert!(matches!(
             handshake.crypto.reader().read(&mut [0; 1]).now_or_never(),
             Some(Err(_))
@@ -343,6 +328,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
     assert!(paths.snapshot().is_empty());
     assert!(!route_exists(&router, cid).await);
+    QuicProtocol::global().unregister(local, &socket);
     drop(route);
     drop(connection);
 }

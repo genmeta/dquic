@@ -35,6 +35,10 @@ impl HandshakeStatus {
     pub fn handshake_confirmed(&self) {
         self.is_handshake_confirmed.store(true, Ordering::Relaxed);
     }
+
+    pub fn is_handshake_confirmed(&self) -> bool {
+        self.is_handshake_confirmed.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone)]

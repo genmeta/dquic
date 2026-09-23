@@ -24,7 +24,7 @@ use crate::{ArcReceiving, util::Buffer};
 fn complete_frame(
     frame_type: FrameType,
     raw: Bytes,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame> {
+) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame<Bytes>> {
     use nom::{Parser, combinator::map};
     move |input: &[u8]| match frame_type {
         FrameType::Padding => Ok((input, Frame::Padding(PaddingFrame))),
@@ -120,7 +120,7 @@ fn complete_frame(
 }
 
 /// Parse a frame type from the raw bytes, [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn be_frame(raw: &Bytes, packet_type: Type) -> Result<(usize, Frame, FrameType), Error> {
+pub fn be_frame(raw: &Bytes, packet_type: Type) -> Result<(usize, Frame<Bytes>, FrameType), Error> {
     let input = raw.as_ref();
     let (remain, frame_type) = be_frame_type(input)?;
     if !frame_type.belongs_to(packet_type) {

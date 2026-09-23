@@ -147,12 +147,8 @@ impl ConnectionFoundation<ClientFoundation, TlsClientConfig> {
         F: ProductStreamsConcurrencyController + ?Sized,
     {
         let client_params = &self.foundation.client_params;
-        let init_max_bidi_streams = client_params
-            .get(ParameterId::InitialMaxStreamsBidi)
-            .expect("unreachable: default value will be got if the value unset");
-        let init_max_uni_streams = client_params
-            .get(ParameterId::InitialMaxStreamsUni)
-            .expect("unreachable: default value will be got if the value unset");
+        let init_max_bidi_streams = client_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
+        let init_max_uni_streams = client_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
         ConnectionFoundation {
             streams_ctrl: strategy_factory.init(init_max_bidi_streams, init_max_uni_streams),
             ..self
@@ -190,12 +186,8 @@ impl ConnectionFoundation<ServerFoundation, TlsServerConfig> {
         F: ProductStreamsConcurrencyController + ?Sized,
     {
         let server_params = &self.foundation.server_params;
-        let init_max_bidi_streams = server_params
-            .get(ParameterId::InitialMaxStreamsBidi)
-            .expect("unreachable: default value will be got if the value unset");
-        let init_max_uni_streams = server_params
-            .get(ParameterId::InitialMaxStreamsUni)
-            .expect("unreachable: default value will be got if the value unset");
+        let init_max_bidi_streams = server_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
+        let init_max_uni_streams = server_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
         ConnectionFoundation {
             streams_ctrl: strategy_factory.init(init_max_bidi_streams, init_max_uni_streams),
             ..self
@@ -432,12 +424,8 @@ fn init_stream_and_datagram<LR: IntoRole, RR: IntoRole>(
 ) -> (DataStreams, FlowController, DatagramFlow) {
     assert_ne!(LR::into_role(), RR::into_role());
     let flow_ctrl = FlowController::new(
-        remote_params
-            .get(ParameterId::InitialMaxData)
-            .expect("unreachable: default value will be got if the value unset"),
-        local_params
-            .get(ParameterId::InitialMaxData)
-            .expect("unreachable: default value will be got if the value unset"),
+        remote_params.get::<u64>(ParameterId::InitialMaxData),
+        local_params.get::<u64>(ParameterId::InitialMaxData),
         reliable_frames.clone(),
         tx_wakers.clone(),
     );
@@ -451,9 +439,7 @@ fn init_stream_and_datagram<LR: IntoRole, RR: IntoRole>(
         Some(metrics),
     );
     let datagram_flow = DatagramFlow::new(
-        local_params
-            .get(ParameterId::MaxDatagramFrameSize)
-            .expect("unreachable: default value will be got if the value unset"),
+        local_params.get::<u64>(ParameterId::MaxDatagramFrameSize),
         tx_wakers.clone(),
     );
     (data_streams, flow_ctrl, datagram_flow)
@@ -647,20 +633,12 @@ fn tls_fin_handler(
         // accept InitialMaxData:
         flow_ctrl.sender.revise_max_data(
             zero_rtt_rejected,
-            remote_parameters
-                .get(ParameterId::InitialMaxData)
-                .expect("unreachable: default value will be got if the value unset"),
+            remote_parameters.get::<u64>(ParameterId::InitialMaxData),
         );
         // accept ActiveConnectionIdLimit
-        local_cids.set_limit(
-            remote_parameters
-                .get(ParameterId::ActiveConnectionIdLimit)
-                .expect("unreachable: default value will be got if the value unset"),
-        )?;
+        local_cids.set_limit(remote_parameters.get::<u64>(ParameterId::ActiveConnectionIdLimit))?;
         conn_idle.negotiate_max_idle_timeout(
-            remote_parameters
-                .get(ParameterId::MaxIdleTimeout)
-                .expect("Duration::ZERO if not specified"),
+            remote_parameters.get::<Duration>(ParameterId::MaxIdleTimeout),
         );
         Ok(())
     }

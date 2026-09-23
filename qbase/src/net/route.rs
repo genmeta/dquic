@@ -1,4 +1,8 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{
+    fmt::Display,
+    net::{IpAddr, SocketAddr},
+    ops::BitOr,
+};
 
 use bytes::BufMut;
 use derive_more::{Deref, DerefMut};
@@ -13,6 +17,56 @@ use crate::{
         be_socket_addr,
     },
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Scope {
+    Loopback = 0b001,
+    Internal = 0b010,
+    External = 0b100,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Scopes(u8);
+
+impl Scopes {
+    pub const ALL: Self =
+        Self(Scope::Loopback as u8 | Scope::Internal as u8 | Scope::External as u8);
+
+    pub fn contains(self, scope: Scope) -> bool {
+        self.0 & scope as u8 != 0
+    }
+}
+
+impl From<Scope> for Scopes {
+    fn from(scope: Scope) -> Self {
+        Self(scope as u8)
+    }
+}
+
+impl BitOr for Scope {
+    type Output = Scopes;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Scopes(self as u8 | rhs as u8)
+    }
+}
+
+impl BitOr<Scope> for Scopes {
+    type Output = Self;
+
+    fn bitor(self, rhs: Scope) -> Self::Output {
+        Self(self.0 | rhs as u8)
+    }
+}
+
+impl BitOr for Scopes {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Pathway<E = EndpointAddr> {
@@ -56,6 +110,37 @@ impl<E> Pathway<E> {
             local: self.remote,
             remote: self.local,
         }
+    }
+}
+
+impl Pathway {
+    /// Returns whether the remote endpoint belongs to a listening scope.
+    pub fn belongs_to(&self, scopes: Scopes) -> bool {
+        let scope = match self.remote {
+            EndpointAddr::Direct { addr } => match addr.ip() {
+                IpAddr::V4(ip) if ip.is_loopback() => Scope::Loopback,
+                IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Scope::Internal,
+                IpAddr::V6(ip)
+                    if ip.is_loopback()
+                        || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()) =>
+                {
+                    Scope::Loopback
+                }
+                IpAddr::V6(ip)
+                    if ip.is_unique_local()
+                        || ip.is_unicast_link_local()
+                        || ip
+                            .to_ipv4_mapped()
+                            .is_some_and(|ip| ip.is_private() || ip.is_link_local()) =>
+                {
+                    Scope::Internal
+                }
+                _ if self.remote.is_globally_routable() => Scope::External,
+                _ => return false,
+            },
+            EndpointAddr::Mediate { .. } => Scope::External,
+        };
+        scopes.contains(scope)
     }
 }
 
@@ -244,6 +329,54 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pathway_scope_classifies_remote_endpoints() {
+        let local = "127.0.0.1:4433".parse::<EndpointAddr>().unwrap();
+        for (remote, expected) in [
+            ("127.0.0.1:4433", Scope::Loopback),
+            ("[::1]:4433", Scope::Loopback),
+            ("[::ffff:127.0.0.1]:4433", Scope::Loopback),
+            ("192.168.1.1:4433", Scope::Internal),
+            ("169.254.1.1:4433", Scope::Internal),
+            ("[fd00::1]:4433", Scope::Internal),
+            ("[fe80::1]:4433", Scope::Internal),
+            ("[::ffff:192.168.1.1]:4433", Scope::Internal),
+            ("1.1.1.1:4433", Scope::External),
+            ("[2001:4860:4860::8888]:4433", Scope::External),
+            ("8.8.8.8:3478-192.168.1.1:4433", Scope::External),
+        ] {
+            let pathway = Pathway::new(local, remote.parse().unwrap());
+            for scope in [Scope::Loopback, Scope::Internal, Scope::External] {
+                assert_eq!(
+                    pathway.belongs_to(scope.into()),
+                    scope == expected,
+                    "{remote}",
+                );
+            }
+            assert!(pathway.belongs_to(Scopes::ALL), "{remote}");
+            assert_eq!(
+                pathway.belongs_to(Scope::Loopback | Scope::Internal),
+                expected != Scope::External,
+                "{remote}",
+            );
+        }
+    }
+
+    #[test]
+    fn pathway_scope_excludes_unroutable_remote_endpoints() {
+        let local = "127.0.0.1:4433".parse::<EndpointAddr>().unwrap();
+        for remote in [
+            "0.0.0.0:4433",
+            "192.0.2.1:4433",
+            "224.0.0.1:4433",
+            "[::]:4433",
+            "[2001:db8::1]:4433",
+        ] {
+            let pathway = Pathway::new(local, remote.parse().unwrap());
+            assert!(!pathway.belongs_to(Scopes::ALL), "{remote}");
+        }
+    }
 
     #[test]
     fn test_endpoint_addr_from_str() {

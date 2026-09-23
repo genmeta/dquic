@@ -105,20 +105,9 @@ impl QuicProtocol {
             return Poll::Ready(Ok(0));
         }
         let packets = &packets[..packets.len().min(Self::MAX_DATAGRAMS)];
-        let socket = self.find_socket(pathway.local()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "local endpoint unavailable")
-        })?;
-        let destination = match pathway.remote() {
-            EndpointAddr::Direct { addr } => addr,
-            EndpointAddr::Mediate { agent, .. } => agent,
-        };
-        let link = Link::new(socket.local_addr()?, destination);
         let overhead = Self::packet_overhead(pathway);
-        // Every IoSlice is a complete UDP datagram; GSO must never split a larger
-        // later datagram using the size of the first one.
-        let segment_size = packets.iter().map(|packet| packet.len()).max().unwrap() + overhead;
         if overhead == 0 {
-            return socket.poll_send(cx, packets, &line(link, segment_size));
+            return self.poll_send_datagrams(cx, pathway, packets);
         }
         let mut payloads = Vec::with_capacity(packets.len());
         for packet in packets {
@@ -133,7 +122,30 @@ impl QuicProtocol {
             .iter()
             .map(|packet| IoSlice::new(packet.as_ref()))
             .collect::<Vec<_>>();
-        socket.poll_send(cx, &packets, &line(link, segment_size))
+        self.poll_send_datagrams(cx, pathway, &packets)
+    }
+
+    /// Submit complete datagrams, including the Forward header for a mediated Pathway.
+    pub fn poll_send_datagrams(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        pathway: Pathway,
+        packets: &[IoSlice<'_>],
+    ) -> std::task::Poll<io::Result<usize>> {
+        if packets.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+        let packets = &packets[..packets.len().min(Self::MAX_DATAGRAMS)];
+        let socket = self.find_socket(pathway.local()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "local endpoint unavailable")
+        })?;
+        let destination = match pathway.remote() {
+            EndpointAddr::Direct { addr } => addr,
+            EndpointAddr::Mediate { agent, .. } => agent,
+        };
+        let link = Link::new(socket.local_addr()?, destination);
+        let segment_size = packets.iter().map(|packet| packet.len()).max().unwrap();
+        socket.poll_send(cx, packets, &line(link, segment_size))
     }
 
     /// Bytes added by qprotocol outside the QUIC packet.

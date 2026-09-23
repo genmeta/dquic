@@ -35,14 +35,14 @@ impl ArcParameters {
         &self.server
     }
 
-    pub fn local<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
+    pub fn local<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> V {
         match self.role {
             Role::Client => self.client.get(id),
             Role::Server => self.server.get(id),
         }
     }
 
-    pub fn remote<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
+    pub fn remote<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> V {
         match self.role {
             Role::Client => self.server.get(id),
             Role::Server => self.client.get(id),

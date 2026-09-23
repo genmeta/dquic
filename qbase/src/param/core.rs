@@ -25,6 +25,7 @@ pub enum ParameterValueType {
 #[derive(Debug, Clone, PartialEq, From)]
 pub enum ParameterValue {
     Bytes(Bytes),
+    False,
     True,
     VarInt(VarInt),
     Duration(Duration),
@@ -37,7 +38,7 @@ impl ParameterValue {
     pub fn value_type(&self) -> ParameterValueType {
         match self {
             ParameterValue::VarInt(_) => ParameterValueType::VarInt,
-            ParameterValue::True => ParameterValueType::Boolean,
+            ParameterValue::False | ParameterValue::True => ParameterValueType::Boolean,
             ParameterValue::Bytes(_) => ParameterValueType::Bytes,
             ParameterValue::Duration(_) => ParameterValueType::Duration,
             ParameterValue::ConnectionId(_) => ParameterValueType::ConnectionId,
@@ -50,6 +51,12 @@ impl ParameterValue {
 impl From<u32> for ParameterValue {
     fn from(value: u32) -> Self {
         ParameterValue::VarInt(VarInt::from_u32(value))
+    }
+}
+
+impl From<bool> for ParameterValue {
+    fn from(value: bool) -> Self {
+        if value { Self::True } else { Self::False }
     }
 }
 
@@ -138,6 +145,7 @@ impl TryFrom<ParameterValue> for bool {
     #[inline]
     fn try_from(value: ParameterValue) -> Result<Self, Self::Error> {
         match value {
+            ParameterValue::False => Ok(false),
             ParameterValue::True => Ok(true),
             _ => Err(TryIntoError::new(value, "Enabled", "bool")),
         }
@@ -193,7 +201,7 @@ pub enum ParameterId {
     AckDelayExponent = 0x000a,
     #[param(value_type = Duration, default = Duration::from_millis(25))]
     MaxAckDelay = 0x000b,
-    #[param(value_type = Boolean)]
+    #[param(value_type = Boolean, default = false)]
     DisableActiveMigration = 0x000c,
     #[param(value_type = PreferredAddress)]
     PreferredAddress = 0x000d,
@@ -205,10 +213,10 @@ pub enum ParameterId {
     RetrySourceConnectionId = 0x0010,
     #[param(value_type = VarInt, default = 0u32)]
     MaxDatagramFrameSize = 0x0020,
-    #[param(value_type = Boolean)]
+    #[param(value_type = Boolean, default = false)]
     GreaseQuicBit = 0x2ab2,
     /// Genemta extension parameter.
-    #[param(value_type = Bytes, default = 0u32)]
+    #[param(value_type = Bytes)]
     ClientName = 0xffee,
 }
 
@@ -249,11 +257,25 @@ impl<Role> Parameters<Role> {
         self.map.iter()
     }
 
-    pub fn get<V>(&self, id: ParameterId) -> Option<V>
+    /// Return an explicitly configured value or the protocol default.
+    /// Use [`Self::try_get`] for parameters that are genuinely optional.
+    pub fn get<V>(&self, id: ParameterId) -> V
     where
         V: TryFrom<ParameterValue>,
     {
-        (self.map.get(&id).cloned().or_else(|| id.default_value()))
+        self.try_get(id)
+            .unwrap_or_else(|| panic!("{id:?} has neither a configured value nor a default"))
+    }
+
+    /// Return an optional parameter, still applying its protocol default when one exists.
+    pub fn try_get<V>(&self, id: ParameterId) -> Option<V>
+    where
+        V: TryFrom<ParameterValue>,
+    {
+        self.map
+            .get(&id)
+            .cloned()
+            .or_else(|| id.default_value())
             .and_then(|value| value.try_into().ok())
     }
 
@@ -298,12 +320,7 @@ impl ServerParameters {
             ParameterId::MaxDatagramFrameSize,
         ]
         .into_iter()
-        .all(
-            |id| match (self.get::<VarInt>(id), server_params.get::<VarInt>(id)) {
-                (Some(old_value), Some(new_value)) => old_value <= new_value,
-                _ => unreachable!("Expected VarInt values for 0-RTT acceptance check"),
-            },
-        )
+        .all(|id| self.get::<VarInt>(id) <= server_params.get::<VarInt>(id))
     }
 }
 

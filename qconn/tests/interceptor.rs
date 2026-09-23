@@ -1,13 +1,14 @@
 mod common;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use qbase::{
     cid::ConnectionId,
+    net::route::Pathway,
     param::{ClientParameters, ParameterId, WriteParameters},
 };
-use qconn::{BelongsTo, Interceptor, Scope, ServerRegistry};
+use qconn::{Interceptor, Scope, ServerRegistry};
 use qtls::{ClientStart, CryptoLevel, QuicVersion, TlsEvent};
 
 #[tokio::test]
@@ -50,26 +51,28 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
         .get(hello.server_name().unwrap())
         .unwrap();
     assert!(
-        "127.0.0.1:4433"
-            .parse::<SocketAddr>()
-            .unwrap()
-            .belongs_to(server.scopes)
+        Pathway::new(
+            "1.1.1.1:4433".parse().unwrap(),
+            "127.0.0.1:4433".parse().unwrap(),
+        )
+        .belongs_to(server.scopes)
     );
     let scid = ConnectionId::from_slice(b"server00");
     let odcid = ConnectionId::from_slice(b"original");
-    let (tls, intercepted_parameters, connection_parameters) =
-        server.start(QuicVersion::V1, hello, scid, odcid).unwrap();
+    let (tls, intercepted_parameters, connection_parameters) = server
+        .spawn_connection_with(QuicVersion::V1, hello, scid, odcid)
+        .unwrap();
     assert_eq!(
         intercepted_parameters.get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
         client_parameters.get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
     );
     assert_eq!(
         connection_parameters.get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
-        Some(scid)
+        scid
     );
     assert_eq!(
         connection_parameters.get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId),
-        Some(odcid)
+        odcid
     );
     assert!(matches!(
         tls.read_keys().await.unwrap(),
@@ -100,21 +103,11 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
             .get::<qbase::varint::VarInt>(ParameterId::InitialMaxData)
     );
     assert!(
-        "1.1.1.1:4433"
-            .parse::<SocketAddr>()
-            .unwrap()
-            .belongs_to(updated.scopes)
+        Pathway::new(
+            "127.0.0.1:4433".parse().unwrap(),
+            "1.1.1.1:4433".parse().unwrap(),
+        )
+        .belongs_to(updated.scopes)
     );
     assert!(ServerRegistry::global().remove("localhost").is_some());
-}
-
-#[test]
-fn listen_scope_distinguishes_peer_address_classes() {
-    let address = |value: &str| value.parse::<SocketAddr>().unwrap();
-    let local = Scope::Loopback | Scope::Internal;
-
-    assert!(address("127.0.0.1:4433").belongs_to(local));
-    assert!(address("192.168.1.1:4433").belongs_to(local));
-    assert!(!address("1.1.1.1:4433").belongs_to(local));
-    assert!(address("1.1.1.1:4433").belongs_to(Scope::External.into()));
 }

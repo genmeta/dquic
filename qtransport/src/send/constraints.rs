@@ -8,54 +8,91 @@ pub struct Constraints {
     pub anti_amplification: usize,
 }
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use qcongestion::PathStatus;
 
-/// Shared with receive-side path accounting; only successful submissions debit credit.
+use crate::path::PathState;
+
+/// Shared path state; only successful submissions debit amplification credit.
 pub struct AntiAmplifier {
-    received: AtomicU64,
-    sent: AtomicU64,
-    validated: AtomicBool,
+    pub(crate) state: Mutex<PathState>,
     status: PathStatus,
 }
 
 impl AntiAmplifier {
     pub fn new(status: PathStatus) -> Self {
         Self {
-            received: 0.into(),
-            sent: 0.into(),
-            validated: false.into(),
+            state: Mutex::new(PathState::AmplifyGuard {
+                rcvd_bytes: 0,
+                sent_bytes: 0,
+            }),
             status,
         }
     }
 
     pub fn balance(&self) -> usize {
-        if self.validated.load(Ordering::Acquire) {
-            return usize::MAX;
+        match *self.state.lock().unwrap() {
+            PathState::ClientHandshaking | PathState::Validated => usize::MAX,
+            PathState::AmplifyGuard {
+                rcvd_bytes,
+                sent_bytes,
+            } => rcvd_bytes.saturating_mul(3).saturating_sub(sent_bytes),
+            PathState::Retired => 0,
         }
-        self.received
-            .load(Ordering::Acquire)
-            .saturating_mul(3)
-            .saturating_sub(self.sent.load(Ordering::Acquire))
-            .min(usize::MAX as u64) as usize
     }
 
     pub fn on_received(&self, bytes: usize) {
-        self.received.fetch_add(bytes as u64, Ordering::AcqRel);
-        if self.balance() >= 1200 {
-            self.status.release_anti_amplification_limit();
+        let mut state = self.state.lock().unwrap();
+        if let PathState::AmplifyGuard {
+            rcvd_bytes,
+            sent_bytes,
+        } = &mut *state
+        {
+            *rcvd_bytes = rcvd_bytes.saturating_add(bytes);
+            if rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes) >= 1200 {
+                self.status.release_anti_amplification_limit();
+            }
         }
     }
 
     pub fn grant(&self) {
-        self.validated.store(true, Ordering::Release);
-        self.status.release_anti_amplification_limit();
+        let mut state = self.state.lock().unwrap();
+        if *state != PathState::Retired {
+            *state = PathState::Validated;
+            self.status.release_anti_amplification_limit();
+        }
     }
 
     pub fn on_sent(&self, bytes: usize) {
-        self.sent.fetch_add(bytes as u64, Ordering::AcqRel);
-        if self.balance() < 1200 {
+        let mut state = self.state.lock().unwrap();
+        if let PathState::AmplifyGuard {
+            rcvd_bytes,
+            sent_bytes,
+        } = &mut *state
+        {
+            *sent_bytes = sent_bytes.saturating_add(bytes);
+            if rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes) < 1200 {
+                self.status.enter_anti_amplification_limit();
+            }
+        }
+    }
+
+    pub(crate) fn client_handshaking(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, PathState::AmplifyGuard { .. }) {
+            *state = PathState::ClientHandshaking;
+            self.status.release_anti_amplification_limit();
+        }
+    }
+
+    pub(crate) fn guard(&self) {
+        let mut state = self.state.lock().unwrap();
+        if *state == PathState::ClientHandshaking {
+            *state = PathState::AmplifyGuard {
+                rcvd_bytes: 0,
+                sent_bytes: 0,
+            };
             self.status.enter_anti_amplification_limit();
         }
     }
