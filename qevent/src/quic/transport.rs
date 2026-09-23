@@ -183,12 +183,12 @@ macro_rules! extract_parameter {
     };
     (@one $id:ident as $as:ident .map($($tt:tt)*) from $set:ident to $this:ident.$field:ident) => {
         $this.$field = $this.$field.take().or_else(|| {
-            Some($set.get::<$as>(ParameterId::$id).map($($tt)*))
+            Some($set.try_get::<$as>(ParameterId::$id).map($($tt)*))
         });
     };
     (@one $id:ident as $as:ident from $set:ident to $this:ident.$field:ident) => {
         $this.$field = $this.$field.take().or_else(|| {
-            Some($set.get::<$as>(ParameterId::$id).map(Into::into))
+            Some($set.try_get::<$as>(ParameterId::$id).map(Into::into))
         });
     };
 }

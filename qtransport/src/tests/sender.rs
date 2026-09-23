@@ -6,7 +6,7 @@ use qprotocol::protocol::quic::QuicProtocol;
 use super::*;
 use crate::{
     path::PathState,
-    send::{Sender as PacketSender, write::PendingPacket},
+    send::{MAX_BURST_PACKETS, fixture::TestSender as PacketSender, write::PendingPacket},
 };
 
 pub(crate) struct Sender {
@@ -15,6 +15,7 @@ pub(crate) struct Sender {
     transport: Arc<Transport>,
     path: Arc<Path>,
     heartbeat: bool,
+    packets: Vec<std::io::IoSlice<'static>>,
 }
 
 impl Sender {
@@ -27,19 +28,14 @@ impl Sender {
             .data
             .send_wakers
             .replace(path.pathway, &path.send_waker);
-        let inner = PacketSender::new(
-            Arc::new(QuicProtocol::new()),
-            path.pathway,
-            path.cc.clone(),
-            path.anti_amplifier.clone(),
-            path.send_waker.clone(),
-        );
+        let inner = PacketSender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone());
         Ok(Self {
             inner,
             keys,
             transport,
             path,
             heartbeat: false,
+            packets: Vec::with_capacity(MAX_BURST_PACKETS),
         })
     }
     pub(crate) fn heartbeat(&mut self) {
@@ -83,6 +79,7 @@ impl Sender {
         self.inner
             .poll_send_with(
                 cx,
+                &mut self.packets,
                 |cx, path, packets| submit(cx, path, &packets[0]).map(|result| result.map(|_| 1)),
                 |_| self.path.state() != PathState::Retired,
                 |packet| self.path.on_packet_sent(packet),
@@ -97,7 +94,8 @@ impl Sender {
         self.inner
             .poll_send_with(
                 cx,
-                |cx, pathway, packets| protocol.poll_send(cx, pathway, packets),
+                &mut self.packets,
+                |cx, pathway, packets| protocol.poll_send_datagrams(cx, pathway, packets),
                 |_| self.path.state() != PathState::Retired,
                 |packet| self.path.on_packet_sent(packet),
             )
@@ -133,10 +131,7 @@ pub(crate) fn assemble_data(
                 .ok()
         })
         .map(|ack| {
-            let exponent: u64 = transport
-                .parameters
-                .local(ParameterId::AckDelayExponent)
-                .unwrap();
+            let exponent: u64 = transport.parameters.local(ParameterId::AckDelayExponent);
             AckFrame::new(
                 VarInt::from_u64(ack.largest()).unwrap(),
                 VarInt::from_u64(ack.delay() >> exponent).unwrap(),
@@ -146,8 +141,8 @@ pub(crate) fn assemble_data(
             )
         });
     let mut response = path.response();
-    let mut challenge = path.challenge()?;
-    let mut crypto = transport.data.crypto.outgoing().package(Epoch::Data);
+    let mut challenge = path.challenge();
+    let mut crypto = transport.data.crypto.outgoing();
     let mut reliable = transport.reliable_frames.clone();
     let mut streams = Repeat(
         transport

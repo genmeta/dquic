@@ -1,54 +1,230 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use qbase::net::route::Pathway;
-use qtransport::path::Path;
+use qbase::{
+    ArcReceiving, Epoch,
+    error::{ErrorKind, QuicError},
+    frame::{PathChallengeFrame, PathResponseFrame},
+    net::{route::Pathway, tx::Signals},
+    role::Role,
+    time::ArcConnIdle,
+};
+use qcongestion::Transport as _;
+use qtransport::{
+    CloseReason,
+    path::{Path, PathState},
+    space::ArcFeedback,
+};
 
-use crate::ArcConnPhase;
+use crate::{ArcConnPhase, ConnPhase, Error, terminate::ArcTerminator};
 
-/// Connection paths and the phase observed by every path sender.
+/// Connection-level path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
-    entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
+    pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
+    responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
+    role: Role,
+    idle: ArcConnIdle,
+    feedback: [ArcFeedback; 3],
+    closed: ArcReceiving<CloseReason>,
+    terminator: ArcTerminator,
 }
 
 impl Paths {
-    pub fn new(phase: ArcConnPhase) -> Self {
-        Self {
+    pub fn new(role: Role, phase: ArcConnPhase, idle: ArcConnIdle) -> Arc<Self> {
+        let feedback: [ArcFeedback; 3] = std::array::from_fn(|_| ArcFeedback::default());
+        let snapshot = phase.get();
+        let initial = match &snapshot {
+            ConnPhase::Initial(phase) => &phase.initial,
+            ConnPhase::Handshake(phase) => &phase.initial.initial,
+            ConnPhase::Mature(phase) => &phase.spaces.initial,
+        };
+        feedback[Epoch::Initial].start(initial.send_journal.clone());
+        let terminator = phase.terminator();
+        Arc::new(Self {
             phase,
             entries: Mutex::new(BTreeMap::new()),
+            responses: Mutex::new(HashMap::new()),
+            role,
+            idle,
+            feedback,
+            closed: ArcReceiving::default(),
+            terminator,
+        })
+    }
+
+    /// Add a path and start its only sending task. Existing paths are returned unchanged.
+    pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
+        let handshaking =
+            self.role == Role::Client && matches!(self.phase.get(), ConnPhase::Initial(_));
+        self.create_path(pathway, handshaking)
+    }
+
+    pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
+        self.create_path(pathway, false)
+    }
+
+    fn create_path(
+        self: &Arc<Self>,
+        pathway: Pathway,
+        handshaking: bool,
+    ) -> Result<Arc<Path>, Error> {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(path) = entries.get(&pathway) {
+            return Ok(path.clone());
         }
+        let path = Arc::new(Path::new(
+            pathway,
+            self.role,
+            self.idle.timer(),
+            self.feedback
+                .each_ref()
+                .map(|feedback| Arc::new(feedback.clone()) as Arc<dyn qcongestion::Feedback>),
+        ));
+        if handshaking && !entries.values().any(|path| path.is_selected()) {
+            path.client_handshaking();
+        }
+        self.phase.send_wakers().replace(pathway, &path.send_waker);
+        entries.insert(pathway, path.clone());
+        drop(entries);
+
+        tokio::spawn(crate::burst::sending(self.clone(), path.clone()));
+        path.send_waker.wake_by(Signals::all());
+        Ok(path)
+    }
+
+    pub(crate) fn select_path(&self, path: &Path) {
+        let entries = self.entries.lock().unwrap();
+        if entries.values().any(|path| path.is_selected()) {
+            return;
+        }
+        path.select();
+        for other in entries.values().filter(|other| {
+            other.state() == PathState::ClientHandshaking && other.pathway != path.pathway
+        }) {
+            other.guard_amplification();
+        }
+        self.phase
+            .send_wakers()
+            .wake_all_by(qbase::net::tx::Signals::TRANSPORT);
     }
 
     pub(crate) fn phase(&self) -> ArcConnPhase {
         self.phase.clone()
     }
 
-    pub fn insert(&self, path: Arc<Path>) -> bool {
-        let mut entries = self.entries.lock().unwrap();
-        match entries.entry(path.pathway) {
-            std::collections::btree_map::Entry::Occupied(_) => false,
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(path);
-                true
+    pub(crate) fn role(&self) -> Role {
+        self.role
+    }
+
+    pub(crate) fn idle(&self) -> ArcConnIdle {
+        self.idle.clone()
+    }
+
+    pub(crate) fn feedback(&self) -> [ArcFeedback; 3] {
+        self.feedback.clone()
+    }
+
+    pub(crate) fn closed(&self) -> ArcReceiving<CloseReason> {
+        self.closed.clone()
+    }
+
+    pub(crate) fn terminator(&self) -> ArcTerminator {
+        self.terminator.clone()
+    }
+
+    pub(crate) fn on_error(&self, error: Error) {
+        self.closed.set(error.into());
+    }
+
+    pub(crate) fn on_rcvd_packet(&self) {
+        self.terminator.on_rcvd_packet(tokio::time::Instant::now());
+    }
+
+    pub(crate) fn on_rcvd_close(
+        &self,
+        epoch: Epoch,
+        path: &Path,
+        frame: qbase::frame::ConnectionCloseFrame,
+    ) {
+        let duration = path.cc.pto_base(epoch) * 3;
+        self.terminator
+            .on_rcvd_close_connection_frame(frame.clone(), duration);
+        self.closed.set(CloseReason::Peer(frame));
+    }
+
+    pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
+        for path in self.snapshot() {
+            path.handshake_confirmed();
+            if path.state() == PathState::ClientHandshaking && path.is_selected() {
+                path.validate();
             }
+            self.start_validation(&path);
         }
     }
 
-    /// Register a path and start its sender exactly once while holding the path table.
-    pub(crate) fn get_or_try_insert_with<E>(
-        &self,
-        pathway: Pathway,
-        create: impl FnOnce() -> Result<Arc<Path>, E>,
-    ) -> Result<Arc<Path>, E> {
-        let mut entries = self.entries.lock().unwrap();
-        match entries.entry(pathway) {
-            std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.get().clone()),
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                Ok(entry.insert(create()?).clone())
+    pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
+        if !matches!(path.state(), PathState::AmplifyGuard { .. }) {
+            return;
+        }
+        let mut responses = self.responses.lock().unwrap();
+        if responses.contains_key(&path.pathway) {
+            return;
+        }
+        let response = ArcReceiving::default();
+        responses.insert(path.pathway, response.clone());
+        drop(responses);
+        let paths = self.clone();
+        let path = path.clone();
+        tokio::spawn(async move {
+            let challenge = PathChallengeFrame::random();
+            for _ in 0..3 {
+                if !matches!(path.state(), PathState::AmplifyGuard { .. }) {
+                    break;
+                }
+                path.set_challenge(challenge);
+                match tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone())
+                    .await
+                {
+                    Ok(Ok(Some(data))) if data == *challenge => {
+                        path.validate();
+                        break;
+                    }
+                    Ok(_) => break,
+                    Err(_) => continue,
+                }
             }
+            // A replacement at the same Pathway has its own receiver and task.
+            if paths
+                .get(&path.pathway)
+                .is_some_and(|current| Arc::ptr_eq(&current, &path))
+            {
+                paths.responses.lock().unwrap().remove(&path.pathway);
+                path.clear_challenge();
+                if matches!(path.state(), PathState::AmplifyGuard { .. }) {
+                    paths.remove(&path);
+                    if paths.snapshot().is_empty() {
+                        paths.on_error(
+                            QuicError::with_default_fty(
+                                ErrorKind::NoViablePath,
+                                "path validation timed out",
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn on_path_response(&self, path: &Path, frame: PathResponseFrame) {
+        if path.matches_response(frame)
+            && let Some(response) = self.responses.lock().unwrap().get(&path.pathway)
+        {
+            response.with(*frame);
         }
     }
 
@@ -69,9 +245,215 @@ impl Paths {
             .is_some_and(|current| Arc::ptr_eq(current, path))
         {
             entries.remove(&path.pathway);
+            if let Some(response) = self.responses.lock().unwrap().remove(&path.pathway) {
+                response.cancel();
+            }
             true
         } else {
             false
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_all(&self) {
+        self.terminator.terminate();
+        for path in self.snapshot() {
+            self.remove(&path);
+        }
+    }
+
+    pub(crate) async fn finish(&self, reason: &CloseReason) {
+        let snapshot = self.phase.get();
+        let error: Error = match reason {
+            CloseReason::App(error) => error.clone().into(),
+            CloseReason::Internal(error) => error.clone().into(),
+            CloseReason::Peer(frame) => frame.clone().into(),
+        };
+        let active_paths = self.snapshot();
+        let pto = active_paths
+            .iter()
+            .map(|path| path.cc.pto_base(Epoch::Data))
+            .max()
+            .unwrap_or(Duration::from_secs(1));
+        self.terminator.on_error(reason, pto * 3);
+
+        match &snapshot {
+            ConnPhase::Initial(phase) => phase.initial.crypto.on_error(&error),
+            ConnPhase::Handshake(phase) => {
+                phase.initial.initial.crypto.on_error(&error);
+                phase.handshake.crypto.on_error(&error);
+            }
+            ConnPhase::Mature(phase) => {
+                phase.spaces.initial.crypto.on_error(&error);
+                phase.spaces.handshake.crypto.on_error(&error);
+                phase.spaces.data.crypto.on_error(&error);
+                phase.streams.on_conn_error(&error);
+                phase.flow.on_conn_error(&error);
+            }
+        }
+        for path in &active_paths {
+            for epoch in [Epoch::Initial, Epoch::Handshake] {
+                path.cc.discard_epoch(epoch);
+            }
+        }
+
+        self.terminator.wait().await;
+        match &snapshot {
+            ConnPhase::Initial(phase) => phase.initial.retire(),
+            ConnPhase::Handshake(phase) => {
+                phase.initial.initial.retire();
+                phase.handshake.retire();
+            }
+            ConnPhase::Mature(phase) => {
+                phase.spaces.initial.retire();
+                phase.spaces.handshake.retire();
+                phase.spaces.data.keys.retire();
+            }
+        }
+        for path in active_paths {
+            self.remove(&path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use qbase::{cid::ConnectionId, net::addr::EndpointAddr};
+    use qtransport::{keys::ArcKeys, space::Space};
+
+    use super::*;
+    use crate::InitialPhase;
+
+    fn paths(role: Role) -> Arc<Paths> {
+        let keys = qtls::default_provider()
+            .cipher_suites
+            .iter()
+            .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
+            .unwrap()
+            .keys(
+                b"original",
+                if role == Role::Server {
+                    tls_backend::Side::Server
+                } else {
+                    tls_backend::Side::Client
+                },
+                tls_backend::quic::Version::V1,
+            )
+            .into();
+        Paths::new(
+            role,
+            ArcConnPhase::initial(InitialPhase::new(
+                ConnectionId::from_slice(b"localcid"),
+                ConnectionId::from_slice(b"original"),
+                keys,
+            )),
+            ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
+        )
+    }
+
+    fn pathway(port: u16) -> Pathway {
+        Pathway::new(
+            EndpointAddr::direct(([127, 0, 0, 1], 30001).into()),
+            EndpointAddr::direct(([127, 0, 0, 1], port).into()),
+        )
+    }
+
+    #[tokio::test]
+    async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard() {
+        let paths = paths(Role::Client);
+        let first = paths.add_path(pathway(30002)).unwrap();
+        let second = paths.add_path(pathway(30003)).unwrap();
+        assert_eq!(first.state(), PathState::ClientHandshaking);
+        assert_eq!(second.amplification_credit(), usize::MAX);
+        let incoming = paths.on_incoming_path(pathway(30004)).unwrap();
+        assert_eq!(incoming.amplification_credit(), 0);
+        paths.select_path(&first);
+        assert_eq!(first.state(), PathState::ClientHandshaking);
+        assert_eq!(
+            second.state(),
+            PathState::AmplifyGuard {
+                rcvd_bytes: 0,
+                sent_bytes: 0
+            }
+        );
+        assert_eq!(second.amplification_credit(), 0);
+        second.on_datagram_received(100);
+        second.anti_amplifier.on_sent(200);
+        assert_eq!(second.amplification_credit(), 100);
+        let ConnPhase::Initial(initial) = paths.phase.get() else {
+            panic!()
+        };
+        paths.phase.enter_handshake(
+            initial,
+            Arc::new(Space::<ArcKeys>::new(
+                Epoch::Handshake,
+                paths.phase.send_wakers(),
+                |_| {},
+            )),
+        );
+        assert_eq!(
+            paths
+                .add_path(pathway(30005))
+                .unwrap()
+                .amplification_credit(),
+            0
+        );
+        paths.retire_all();
+    }
+
+    #[tokio::test]
+    async fn server_paths_start_guarded_and_only_the_correct_path_response_validates() {
+        let paths = paths(Role::Server);
+        let first = paths.add_path(pathway(30002)).unwrap();
+        let second = paths.add_path(pathway(30003)).unwrap();
+        assert_eq!(first.amplification_credit(), 0);
+        paths.start_validation(&first);
+        paths.start_validation(&first);
+        tokio::task::yield_now().await;
+        assert_eq!(paths.responses.lock().unwrap().len(), 1);
+        let challenge = first.challenge().unwrap();
+        paths.on_path_response(&second, challenge.into());
+        paths.on_path_response(&first, PathChallengeFrame::from_slice(&[42; 8]).into());
+        assert!(!first.is_validated());
+        paths.on_path_response(&first, challenge.into());
+        tokio::task::yield_now().await;
+        assert!(first.is_validated());
+        assert_eq!(first.amplification_credit(), usize::MAX);
+        assert_eq!(second.amplification_credit(), 0);
+        assert!(paths.responses.lock().unwrap().is_empty());
+        paths.retire_all();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn validation_times_out_after_three_attempts_and_retirement_cancels_waiting() {
+        let paths = paths(Role::Server);
+        let path = paths.add_path(pathway(30002)).unwrap();
+        paths.start_validation(&path);
+        tokio::task::yield_now().await;
+        for _ in 0..3 {
+            assert!(path.challenge().is_some());
+            tokio::time::advance(path.cc.pto_base(Epoch::Data) * 3).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(path.state(), PathState::Retired);
+        assert!(paths.get(&path.pathway).is_none());
+        assert!(paths.responses.lock().unwrap().is_empty());
+        assert!(
+            matches!(paths.closed().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
+        );
+        let replacement = paths.add_path(pathway(30002)).unwrap();
+        paths.start_validation(&replacement);
+        tokio::task::yield_now().await;
+        let response = paths
+            .responses
+            .lock()
+            .unwrap()
+            .get(&replacement.pathway)
+            .unwrap()
+            .clone();
+        paths.remove(&replacement);
+        assert!(response.await.is_err());
+        tokio::task::yield_now().await;
+        assert!(paths.responses.lock().unwrap().is_empty());
     }
 }

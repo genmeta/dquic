@@ -31,12 +31,15 @@ use qbase::{
 };
 use qcongestion::{ArcCC, Transport};
 use qinterface::io::IO;
-use qrecovery::journal::{AckPackege, ArcRcvdJournal, Journal};
+use qrecovery::{
+    crypto::CryptoStream,
+    journal::{AckPackege, ArcRcvdJournal, Journal},
+};
 
 use crate::{
     ArcDcidCell, ArcReliableFrameDeque, CidRegistry, Components,
     path::{AntiAmplifier, ArcPathContexts, Constraints},
-    space::{Spaces, data::DataSpace, handshake::HandshakeSpace, initial::InitialSpace},
+    space::{Spaces, data::DataSpace, handshake::HandshakeSpace},
     tls::ArcTlsHandshake,
     tx::PacketWriter,
 };
@@ -279,7 +282,7 @@ pub type PackageIntoSpace<H, S> =
     dyn for<'b, 's> Package<PacketWriter<'b, 's, <S as PacketSpace<H>>::JournalFrame>> + Send;
 
 pub struct DataSources {
-    initial: Box<PackageIntoSpace<InitialHeader, InitialSpace>>,
+    initial: CryptoStream,
     zero_rtt: Box<PackageIntoSpace<ZeroRttHeader, DataSpace>>,
     handshake: Box<PackageIntoSpace<HandshakeHeader, HandshakeSpace>>,
     one_rtt: Box<PackageIntoSpace<OneRttHeader, DataSpace>>,
@@ -287,9 +290,6 @@ pub struct DataSources {
 
 impl Components {
     pub(super) fn packages(&self) -> DataSources {
-        let initial_packages = self.crypto_streams[Epoch::Initial]
-            .outgoing()
-            .package(Epoch::Initial);
         let zero_rtt_packages = Packages((
             // repeat to send multi reliable frames in one packet
             Repeat(self.reliable_frames.clone()),
@@ -300,13 +300,9 @@ impl Components {
             ),
             // TODO: datagram
         ));
-        let handshake_packages = self.crypto_streams[Epoch::Handshake]
-            .outgoing()
-            .package(Epoch::Handshake);
+        let handshake_packages = self.crypto_streams[Epoch::Handshake].outgoing();
         let one_rtt_packages = Packages((
-            self.crypto_streams[Epoch::Data]
-                .outgoing()
-                .package(Epoch::Data),
+            self.crypto_streams[Epoch::Data].outgoing(),
             // repeat to send multi reliable frames in one packet
             Repeat(self.reliable_frames.clone()),
             // repeat to send multi stream frames in one packet
@@ -317,7 +313,7 @@ impl Components {
             // TODO: datagram
         ));
         DataSources {
-            initial: Box::new(initial_packages),
+            initial: self.crypto_streams[Epoch::Initial].clone(),
             zero_rtt: Box::new(zero_rtt_packages),
             handshake: Box::new(handshake_packages),
             one_rtt: Box::new(one_rtt_packages),
@@ -382,15 +378,23 @@ impl Burst {
             return Err(BurstError::PathDeactived);
         };
 
-        match assembler.assemble(
-            initial_space,
-            &mut Packages((ack_package(initial_space, &path.cc), initial_data_sources)),
-            buffer,
-            &mut packet_content,
-        ) {
-            Ok(bytes_sent) => buffer = buffer[bytes_sent..].as_mut(),
-            Err(s) => signals |= s,
-        };
+        let selected = self.paths.handshake_path();
+        if selected
+            .as_ref()
+            .is_none_or(|selected| Arc::ptr_eq(selected, path))
+        {
+            let outgoing = selected.as_ref().map(|_| initial_data_sources.outgoing());
+            let multipath = selected.is_none().then(|| initial_data_sources.multipath());
+            match assembler.assemble(
+                initial_space,
+                &mut Packages((ack_package(initial_space, &path.cc), outgoing, multipath)),
+                buffer,
+                &mut packet_content,
+            ) {
+                Ok(bytes_sent) => buffer = buffer[bytes_sent..].as_mut(),
+                Err(s) => signals |= s,
+            };
+        }
 
         let loaded_initial = buffer.remaining_mut() != origin;
 

@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use qbase::{
@@ -10,7 +13,7 @@ use qbase::{
     packet::{LongHeaderBuilder, Packet as ParsedPacket, PacketReader},
 };
 
-use super::*;
+use super::{fixture::TestSender as Sender, *};
 use crate::{keys::OpenPacket, transport::Transport};
 
 fn sender(transport: &Transport, path: &Path) -> Sender {
@@ -18,13 +21,7 @@ fn sender(transport: &Transport, path: &Path) -> Sender {
         .data
         .send_wakers
         .replace(path.pathway, &path.send_waker);
-    Sender::new(
-        Arc::new(QuicProtocol::new()),
-        path.pathway,
-        path.cc.clone(),
-        path.anti_amplifier.clone(),
-        path.send_waker.clone(),
-    )
+    Sender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone())
 }
 fn header() -> OneRttHeader {
     OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"))
@@ -78,7 +75,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         bytes.as_slice(),
     );
     let packet = sender
-        .assemble_initial_packet(
+        .assemble_long_packet(
             &fixed.sealing,
             long().initial(vec![1, 2]),
             &initial,
@@ -98,7 +95,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         matches!(frames.next().unwrap().unwrap().0, Frame::Crypto(_, body) if body.as_ref() == b"client hello")
     );
     let packet = sender
-        .assemble_handshake_packet(
+        .assemble_long_packet(
             &fixed.sealing,
             long().handshake(),
             &handshake,
@@ -120,7 +117,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         Bytes::from_static(b"hello"),
     );
     let zero = sender
-        .assemble_0rtt_packet(
+        .assemble_long_packet(
             &fixed.sealing,
             long().zero_rtt(),
             &data,
@@ -180,7 +177,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
         }
     });
     let mut sender = sender(&transport, &path);
-    let mut remaining = 8;
+    let mut remaining = 16;
     assert_eq!(
         sender
             .burst(|sender, limit| {
@@ -198,6 +195,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
             .unwrap(),
         8
     );
+    assert_eq!(remaining, 8); // ready sources cannot grow this batch beyond eight datagrams
     let original = sender
         .pending()
         .map(|packet| packet.bytes().to_vec())
@@ -207,6 +205,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
         sender
             .poll_send_with(
                 &mut cx(),
+                &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS),
                 |_, _, packets| {
                     assert_eq!(packets.len(), 8);
                     Poll::Pending
@@ -219,6 +218,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
     assert!(matches!(
         sender.poll_send_with(
             &mut cx(),
+            &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS),
             |_, _, packets| {
                 assert_eq!(packets.len(), 8);
                 Poll::Ready(Ok(3))
@@ -240,6 +240,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
     assert!(matches!(
         sender.poll_send_with(
             &mut cx(),
+            &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS),
             |_, _, packets| {
                 assert_eq!(packets.len(), 5);
                 for (actual, expected) in packets.iter().zip(&original[3..]) {
@@ -297,7 +298,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     assert!(size <= 2400 && size <= quota);
     assert_eq!(credit.balance(), 2400); // assembly does not debit the real credit
     assert!(
-        matches!(sender.poll_send_with(&mut cx(), |_, _, packets| Poll::Ready(Ok(packets.len())), |_| true, |_| {}), Poll::Ready(Ok(n)) if n == count)
+        matches!(sender.poll_send_with(&mut cx(), &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS), |_, _, packets| Poll::Ready(Ok(packets.len())), |_| true, |_| {}), Poll::Ready(Ok(n)) if n == count)
     );
     assert_eq!(credit.balance(), 2400 - size);
 }
@@ -377,14 +378,14 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
                 assert_eq!(missing.try_get(), Ok(None)); // no wait, other levels still make progress
                 index += 1;
                 match index {
-                    1 => sender.assemble_initial_packet(
+                    1 => sender.assemble_long_packet(
                         &keys.sealing,
                         long().initial(vec![]),
                         &initial,
                         limit,
                         [&mut PingFrame],
                     ),
-                    2 => sender.assemble_handshake_packet(
+                    2 => sender.assemble_long_packet(
                         &keys.sealing,
                         long().handshake(),
                         &handshake,
@@ -401,6 +402,7 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
     assert!(matches!(
         sender.poll_send_with(
             &mut cx(),
+            &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS),
             |_, _, packets| {
                 assert_eq!(packets.len(), 1);
                 Poll::Ready(Ok(1))
@@ -413,34 +415,6 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
     assert_eq!(sent, [Epoch::Handshake]);
     assert!(initial.acknowledge(&ack(0), |_| {}).is_err());
     handshake.acknowledge(&ack(0), |_| {}).unwrap();
-}
-
-#[tokio::test]
-async fn idle_stream_sender_yields_pending_instead_of_spinning_on_returned_credit() {
-    let [(client, transport, path), _peer] = crate::tests::pair(1);
-    let (_, _writer) = client.open_uni_stream().await.unwrap().unwrap();
-    let mut sender = sender(&transport, &path);
-    let watchdog_path = path.clone();
-    let watchdog = std::thread::spawn({
-        move || {
-            std::thread::sleep(Duration::from_millis(50));
-            watchdog_path.retire();
-        }
-    });
-    let mut running = Box::pin(sender.run(
-        |sender, limit| {
-            let Ok(Some(keys)) = transport.data.keys.try_get() else {
-                return Ok(None);
-            };
-            crate::tests::sender::assemble_data(sender, limit, &keys, &transport, &path, false)
-        },
-        || path.state() != crate::path::PathState::Retired,
-        |_| path.state() != crate::path::PathState::Retired,
-        |packet| path.on_packet_sent(packet),
-    ));
-    assert!(futures::poll!(&mut running).is_pending());
-    watchdog.join().unwrap();
-    running.await.unwrap();
 }
 
 #[tokio::test]
@@ -466,6 +440,7 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
     assert!(matches!(
         sender.poll_send_with(
             &mut cx(),
+            &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS),
             |_, _, packets| Poll::Ready(Ok(packets.len())),
             |_| true,
             |packet| {
@@ -482,4 +457,75 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
         Poll::Ready(Ok(1))
     ));
     assert_eq!(path.state(), crate::path::PathState::Retired);
+}
+
+#[tokio::test]
+async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
+    use qbase::{
+        datagram::{Datagram, be_datagram},
+        net::{addr::EndpointAddr, route::Pathway},
+    };
+    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let pathway = Pathway::new(
+        EndpointAddr::direct("127.0.0.1:30001".parse().unwrap()),
+        EndpointAddr::mediate(
+            "127.0.0.1:30002".parse().unwrap(),
+            "127.0.0.1:30003".parse().unwrap(),
+        ),
+    );
+    let mut sender = Sender::new(pathway, path.cc.clone(), path.anti_amplifier.clone());
+    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let mut packets = Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS);
+    let allocation = packets.as_ptr();
+    let frames = sender.send_frames.as_ptr();
+    for value in 0..3u32 {
+        let mut once = false;
+        sender
+            .burst(|sender, constraints| {
+                if once {
+                    return Ok(None);
+                }
+                once = true;
+                let frame = ReliableFrame::MaxData(MaxDataFrame::new(value.into()));
+                sender.assemble_1rtt_packet(
+                    &keys,
+                    header(),
+                    &transport.data.send_journal,
+                    constraints,
+                    [&mut &frame],
+                )
+            })
+            .unwrap();
+        let packet = sender.pending().next().unwrap();
+        let expected = packet.bytes().to_vec();
+        let pn = packet.pn;
+        assert!(matches!(
+            sender.poll_send_with(
+                &mut cx(),
+                &mut packets,
+                |_, actual_pathway, packets| {
+                    assert_eq!(actual_pathway, pathway);
+                    let Datagram::Forward(decoded_pathway, payload) =
+                        be_datagram(BytesMut::from(&packets[0][..])).unwrap()
+                    else {
+                        panic!()
+                    };
+                    assert_eq!(decoded_pathway, pathway);
+                    assert_eq!(payload.into_raw().as_ref(), expected);
+                    Poll::Ready(Ok(1))
+                },
+                |_| true,
+                |_| {}
+            ),
+            Poll::Ready(Ok(1))
+        ));
+        assert!(packets.is_empty());
+        assert_eq!(packets.as_ptr(), allocation);
+        assert_eq!(sender.send_frames.as_ptr(), frames);
+        transport
+            .data
+            .send_journal
+            .acknowledge(&ack(pn), |_| {})
+            .unwrap();
+    }
 }

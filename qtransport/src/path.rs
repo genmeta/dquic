@@ -1,23 +1,24 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, RwLock, atomic::AtomicU16},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU16, Ordering},
+    },
     time::Duration,
 };
 
 use qbase::{
-    Epoch,
     cid::ConnectionId,
-    error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{
         route::Pathway,
         tx::{ArcSendWaker, Signals},
     },
+    role::Role,
     time::PathIdleTimer,
 };
 use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, PathStatus, Transport as _};
-use tokio::time::Instant;
 
 use crate::{
     Error,
@@ -29,11 +30,10 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
-    Unvalidated,
-    Validating {
-        challenge: PathChallengeFrame,
-        attempts: u8,
-        retry_at: Instant,
+    ClientHandshaking,
+    AmplifyGuard {
+        rcvd_bytes: usize,
+        sent_bytes: usize,
     },
     Validated,
     Retired,
@@ -42,8 +42,10 @@ pub enum PathState {
 pub struct Path {
     pub pathway: Pathway,
     dcid: RwLock<ConnectionId>,
+    selected: AtomicBool,
+    handshake: Arc<HandshakeStatus>,
     pub cc: ArcCC,
-    state: Mutex<PathState>,
+    challenge: Mutex<Option<(PathChallengeFrame, bool)>>,
     pub send_waker: ArcSendWaker,
     responses: Mutex<VecDeque<PathResponseFrame>>,
     pub anti_amplifier: Arc<AntiAmplifier>,
@@ -53,26 +55,27 @@ pub struct Path {
 impl Path {
     pub fn new(
         pathway: Pathway,
-        dcid: ConnectionId,
-        handshake: Arc<HandshakeStatus>,
-        max_ack_delay: Duration,
+        role: Role,
         activity: PathIdleTimer,
         feedback: [Arc<dyn Feedback>; 3],
     ) -> Self {
         let send_waker = ArcSendWaker::new();
-        let status = PathStatus::new(handshake, Arc::new(AtomicU16::new(1200)));
+        let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
+        let status = PathStatus::new(handshake.clone(), Arc::new(AtomicU16::new(1200)));
         let cc = ArcCC::new(
             Algorithm::NewReno,
-            max_ack_delay,
+            Duration::from_millis(25),
             feedback,
             status.clone(),
             send_waker.clone(),
         );
         Self {
             pathway,
-            dcid: RwLock::new(dcid),
+            dcid: RwLock::new(ConnectionId::default()),
+            selected: AtomicBool::new(false),
+            handshake,
             cc,
-            state: Mutex::new(PathState::Unvalidated),
+            challenge: Mutex::new(None),
             send_waker,
             responses: Mutex::new(VecDeque::new()),
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
@@ -87,8 +90,20 @@ impl Path {
         *self.dcid.write().unwrap() = dcid;
         self.send_waker.wake_by(Signals::CONNECTION_ID);
     }
+    pub fn select(&self) {
+        self.selected.store(true, Ordering::Release);
+    }
+    pub fn is_selected(&self) -> bool {
+        self.selected.load(Ordering::Acquire)
+    }
+    pub fn got_handshake_key(&self) {
+        self.handshake.got_handshake_key();
+    }
+    pub fn handshake_confirmed(&self) {
+        self.handshake.handshake_confirmed();
+    }
     pub fn state(&self) -> PathState {
-        *self.state.lock().unwrap()
+        *self.anti_amplifier.state.lock().unwrap()
     }
     pub fn is_validated(&self) -> bool {
         self.state() == PathState::Validated
@@ -103,35 +118,47 @@ impl Path {
         self.send_waker.wake_by(Signals::CREDIT);
     }
 
-    /// Client-originated traffic, a validated token, or successful address validation grants this.
-    /// Granting anti-amplification credit alone does not enable business traffic on a new path.
-    pub fn grant_amplification(&self) {
-        self.anti_amplifier.grant();
+    pub fn client_handshaking(&self) {
+        self.anti_amplifier.client_handshaking();
         self.cc.grant_anti_amplification();
         self.send_waker.wake_by(Signals::CREDIT);
     }
+
+    pub fn guard_amplification(&self) {
+        self.anti_amplifier.guard();
+        *self.challenge.lock().unwrap() = None;
+        self.responses.lock().unwrap().clear();
+        self.send_waker.wake_by(Signals::CREDIT);
+    }
+
     pub fn validate(&self) {
-        let mut state = self.state.lock().unwrap();
-        if *state != PathState::Retired {
-            *state = PathState::Validated;
-            self.grant_amplification();
-        }
+        self.anti_amplifier.grant();
+        *self.challenge.lock().unwrap() = None;
+        self.cc.grant_anti_amplification();
         self.send_waker.wake_by(Signals::PATH_VALIDATE);
     }
-    pub fn start_validation(&self) {
-        let mut state = self.state.lock().unwrap();
-        if *state == PathState::Unvalidated {
-            *state = PathState::Validating {
-                challenge: PathChallengeFrame::random(),
-                attempts: 0,
-                retry_at: Instant::now(),
-            };
+
+    pub fn set_challenge(&self, challenge: PathChallengeFrame) {
+        if matches!(self.state(), PathState::AmplifyGuard { .. }) {
+            *self.challenge.lock().unwrap() = Some((challenge, false));
             self.send_waker.wake_by(Signals::TRANSPORT);
         }
     }
+
+    pub fn matches_response(&self, response: PathResponseFrame) -> bool {
+        self.challenge
+            .lock()
+            .unwrap()
+            .is_some_and(|(challenge, _)| PathResponseFrame::from(challenge) == response)
+    }
+
+    pub fn clear_challenge(&self) {
+        *self.challenge.lock().unwrap() = None;
+    }
+
     pub fn retire(&self) {
-        *self.state.lock().unwrap() = PathState::Retired;
-        // Connection-level recovery retains the sent packets and their deadlines.
+        *self.anti_amplifier.state.lock().unwrap() = PathState::Retired;
+        self.clear_challenge();
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_by(Signals::all());
     }
@@ -151,24 +178,11 @@ impl Path {
             anti_amplification: self.amplification_credit(),
         }
     }
-    pub fn challenge(&self) -> Result<Option<PathChallengeFrame>, Error> {
-        match self.state() {
-            PathState::Validating {
-                attempts: 3..,
-                retry_at,
-                ..
-            } if Instant::now() >= retry_at => Err(QuicError::with_default_fty(
-                ErrorKind::NoViablePath,
-                "path validation timed out",
-            )
-            .into()),
-            PathState::Validating {
-                challenge,
-                retry_at,
-                ..
-            } if Instant::now() >= retry_at => Ok(Some(challenge)),
-            _ => Ok(None),
-        }
+    pub fn challenge(&self) -> Option<PathChallengeFrame> {
+        self.challenge
+            .lock()
+            .unwrap()
+            .and_then(|(challenge, sent)| (!sent).then_some(challenge))
     }
     pub fn response(&self) -> Option<PathResponseFrame> {
         self.responses.lock().unwrap().front().copied()
@@ -182,20 +196,10 @@ impl Path {
             }
         }
         if let Some(sent) = packet.challenge
-            && let PathState::Validating {
-                challenge,
-                attempts,
-                retry_at,
-            } = &mut *self.state.lock().unwrap()
+            && let Some((challenge, submitted)) = self.challenge.lock().unwrap().as_mut()
             && *challenge == sent
         {
-            *attempts += 1;
-            *retry_at = Instant::now()
-                + self
-                    .cc
-                    .pto_base(Epoch::Data)
-                    .max(Duration::from_millis(100))
-                    * 3;
+            *submitted = true;
         }
     }
 }
@@ -213,16 +217,6 @@ impl ReceiveFrame<PathChallengeFrame> for Path {
             responses.push_back(response);
         }
         self.send_waker.wake_by(Signals::TRANSPORT);
-        Ok(())
-    }
-}
-impl ReceiveFrame<PathResponseFrame> for Path {
-    type Output = ();
-    fn recv_frame(&self, response: PathResponseFrame) -> Result<(), Error> {
-        let matches = matches!(self.state(), PathState::Validating { challenge, attempts: 1.., .. } if PathResponseFrame::from(challenge) == response);
-        if matches {
-            self.validate();
-        }
         Ok(())
     }
 }

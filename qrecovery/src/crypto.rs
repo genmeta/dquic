@@ -9,7 +9,6 @@ mod send {
 
     use bytes::{BufMut, Bytes};
     use qbase::{
-        Epoch,
         error::{Error, ErrorKind, QuicError},
         frame::CryptoFrame,
         net::tx::{ArcSendWakers, Signals},
@@ -29,25 +28,28 @@ mod send {
     }
 
     impl Sender {
-        /// 不再长的像write，因为rust可以多返回值，因此在返回的结果里面将读到的数据返回.
-        /// 调用者一定要自行将其写入到buffer中发送。
-        /// 一旦这种函数成功使用，try_read_data就可以淘汰了
-        fn try_load_data<P>(&mut self, packet: &mut P) -> Result<(), Signals>
+        /// Pack CRYPTO ranges until the packet is full or no more data is available.
+        fn try_load_data<P>(&mut self, packet: &mut P) -> Result<PacketContent, Signals>
         where
             P: BufMut + ?Sized,
             for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
         {
-            let max_size = packet.remaining_mut();
-            let predicate = |offset: u64| CryptoFrame::estimate_max_capacity(max_size, offset);
-            self.sndbuf
-                .pick_up(predicate, usize::MAX)
-                .map(|(range, _is_fresh, data)| {
-                    let frame = CryptoFrame::new(
-                        VarInt::from_u64(range.start).unwrap(),
-                        VarInt::try_from(range.end - range.start).unwrap(),
-                    );
-                    (frame, data.as_slice()).dump(packet).unwrap();
-                })
+            let mut loaded = false;
+            loop {
+                let max_size = packet.remaining_mut();
+                let predicate = |offset: u64| CryptoFrame::estimate_max_capacity(max_size, offset);
+                let (range, _is_fresh, data) = match self.sndbuf.pick_up(predicate, usize::MAX) {
+                    Ok(data) => data,
+                    Err(signals) if !loaded => return Err(signals),
+                    Err(_) => return Ok(PacketContent::EffectivePayload),
+                };
+                let frame = CryptoFrame::new(
+                    VarInt::from_u64(range.start).unwrap(),
+                    VarInt::try_from(range.end - range.start).unwrap(),
+                );
+                (frame, data.as_slice()).dump(packet).unwrap();
+                loaded = true;
+            }
         }
 
         fn on_data_acked(&mut self, crypto_frame: &CryptoFrame) {
@@ -148,6 +150,10 @@ mod send {
     #[derive(Debug, Clone)]
     pub struct CryptoStreamOutgoing(pub(super) ArcSender);
 
+    /// Initial CRYPTO output that remains available until a handshake path is selected.
+    #[derive(Debug, Clone)]
+    pub struct CryptoStreamMultiOut(pub(super) ArcSender);
+
     impl AsyncWrite for CryptoStreamWriter {
         fn poll_write(
             self: Pin<&mut Self>,
@@ -179,40 +185,6 @@ mod send {
     }
 
     impl CryptoStreamOutgoing {
-        /// Try to load the crypto data  into the `packet`.
-        pub fn try_load_data_into<P>(&self, packet: &mut P, force: bool) -> Result<(), Signals>
-        where
-            P: BufMut + ?Sized,
-            for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
-        {
-            use std::ops::ControlFlow::*;
-            let mut inner = self.0.0.lock().unwrap();
-            let Ok(inner) = inner.as_mut() else {
-                return Err(Signals::empty());
-            };
-            if force {
-                inner.sndbuf.resend_flighting();
-            }
-            let (Continue(result) | Break(result)) =
-                core::iter::from_fn(|| Some(inner.try_load_data(packet))).try_fold(
-                    Err(Signals::empty()),
-                    |result, once| match (result, once) {
-                        (Err(_empty), Ok(())) => Continue(Ok(())),
-                        (Err(_empty), Err(signals)) => Break(Err(signals)),
-                        (Ok(()), Ok(())) => Continue(Ok(())),
-                        (Ok(()), Err(_no_more)) => Break(Ok(())),
-                    },
-                );
-            result
-        }
-
-        pub fn package(self, epoch: Epoch) -> CryptoStreamPackage {
-            CryptoStreamPackage {
-                first_load: epoch == Epoch::Initial,
-                outgoing: self,
-            }
-        }
-
         /// Called when the crypto frame sent is acknowledged by peer.
         ///
         /// Acknowledgment of data may free up a segment in the [`SendBuf`], thus waking up the
@@ -231,25 +203,33 @@ mod send {
         }
     }
 
-    pub struct CryptoStreamPackage {
-        first_load: bool,
-        outgoing: CryptoStreamOutgoing,
-    }
-
-    impl<P> Package<P> for CryptoStreamPackage
+    impl<P> Package<P> for CryptoStreamOutgoing
     where
         P: BufMut + ?Sized,
         for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
     {
         fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
-            let force = self.first_load;
-            match self.outgoing.try_load_data_into(packet, force) {
-                Ok(()) => {
-                    self.first_load = false;
-                    Ok(PacketContent::EffectivePayload)
-                }
-                Err(signals) => Err(signals),
-            }
+            let mut inner = self.0.0.lock().unwrap();
+            let Ok(inner) = inner.as_mut() else {
+                return Err(Signals::empty());
+            };
+            inner.try_load_data(packet)
+        }
+    }
+
+    impl<P> Package<P> for CryptoStreamMultiOut
+    where
+        P: BufMut + ?Sized,
+        for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
+    {
+        fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
+            let mut inner = self.0.0.lock().unwrap();
+            let Ok(inner) = inner.as_mut() else {
+                return Err(Signals::empty());
+            };
+            let result = inner.try_load_data(packet);
+            inner.sndbuf.resend_flighting();
+            result
         }
     }
 
@@ -394,7 +374,7 @@ mod recv {
 
 use qbase::{error::Error, net::tx::ArcSendWakers};
 pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
-pub use send::{ArcSender, CryptoStreamOutgoing, CryptoStreamWriter};
+pub use send::{ArcSender, CryptoStreamMultiOut, CryptoStreamOutgoing, CryptoStreamWriter};
 
 /// Crypto data stream.
 #[derive(Debug, Clone)]
@@ -433,6 +413,11 @@ impl CryptoStream {
         CryptoStreamOutgoing(self.sender.clone())
     }
 
+    /// Create Initial output for use before a handshake path is selected.
+    pub fn multipath(&self) -> CryptoStreamMultiOut {
+        CryptoStreamMultiOut(self.sender.clone())
+    }
+
     /// Create a [`CryptoStreamIncoming`] which belong to this crypto stream.
     pub fn incoming(&self) -> CryptoStreamIncoming {
         CryptoStreamIncoming(self.recver.clone())
@@ -453,6 +438,7 @@ mod tests {
     use qbase::{
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, io::ReceiveFrame},
+        packet::Package,
         varint::VarInt,
     };
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -490,6 +476,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disjoint_lost_crypto_ranges_share_one_packet() {
+        use qbase::{
+            frame::{Frame, FrameReader},
+            packet::{
+                Type,
+                r#type::long::{Type as Long, Ver1},
+            },
+        };
+
+        let stream = CryptoStream::new(Default::default());
+        stream.writer().write_all(&[42; 20]).await.unwrap();
+        let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.outgoing().dump(&mut first).unwrap();
+        for offset in [5u32, 15] {
+            stream
+                .outgoing()
+                .on_data_acked(&CryptoFrame::new(offset.into(), 5u32.into()));
+        }
+        stream
+            .outgoing()
+            .may_loss_data(&CryptoFrame::new(0u32.into(), 20u32.into()));
+
+        let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.outgoing().dump(&mut packet).unwrap();
+        let ranges = FrameReader::new(packet.0.freeze(), Type::Long(Long::V1(Ver1::INITIAL)))
+            .map(|frame| {
+                let Frame::Crypto(frame, bytes) = frame.unwrap().0 else {
+                    panic!("expected CRYPTO")
+                };
+                assert_eq!(bytes.as_ref(), &[42; 5]);
+                frame.range()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ranges, [0..5, 10..15]);
+    }
+
+    #[tokio::test]
+    async fn multipath_leaves_data_available_for_the_selected_path_and_acknowledgment() {
+        let stream = CryptoStream::new(Default::default());
+        stream.writer().write_all(b"ClientHello").await.unwrap();
+        let mut multipath = stream.multipath();
+        let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
+        multipath.dump(&mut first).unwrap();
+
+        let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.multipath().dump(&mut second).unwrap();
+        assert_eq!(second.0, first.0);
+
+        let mut selected = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.outgoing().dump(&mut selected).unwrap();
+        assert_eq!(selected.0, first.0);
+        let mut blocked = TestPacket(bytes::BytesMut::with_capacity(64));
+        assert!(stream.outgoing().dump(&mut blocked).is_err());
+
+        stream
+            .outgoing()
+            .on_data_acked(&CryptoFrame::new(0u32.into(), 11u32.into()));
+        assert!(multipath.dump(&mut blocked).is_err());
+        stream.writer().flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipath_marks_flighting_lost_after_loading_and_lost_data_can_be_acked() {
+        use qbase::{
+            frame::{Frame, FrameReader},
+            packet::{
+                Type,
+                r#type::long::{Type as Long, Ver1},
+            },
+        };
+
+        let crypto_frame = |packet: &TestPacket| {
+            let mut frames = FrameReader::new(
+                packet.0.clone().freeze(),
+                Type::Long(Long::V1(Ver1::INITIAL)),
+            );
+            let Frame::Crypto(frame, _) = frames.next().unwrap().unwrap().0 else {
+                panic!("expected CRYPTO")
+            };
+            frame
+        };
+
+        let stream = CryptoStream::new(Default::default());
+        stream.writer().write_all(&[42; 100]).await.unwrap();
+        let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.outgoing().dump(&mut first).unwrap();
+        let prefix = crypto_frame(&first);
+
+        let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
+        stream.multipath().dump(&mut second).unwrap();
+        let suffix = crypto_frame(&second);
+        assert_eq!(suffix.offset(), prefix.range().end);
+        assert_eq!(suffix.range().end, 100);
+
+        // Both the previously flighting prefix and the newly loaded suffix remain ACKable.
+        stream.outgoing().on_data_acked(&prefix);
+        stream.outgoing().on_data_acked(&suffix);
+        let mut empty = TestPacket(bytes::BytesMut::with_capacity(64));
+        assert!(stream.multipath().dump(&mut empty).is_err());
+        stream.writer().flush().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn receiver_retirement_wakes_reader_and_preserves_crypto_retransmission() {
         let stream = CryptoStream::new(Default::default());
         let mut reader = stream.reader();
@@ -506,10 +595,7 @@ mod tests {
         );
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream
-            .outgoing()
-            .try_load_data_into(&mut packet, false)
-            .unwrap();
+        stream.outgoing().dump(&mut packet).unwrap();
 
         stream.recver.retire();
         assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
@@ -521,10 +607,7 @@ mod tests {
         let frame = CryptoFrame::new(0u32.into(), 11u32.into());
         stream.outgoing().may_loss_data(&frame);
         let mut retransmission = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream
-            .outgoing()
-            .try_load_data_into(&mut retransmission, false)
-            .unwrap();
+        stream.outgoing().dump(&mut retransmission).unwrap();
         assert_eq!(retransmission.0, packet.0);
         stream.outgoing().on_data_acked(&frame);
         assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
@@ -559,12 +642,7 @@ mod tests {
             std::io::ErrorKind::BrokenPipe
         );
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(
-            stream
-                .outgoing()
-                .try_load_data_into(&mut packet, true)
-                .is_err()
-        );
+        assert!(stream.multipath().dump(&mut packet).is_err());
         stream
             .outgoing()
             .on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
@@ -620,12 +698,7 @@ mod tests {
             assert_eq!(cause, &error);
         }
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(
-            stream
-                .outgoing()
-                .try_load_data_into(&mut packet, true)
-                .is_err()
-        );
+        assert!(stream.multipath().dump(&mut packet).is_err());
         assert!(packet.0.is_empty());
     }
 
@@ -638,10 +711,7 @@ mod tests {
             std::io::ErrorKind::Unsupported,
         );
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream
-            .outgoing()
-            .try_load_data_into(&mut packet, false)
-            .unwrap();
+        stream.outgoing().dump(&mut packet).unwrap();
         assert!(packet.0.ends_with(b"outgoing"));
         stream.writer().write_all(b"still open").await.unwrap();
     }
@@ -652,10 +722,7 @@ mod tests {
         let mut writer = stream.writer();
         writer.write_all(b"hello").await.unwrap();
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream
-            .outgoing()
-            .try_load_data_into(&mut packet, false)
-            .unwrap();
+        stream.outgoing().dump(&mut packet).unwrap();
         let wakes = Arc::new(WakeCount::default());
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);

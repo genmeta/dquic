@@ -11,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use qbase::{
     Epoch,
-    cid::ConnectionId,
+    cid::{ConnectionId, Registry},
     error::{AppError, ErrorKind, QuicError},
     flow::FlowController,
     frame::{AckFrame, Frame, MaxStreamsFrame, PingFrame, StreamCtlFrame, io::ReceiveFrame},
@@ -28,7 +28,7 @@ use qbase::{
     sid::{Dir, handy::DemandConcurrency},
     time::{ArcConnIdle, PathIdleTimer},
 };
-use qcongestion::{Feedback, HandshakeStatus};
+use qcongestion::Feedback;
 use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
@@ -192,8 +192,8 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         .unwrap()
         .allow_update();
     let flow = FlowController::new(
-        params.remote(ParameterId::InitialMaxData).unwrap(),
-        params.local(ParameterId::InitialMaxData).unwrap(),
+        params.remote(ParameterId::InitialMaxData),
+        params.local(ParameterId::InitialMaxData),
         reliable.clone(),
         wakers,
     );
@@ -232,21 +232,17 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         EndpointAddr::direct(([127, 0, 0, 1], local).into()),
         EndpointAddr::direct(([127, 0, 0, 1], remote).into()),
     );
-    let status = Arc::new(HandshakeStatus::new(
-        transport.parameters.role() == Role::Server,
-    ));
-    status.handshake_confirmed();
     let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
         transport.data.send_journal.clone(),
     ));
     let path = Arc::new(Path::new(
         pathway,
-        ConnectionId::from_slice(b"original"),
-        status,
-        Duration::from_millis(25),
+        transport.parameters.role(),
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
+    path.set_dcid(ConnectionId::from_slice(b"original"));
+    path.handshake_confirmed();
     path.validate();
     path
 }
@@ -293,7 +289,11 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
         Frame::MaxData(frame) => transport.flow.sender.recv_frame(frame)?,
         Frame::DataBlocked(frame) => transport.flow.recver.recv_frame(frame)?,
         Frame::PathChallenge(frame) => path.recv_frame(frame)?,
-        Frame::PathResponse(frame) => path.recv_frame(frame)?,
+        Frame::PathResponse(frame) => {
+            if path.matches_response(frame) {
+                path.validate();
+            }
+        }
         Frame::Crypto(frame, bytes) => transport
             .data
             .crypto
@@ -330,7 +330,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
         frames,
         &transport.data,
         path,
-        &AtomicBool::new(false),
+        || false,
         |_, frame, path| dispatch(transport, path, frame),
         |_, _| Ok(()),
     )
@@ -581,7 +581,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                Arc::default(),
+                || false,
                 dispatch,
                 |_, _| Ok(()),
                 |_| panic!("receive failed"),
@@ -599,7 +599,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                Arc::default(),
+                || false,
                 dispatch,
                 |_, _| Ok(()),
                 |_| panic!("receive failed"),
@@ -677,6 +677,12 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     ));
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
+    let cid_registry = Registry::new(
+        st.parameters.role(),
+        ConnectionId::default(),
+        ArcReceiving::<RetireConnectionIdFrame>::default(),
+        ArcReceiving::<NewConnectionIdFrame>::default(),
+    );
     let dispatch = recv::frame_dispatcher(
         st.data.clone(),
         st.parameters.clone(),
@@ -687,11 +693,15 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
             handshake.crypto.clone(),
             st.data.crypto.clone(),
         ],
-        ArcReceiving::<RetireConnectionIdFrame>::default(),
-        ArcReceiving::<NewConnectionIdFrame>::default(),
+        cid_registry,
         ArcReceiving::<NewTokenFrame>::default(),
-        closing.clone(),
-        move |_, frame, _| close_sink.recv_frame(frame),
+        {
+            let closing = closing.clone();
+            move |_, frame, _| {
+                closing.store(true, Ordering::Release);
+                close_sink.recv_frame(frame)
+            }
+        },
         |_, _, _| panic!("unexpected frame"),
     );
     let streams_seen = Arc::new(AtomicUsize::new(0));
@@ -716,7 +726,10 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
         initial.clone(),
         handshake.clone(),
         st.data.clone(),
-        closing.clone(),
+        {
+            let closing = closing.clone();
+            move || closing.load(Ordering::Acquire)
+        },
         move |_, _| Some(sp.clone()),
         move |epoch, frame, path, on_ack| {
             if matches!(frame, Frame::Stream(_, _)) {
@@ -784,6 +797,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     let mut errors = 0;
     let mut ordinary = 0;
     let mut closes = 0;
+    let closing = Arc::new(AtomicBool::new(false));
     run_receive(
         rcvd_pkt.one_rtt,
         st.data.clone(),
@@ -791,7 +805,10 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto)
         },
-        Arc::default(),
+        {
+            let closing = closing.clone();
+            move || closing.load(Ordering::Acquire)
+        },
         |_, _, frame, _| {
             if matches!(frame, Frame::Close(_)) {
                 closes += 1;
@@ -804,6 +821,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         |_, _| Ok(()),
         |error| {
             errors += 1;
+            closing.store(true, Ordering::Release);
             st.close(error);
         },
     )
@@ -837,17 +855,27 @@ async fn frame_dispatcher_connects_crypto_cids_tokens_and_peer_close_to_original
     let closing = Arc::new(AtomicBool::new(false));
     let close_seen = ArcReceiving::default();
     let close_sink = close_seen.clone();
+    let cid_registry = Registry::new(
+        ct.parameters.role(),
+        ConnectionId::default(),
+        retired.clone(),
+        issued.clone(),
+    );
     let dispatch = recv::frame_dispatcher(
         ct.data.clone(),
         ct.parameters.clone(),
         ct.streams.clone(),
         ct.flow.clone(),
         crypto.clone(),
-        retired.clone(),
-        issued.clone(),
+        cid_registry,
         token.clone(),
-        closing.clone(),
-        move |_, frame, _| close_sink.recv_frame(frame),
+        {
+            let closing = closing.clone();
+            move |_, frame, _| {
+                closing.store(true, Ordering::Release);
+                close_sink.recv_frame(frame)
+            }
+        },
         move |epoch, frame, _| {
             assert_eq!(epoch, Epoch::Handshake);
             let Frame::Ack(frame) = frame else {
@@ -1131,7 +1159,7 @@ async fn close_wakes_both_accepts_and_blocked_opens_without_changing_parameters(
         client
             .parameters()
             .remote::<u64>(ParameterId::InitialMaxStreamsUni),
-        Some(0)
+        0
     );
     assert_eq!(client.alpn(), b"ssh");
     client.clone().close(VarInt::from_u32(99), "later");
@@ -1308,7 +1336,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             .unwrap();
         let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
         writer.write_all(&stream_data).await.unwrap();
-        let mut crypto = ct.data.crypto.outgoing().package(Epoch::Data);
+        let mut crypto = ct.data.crypto.outgoing();
         let mut streams = Repeat(ct.streams.package(ct.flow.sender.clone(), false));
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
@@ -1482,7 +1510,7 @@ async fn receiving_waits_for_keys_without_a_command_queue() {
         move |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
         },
-        Arc::default(),
+        || false,
         move |_, _, _, _| {
             seen.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -1523,7 +1551,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             frames,
             &st.data,
             &sp,
-            &AtomicBool::new(false),
+            || false,
             |_, _, _| Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into()),
             |_, _| Ok(())
         )
@@ -1575,7 +1603,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         frames,
         &st.data,
         &sp,
-        &AtomicBool::new(false),
+        || false,
         |_, frame, _| {
             assert!(matches!(frame, Frame::Close(_)));
             Ok(())
@@ -1612,7 +1640,7 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     )
     .unwrap();
     let mut frames = Vec::new();
-    let mut crypto = ct.data.crypto.outgoing().package(Epoch::Data);
+    let mut crypto = ct.data.crypto.outgoing();
     let mut reliable = ct.reliable_frames.clone();
     let mut streams = ct.streams.package(ct.flow.sender.clone(), false);
     packet
@@ -1856,19 +1884,17 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     let pathway = Pathway::new(local, EndpointAddr::direct(remote.local_addr().unwrap()));
     let protocol = QuicProtocol::new();
     protocol.register(local, &socket).unwrap();
-    let status = Arc::new(HandshakeStatus::new(false));
-    status.handshake_confirmed();
     let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
         ct.data.send_journal.clone(),
     ));
     let path = Arc::new(Path::new(
         pathway,
-        ConnectionId::from_slice(b"original"),
-        status,
-        Duration::from_millis(25),
+        Role::Client,
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
+    path.set_dcid(ConnectionId::from_slice(b"original"));
+    path.handshake_confirmed();
     path.validate();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
@@ -1929,25 +1955,22 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_validated() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
-        let status = Arc::new(HandshakeStatus::new(
-            transport.parameters.role() == Role::Server,
-        ));
-        status.handshake_confirmed();
         let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
             transport.data.send_journal.clone(),
         ));
-        Arc::new(Path::new(
+        let path = Arc::new(Path::new(
             pathway,
-            ConnectionId::from_slice(b"original"),
-            status,
-            Duration::from_millis(25),
+            transport.parameters.role(),
             path_idle(),
             [feedback.clone(), feedback.clone(), feedback],
-        ))
+        ));
+        path.set_dcid(ConnectionId::from_slice(b"original"));
+        path.handshake_confirmed();
+        path
     });
     let [cp, sp] = paths;
-    cp.grant_amplification();
-    cp.start_validation();
+    cp.on_datagram_received(400);
+    cp.set_challenge(qbase::frame::PathChallengeFrame::random());
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"validated")).unwrap();
     let mut cs = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
@@ -1976,21 +1999,19 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
 async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     use qcongestion::Transport as _;
     let [(_client, transport, original), _] = pair(1);
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.handshake_confirmed();
     let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
         transport.data.send_journal.clone(),
     ));
     let path = Arc::new(Path::new(
         original.pathway,
-        original.dcid(),
-        handshake,
-        Duration::from_millis(25),
+        Role::Client,
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
+    path.set_dcid(original.dcid());
+    path.handshake_confirmed();
     path.on_datagram_received(400);
-    path.start_validation();
+    path.set_challenge(qbase::frame::PathChallengeFrame::random());
     let mut sender = Sender::new(keys(&transport), transport, path.clone()).unwrap();
     assert_eq!(emit(&mut sender).len(), 1200);
     assert_eq!(path.amplification_credit(), 0);
@@ -2063,7 +2084,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         space.clone(),
         |_, _| unreachable!(),
         |_: &Arc<qtls::BidirectionalKeys>, _, _| unreachable!(),
-        Arc::default(),
+        || false,
         |_, _, _, _| unreachable!(),
         |_, _| unreachable!(),
         |_| unreachable!(),

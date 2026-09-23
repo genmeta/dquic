@@ -19,6 +19,7 @@ use crate::{
 
 const INIT_CWND: usize = MSS * 10;
 const PACKET_THRESHOLD: usize = 3;
+const TICK_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Imple RFC 9002 Appendix A. Loss Recovery
 /// See [Appendix A](https://datatracker.ietf.org/doc/html/rfc9002#name-loss-recovery-pseudocode)
@@ -530,13 +531,28 @@ impl ArcCC {
         path_status: PathStatus,
         tx_waker: ArcSendWaker,
     ) -> Self {
-        ArcCC(Arc::new(Mutex::new(CongestionController::init(
+        let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
             algorithm,
             max_ack_delay,
             trackers,
             path_status,
-            tx_waker,
-        ))))
+            tx_waker.clone(),
+        ))));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&cc.0);
+            runtime.spawn(async move {
+                let mut ticker =
+                    tokio::time::interval_at(Instant::now() + TICK_INTERVAL, TICK_INTERVAL);
+                loop {
+                    ticker.tick().await;
+                    if weak.upgrade().is_none() {
+                        break;
+                    }
+                    tx_waker.wake_by(Signals::CONGESTION | Signals::TRANSPORT | Signals::PING);
+                }
+            });
+        }
+        cc
     }
 
     /// Install negotiated local ACK scheduling and peer ACK/PTO bounds.

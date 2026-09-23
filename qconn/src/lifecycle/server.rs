@@ -1,46 +1,42 @@
 use std::sync::{Arc, OnceLock};
 
 use qbase::{
-    ArcReceiving, Epoch,
+    Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     frame::{HandshakeDoneFrame, io::SendFrame},
-    net::{route::Link, tx::Signals},
+    net::tx::Signals,
     param::ParameterId,
     role::Role,
-    time::ArcConnIdle,
     token::ArcTokenRegistry,
 };
 use qtls::CryptoLevel;
 use qtransport::{
     keys::ArcKeys, packet::channel::RcvdPacket, router::QuicRouterEntry, space::Space,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
-use super::close_error;
+use super::{any, close_error, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcConnPhase, ArcParameters, BelongsTo, CloseReason, ConnPhase, Error, Interceptor,
-    MaturePhase, Paths, ServerRegistry, TlsContext,
+    ArcParameters, CloseReason, Error, Interceptor, MaturePhase, Paths, ServerRegistry, TlsContext,
 };
 
 /// Select a listening server from an already routed Initial, then grow the connection.
 #[allow(clippy::too_many_arguments)]
 pub async fn server_growing(
-    phase: ArcConnPhase,
     route: QuicRouterEntry,
     rcvd_pkt: RcvdPacket,
     paths: Arc<Paths>,
-    idle: ArcConnIdle,
     token: ArcTokenRegistry,
-    initial_link: Link,
 ) -> CloseReason {
-    let ConnPhase::Initial(initial_phase) = phase.get() else {
+    let phase = paths.phase();
+    let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
-
+    let idle = paths.idle();
+    let closed = paths.closed();
     let initial = &initial_phase.initial;
     let send_wakers = &initial.send_wakers;
-    let closed = ArcReceiving::default();
     let local_cids = crate::ArcLocalCids::new(
         initial_phase.scid,
         route
@@ -52,136 +48,83 @@ pub async fn server_growing(
         rcvd_pkt.initial,
         initial.clone(),
         paths.clone(),
+        initial_phase.terminator.clone(),
         closed.clone(),
         scopes.clone(),
     ));
 
     let interceptor = Interceptor::new();
-    tokio::spawn({
-        let interceptor = interceptor.clone();
-        let stream = initial.crypto.clone();
-        let closed = closed.clone();
-        async move {
-            let mut reader = stream.reader();
-            let mut buffer = [0; 4096];
-            loop {
-                match reader.read(&mut buffer).await {
-                    Ok(0) => {
-                        closed.set(CloseReason::Internal(QuicError::with_default_fty(
-                            ErrorKind::ProtocolViolation,
-                            "Initial CRYPTO ended before ClientHello",
-                        )));
-                        break;
-                    }
-                    Ok(length) if interceptor.write(&buffer[..length]) => break,
-                    Ok(_) => {}
-                    Err(error) => {
-                        closed.set(CloseReason::Internal(QuicError::with_default_fty(
-                            ErrorKind::Internal,
-                            error.to_string(),
-                        )));
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    tokio::spawn(read_crypto_stream_to_interceptor(
+        interceptor.clone(),
+        initial.crypto.clone(),
+        closed.clone(),
+    ));
 
-    let hello = {
-        let mut close = closed.clone();
-        tokio::select! {
-            Ok(Some(reason)) = &mut close => Err(reason),
-            result = interceptor.read() => result.map_err(CloseReason::from),
-        }
-    };
+    let hello = any(interceptor.read(), closed.clone())
+        .await
+        .and_then(|result| result.map_err(CloseReason::from));
     let hello = match hello {
         Ok(hello) => hello,
-        Err(reason) => return shutdown_initial(&phase, &local_cids, &paths, reason),
+        Err(reason) => {
+            return shutdown_initial(&paths, &local_cids, reason).await;
+        }
     };
     let Some(server_name) = hello.server_name() else {
         return shutdown_initial(
-            &phase,
-            &local_cids,
             &paths,
+            &local_cids,
             CloseReason::Internal(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "ClientHello has no server name",
             )),
-        );
+        )
+        .await;
     };
     let Some(server) = ServerRegistry::global().get(server_name) else {
         return shutdown_initial(
-            &phase,
-            &local_cids,
             &paths,
+            &local_cids,
             CloseReason::Internal(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "server name is not listening",
             )),
-        );
+        )
+        .await;
     };
-    if !initial_link.src.belongs_to(server.scopes) {
-        return shutdown_initial(
-            &phase,
-            &local_cids,
-            &paths,
-            CloseReason::Internal(QuicError::with_default_fty(
-                ErrorKind::ConnectionRefused,
-                "client address is outside the server listen scope",
-            )),
-        );
-    }
-    scopes
-        .set(server.scopes)
-        .expect("server scope is selected once");
     idle.negotiate_max_idle_timeout(
         server
             .server_parameters
-            .get(ParameterId::MaxIdleTimeout)
-            .unwrap(),
+            .get::<std::time::Duration>(ParameterId::MaxIdleTimeout),
     );
-    let (tls_ctx, client_parameters, server_parameters) = match server.start(
+    let (tls_ctx, client_parameters, server_parameters) = match server.spawn_connection_with(
         qtls::QuicVersion::V1,
         hello,
         initial_phase.scid,
         initial_phase.odcid,
     ) {
-        Ok(connection) => connection,
+        Ok(ready) => ready,
         Err(error) => {
             (server.accept_cb)(Err(error.clone()));
-            return shutdown_initial(&phase, &local_cids, &paths, error.into());
+            return shutdown_initial(&paths, &local_cids, error.into()).await;
         }
     };
-    let selected_scopes = server.scopes;
-    let remote_cids = ArcRemoteCids::new(
-        server_parameters
-            .get(ParameterId::ActiveConnectionIdLimit)
-            .unwrap(),
-        initial_phase.reliable_frames.clone(),
+    scopes
+        .set(server.scopes)
+        .expect("server scope is selected once");
+    let scopes = server.scopes;
+    let cid_registry = qbase::cid::Registry::new(
+        Role::Server,
+        initial_phase.odcid,
+        local_cids,
+        ArcRemoteCids::new(
+            server_parameters.get::<u64>(ParameterId::ActiveConnectionIdLimit),
+            initial_phase.reliable_frames.clone(),
+        ),
     );
-    tokio::spawn(crate::tls::read_tls_to_crypto_stream(
-        tls_ctx.clone(),
-        CryptoLevel::Initial,
-        initial.crypto.clone(),
-        closed.clone(),
-    ));
-    tokio::spawn(crate::tls::read_crypto_stream_to_tls(
-        tls_ctx.clone(),
-        CryptoLevel::Initial,
-        initial.crypto.clone(),
-        closed.clone(),
-    ));
-
     let result = {
         let establish = async {
             let client_scid = client_parameters
-                .get(ParameterId::InitialSourceConnectionId)
-                .ok_or_else(|| {
-                    QuicError::with_default_fty(
-                        ErrorKind::TransportParameter,
-                        "client initial source connection ID is missing",
-                    )
-                })?;
+                .get::<qbase::cid::ConnectionId>(ParameterId::InitialSourceConnectionId);
             if paths
                 .snapshot()
                 .iter()
@@ -201,15 +144,8 @@ pub async fn server_growing(
                 |_| {},
             ));
             handshake.install_hs_keys(handshake_keys)?;
-            phase.enter_connecting(initial_phase.clone(), handshake.clone());
             initial.crypto.recver.retire();
 
-            tokio::spawn(crate::tls::read_tls_to_crypto_stream(
-                tls_ctx.clone(),
-                CryptoLevel::Handshake,
-                handshake.crypto.clone(),
-                closed.clone(),
-            ));
             tokio::spawn(crate::tls::read_crypto_stream_to_tls(
                 tls_ctx.clone(),
                 CryptoLevel::Handshake,
@@ -220,66 +156,109 @@ pub async fn server_growing(
                 rcvd_pkt.handshake,
                 handshake.clone(),
                 paths.clone(),
+                initial_phase.terminator.clone(),
                 closed.clone(),
-                selected_scopes,
+                scopes,
             ));
 
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
-            let initial_dcid = remote_cids.apply_dcid();
-            remote_cids.apply_initial_dcid(client_scid, &initial_dcid);
-            let (material, transport) = MaturePhase::new(
+            let initial_dcid = cid_registry.remote.apply_dcid();
+            cid_registry
+                .remote
+                .apply_initial_dcid(client_scid, &initial_dcid);
+            let (mature_phase, transport) = MaturePhase::new(
                 &initial_phase,
                 handshake.clone(),
                 parameters.clone(),
                 client_scid,
                 initial_phase.reliable_frames.clone(),
-                remote_cids.clone(),
+                cid_registry.clone(),
                 initial_dcid,
             )?;
-            phase.enter_handshaking(material.clone());
-            local_cids.set_limit(
-                parameters
-                    .remote::<u64>(ParameterId::ActiveConnectionIdLimit)
-                    .unwrap()
-                    .min(4),
-            )?;
-            idle.negotiate_max_idle_timeout(
-                parameters.remote(ParameterId::MaxIdleTimeout).unwrap(),
-            );
+            cid_registry
+                .local
+                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
 
-            tokio::spawn(crate::recv::receive_server_data(
-                rcvd_pkt.one_rtt,
-                material.clone(),
-                paths.clone(),
-                parameters,
-                local_cids.clone(),
-                remote_cids,
-                token,
-                closed.clone(),
-                selected_scopes,
-            ));
-
-            material
+            mature_phase
                 .spaces
                 .data
                 .install_1rtt_keys(tls_ctx.read_keys().await?)?;
-            tokio::spawn(crate::tls::read_tls_to_crypto_stream(
-                tls_ctx.clone(),
-                CryptoLevel::OneRtt,
-                material.spaces.data.crypto.clone(),
-                closed.clone(),
-            ));
+
+            let initial_flight = tls_ctx.read_msg_at(CryptoLevel::Initial).await?;
+            initial
+                .crypto
+                .writer()
+                .write_all(&initial_flight)
+                .await
+                .map_err(|error| {
+                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
+                })?;
+            while let Some(bytes) = tls_ctx.try_read_msg_at(CryptoLevel::Initial)? {
+                initial
+                    .crypto
+                    .writer()
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| {
+                        QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
+                    })?;
+            }
+            let handshake_flight = tls_ctx.read_msg_at(CryptoLevel::Handshake).await?;
+            handshake
+                .crypto
+                .writer()
+                .write_all(&handshake_flight)
+                .await
+                .map_err(|error| {
+                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
+                })?;
+            while let Some(bytes) = tls_ctx.try_read_msg_at(CryptoLevel::Handshake)? {
+                handshake
+                    .crypto
+                    .writer()
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| {
+                        QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
+                    })?;
+            }
+
+            for (level, stream) in [
+                (CryptoLevel::Initial, initial.crypto.clone()),
+                (CryptoLevel::Handshake, handshake.crypto.clone()),
+                (CryptoLevel::OneRtt, mature_phase.spaces.data.crypto.clone()),
+            ] {
+                tokio::spawn(crate::tls::read_tls_to_crypto_stream(
+                    tls_ctx.clone(),
+                    level,
+                    stream,
+                    closed.clone(),
+                ));
+            }
             tokio::spawn(crate::tls::read_crypto_stream_to_tls(
                 tls_ctx.clone(),
                 CryptoLevel::OneRtt,
-                material.spaces.data.crypto.clone(),
+                mature_phase.spaces.data.crypto.clone(),
                 closed.clone(),
             ));
+
+            tokio::spawn(crate::recv::receive_server_data(
+                rcvd_pkt.one_rtt,
+                mature_phase.clone(),
+                paths.clone(),
+                parameters,
+                cid_registry.clone(),
+                token,
+                closed.clone(),
+                scopes,
+            ));
+            phase.enter_mature(mature_phase.clone());
 
             let summary = tls_ctx.finished().await?;
             initial.retire();
             handshake.retire();
-            material
+            mature_phase
                 .spaces
                 .data
                 .keys
@@ -290,14 +269,11 @@ pub async fn server_growing(
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
-            for path in paths.snapshot() {
-                path.validate();
-            }
             initial_phase
                 .reliable_frames
                 .send_frame([HandshakeDoneFrame]);
+            paths.handshake_confirmed();
             send_wakers.wake_all_by(Signals::all());
-            phase.enter_mature(material);
 
             Ok::<_, Error>((
                 summary.remote,
@@ -309,19 +285,16 @@ pub async fn server_growing(
                 ),
             ))
         };
-        let mut close = closed.clone();
-        tokio::pin!(establish);
-        tokio::select! {
-            Ok(Some(reason)) = &mut close => Err(reason),
-            result = &mut establish => result.map_err(CloseReason::from),
-        }
+        any(establish, closed.clone())
+            .await
+            .and_then(|result| result.map_err(CloseReason::from))
     };
 
     match result {
         Ok(connection) => (server.accept_cb)(Ok(connection)),
         Err(reason) => {
             (server.accept_cb)(Err(close_error(&reason)));
-            return shutdown(&phase, &tls_ctx, &local_cids, &paths, reason);
+            return shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await;
         }
     }
 
@@ -329,53 +302,27 @@ pub async fn server_growing(
         .await
         .expect("growing owns close")
         .expect("first close reason");
-    shutdown(&phase, &tls_ctx, &local_cids, &paths, reason)
+    shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await
 }
 
-fn shutdown(
-    phase: &ArcConnPhase,
+async fn shutdown(
+    paths: &Paths,
     tls: &TlsContext,
     local_cids: &crate::ArcLocalCids,
-    paths: &Paths,
     reason: CloseReason,
 ) -> CloseReason {
     tls.on_error(close_error(&reason));
-    close_spaces(&phase.get(), &reason);
+    paths.finish(&reason).await;
     local_cids.clear();
-    for path in paths.snapshot() {
-        path.retire();
-        paths.remove(&path);
-    }
     reason
 }
 
-fn shutdown_initial(
-    phase: &ArcConnPhase,
-    local_cids: &crate::ArcLocalCids,
+async fn shutdown_initial(
     paths: &Paths,
+    local_cids: &crate::ArcLocalCids,
     reason: CloseReason,
 ) -> CloseReason {
-    close_spaces(&phase.get(), &reason);
+    paths.finish(&reason).await;
     local_cids.clear();
-    for path in paths.snapshot() {
-        path.retire();
-        paths.remove(&path);
-    }
     reason
-}
-
-fn close_spaces(phase: &ConnPhase, reason: &CloseReason) {
-    let error = close_error(reason);
-    phase.initial().crypto.on_error(&error);
-    phase.initial().retire();
-    if let Some(handshake) = phase.handshake() {
-        handshake.crypto.on_error(&error);
-        handshake.retire();
-    }
-    if let Some(material) = phase.material() {
-        material.spaces.data.crypto.on_error(&error);
-        material.streams.on_conn_error(&error);
-        material.flow.on_conn_error(&error);
-        material.spaces.data.keys.retire();
-    }
 }

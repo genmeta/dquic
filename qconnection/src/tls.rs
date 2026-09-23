@@ -175,7 +175,7 @@ impl ClientTlsSession {
 
         let local_authority = Arc::new(Mutex::new(None));
         // 通过注入ServerCertResolver实现CertifiedKey向上传递
-        if let Some(client_name) = client_params.get::<String>(ParameterId::ClientName) {
+        if let Some(client_name) = client_params.try_get::<String>(ParameterId::ClientName) {
             let tls_config = Arc::make_mut(&mut tls_config);
             tls_config.client_auth_cert_resolver = Arc::new(ClientCertResolver {
                 client_name: client_name.into(),
@@ -345,7 +345,7 @@ impl ServerTlsSession {
                 .expect("Client parameters must be present in ClientHello"),
         )?;
 
-        let client_name = client_params.get::<String>(ParameterId::ClientName);
+        let client_name = client_params.try_get::<String>(ParameterId::ClientName);
 
         let server_authority = self.local_authority().clone().ok_or_else(|| {
             QuicError::with_default_fty(ErrorKind::ConnectionRefused, "missing SNI in client hello")

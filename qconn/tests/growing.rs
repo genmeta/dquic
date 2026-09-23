@@ -30,9 +30,10 @@ async fn flight(from: &TlsContext, to: &TlsContext, expected: CryptoLevel) {
 async fn tls_output_keys_and_parameters_have_independent_consumers() {
     let [client, server] = pair(false);
     assert!(client.read_keys().now_or_never().is_none()); // cancel this pending wait
-    assert!(client.read_server_hello().now_or_never().is_none());
+    assert!(client.read_server_parameters().now_or_never().is_none());
     flight(&client, &server, CryptoLevel::Initial).await;
     // Neither output nor key consumption is required to retrieve ClientHello.
+    assert!(server.read_server_parameters().now_or_never().is_none());
     let (name, _) = server.read_client_hello().await.unwrap();
     assert_eq!(name.as_deref(), Some("localhost"));
     assert!(matches!(
@@ -49,9 +50,10 @@ async fn tls_output_keys_and_parameters_have_independent_consumers() {
         client.read_keys().await.unwrap(),
         InstalledKeys::Handshake(_)
     ));
-    assert!(client.read_server_hello().now_or_never().is_none());
+    assert!(client.read_server_parameters().now_or_never().is_none());
     flight(&server, &client, CryptoLevel::Handshake).await;
-    client.read_server_hello().await.unwrap();
+    assert!(client.read_client_hello().now_or_never().is_none());
+    client.read_server_parameters().await.unwrap();
     assert!(matches!(
         client.read_keys().await.unwrap(),
         InstalledKeys::OneRtt(_)

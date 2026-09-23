@@ -182,15 +182,15 @@ impl Parameters {
 
     pub fn get_local<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
         match self.role() {
-            Role::Client => self.client()?.get(id),
-            Role::Server => self.server()?.get(id),
+            Role::Client => Some(self.client()?.get(id)),
+            Role::Server => Some(self.server()?.get(id)),
         }
     }
 
     pub fn get_remote<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
         match self.role() {
-            Role::Client => self.server()?.get(id),
-            Role::Server => self.client()?.get(id),
+            Role::Client => Some(self.server()?.get(id)),
+            Role::Server => Some(self.client()?.get(id)),
         }
     }
 
@@ -338,7 +338,6 @@ impl Parameters {
                 if self
                     .server
                     .get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    .expect("this value must be set")
                     != initial_scid
                 {
                     return Err(param_error(
@@ -352,7 +351,6 @@ impl Parameters {
                 if self
                     .server
                     .get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId)
-                    .expect("this value must be set")
                     != origin_dcid
                 {
                     return Err(param_error("Original Destination Connection ID mismatch"));
@@ -366,7 +364,6 @@ impl Parameters {
                 if self
                     .client
                     .get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    .expect("this value must be set")
                     != initial_scid
                 {
                     return Err(param_error(
@@ -519,6 +516,26 @@ mod tests {
             )
             .unwrap();
         params
+    }
+
+    #[test]
+    fn get_returns_defaults_and_try_get_preserves_absence() {
+        let mut params = ClientParameters::new();
+        assert_eq!(params.get::<u64>(ParameterId::InitialMaxData), 0);
+        assert!(!params.get::<bool>(ParameterId::DisableActiveMigration));
+        assert_eq!(
+            params.try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
+            None
+        );
+
+        let scid = ConnectionId::from_slice(b"client");
+        params
+            .set(ParameterId::InitialSourceConnectionId, scid)
+            .unwrap();
+        assert_eq!(
+            params.get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
+            scid
+        );
     }
 
     #[test]

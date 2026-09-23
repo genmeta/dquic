@@ -1,7 +1,5 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    ops::BitOr,
     sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
@@ -11,13 +9,14 @@ use qbase::{
     cid::{ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
     error::{ErrorKind, QuicError},
-    net::tx::ArcSendWakers,
+    net::{route::Scopes, tx::ArcSendWakers},
     packet::{GetDcid, GetScid},
     param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
+    role::Role,
     time::{ArcConnIdle, DEFAULT_HEARTBEAT_INTERVAL},
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qtransport::{packet::channel, path::Path, router::QuicRouter, space::ArcFeedback};
+use qtransport::{packet::channel, router::QuicRouter};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -101,8 +100,8 @@ impl QuicEndpoint {
         let cid_registry =
             QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
         let scid = cid_registry.gen_unique_cid();
-        let mut client_parameters = self.client_parameters.clone();
-        client_parameters
+        let mut client_params = self.client_parameters.clone();
+        client_params
             .set(ParameterId::InitialSourceConnectionId, scid)
             .map_err(|error| internal_error(error.to_string()))?;
         let tls = TlsContext::client(
@@ -111,32 +110,30 @@ impl QuicEndpoint {
                 .clone()
                 .try_into()
                 .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
-            &client_parameters,
+            &client_params,
         )?;
-        let phase = ArcConnPhase::new(InitialPhase::with_components(
+        let phase = ArcConnPhase::initial(InitialPhase::with_components(
             scid,
             odcid,
             initial_keys,
             wakers,
             reliable_frames,
         ));
-        let paths = Arc::new(Paths::new(phase.clone()));
         let idle = ArcConnIdle::new(
-            client_parameters.get(ParameterId::MaxIdleTimeout).unwrap(),
+            client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
             DEFAULT_HEARTBEAT_INTERVAL,
         );
+        let paths = Paths::new(Role::Client, phase, idle);
         let token = ArcTokenRegistry::with_sink(server_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
 
         tokio::spawn(client_growing(
-            phase,
-            tls,
-            client_parameters,
-            cid_registry,
-            rcvd_pkt,
+            client_params,
             paths,
-            idle,
+            rcvd_pkt,
+            tls,
+            cid_registry,
             token,
             move |result| {
                 let _ = deliver.send(result);
@@ -159,75 +156,6 @@ impl QuicEndpoint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Scope {
-    Loopback = 0b001,
-    Internal = 0b010,
-    External = 0b100,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Scopes(u8);
-
-impl Scopes {
-    pub const ALL: Self =
-        Self(Scope::Loopback as u8 | Scope::Internal as u8 | Scope::External as u8);
-
-    pub fn contains(self, scope: Scope) -> bool {
-        self.0 & scope as u8 != 0
-    }
-}
-
-impl From<Scope> for Scopes {
-    fn from(scope: Scope) -> Self {
-        Self(scope as u8)
-    }
-}
-
-impl BitOr for Scope {
-    type Output = Scopes;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Scopes(self as u8 | rhs as u8)
-    }
-}
-
-impl BitOr<Scope> for Scopes {
-    type Output = Self;
-
-    fn bitor(self, rhs: Scope) -> Self::Output {
-        Self(self.0 | rhs as u8)
-    }
-}
-
-impl BitOr for Scopes {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self(self.0 | rhs.0)
-    }
-}
-
-pub trait BelongsTo {
-    fn belongs_to(&self, scopes: Scopes) -> bool;
-}
-
-impl BelongsTo for SocketAddr {
-    fn belongs_to(&self, scopes: Scopes) -> bool {
-        let scope = if is_loopback(self.ip()) {
-            Scope::Loopback
-        } else if is_internal(self.ip()) {
-            Scope::Internal
-        } else if qbase::net::addr::EndpointAddr::direct(*self).is_globally_routable() {
-            Scope::External
-        } else {
-            return false;
-        };
-        scopes.contains(scope)
-    }
-}
-
 pub type AcceptCallback = dyn Fn(Result<Accepted, Error>) + Send + Sync;
 
 pub struct Server {
@@ -239,7 +167,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start(
+    pub fn spawn_connection_with(
         &self,
         version: qtls::QuicVersion,
         hello: qtls::incoming::ClientHello,
@@ -289,46 +217,29 @@ impl ServerRegistry {
                 let cid_registry =
                     router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone());
                 let scid = cid_registry.gen_unique_cid();
-                let phase = ArcConnPhase::new(InitialPhase::with_components(
+                let phase = ArcConnPhase::initial(InitialPhase::with_components(
                     scid,
                     odcid,
                     initial_keys,
-                    send_wakers,
+                    send_wakers.clone(),
                     reliable_frames,
                 ));
                 let idle =
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, DEFAULT_HEARTBEAT_INTERVAL);
-                let paths = Arc::new(Paths::new(phase.clone()));
-                let path = Arc::new(Path::new(
-                    pathway,
-                    peer_cid,
-                    Arc::new(qcongestion::HandshakeStatus::new(true)),
-                    Duration::from_millis(25),
-                    idle.timer(),
-                    std::array::from_fn(|_| {
-                        Arc::new(ArcFeedback::default()) as Arc<dyn qcongestion::Feedback>
-                    }),
-                ));
-                phase
-                    .get()
-                    .initial()
-                    .send_wakers
-                    .replace(pathway, &path.send_waker);
+                let paths = Paths::new(Role::Server, phase, idle);
                 paths
-                    .get_or_try_insert_with(pathway, || Ok::<_, Error>(path))
-                    .expect("fresh server path");
+                    .add_path(pathway)
+                    .expect("fresh server path")
+                    .set_dcid(peer_cid);
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
                 }
 
                 tokio::spawn(crate::server_growing(
-                    phase,
                     route,
                     rcvd_pkt,
                     paths,
-                    idle,
                     ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-                    link,
                 ));
             });
             Self(RwLock::new(HashMap::new()))
@@ -361,26 +272,4 @@ impl ServerRegistry {
 
 fn internal_error(reason: impl Into<String>) -> Error {
     QuicError::with_default_fty(ErrorKind::Internal, reason.into()).into()
-}
-
-fn is_loopback(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_loopback(),
-        IpAddr::V6(ip) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
-        }
-    }
-}
-
-fn is_internal(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
-        IpAddr::V6(ip) => {
-            ip.is_unique_local()
-                || ip.is_unicast_link_local()
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|ip| ip.is_private() || ip.is_link_local())
-        }
-    }
 }
