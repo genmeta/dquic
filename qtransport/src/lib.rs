@@ -43,10 +43,10 @@ pub enum GuaranteedFrame {
     Reliable(ReliableFrame),
 }
 
-impl TryFrom<Frame<()>> for GuaranteedFrame {
-    type Error = Frame<()>;
+impl TryFrom<Frame> for GuaranteedFrame {
+    type Error = Frame;
 
-    fn try_from(frame: Frame<()>) -> Result<Self, Self::Error> {
+    fn try_from(frame: Frame) -> Result<Self, Self::Error> {
         let reliable = match frame {
             Frame::Stream(frame, ()) => return Ok(Self::Stream(frame)),
             Frame::Crypto(frame, ()) => return Ok(Self::Crypto(frame)),
@@ -67,7 +67,7 @@ impl TryFrom<Frame<()>> for GuaranteedFrame {
     }
 }
 
-impl From<GuaranteedFrame> for Frame<()> {
+impl From<GuaranteedFrame> for Frame {
     fn from(frame: GuaranteedFrame) -> Self {
         match frame {
             GuaranteedFrame::Stream(frame) => Self::Stream(frame, ()),

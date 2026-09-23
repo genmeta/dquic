@@ -32,6 +32,7 @@ pub enum PacketError {
 /// It contains no borrowed source, journal lock, or buffer reference.
 pub struct Datagram {
     pub msg: BytesMut,
+    pub(super) raw_offset: usize,
 }
 
 pub struct PendingPacket {
@@ -49,14 +50,14 @@ pub struct PendingPacket {
 
 impl PendingPacket {
     pub fn bytes(&self) -> &[u8] {
-        &self.datagram.msg
+        &self.datagram.msg[self.datagram.raw_offset..]
     }
 
     pub fn epoch(&self) -> qbase::Epoch {
         epoch(self.packet_type)
     }
 
-    pub(crate) fn into_buffer(mut self) -> BytesMut {
+    pub fn into_buffer(mut self) -> BytesMut {
         std::mem::take(&mut self.datagram.msg)
     }
 }
@@ -115,7 +116,10 @@ impl Packet {
         }
         writer.put_packet_number(PacketNumber::U32(0));
         Ok(Self {
-            datagram: Datagram { msg: buffer },
+            datagram: Datagram {
+                msg: buffer,
+                raw_offset: 0,
+            },
             packet_type,
             challenge: None,
             response: None,
@@ -280,7 +284,7 @@ pub struct PacketWriter<'a> {
     packet: &'a mut Packet,
     constraints: &'a Constraints,
     records: &'a mut Vec<GuaranteedFrame>,
-    pending: &'a [PendingPacket],
+    pub pending: &'a [PendingPacket],
 }
 
 impl<'a> PacketWriter<'a> {
@@ -300,6 +304,10 @@ impl<'a> PacketWriter<'a> {
     /// The datagram being assembled, including its encoded header and frame bytes.
     pub fn datagram(&self) -> &Datagram {
         &self.packet.datagram
+    }
+
+    pub fn packet_type(&self) -> Type {
+        self.packet.packet_type
     }
 
     fn write<D: Buffer>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
@@ -422,19 +430,19 @@ impl Package<PacketWriter<'_>> for (CryptoFrame, &[Bytes]) {
 
 impl Package<PacketWriter<'_>> for AckFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::Ack(self.clone()))
+        packet.write(&<Frame>::Ack(self.clone()))
     }
 }
 
 impl Package<PacketWriter<'_>> for PingFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::Ping(*self))
+        packet.write(&<Frame>::Ping(*self))
     }
 }
 
 impl Package<PacketWriter<'_>> for ConnectionCloseFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::Close(self.clone()))
+        packet.write(&<Frame>::Close(self.clone()))
     }
 }
 
@@ -448,19 +456,19 @@ impl Package<PacketWriter<'_>> for (StreamFrame, &[Bytes]) {
 
 impl Package<PacketWriter<'_>> for &ReliableFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::from((*self).clone()))
+        packet.write(&<Frame>::from((*self).clone()))
     }
 }
 
 impl Package<PacketWriter<'_>> for frame::PathChallengeFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::PathChallenge(*self))
+        packet.write(&<Frame>::PathChallenge(*self))
     }
 }
 
 impl Package<PacketWriter<'_>> for frame::PathResponseFrame {
     fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::<()>::PathResponse(*self))
+        packet.write(&<Frame>::PathResponse(*self))
     }
 }
 
@@ -472,7 +480,7 @@ impl Package<PacketWriter<'_>> for (DatagramFrame, Bytes) {
     }
 }
 
-pub(crate) fn epoch(packet_type: Type) -> qbase::Epoch {
+pub fn epoch(packet_type: Type) -> qbase::Epoch {
     use qbase::packet::r#type::long::{Type as Long, Ver1};
     match packet_type {
         Type::Long(Long::V1(Ver1::INITIAL)) => qbase::Epoch::Initial,

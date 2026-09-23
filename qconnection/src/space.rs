@@ -363,7 +363,7 @@ fn filter_odcid_packet<H: GetDcid>(
 
 fn read_plain_packet<H>(
     packet: &PlainPacket<H>,
-    mut dispatch_frame: impl FnMut(qbase::frame::Frame),
+    mut dispatch_frame: impl FnMut(qbase::frame::Frame<Bytes>),
 ) -> Result<PacketContent, Error>
 where
     H: GetType,

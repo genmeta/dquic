@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, LazyLock, OnceLock},
 };
 
+use bytes::Bytes;
 use qbase::{
     Epoch, GetEpoch,
     error::{Error, QuicError},
@@ -140,11 +141,11 @@ fn frame_dispathcer<'a>(
     space: &'a InitialSpace,
     components: &'a Components,
     event_broker: &'a ArcEventBroker,
-) -> impl for<'p> Fn(Frame, &'p Path) + use<'a> {
+) -> impl for<'p> Fn(Frame<Bytes>, &'p Path) + use<'a> {
     let crypto_frames_entry = OnceLock::new();
     let ack_frames_entry = OnceLock::new();
     let event_broker = event_broker.clone();
-    move |frame: Frame, path: &Path| match frame {
+    move |frame: Frame<Bytes>, path: &Path| match frame {
         Frame::Ack(f) => {
             path.cc().on_ack_rcvd(Epoch::Initial, &f);
             _ = ack_frames_entry
@@ -185,7 +186,7 @@ async fn parse_normal_packet(
     ((packet, datagram_size), (bind_uri, pathway, link)): ReceivedFrom,
     space: &InitialSpace,
     components: &Components,
-    dispatch_frame: impl Fn(Frame, &Path),
+    dispatch_frame: impl Fn(Frame<Bytes>, &Path),
 ) -> Result<(), Error> {
     let parameters = &components.parameters;
     let paths = &components.paths;

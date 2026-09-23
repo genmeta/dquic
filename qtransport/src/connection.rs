@@ -67,15 +67,13 @@ impl ArcConnection {
     ) -> Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error> {
         let window = self
             .parameters()
-            .remote(ParameterId::InitialMaxStreamDataBidiRemote)
-            .unwrap();
+            .remote::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
         poll_fn(|cx| self.0.transport.streams.poll_open_bi_with_limit(cx, window)).await
     }
     pub async fn open_uni_stream(&self) -> Result<Option<(StreamId, StreamWriter)>, Error> {
         let window = self
             .parameters()
-            .remote(ParameterId::InitialMaxStreamDataUni)
-            .unwrap();
+            .remote::<u64>(ParameterId::InitialMaxStreamDataUni);
         poll_fn(|cx| {
             self.0
                 .transport
@@ -90,8 +88,7 @@ impl ArcConnection {
     ) -> Result<(StreamId, (StreamReader, StreamWriter)), Error> {
         let window = self
             .parameters()
-            .remote(ParameterId::InitialMaxStreamDataBidiLocal)
-            .unwrap();
+            .remote::<u64>(ParameterId::InitialMaxStreamDataBidiLocal);
         poll_fn(|cx| {
             self.0
                 .transport

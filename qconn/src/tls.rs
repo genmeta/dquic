@@ -32,14 +32,16 @@ struct Tls {
     backend: Backend,
     messages: VecDeque<(CryptoLevel, Bytes)>,
     keys: VecDeque<InstalledKeys>,
-    hello: Option<(Option<Arc<str>>, Bytes)>,
+    client_hello: Option<(Option<Arc<str>>, Bytes)>,
+    server_parameters: Option<Bytes>,
     summary: Option<HandshakeSummary>,
     pending_bytes: usize,
     max_pending_bytes: usize,
     message_waker: Option<Waker>,
     level_wakers: [Option<Waker>; 3],
     key_waker: Option<Waker>,
-    hello_waker: Option<Waker>,
+    client_hello_waker: Option<Waker>,
+    server_parameters_waker: Option<Waker>,
     finished_waker: Option<Waker>,
 }
 
@@ -75,7 +77,7 @@ impl TlsContext {
         let context = Self::new(tls, endpoint.max_flight_bytes())?;
         context.write_msg(CryptoLevel::Initial, hello.encoded())?;
         if let Ok(tls) = context.0.lock().unwrap().as_mut() {
-            tls.hello = None;
+            tls.client_hello = None;
         }
         Ok((context, client_parameters))
     }
@@ -88,14 +90,16 @@ impl TlsContext {
             backend: Backend::Handshake(Box::new(tls)),
             messages: VecDeque::new(),
             keys: VecDeque::new(),
-            hello: None,
+            client_hello: None,
+            server_parameters: None,
             summary: None,
             pending_bytes: 0,
             max_pending_bytes,
             message_waker: None,
             level_wakers: [None, None, None],
             key_waker: None,
-            hello_waker: None,
+            client_hello_waker: None,
+            server_parameters_waker: None,
             finished_waker: None,
         };
         tls.collect()?;
@@ -144,6 +148,21 @@ impl TlsContext {
         .await
     }
 
+    pub(crate) fn try_read_msg_at(&self, level: CryptoLevel) -> Result<Option<Bytes>, Error> {
+        let mut guard = self.0.lock().unwrap();
+        let tls = guard.as_mut().map_err(|error| error.clone())?;
+        let Some(index) = tls
+            .messages
+            .iter()
+            .position(|(message_level, _)| *message_level == level)
+        else {
+            return Ok(None);
+        };
+        let (_, bytes) = tls.messages.remove(index).unwrap();
+        tls.pending_bytes -= bytes.len();
+        Ok(Some(bytes))
+    }
+
     /// Feed contiguous CRYPTO input and publish all resulting facts without awaiting consumers.
     pub fn write_msg(&self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
         let mut guard = self.0.lock().unwrap();
@@ -157,33 +176,42 @@ impl TlsContext {
     }
 
     /// Wait for server parameters in EncryptedExtensions, after installing Handshake keys.
-    pub async fn read_server_hello(&self) -> Result<ServerParameters, Error> {
-        let (_, bytes) = self.read_hello().await?;
+    pub async fn read_server_parameters(&self) -> Result<ServerParameters, Error> {
+        let bytes = poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(parameters) = tls.server_parameters.take() {
+                Poll::Ready(Ok(parameters))
+            } else {
+                tls.server_parameters_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await?;
         Ok(ServerParameters::parse_from_bytes(&bytes)?)
     }
 
     /// The caller has already selected/configured the server TLS endpoint.
     /// A missing SNI is preserved for the caller's endpoint policy to decide.
     pub async fn read_client_hello(&self) -> Result<(Option<Arc<str>>, ClientParameters), Error> {
-        let (name, bytes) = self.read_hello().await?;
-        Ok((name, ClientParameters::parse_from_bytes(&bytes)?))
-    }
-
-    async fn read_hello(&self) -> Result<(Option<Arc<str>>, Bytes), Error> {
-        poll_fn(|cx| {
+        let (name, bytes) = poll_fn(|cx| {
             let mut guard = self.0.lock().unwrap();
             let tls = match guard.as_mut() {
                 Ok(tls) => tls,
                 Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            if let Some(hello) = tls.hello.take() {
+            if let Some(hello) = tls.client_hello.take() {
                 Poll::Ready(Ok(hello))
             } else {
-                tls.hello_waker = Some(cx.waker().clone());
+                tls.client_hello_waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         })
-        .await
+        .await?;
+        Ok((name, ClientParameters::parse_from_bytes(&bytes)?))
     }
 
     /// Consume the next key installation; cancelling a pending wait consumes nothing.
@@ -282,14 +310,14 @@ impl Tls {
                     server_name,
                     transport_parameters,
                 } => {
-                    self.hello = Some((server_name, transport_parameters));
-                    if let Some(waker) = self.hello_waker.take() {
+                    self.client_hello = Some((server_name, transport_parameters));
+                    if let Some(waker) = self.client_hello_waker.take() {
                         waker.wake();
                     }
                 }
                 TlsEvent::ServerTransportParameters(parameters) => {
-                    self.hello = Some((None, parameters));
-                    if let Some(waker) = self.hello_waker.take() {
+                    self.server_parameters = Some(parameters);
+                    if let Some(waker) = self.server_parameters_waker.take() {
                         waker.wake();
                     }
                 }
@@ -316,7 +344,8 @@ impl Tls {
         for waker in [
             self.message_waker.take(),
             self.key_waker.take(),
-            self.hello_waker.take(),
+            self.client_hello_waker.take(),
+            self.server_parameters_waker.take(),
             self.finished_waker.take(),
         ]
         .into_iter()

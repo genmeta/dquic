@@ -624,18 +624,10 @@ where
             role,
             stream_ids: StreamIds::new(
                 role,
-                local_params
-                    .get::<u64>(InitialMaxStreamsBidi)
-                    .expect("unreachable: default value will be got if the value unset"),
-                local_params
-                    .get::<u64>(InitialMaxStreamsUni)
-                    .expect("unreachable: default value will be got if the value unset"),
-                remote_params
-                    .get::<u64>(InitialMaxStreamsBidi)
-                    .expect("unreachable: default value will be got if the value unset"),
-                remote_params
-                    .get::<u64>(InitialMaxStreamsUni)
-                    .expect("unreachable: default value will be got if the value unset"),
+                local_params.get::<u64>(InitialMaxStreamsBidi),
+                local_params.get::<u64>(InitialMaxStreamsUni),
+                remote_params.get::<u64>(InitialMaxStreamsBidi),
+                remote_params.get::<u64>(InitialMaxStreamsUni),
                 Ext(ctrl_frames.clone()),
                 ctrl,
                 tx_wakers.clone(),
@@ -647,14 +639,11 @@ where
             tls_fin: AtomicBool::new(false),
             tx_wakers,
             initial_max_stream_data_bidi_local: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataBidiLocal)
-                .expect("unreachable: default value will be got if the value unset"),
+                .get::<u64>(ParameterId::InitialMaxStreamDataBidiLocal),
             initial_max_stream_data_bidi_remote: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote)
-                .expect("unreachable: default value will be got if the value unset"),
+                .get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote),
             initial_max_stream_data_uni: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataUni)
-                .expect("unreachable: default value will be got if the value unset"),
+                .get::<u64>(ParameterId::InitialMaxStreamDataUni),
             metrics,
         }
     }
@@ -666,12 +655,10 @@ where
 
             let opened_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
             let opened_uni = self.stream_ids.local.opened_streams(Dir::Uni);
-            let opened_bidi_snd_wnd_size = remote_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote)
-                .expect("unreachable: default value will be got if the value unset");
-            let opened_uni_snd_wnd_size = remote_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataUni)
-                .expect("unreachable: default value will be got if the value unset");
+            let opened_bidi_snd_wnd_size =
+                remote_params.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
+            let opened_uni_snd_wnd_size =
+                remote_params.get::<u64>(ParameterId::InitialMaxStreamDataUni);
             output.revise_max_stream_data(
                 zero_rtt_rejected,
                 opened_bidi,
@@ -679,12 +666,8 @@ where
                 opened_bidi_snd_wnd_size,
                 opened_uni_snd_wnd_size,
             );
-            let max_streams_bidi = remote_params
-                .get::<u64>(ParameterId::InitialMaxStreamsBidi)
-                .expect("unreachable: default value will be got if the value unset");
-            let max_streams_uni = remote_params
-                .get::<u64>(ParameterId::InitialMaxStreamsUni)
-                .expect("unreachable: default value will be got if the value unset");
+            let max_streams_bidi = remote_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
+            let max_streams_uni = remote_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
             self.stream_ids.local.revise_max_streams(
                 zero_rtt_rejected,
                 max_streams_bidi,
@@ -702,9 +685,7 @@ where
         let mut params = arc_params.lock_guard()?;
 
         let snd_buf_size = match params.remembered() {
-            Some(remembered) => remembered
-                .get(ParameterId::InitialMaxStreamDataBidiRemote)
-                .expect("unreachable: default value will be got if the value unset"),
+            Some(remembered) => remembered.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote),
             None => match params.get_remote(ParameterId::InitialMaxStreamDataBidiRemote) {
                 Some(value) => value,
                 None => {
@@ -751,9 +732,7 @@ where
         let mut params = arc_params.lock_guard()?;
 
         let snd_buf_size = match params.remembered() {
-            Some(remembered) => remembered
-                .get(ParameterId::InitialMaxStreamDataUni)
-                .expect("unreachable: default value will be got if the value unset"),
+            Some(remembered) => remembered.get::<u64>(ParameterId::InitialMaxStreamDataUni),
             None => match params.get_remote(ParameterId::InitialMaxStreamDataBidiRemote) {
                 Some(value) => value,
                 None => {

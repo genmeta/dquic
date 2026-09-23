@@ -5,9 +5,11 @@ use qbase::{
     ArcReceiving,
     error::{ErrorKind, QuicError},
 };
+use qrecovery::crypto::CryptoStream;
 use qtls::{TlsLimits, incoming::ClientHello};
+use tokio::io::AsyncReadExt;
 
-use crate::Error;
+use crate::{CloseReason, Error};
 
 /// Accumulate Initial CRYPTO until a server can be selected from ClientHello.
 #[derive(Clone)]
@@ -42,7 +44,13 @@ impl Interceptor {
                     qtls::incoming::client_hello(buffer, self.max_bytes)
                         .map_err(crate::tls::tls_error)
                 }
-                _ => Err(limit_error(self.max_bytes)),
+                _ => Err(crate::tls::tls_error(
+                    qtls::PeerTlsError::ResourceLimit {
+                        resource: "ClientHello bytes",
+                        limit: self.max_bytes,
+                    }
+                    .into(),
+                )),
             };
             match inspected {
                 Ok(None) => None,
@@ -68,8 +76,16 @@ impl Interceptor {
     pub async fn read(self) -> Result<ClientHello, Error> {
         match self.result.await {
             Ok(Some(result)) => result,
-            Ok(None) => Err(internal_error("ClientHello was already read")),
-            Err(_) => Err(internal_error("ClientHello interception was cancelled")),
+            Ok(None) => Err(QuicError::with_default_fty(
+                ErrorKind::Internal,
+                "ClientHello was already read",
+            )
+            .into()),
+            Err(_) => Err(QuicError::with_default_fty(
+                ErrorKind::Internal,
+                "ClientHello interception was cancelled",
+            )
+            .into()),
         }
     }
 }
@@ -80,16 +96,32 @@ impl Default for Interceptor {
     }
 }
 
-fn limit_error(limit: usize) -> Error {
-    crate::tls::tls_error(
-        qtls::PeerTlsError::ResourceLimit {
-            resource: "ClientHello bytes",
-            limit,
+/// Feed Initial CRYPTO into the interceptor until ClientHello or a read failure.
+pub(super) async fn read_crypto_stream_to_interceptor(
+    interceptor: Interceptor,
+    stream: CryptoStream,
+    closed: ArcReceiving<CloseReason>,
+) {
+    let mut reader = stream.reader();
+    let mut buffer = [0; 4096];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                closed.set(CloseReason::Internal(QuicError::with_default_fty(
+                    ErrorKind::ProtocolViolation,
+                    "Initial CRYPTO ended before ClientHello",
+                )));
+                break;
+            }
+            Ok(length) if interceptor.write(&buffer[..length]) => break,
+            Ok(_) => {}
+            Err(error) => {
+                closed.set(CloseReason::Internal(QuicError::with_default_fty(
+                    ErrorKind::Internal,
+                    error.to_string(),
+                )));
+                break;
+            }
         }
-        .into(),
-    )
-}
-
-fn internal_error(reason: &'static str) -> Error {
-    QuicError::with_default_fty(ErrorKind::Internal, reason).into()
+    }
 }

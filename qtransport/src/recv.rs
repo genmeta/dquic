@@ -1,16 +1,10 @@
 //! Receive engines are functions. Their closures capture already connected component pipes.
-use std::{
-    future::Future,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use qbase::{
     Epoch,
+    cid::Registry,
     error::{ErrorKind, QuicError},
     flow::FlowController,
     frame::{
@@ -39,19 +33,21 @@ use crate::{
 /// Handshake ACK/HANDSHAKE_DONE and negotiated extensions belong to the external driver.
 /// Data dispatch supplies an ACK callback capturing its already acquired OneRttKeys.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn frame_dispatcher(
+pub fn frame_dispatcher<LOCAL, REMOTE>(
     data: Arc<Space<ArcOneRttKeys>>,
     parameters: ArcParameters,
     streams: DataStreams<ReliableFrames>,
     flow: FlowController<ReliableFrames>,
     crypto: [CryptoStream; 3],
-    local_cids: impl ReceiveFrame<RetireConnectionIdFrame> + Send + Sync,
-    remote_cids: impl ReceiveFrame<NewConnectionIdFrame> + Send + Sync,
+    cid_registry: Registry<LOCAL, REMOTE>,
     tokens: impl ReceiveFrame<NewTokenFrame> + Send + Sync,
-    closing: Arc<AtomicBool>,
     on_close: impl Fn(Epoch, ConnectionCloseFrame, &Arc<Path>) -> Result<(), Error> + Send + Sync,
     on_other: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error> + Send + Sync,
-) -> impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error> + Send + Sync {
+) -> impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error> + Send + Sync
+where
+    LOCAL: ReceiveFrame<RetireConnectionIdFrame> + Send + Sync,
+    REMOTE: ReceiveFrame<NewConnectionIdFrame> + Send + Sync,
+{
     move |epoch, frame, path, on_ack| {
         let kind = frame.frame_type();
         match frame {
@@ -70,13 +66,11 @@ pub fn frame_dispatcher(
             }
             Frame::MaxData(frame) => flow.sender.recv_frame(frame),
             Frame::DataBlocked(frame) => flow.recver.recv_frame(frame),
-            Frame::NewConnectionId(frame) => remote_cids.recv_frame(frame).map(|_| ()),
-            Frame::RetireConnectionId(frame) => local_cids.recv_frame(frame).map(|_| ()),
+            Frame::NewConnectionId(frame) => cid_registry.remote.recv_frame(frame).map(|_| ()),
+            Frame::RetireConnectionId(frame) => cid_registry.local.recv_frame(frame).map(|_| ()),
             Frame::NewToken(frame) => tokens.recv_frame(frame).map(|_| ()),
             Frame::PathChallenge(frame) => path.recv_frame(frame),
-            Frame::PathResponse(frame) => path.recv_frame(frame),
             Frame::Close(frame) => {
-                closing.store(true, Ordering::Release);
                 let error = Error::from(frame.clone());
                 data.crypto.on_error(&error);
                 streams.on_conn_error(&error);
@@ -96,7 +90,7 @@ pub async fn run(
     initial: Arc<Space<ArcKeys>>,
     handshake: Arc<Space<ArcKeys>>,
     data: Arc<Space<ArcOneRttKeys>>,
-    closing: Arc<AtomicBool>,
+    is_closing: impl Fn() -> bool + Sync,
     path_for: impl Fn(Pathway, Link) -> Option<Arc<Path>> + Sync,
     dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
     on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
@@ -119,7 +113,7 @@ pub async fn run(
                     .transpose()
                     .map_err(Into::into)
             },
-            closing.clone(),
+            &is_closing,
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
             &on_processed,
             &on_error
@@ -134,7 +128,7 @@ pub async fn run(
                     .transpose()
                     .map_err(Into::into)
             },
-            closing.clone(),
+            &is_closing,
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
             &on_processed,
             &on_error
@@ -146,7 +140,7 @@ pub async fn run(
             |keys: &OneRttKeys, packet, pto| {
                 keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
             },
-            closing,
+            &is_closing,
             |keys, epoch, frame, path| {
                 dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
             },
@@ -165,11 +159,11 @@ pub fn receive_packet<K>(
     frames: FrameReader,
     space: &Space<K>,
     path: &Arc<Path>,
-    closing: &AtomicBool,
+    is_closing: impl Fn() -> bool,
     mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
 ) -> Result<PacketContent, Error> {
-    if closing.load(Ordering::Acquire) {
+    if is_closing() {
         on_processed(space.epoch, path)?;
         for frame in frames {
             let Ok((frame, _)) = frame else { break };
@@ -213,7 +207,7 @@ pub fn receive_packet<K>(
         return Ok(PacketContent::default());
     }
     for frame in decoded {
-        if closing.load(Ordering::Acquire) {
+        if is_closing() {
             return Ok(PacketContent::default());
         }
         dispatch(space.epoch, frame, path)?;
@@ -237,7 +231,7 @@ pub async fn run_receive<H, K, M>(
     space: Arc<Space<K>>,
     mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
-    closing: Arc<AtomicBool>,
+    is_closing: impl Fn() -> bool,
     mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
@@ -263,7 +257,7 @@ pub async fn run_receive<H, K, M>(
                     frames,
                     &space,
                     &path,
-                    &closing,
+                    &is_closing,
                     |epoch, frame, path| dispatch(&keys, epoch, frame, path),
                     &mut on_processed,
                 )?;
@@ -271,7 +265,7 @@ pub async fn run_receive<H, K, M>(
             Ok(())
         });
         if let Err(error) = result
-            && !closing.swap(true, Ordering::AcqRel)
+            && !is_closing()
         {
             on_error(error);
         }
