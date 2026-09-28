@@ -9,7 +9,6 @@ pub struct TestSender {
     buffers: Vec<BytesMut>,
     pub(super) send_frames: Vec<GuaranteedFrame>,
     pns: VecDeque<PendingPacket>,
-    signals: Signals,
 }
 
 impl TestSender {
@@ -23,7 +22,6 @@ impl TestSender {
                 .collect(),
             send_frames: Vec::with_capacity(256),
             pns: VecDeque::with_capacity(MAX_BURST_PACKETS),
-            signals: Signals::all(),
         }
     }
 
@@ -38,7 +36,7 @@ impl TestSender {
         header: H,
         journal: &ArcSendJournal,
         constraints: &Constraints,
-        sources: [&mut dyn for<'a> Package<PacketWriter<'a>>; N],
+        sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     ) -> Result<Option<PendingPacket>, Error>
     where
         for<'b> &'b mut [u8]: WriteHeader<H>,
@@ -49,7 +47,6 @@ impl TestSender {
             &mut self.buffers,
             &mut self.send_frames,
             &mut self.pns,
-            &mut self.signals,
             keys,
             header,
             journal,
@@ -64,7 +61,7 @@ impl TestSender {
         header: OneRttHeader,
         journal: &ArcSendJournal,
         constraints: &Constraints,
-        sources: [&mut dyn for<'a> Package<PacketWriter<'a>>; N],
+        sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     ) -> Result<Option<PendingPacket>, Error> {
         super::assemble_1rtt_packet(
             self.pathway,
@@ -72,7 +69,6 @@ impl TestSender {
             &mut self.buffers,
             &mut self.send_frames,
             &mut self.pns,
-            &mut self.signals,
             keys,
             header,
             journal,
@@ -90,13 +86,11 @@ impl TestSender {
         if !self.pns.is_empty() {
             return Ok(self.pns.len());
         }
-        self.signals = Signals::TRANSPORT | Signals::KEYS | Signals::PATH_VALIDATE | Signals::PING;
+
         let mut constraints = Constraints {
+            flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity: 1200,
-            congestion: self.congestion.send_quota().unwrap_or_else(|signals| {
-                self.signals |= signals;
-                0
-            }),
+            congestion: self.congestion.send_quota(),
             anti_amplification: self.anti_amplifier.balance(),
         };
         while self.pns.len() < MAX_BURST_PACKETS {
@@ -128,7 +122,6 @@ impl TestSender {
             &self.anti_amplifier,
             &mut self.buffers,
             &mut self.pns,
-            &mut self.signals,
             cx,
             packets,
             submit,

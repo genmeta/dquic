@@ -1,4 +1,8 @@
-use std::{any::Any, mem};
+use std::{
+    any::Any,
+    mem,
+    task::{Context, Poll},
+};
 
 use bytes::BytesMut;
 use nom::{Parser, multi::length_data};
@@ -9,13 +13,7 @@ use super::{
     r#type::{Type, io::be_packet_type},
     *,
 };
-use crate::{
-    Epoch,
-    frame::{io::WriteFrame, *},
-    net::tx::Signals,
-    util::{Buffer, NonData, WriteData},
-    varint::be_varint,
-};
+use crate::{Epoch, frame::*, util::Buffer, varint::be_varint};
 
 /// Parse the payload of a packet.
 ///
@@ -107,7 +105,7 @@ pub fn be_packet(datagram: &mut BytesMut, dcid_len: usize) -> Result<Packet, Err
 }
 
 pub trait ProductHeader<H> {
-    fn new_header(&self) -> Result<H, Signals>;
+    fn new_header(&self) -> Result<H, Poll<()>>;
 }
 
 pub trait PacketSpace<H> {
@@ -119,261 +117,7 @@ pub trait PacketSpace<H> {
         &'b self,
         header: H,
         buffer: &'b mut [u8],
-    ) -> Result<Self::PacketAssembler<'b>, Signals>;
-}
-
-// Target -> Target
-pub trait Package<Target: ?Sized> {
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals>;
-}
-
-impl<Target: BufMut + ?Sized, P: Package<Target> + ?Sized> Package<Target> for &mut P {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        P::dump(self, target)
-    }
-}
-
-impl<Target: BufMut + ?Sized, P: Package<Target> + ?Sized> Package<Target> for Box<P> {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        P::dump(self, target)
-    }
-}
-
-impl<Target: BufMut + ?Sized, P: Package<Target>> Package<Target> for Option<P> {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        self.take()
-            .map_or_else(|| Err(Signals::empty()), |mut package| package.dump(target))
-    }
-}
-
-impl<Target: BufMut + ?Sized, P: Package<Target>> Package<Target> for [P] {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        let origin = target.remaining_mut();
-        let mut signals = Signals::empty();
-        let mut packet_content = PacketContent::default();
-        for package in self {
-            match package.dump(target) {
-                Ok(content) => packet_content += content,
-                Err(s) => signals |= s,
-            }
-        }
-
-        (origin != target.remaining_mut())
-            .then_some(packet_content)
-            .ok_or(signals)
-    }
-}
-
-impl<Target: BufMut + ?Sized, P: Package<Target>, const N: usize> Package<Target> for [P; N] {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        let origin = target.remaining_mut();
-        let mut signals = Signals::empty();
-        let mut packet_content = PacketContent::default();
-        for package in self {
-            match package.dump(target) {
-                Ok(content) => packet_content += content,
-                Err(s) => signals |= s,
-            }
-        }
-
-        (origin != target.remaining_mut())
-            .then_some(packet_content)
-            .ok_or(signals)
-    }
-}
-
-pub struct PadTo20;
-
-impl<'b, P> Package<P> for PadTo20
-where
-    P: AsRef<PacketWriter<'b>> + BufMut + ?Sized,
-{
-    #[inline]
-    fn dump(&mut self, target: &mut P) -> Result<PacketContent, Signals> {
-        let packet = target.as_ref();
-        match packet.payload_len() + packet.tag_len() {
-            _ if packet.is_empty() => Err(Signals::empty()),
-            len if len < 20 => {
-                target.put_bytes(0, 20 - len);
-                Ok(PacketContent::NonAckEliciting)
-            }
-            _ => Ok(PacketContent::NonAckEliciting),
-        }
-    }
-}
-
-pub struct PadToFull;
-
-impl<'b, P> Package<P> for PadToFull
-where
-    P: AsRef<PacketWriter<'b>> + BufMut + ?Sized,
-{
-    #[inline]
-    fn dump(&mut self, target: &mut P) -> Result<PacketContent, Signals> {
-        let packet = target.as_ref();
-        match packet.payload_len() + packet.tag_len() {
-            _ if packet.is_empty() => Err(Signals::empty()),
-            len if len < packet.buffer().len() => {
-                target.put_bytes(0, packet.remaining_mut());
-                Ok(PacketContent::NonAckEliciting)
-            }
-            _ => Ok(PacketContent::NonAckEliciting),
-        }
-    }
-}
-
-pub struct PadProbe;
-
-impl<'b, P> Package<P> for PadProbe
-where
-    P: AsRef<PacketWriter<'b>> + BufMut + ?Sized,
-{
-    #[inline]
-    fn dump(&mut self, target: &mut P) -> Result<PacketContent, Signals> {
-        if target.as_ref().is_probe_new_path() {
-            return PadToFull.dump(target);
-        }
-        Err(Signals::empty())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Repeat<P>(pub P);
-
-impl<Target: ?Sized + BufMut, P: Package<Target>> Package<Target> for Repeat<P> {
-    #[inline]
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        let origin = target.remaining_mut();
-        let mut packet_content = PacketContent::default();
-        let signals = loop {
-            match self.0.dump(target) {
-                Ok(content) => packet_content += content,
-                Err(signals) => break signals,
-            }
-        };
-
-        (origin != target.remaining_mut())
-            .then_some(packet_content)
-            .ok_or(signals)
-    }
-}
-
-pub struct Packages<T>(pub T);
-
-macro_rules! impl_package_for_tuple {
-    () => {};
-    ($head:ident $($tail:ident)*) => {
-        impl_package_for_tuple!(@imp $head $($tail)*);
-        impl_package_for_tuple!(           $($tail)*);
-
-    };
-    (@imp $($t:ident)*) => {
-        impl<Target: BufMut + ?Sized, $($t: Package<Target>),*> Package<Target> for Packages<($($t,)*)> {
-            #[inline]
-            fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-                let origin = target.remaining_mut();
-                let mut signals = Signals::empty();
-                let mut packet_content = PacketContent::default();
-
-                #[allow(non_snake_case)]
-                let ($($t,)*) = &mut self.0;
-
-                $( #[allow(non_snake_case)]
-                match $t.dump(target) {
-                    Ok(content) => packet_content += content,
-                    Err(s) => signals |= s,
-                } )*
-
-                (origin != target.remaining_mut())
-                    .then_some(packet_content)
-                    .ok_or(signals)
-            }
-        }
-    }
-}
-
-impl_package_for_tuple! {
-    Z Y X W V U T S R Q P O N M L K J I H G F E D C B A
-}
-
-macro_rules! frame_packages {
-    () => {};
-    (@imp_frame $($frame:tt)*) => {
-        impl<Target> Package<Target> for $($frame)*
-        where
-            Target: BufMut + RecordFrame<Frame<NonData>, NonData> + ?Sized,
-        {
-            #[inline]
-            fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-                if !(target.remaining_mut() >= self.max_encoding_size()
-                    || target.remaining_mut() >= self.encoding_size())
-                {
-                    return Err(Signals::CONGESTION);
-                }
-                let frame = self.clone().into();
-                target.record_frame(&frame);
-                target.put_frame(&frame);
-                Ok(PacketContent::from(self.frame_type()))
-            }
-        }
-    };
-    (impl<Target: WriteFrame<Self>> Package<Target> for $frame:ident {} $($tail:tt)*) => {
-        frame_packages!{ @imp_frame $frame }
-        frame_packages!{ @imp_frame &$frame }
-        frame_packages!{ $($tail)* }
-    };
-    (@imp_data_frame $($frame_with_data:tt)*) => {
-        impl<Target,D> Package<Target> for $($frame_with_data)*
-        where
-            Target: BufMut + RecordFrame<Frame<D>, D> + ?Sized,
-            D: Buffer + Clone,
-            for<'b> &'b mut Target: WriteData<D>,
-        {
-            #[inline]
-            fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-                let (frame, data) = self;
-                if !(target.remaining_mut() >= frame.max_encoding_size()
-                    || target.remaining_mut() >= frame.encoding_size())
-                {
-                    return Err(Signals::CONGESTION);
-                }
-                let frame = (frame.clone(), data.clone()).into();
-                target.record_frame(&frame);
-                target.put_frame(&frame);
-                Ok(PacketContent::from(frame.frame_type()))
-            }
-        }
-    };
-    (impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for ($frame:ident, D) {} $($tail:tt)*) => {
-        frame_packages!{ @imp_data_frame ($frame, D) }
-        frame_packages!{ @imp_data_frame &($frame, D) }
-        frame_packages!{ $($tail)* }
-    };
-}
-
-frame_packages! {
-    impl<Target: WriteFrame<Self>> Package<Target> for PaddingFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for PingFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for AckFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for ConnectionCloseFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for NewTokenFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for MaxDataFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for DataBlockedFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for HandshakeDoneFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for PathChallengeFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for PathResponseFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for StreamCtlFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for ReliableFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for PunchHelloFrame {}
-    impl<Target: WriteFrame<Self>> Package<Target> for PunchDoneFrame {}
-    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (StreamFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (CryptoFrame, D) {}
-    impl<Target: WriteDataFrame<Self, D>, D: Buffer> Package<Target> for (DatagramFrame, D) {}
+    ) -> Result<Self::PacketAssembler<'b>, Poll<()>>;
 }
 
 pub enum Keys {
@@ -567,7 +311,7 @@ impl<'b> PacketWriter<'b> {
         buffer: &'b mut [u8],
         (actual_pn, encoded_pn): (u64, PacketNumber),
         keys: DirectionalKeys,
-    ) -> Result<Self, Signals>
+    ) -> Result<Self, Poll<()>>
     where
         S: HeaderSize,
         LongHeader<S>: GetType,
@@ -576,7 +320,7 @@ impl<'b> PacketWriter<'b> {
         let hdr_len = header.size();
         let len_encoding = header.length_encoding();
         if buffer.len() < hdr_len + len_encoding + 20 {
-            return Err(Signals::CONGESTION);
+            return Err(Poll::Ready(()));
         }
 
         let (mut hdr_buf, mut payload_buf) = buffer.split_at_mut(hdr_len + len_encoding);
@@ -604,10 +348,10 @@ impl<'b> PacketWriter<'b> {
         (actual_pn, encoded_pn): (u64, PacketNumber),
         keys: DirectionalKeys,
         key_phase: KeyPhaseBit,
-    ) -> Result<Self, Signals> {
+    ) -> Result<Self, Poll<()>> {
         let hdr_len = header.size();
         if buffer.len() < hdr_len + 20 {
-            return Err(Signals::CONGESTION);
+            return Err(Poll::Ready(()));
         }
 
         let (mut hdr_buf, mut payload_buf) = buffer.split_at_mut(hdr_len);
@@ -709,16 +453,59 @@ unsafe impl BufMut for PacketWriter<'_> {
     }
 }
 
-pub trait AssemblePacket: BufMut {
-    #[inline]
-    fn assemble_packet(
-        &mut self,
-        package: &mut dyn Package<Self>,
-    ) -> Result<PacketContent, Signals> {
-        package.dump(self)
-    }
-
+pub trait AssemblePacket: Assemble<1> {
     fn encrypt_and_protect_packet(self) -> (usize, PacketInfo);
+}
+
+impl<const N: usize> Assemble<N> for PacketWriter<'_> {
+    type Buffer = Self;
+
+    fn assemble(
+        &mut self,
+        cx: &mut Context<'_>,
+        sources: [&mut dyn Package<Self>; N],
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, crate::error::Error>> {
+        let start = frames.len();
+        // This writer already excludes the authentication tag from its BufMut view.
+        let mut limits = Constraints {
+            flow_ctrl: usize::MAX,
+            send_quota: usize::MAX,
+            credit: usize::MAX,
+            min_size: (self.layout.hdr_len + self.layout.len_encoding + 20)
+                .saturating_sub(self.tag_len()),
+            max_size: self.layout.end,
+            ..Default::default()
+        };
+        let packet_type = self.packet_type();
+        let written = self.layout.cursor;
+        let mut buffer = ConstraintBuffer::new(self, &mut limits, packet_type, written, 0);
+        let mut result = Poll::Pending;
+        for source in sources {
+            match source.poll_dump(cx, &mut buffer, frames) {
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(_)) => result = Poll::Ready(Ok(0)),
+                Poll::Pending => {}
+            }
+        }
+        if frames.len() == start {
+            return result;
+        }
+        let padding = buffer.limits.min_size().saturating_sub(buffer.written());
+        if padding != 0 {
+            // Keep an omitted-LEN final frame final: put HP padding before the frames.
+            let body = self.layout.hdr_len + self.layout.len_encoding + self.layout.pn_len;
+            self.buffer
+                .copy_within(body..self.layout.cursor, body + padding);
+            self.buffer[body..body + padding].fill(0);
+            self.layout.cursor += padding;
+            frames.insert(start, Frame::Padding(PaddingFrame));
+        }
+        for frame in &frames[start..] {
+            self.record_frame(frame);
+        }
+        Poll::Ready(Ok(frames.len() - start))
+    }
 }
 
 impl AssemblePacket for PacketWriter<'_> {
@@ -843,6 +630,51 @@ mod tests {
     }
 
     #[test]
+    fn header_protection_padding_precedes_an_omitted_length_stream() {
+        let mut bytes = [0; 64];
+        let keys = DirectionalKeys {
+            packet: Arc::new(TransparentKeys),
+            header: Arc::new(TransparentKeys),
+        };
+        let header = OneRttHeader::new(Default::default(), Default::default());
+        let mut packet = PacketWriter::new_short(
+            &header,
+            &mut bytes,
+            (0, PacketNumber::U8(0)),
+            keys,
+            Default::default(),
+        )
+        .unwrap();
+        let sid = crate::sid::StreamId::new(crate::role::Role::Client, crate::sid::Dir::Bi, 0);
+        let mut source = (StreamFrame::new(sid, 0, 0), b"".as_slice());
+        let mut frames = Vec::new();
+        assert!(matches!(
+            packet.assemble(
+                &mut Context::from_waker(std::task::Waker::noop()),
+                [&mut source],
+                &mut frames
+            ),
+            Poll::Ready(Ok(2))
+        ));
+        assert!(matches!(
+            frames.as_slice(),
+            [Frame::Padding(_), Frame::Stream(_, ())]
+        ));
+        let body = packet.layout.hdr_len + packet.layout.pn_len;
+        let decoded = FrameReader::new(
+            BytesMut::from(&packet.buffer[body..packet.layout.cursor]).freeze(),
+            header.get_type(),
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert!(
+            matches!(&decoded[1].0, Frame::Stream(frame, data) if frame.is_empty() && data.is_empty())
+        );
+        assert_eq!(packet.payload_len() + packet.tag_len(), 20);
+    }
+
+    #[test]
     fn test_initial_packet_writer() {
         let mut buffer = vec![0u8; 128];
         let header = LongHeaderBuilder::with_cid(
@@ -860,9 +692,14 @@ mod tests {
 
         let mut writer = PacketWriter::new_long(&header, &mut buffer, pn, keys).unwrap();
         let frame = CryptoFrame::new(VarInt::from_u32(0), VarInt::from_u32(12));
-        writer
-            .assemble_packet(&mut (frame, "client_hello".as_bytes()))
-            .unwrap();
+        assert!(matches!(
+            writer.assemble(
+                &mut Context::from_waker(std::task::Waker::noop()),
+                [&mut (frame, "client_hello".as_bytes())],
+                &mut Vec::new(),
+            ),
+            Poll::Ready(Ok(1))
+        ));
         assert!(writer.is_ack_eliciting());
         assert!(writer.in_flight());
 

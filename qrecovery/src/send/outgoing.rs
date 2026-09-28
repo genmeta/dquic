@@ -1,13 +1,14 @@
-use std::ops::DerefMut;
+use std::{
+    ops::DerefMut,
+    task::{Context, Poll},
+};
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use qbase::{
     error::Error as QuicError,
-    frame::{ResetStreamError, StreamFrame},
-    net::tx::Signals,
-    packet::Package,
+    frame::{Frame, FrameType, PaddingFrame, ResetStreamError, StreamFrame},
+    packet::{ConstraintBuffer, Package},
     sid::StreamId,
-    util::Buffer,
     varint::VarInt,
 };
 use qevent::quic::transport::{GranularStreamStates, StreamSide, StreamStateUpdated};
@@ -19,47 +20,61 @@ use super::sender::{ArcSender, Sender, SendingSender, StreamData};
 pub struct Outgoing<TX>(ArcSender<TX>);
 
 impl<TX: Clone> Outgoing<TX> {
-    /// Try to load data that the application wants to sent to the packet.
-    ///
-    /// See [`DataStreams::try_load_data_into`] for more about this method.
-    ///
-    /// Return the size of data loaded, and whether the data is fresh.
-    ///
-    /// [`DataStreams::try_load_data_into`]: crate::streams::raw::DataStreams::try_load_data_into
-    // consume the token internally, return the number of fresh data have been written to the buffer.
-    // return None indicates that the stream write no data to the buffer.
-    pub fn try_load_data_into<P>(
+    pub(crate) fn poll_dump_with_tokens<B: BufMut + ?Sized>(
         &self,
-        packet: &mut P,
-        sid: StreamId,
-        flow_limit: usize,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
         tokens: usize,
-    ) -> Result<(usize, bool), Signals>
-    where
-        P: BufMut + ?Sized,
-        for<'a> (StreamFrame, &'a [Bytes]): Package<P>,
-    {
-        let origin_len = packet.remaining_mut();
-        let mut write = |(range, is_fresh, data, is_eos): StreamData| {
-            let mut frame = StreamFrame::new(sid, range.start, (range.end - range.start) as usize);
+    ) -> Poll<Result<usize, QuicError>> {
+        match self.0.sender().as_mut() {
+            Ok(sender) => sender.poll_dump(cx, buffer, frames, tokens),
+            Err(error) => Poll::Ready(Err(error.clone())),
+        }
+    }
+}
 
-            frame.set_eos_flag(is_eos);
-            let strategy = frame.encoding_strategy(origin_len);
-            frame.set_len_bit(strategy.len_bit());
-            packet.put_bytes(0, strategy.pre_padding());
-            (frame, data.as_slice()).dump(packet).unwrap();
-
-            (Buffer::len(data.as_slice()), is_fresh)
+impl<TX: Clone> Sender<TX> {
+    fn poll_dump<B: BufMut + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+        tokens: usize,
+    ) -> Poll<Result<usize, QuicError>> {
+        let Some((sid, _)) = self.source() else {
+            return Poll::Pending;
         };
-
+        buffer.for_frame(
+            FrameType::Stream(
+                qbase::frame::Offset::Zero,
+                qbase::frame::Len::Explicit,
+                qbase::frame::Fin::No,
+            ),
+            frames,
+        );
+        let capacity = buffer.remaining_mut();
+        let flow_limit = buffer.limits.flow_ctrl();
         let predicate = |offset| {
-            StreamFrame::estimate_max_capacity(origin_len, sid, offset)
-                .map(|capacity| tokens.min(capacity))
+            StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(tokens))
         };
-        let mut sender = self.0.sender();
-        let sending_state = sender.as_mut().or(Err(Signals::empty()))?; // other(connection closed)
-
-        match sending_state {
+        let start = frames.len();
+        let mut write = |(range, fresh, data, eos): StreamData<'_>| {
+            let mut frame = StreamFrame::new(sid, range.start, (range.end - range.start) as usize);
+            frame.set_eos_flag(eos);
+            let strategy = frame.encoding_strategy(capacity);
+            frame.set_len_bit(strategy.len_bit());
+            if strategy.pre_padding() != 0 {
+                buffer.put_bytes(0, strategy.pre_padding());
+                frames.push(Frame::Padding(PaddingFrame));
+            }
+            let result = (frame, data.as_slice()).poll_dump(cx, buffer, frames);
+            debug_assert!(matches!(result, Poll::Ready(Ok(1))));
+            if fresh {
+                buffer.limits.fresh(frame.len());
+            }
+        };
+        let result = match self {
             Sender::Ready(s) => {
                 let mut s: SendingSender<TX> = s.upgrade();
                 let (result, finished) = s
@@ -68,9 +83,9 @@ impl<TX: Clone> Outgoing<TX> {
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
-                    *sending_state = Sender::DataSent(s.upgrade());
+                    *self = Sender::DataSent(s.upgrade());
                 } else {
-                    *sending_state = Sender::Sending(s);
+                    *self = Sender::Sending(s);
                 }
                 result
             }
@@ -81,17 +96,31 @@ impl<TX: Clone> Outgoing<TX> {
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
-                    *sending_state = Sender::DataSent(s.upgrade());
+                    *self = Sender::DataSent(s.upgrade());
                 }
                 result
             }
             Sender::DataSent(s) => s.pick_up(predicate, flow_limit).map(write),
-            _ => Err(Signals::TRANSPORT),
+            _ => Err(Poll::Pending),
+        };
+        match result {
+            Ok(()) => Poll::Ready(Ok(frames.len() - start)),
+            Err(Poll::Ready(())) => Poll::Ready(Ok(0)),
+            Err(Poll::Pending) => {
+                if let Some((_, wakers)) = self.source() {
+                    wakers.register(cx.waker());
+                }
+                Poll::Pending
+            }
         }
     }
 }
 
 impl<TX> Outgoing<TX> {
+    pub(crate) fn fresh_bytes(&self) -> usize {
+        self.0.sender().as_ref().map_or(0, Sender::fresh_bytes)
+    }
+
     /// Create a new instance of [`Outgoing`]
     pub fn new(sender: ArcSender<TX>) -> Self {
         Self(sender)
@@ -274,5 +303,177 @@ impl<TX> Outgoing<TX> {
             Err(_) => return,
         };
         *inner = Err(err.clone());
+    }
+}
+
+impl<TX: Clone, B: BufMut + ?Sized> qbase::packet::Package<B> for Outgoing<TX> {
+    fn poll_dump(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, qbase::error::Error>> {
+        self.poll_dump_with_tokens(cx, buffer, frames, usize::MAX)
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        if let Ok(state) = self.0.sender().as_ref() {
+            if let Some((_, wakers)) = state.source() {
+                wakers.cancel(waker);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use std::task::{Context, Poll, Waker};
+
+    use bytes::BytesMut;
+    use qbase::{
+        frame::{Frame, FrameType, Len, io::SendFrame},
+        packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package},
+        role::Role,
+        sid::Dir,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+    use crate::send::{CancelStream, Writer};
+
+    #[derive(Clone)]
+    struct Broker;
+    impl<T> SendFrame<T> for Broker {
+        fn send_frame<I: IntoIterator<Item = T>>(&self, _: I) {}
+    }
+
+    #[derive(Default)]
+    struct Counter(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_own_waiters_across_states_and_cancel_each_path() {
+        use std::sync::{Arc, atomic::Ordering};
+        let make_stream = |id| {
+            let sender =
+                ArcSender::new(StreamId::new(Role::Client, Dir::Bi, id), 100, Broker, None);
+            (Writer::new(sender.clone()), Outgoing::new(sender))
+        };
+        let (mut writer, mut source) = make_stream(0);
+        let (mut other_writer, mut other) = make_stream(1);
+        let a = Arc::new(Counter::default());
+        let b = Arc::new(Counter::default());
+        let c = Arc::new(Counter::default());
+        let wa = Waker::from(a.clone());
+        let wb = Waker::from(b.clone());
+        let wc = Waker::from(c.clone());
+        let poll = |source: &mut Outgoing<Broker>, waker: &Waker| {
+            let mut bytes = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 100,
+                send_quota: 128,
+                credit: 128,
+                min_size: 0,
+                max_size: 128,
+                ..Default::default()
+            };
+            let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+            source.poll_dump(
+                &mut Context::from_waker(waker),
+                &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
+                &mut frames,
+            )
+        };
+        assert!(poll(&mut source, &wa).is_pending());
+        assert!(poll(&mut source, &wb).is_pending());
+        assert!(poll(&mut other, &wc).is_pending());
+        writer.write_all(b"first").await.unwrap();
+        assert_eq!(a.0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.0.load(Ordering::Relaxed), 1);
+        assert_eq!(c.0.load(Ordering::Relaxed), 0);
+        assert!(matches!(poll(&mut source, &wa), Poll::Ready(Ok(1))));
+        <Outgoing<Broker> as Package<BytesMut>>::cancel(&mut source, &wa);
+        writer.write_all(b"next").await.unwrap();
+        assert_eq!(a.0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.0.load(Ordering::Relaxed), 2);
+        assert!(futures::poll!(Box::pin(writer.shutdown())).is_pending());
+        assert!(matches!(poll(&mut source, &wb), Poll::Ready(Ok(1))));
+        let before = b.0.load(Ordering::Relaxed);
+        let frame = StreamFrame::new(StreamId::new(Role::Client, Dir::Bi, 0), 0, 5);
+        source.may_loss_data(&frame);
+        assert_eq!(b.0.load(Ordering::Relaxed), before + 1);
+        <Outgoing<Broker> as Package<BytesMut>>::cancel(&mut source, &wb);
+        source.may_loss_data(&frame);
+        assert_eq!(b.0.load(Ordering::Relaxed), before + 1);
+        other_writer.write_all(b"other").await.unwrap();
+        assert_eq!(c.0.load(Ordering::Relaxed), 1);
+        writer.cancel(0);
+        other_writer.cancel(0);
+    }
+
+    #[tokio::test]
+    async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
+        let sender = ArcSender::new(StreamId::new(Role::Client, Dir::Bi, 0), 100, Broker, None);
+        let mut writer = Writer::new(sender.clone());
+        let mut source = Outgoing::new(sender);
+        writer.write_all(b"0123456789").await.unwrap();
+        assert!(futures::poll!(Box::pin(writer.shutdown())).is_pending());
+        let mut bytes = BytesMut::new();
+        let mut frames = Vec::new();
+        let mut limits = Constraints {
+            flow_ctrl: 10,
+            send_quota: 12,
+            credit: 12,
+            min_size: 0,
+            max_size: 12,
+            ..Default::default()
+        };
+        let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+        assert!(matches!(
+            source.poll_dump(&mut cx, &mut buffer, &mut frames),
+            Poll::Ready(Ok(1))
+        ));
+        assert_eq!(buffer.limits.flow_ctrl(), 0);
+        let Frame::Stream(frame, ()) = frames[0] else {
+            panic!()
+        };
+        assert!(matches!(
+            qbase::frame::GetFrameType::frame_type(&frame),
+            FrameType::Stream(_, Len::Omit, _)
+        ));
+        assert!(frame.is_fin());
+        let mut ack =
+            qbase::frame::AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        assert!(matches!(
+            ack.poll_dump(&mut cx, &mut buffer, &mut frames),
+            Poll::Ready(Ok(0))
+        ));
+        drop(buffer);
+        source.may_loss_data(&frame);
+        bytes.clear();
+        frames.clear();
+        limits.send_quota = 0;
+        let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+        assert!(matches!(
+            source.poll_dump(&mut cx, &mut buffer, &mut frames),
+            Poll::Ready(Ok(0))
+        ));
+        assert!(frames.is_empty());
+        drop(buffer);
+        limits.send_quota = 12;
+        let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+        assert!(matches!(
+            source.poll_dump(&mut cx, &mut buffer, &mut frames),
+            Poll::Ready(Ok(1))
+        ));
+        assert_eq!(buffer.limits.flow_ctrl(), 0);
+        assert_eq!(frames, vec![Frame::Stream(frame, ())]);
+        writer.cancel(0);
     }
 }

@@ -153,7 +153,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         packet::LongHeaderBuilder,
     };
     use qtls::CryptoLevel;
-    use qtransport::send::{self, constraints::Constraints, records::ArcSendJournal};
+    use qtransport::journal::ArcSendJournal;
 
     let [tls, server_tls] =
         common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
@@ -184,7 +184,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         EndpointAddr::direct(link.src),
         EndpointAddr::direct(link.dst),
     );
-    let path = paths.add_path(pathway).unwrap();
+    paths.add_path(pathway).unwrap();
     let router = Arc::new(QuicRouter::new());
     let (inbox, rcvd_pkt) = channel::new();
     let route = router.insert(cid.into(), inbox.clone());
@@ -206,36 +206,20 @@ async fn close_at_client_stage(wait: ClientWait) {
             let _ = delivered.send(result);
         },
     ));
-    let mut buffers = vec![BytesMut::with_capacity(1200)];
-    let mut send_frames = Vec::new();
-    let mut pns = std::collections::VecDeque::new();
-    let mut signals = qbase::net::tx::Signals::empty();
     let hello_len = hello.len();
     let bytes = [hello];
     let mut crypto = (
         CryptoFrame::new(0u32.into(), (hello_len as u32).into()),
         bytes.as_slice(),
     );
-    let packet = send::assemble_long_packet(
-        pathway,
-        &path.cc,
-        &mut buffers,
-        &mut send_frames,
-        &mut pns,
-        &mut signals,
-        &initial_keys(true).sealing,
+    let packet = common::seal(
         LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"server00")).initial(vec![]),
+        &initial_keys(true).sealing,
         &ArcSendJournal::default(),
-        &Constraints {
-            capacity: 1200,
-            congestion: 1200,
-            anti_amplification: 1200,
-        },
         [&mut crypto],
     )
-    .unwrap()
     .unwrap();
-    router.receive(BytesMut::from(packet.bytes()), pathway, link, 8);
+    router.receive(BytesMut::from(packet.as_ref()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let ConnPhase::Handshake(connecting) = phase.get() {
@@ -270,17 +254,8 @@ async fn close_at_client_stage(wait: ClientWait) {
                 flight.slice(..parameters_end),
             ))
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !matches!(phase.get(), ConnPhase::Mature(_)) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let ConnPhase::Mature(material) = phase.get() else {
-            unreachable!()
-        };
-        assert!(material.spaces.data.keys.try_get().unwrap().is_none());
+        tokio::task::yield_now().await;
+        assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
         assert!(matches!(
             delivery.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -302,7 +277,10 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        assert!(matches!(phase.get(), ConnPhase::Mature(_)));
+        let ConnPhase::Mature(material) = phase.get() else {
+            panic!()
+        };
+        assert!(material.spaces.data.keys.get().is_ok());
         assert!(matches!(
             handshake.crypto.reader().read(&mut [0; 1]).now_or_never(),
             Some(Err(_))
@@ -324,7 +302,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         assert!(delivery.await.unwrap().is_err());
     }
     assert!(tls.read_keys().await.is_err());
-    assert!(handshake.keys.try_get().is_err());
+    assert!(handshake.keys.get().is_err());
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
     assert!(paths.snapshot().is_empty());
     assert!(!route_exists(&router, cid).await);

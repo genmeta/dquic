@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    sync::{Arc, Mutex, RwLock},
+    task::Poll,
+};
 
 use thiserror::Error;
 use tokio::time::{Duration, Instant};
@@ -91,6 +94,7 @@ impl ArcConnIdle {
     pub fn timer(&self) -> PathIdleTimer {
         PathIdleTimer {
             conn_idle: self.clone(),
+            waiters: Default::default(),
             activity: Mutex::new(PathIdleActivity {
                 path_die_since: Instant::now(),
                 update_idle_on_send: true,
@@ -132,6 +136,7 @@ struct PathIdleActivity {
 #[derive(Debug)]
 pub struct PathIdleTimer {
     conn_idle: ArcConnIdle,
+    waiters: crate::net::tx::ArcSendWakers,
     activity: Mutex<PathIdleActivity>,
 }
 
@@ -215,6 +220,61 @@ impl PathIdleTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_registers_only_when_pending() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Context, Wake, Waker},
+        };
+
+        use crate::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package};
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for due in [false, true] {
+            for quota in [0, 128] {
+                let timer = ArcConnIdle::new(
+                    Duration::from_secs(120),
+                    Duration::from_secs(120),
+                    Duration::from_secs(1),
+                )
+                .timer();
+                timer.on_sent(PacketContent::EffectivePayload);
+                if due {
+                    tokio::time::advance(Duration::from_secs(1)).await;
+                }
+                let counter = Arc::new(Counter(AtomicUsize::new(0)));
+                let waker = Waker::from(counter.clone());
+                let mut bytes = bytes::BytesMut::new();
+                let mut frames = Vec::new();
+                let mut limits = Constraints {
+                    flow_ctrl: 0,
+                    send_quota: quota,
+                    credit: 128,
+                    min_size: 0,
+                    max_size: 128,
+                    ..Default::default()
+                };
+                let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                let result = (&timer).poll_dump(
+                    &mut Context::from_waker(&waker),
+                    &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
+                    &mut frames,
+                );
+                assert_eq!(result.is_pending(), !due);
+                if due {
+                    assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
+                }
+                tokio::time::advance(Duration::from_secs(1)).await;
+                timer.on_tick(Instant::now());
+                assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!due));
+            }
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn negotiated_timeout_applies_to_existing_path_timers() {
@@ -425,5 +485,42 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
 
         assert!(timer.keep_alive_due(Instant::now()));
+    }
+}
+
+impl PathIdleTimer {
+    pub fn on_tick(&self, now: Instant) {
+        if self.keep_alive_due(now) {
+            self.waiters.wake_all();
+        }
+    }
+    pub fn ignore(&self, waker: &std::task::Waker) {
+        self.waiters.cancel(waker);
+    }
+}
+
+impl<B: bytes::BufMut + ?Sized> crate::packet::Package<B> for &PathIdleTimer {
+    fn poll_dump(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut crate::packet::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<crate::frame::Frame>,
+    ) -> Poll<Result<usize, crate::error::Error>> {
+        if crate::packet::assemble::content(frames).is_ack_eliciting() {
+            self.waiters.register(cx.waker());
+            return Poll::Pending;
+        }
+        if !self.keep_alive_due(Instant::now()) {
+            self.waiters.register(cx.waker());
+            // A tick may have passed between checking the deadline and registering.
+            if self.keep_alive_due(Instant::now()) {
+                cx.waker().wake_by_ref();
+            }
+            return Poll::Pending;
+        }
+        crate::frame::PingFrame.poll_dump(cx, buffer, frames)
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        PathIdleTimer::ignore(self, waker);
     }
 }

@@ -12,9 +12,9 @@ use qbase::{
         ReliableFrame, StreamCtlFrame, StreamFrame, io::ReceiveFrame,
     },
     packet::{
-        AssemblePacket, Package, PacketContent, PacketSpace, PacketWriter, ProductHeader,
+        AssemblePacket, PacketContent, PacketSpace, PacketWriter, ProductHeader,
         header::{GetDcid, GetType, short::OneRttHeader},
-        io::{Packages, PadTo20},
+        io::{Package, Packages, PadTo20},
     },
 };
 use qevent::{

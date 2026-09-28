@@ -1,7 +1,8 @@
+use std::task::Poll;
+
 use bytes::{BufMut, buf::UninitSlice};
 use derive_more::Deref;
 use qbase::{
-    net::tx::Signals,
     packet::{
         RecordFrame,
         header::{
@@ -73,7 +74,7 @@ impl<'b> PacketWriter<'b> {
         buffer: &'b mut [u8],
         pn: (u64, PacketNumber),
         keys: DirectionalKeys,
-    ) -> Result<Self, Signals>
+    ) -> Result<Self, Poll<()>>
     where
         S: HeaderSize,
         LongHeader<S>: GetType,
@@ -104,7 +105,7 @@ impl<'b> PacketWriter<'b> {
         pn: (u64, PacketNumber),
         keys: DirectionalKeys,
         key_phase: KeyPhaseBit,
-    ) -> Result<Self, Signals> {
+    ) -> Result<Self, Poll<()>> {
         Ok(Self {
             writer: BasePacketWriter::new_short(header, buffer, pn, keys, key_phase)?,
             logger: PacketLogger {
@@ -160,6 +161,24 @@ where
     fn record_frame(&mut self, frame: &F) {
         self.logger.record_frame(frame);
         self.writer.record_frame(frame);
+    }
+}
+
+impl<'b, const N: usize> qbase::packet::Assemble<N> for PacketWriter<'b> {
+    type Buffer = BasePacketWriter<'b>;
+
+    fn assemble(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        sources: [&mut dyn qbase::packet::Package<Self::Buffer>; N],
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, qbase::error::Error>> {
+        let start = frames.len();
+        let result = self.writer.assemble(cx, sources, frames);
+        for frame in &frames[start..] {
+            self.logger.record_frame(frame);
+        }
+        result
     }
 }
 

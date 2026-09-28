@@ -10,9 +10,9 @@ mod send {
     use bytes::{BufMut, Bytes};
     use qbase::{
         error::{Error, ErrorKind, QuicError},
-        frame::CryptoFrame,
-        net::tx::{ArcSendWakers, Signals},
-        packet::{Package, PacketContent},
+        frame::{CryptoFrame, Frame, FrameType},
+        net::tx::ArcSendWakers,
+        packet::{ConstraintBuffer, Package},
         varint::{VARINT_MAX, VarInt},
     };
     use tokio::io::AsyncWrite;
@@ -29,26 +29,34 @@ mod send {
 
     impl Sender {
         /// Pack CRYPTO ranges until the packet is full or no more data is available.
-        fn try_load_data<P>(&mut self, packet: &mut P) -> Result<PacketContent, Signals>
-        where
-            P: BufMut + ?Sized,
-            for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
-        {
-            let mut loaded = false;
+        fn poll_dump<B: BufMut + ?Sized>(
+            &mut self,
+            cx: &mut Context<'_>,
+            buffer: &mut ConstraintBuffer<'_, B>,
+            frames: &mut Vec<Frame>,
+        ) -> Poll<Result<usize, Error>> {
+            buffer.for_frame(FrameType::Crypto, frames);
+            let start = frames.len();
             loop {
-                let max_size = packet.remaining_mut();
-                let predicate = |offset: u64| CryptoFrame::estimate_max_capacity(max_size, offset);
-                let (range, _is_fresh, data) = match self.sndbuf.pick_up(predicate, usize::MAX) {
+                let capacity = buffer.remaining_mut();
+                let predicate = |offset| CryptoFrame::estimate_max_capacity(capacity, offset);
+                let (range, _, data) = match self.sndbuf.pick_up(predicate, usize::MAX) {
                     Ok(data) => data,
-                    Err(signals) if !loaded => return Err(signals),
-                    Err(_) => return Ok(PacketContent::EffectivePayload),
+                    Err(_) if frames.len() != start => {
+                        return Poll::Ready(Ok(frames.len() - start));
+                    }
+                    Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
+                    Err(Poll::Pending) => {
+                        self.tx_wakers.register(cx.waker());
+                        return Poll::Pending;
+                    }
                 };
                 let frame = CryptoFrame::new(
                     VarInt::from_u64(range.start).unwrap(),
-                    VarInt::try_from(range.end - range.start).unwrap(),
+                    VarInt::from_u64(range.end - range.start).unwrap(),
                 );
-                (frame, data.as_slice()).dump(packet).unwrap();
-                loaded = true;
+                let result = (frame, data.as_slice()).poll_dump(cx, buffer, frames);
+                debug_assert!(matches!(result, Poll::Ready(Ok(1))));
             }
         }
 
@@ -68,7 +76,7 @@ mod send {
 
         fn may_loss_data(&mut self, crypto_frame: &CryptoFrame) {
             self.sndbuf.may_loss_data(&crypto_frame.range());
-            self.tx_wakers.wake_all_by(Signals::TRANSPORT);
+            self.tx_wakers.wake_all();
         }
     }
 
@@ -91,7 +99,7 @@ mod send {
 
             debug_assert!(self.sndbuf.has_remaining_mut());
 
-            self.tx_wakers.wake_all_by(Signals::TRANSPORT);
+            self.tx_wakers.wake_all();
             self.sndbuf.write(Bytes::copy_from_slice(buf));
             Poll::Ready(Ok(buf.len()))
         }
@@ -132,7 +140,7 @@ mod send {
                 if let Some(waker) = sender.flush_waker.take() {
                     waker.wake();
                 }
-                sender.tx_wakers.wake_all_by(Signals::TRANSPORT);
+                sender.tx_wakers.wake_all();
                 *state = Err(error.clone());
             }
         }
@@ -203,42 +211,59 @@ mod send {
         }
     }
 
-    impl<P> Package<P> for CryptoStreamOutgoing
-    where
-        P: BufMut + ?Sized,
-        for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
-    {
-        fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
-            let mut inner = self.0.0.lock().unwrap();
-            let Ok(inner) = inner.as_mut() else {
-                return Err(Signals::empty());
+    impl<B: BufMut + ?Sized> Package<B> for CryptoStreamOutgoing {
+        fn poll_dump(
+            &mut self,
+            cx: &mut Context<'_>,
+            buffer: &mut ConstraintBuffer<'_, B>,
+            frames: &mut Vec<Frame>,
+        ) -> Poll<Result<usize, Error>> {
+            let mut guard = self.0.0.lock().unwrap();
+            let inner = match guard.as_mut() {
+                Ok(inner) => inner,
+                Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
+                Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            inner.try_load_data(packet)
+            inner.poll_dump(cx, buffer, frames)
+        }
+        fn cancel(&mut self, waker: &Waker) {
+            if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
+                inner.tx_wakers.cancel(waker);
+            }
         }
     }
 
-    impl<P> Package<P> for CryptoStreamMultiOut
-    where
-        P: BufMut + ?Sized,
-        for<'b> (CryptoFrame, &'b [Bytes]): Package<P>,
-    {
-        fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
-            let mut inner = self.0.0.lock().unwrap();
-            let Ok(inner) = inner.as_mut() else {
-                return Err(Signals::empty());
+    impl<B: BufMut + ?Sized> Package<B> for CryptoStreamMultiOut {
+        fn poll_dump(
+            &mut self,
+            cx: &mut Context<'_>,
+            buffer: &mut ConstraintBuffer<'_, B>,
+            frames: &mut Vec<Frame>,
+        ) -> Poll<Result<usize, Error>> {
+            let mut guard = self.0.0.lock().unwrap();
+            let inner = match guard.as_mut() {
+                Ok(inner) => inner,
+                Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
+                Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            let result = inner.try_load_data(packet);
+            let result = inner.poll_dump(cx, buffer, frames);
             inner.sndbuf.resend_flighting();
             result
         }
+
+        fn cancel(&mut self, waker: &Waker) {
+            if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
+                inner.tx_wakers.cancel(waker);
+            }
+        }
     }
 
-    pub(super) fn create(tx_wakers: ArcSendWakers) -> ArcSender {
+    pub(super) fn create() -> ArcSender {
         ArcSender(Arc::new(Mutex::new(Ok(Sender {
             sndbuf: SendBuf::with_capacity(VARINT_MAX),
             writable_waker: None,
             flush_waker: None,
-            tx_wakers,
+            tx_wakers: ArcSendWakers::default(),
         }))))
     }
 }
@@ -372,7 +397,7 @@ mod recv {
     }
 }
 
-use qbase::{error::Error, net::tx::ArcSendWakers};
+use qbase::error::Error;
 pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
 pub use send::{ArcSender, CryptoStreamMultiOut, CryptoStreamOutgoing, CryptoStreamWriter};
 
@@ -391,9 +416,9 @@ impl CryptoStream {
     }
 
     /// Create a new instance of [`CryptoStream`] with the given buffer size.
-    pub fn new(tx_wakers: ArcSendWakers) -> Self {
+    pub fn new() -> Self {
         Self {
-            sender: send::create(tx_wakers),
+            sender: send::create(),
             recver: recv::create(),
         }
     }
@@ -471,8 +496,37 @@ mod tests {
         }
     }
 
-    impl<D: qbase::util::Buffer> qbase::packet::RecordFrame<qbase::frame::Frame<D>, D> for TestPacket {
-        fn record_frame(&mut self, _: &qbase::frame::Frame<D>) {}
+    impl TestPacket {
+        fn load(&mut self, source: &mut impl Package<Self>) -> Result<usize, ()> {
+            use qbase::packet::{
+                ConstraintBuffer, Constraints, Type,
+                r#type::long::{Type as Long, Ver1},
+            };
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: 64,
+                credit: 64,
+                min_size: 0,
+                max_size: 64,
+                ..Default::default()
+            };
+            let written = self.0.len();
+            let mut buffer = ConstraintBuffer::new(
+                self,
+                &mut limits,
+                Type::Long(Long::V1(Ver1::INITIAL)),
+                written,
+                0,
+            );
+            match source.poll_dump(
+                &mut Context::from_waker(Waker::noop()),
+                &mut buffer,
+                &mut Vec::new(),
+            ) {
+                std::task::Poll::Ready(Ok(n)) if n > 0 => Ok(n),
+                _ => Err(()),
+            }
+        }
     }
 
     #[tokio::test]
@@ -485,10 +539,10 @@ mod tests {
             },
         };
 
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         stream.writer().write_all(&[42; 20]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut first).unwrap();
+        first.load(&mut stream.outgoing()).unwrap();
         for offset in [5u32, 15] {
             stream
                 .outgoing()
@@ -499,7 +553,7 @@ mod tests {
             .may_loss_data(&CryptoFrame::new(0u32.into(), 20u32.into()));
 
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut packet).unwrap();
+        packet.load(&mut stream.outgoing()).unwrap();
         let ranges = FrameReader::new(packet.0.freeze(), Type::Long(Long::V1(Ver1::INITIAL)))
             .map(|frame| {
                 let Frame::Crypto(frame, bytes) = frame.unwrap().0 else {
@@ -514,26 +568,26 @@ mod tests {
 
     #[tokio::test]
     async fn multipath_leaves_data_available_for_the_selected_path_and_acknowledgment() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         stream.writer().write_all(b"ClientHello").await.unwrap();
         let mut multipath = stream.multipath();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
-        multipath.dump(&mut first).unwrap();
+        first.load(&mut multipath).unwrap();
 
         let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.multipath().dump(&mut second).unwrap();
+        second.load(&mut stream.multipath()).unwrap();
         assert_eq!(second.0, first.0);
 
         let mut selected = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut selected).unwrap();
+        selected.load(&mut stream.outgoing()).unwrap();
         assert_eq!(selected.0, first.0);
         let mut blocked = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(stream.outgoing().dump(&mut blocked).is_err());
+        assert!(blocked.load(&mut stream.outgoing()).is_err());
 
         stream
             .outgoing()
             .on_data_acked(&CryptoFrame::new(0u32.into(), 11u32.into()));
-        assert!(multipath.dump(&mut blocked).is_err());
+        assert!(blocked.load(&mut multipath).is_err());
         stream.writer().flush().await.unwrap();
     }
 
@@ -558,14 +612,14 @@ mod tests {
             frame
         };
 
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         stream.writer().write_all(&[42; 100]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut first).unwrap();
+        first.load(&mut stream.outgoing()).unwrap();
         let prefix = crypto_frame(&first);
 
         let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.multipath().dump(&mut second).unwrap();
+        second.load(&mut stream.multipath()).unwrap();
         let suffix = crypto_frame(&second);
         assert_eq!(suffix.offset(), prefix.range().end);
         assert_eq!(suffix.range().end, 100);
@@ -574,13 +628,13 @@ mod tests {
         stream.outgoing().on_data_acked(&prefix);
         stream.outgoing().on_data_acked(&suffix);
         let mut empty = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(stream.multipath().dump(&mut empty).is_err());
+        assert!(empty.load(&mut stream.multipath()).is_err());
         stream.writer().flush().await.unwrap();
     }
 
     #[tokio::test]
     async fn receiver_retirement_wakes_reader_and_preserves_crypto_retransmission() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"ServerHello").await.unwrap();
@@ -595,7 +649,7 @@ mod tests {
         );
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut packet).unwrap();
+        packet.load(&mut stream.outgoing()).unwrap();
 
         stream.recver.retire();
         assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
@@ -607,7 +661,7 @@ mod tests {
         let frame = CryptoFrame::new(0u32.into(), 11u32.into());
         stream.outgoing().may_loss_data(&frame);
         let mut retransmission = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut retransmission).unwrap();
+        retransmission.load(&mut stream.outgoing()).unwrap();
         assert_eq!(retransmission.0, packet.0);
         stream.outgoing().on_data_acked(&frame);
         assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
@@ -624,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_retirement_wakes_flush_and_leaves_receiver_running() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
         let wakes = Arc::new(WakeCount::default());
@@ -642,7 +696,7 @@ mod tests {
             std::io::ErrorKind::BrokenPipe
         );
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(stream.multipath().dump(&mut packet).is_err());
+        assert!(packet.load(&mut stream.multipath()).is_err());
         stream
             .outgoing()
             .on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
@@ -664,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_error_wakes_both_sides_and_preserves_the_cause() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
@@ -698,31 +752,31 @@ mod tests {
             assert_eq!(cause, &error);
         }
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(stream.multipath().dump(&mut packet).is_err());
+        assert!(packet.load(&mut stream.multipath()).is_err());
         assert!(packet.0.is_empty());
     }
 
     #[tokio::test]
     async fn shutdown_is_unsupported_and_keeps_unacknowledged_data() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         stream.writer().write_all(b"outgoing").await.unwrap();
         assert_eq!(
             stream.writer().shutdown().await.unwrap_err().kind(),
             std::io::ErrorKind::Unsupported,
         );
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut packet).unwrap();
+        packet.load(&mut stream.outgoing()).unwrap();
         assert!(packet.0.ends_with(b"outgoing"));
         stream.writer().write_all(b"still open").await.unwrap();
     }
 
     #[tokio::test]
     async fn acknowledging_crypto_wakes_flush() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         let mut writer = stream.writer();
         writer.write_all(b"hello").await.unwrap();
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        stream.outgoing().dump(&mut packet).unwrap();
+        packet.load(&mut stream.outgoing()).unwrap();
         let wakes = Arc::new(WakeCount::default());
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
@@ -736,7 +790,7 @@ mod tests {
 
     #[test]
     fn sparse_crypto_cannot_allocate_an_unbounded_handshake_buffer() {
-        let stream = CryptoStream::new(Default::default());
+        let stream = CryptoStream::new();
         let result = stream.incoming().recv_frame((
             CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)),
             bytes::Bytes::from_static(b"x"),
@@ -748,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read() {
-        let crypto_stream: CryptoStream = CryptoStream::new(Default::default());
+        let crypto_stream: CryptoStream = CryptoStream::new();
         crypto_stream
             .writer()
             .write_all(b"hello world")
@@ -765,5 +819,63 @@ mod tests {
         let mut buf = [0u8; 11];
         crypto_stream.reader().read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf[..], b"hello world");
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use std::task::{Context, Poll, Waker};
+
+    use bytes::BytesMut;
+    use qbase::{
+        frame::Frame,
+        packet::{ConstraintBuffer, Constraints, GetType, LongHeaderBuilder, Package},
+    };
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn multipath_repeats_then_normal_outgoing_advances() {
+        let stream = CryptoStream::new();
+        stream.writer().write_all(b"client hello").await.unwrap();
+        let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
+            .initial(vec![])
+            .get_type();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut previous = None;
+        for pass in 0..4 {
+            let mut bytes = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: 100,
+                credit: 100,
+                min_size: 0,
+                max_size: 100,
+                ..Default::default()
+            };
+            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            let result = if pass < 2 {
+                stream
+                    .multipath()
+                    .poll_dump(&mut cx, &mut buffer, &mut frames)
+            } else {
+                stream
+                    .outgoing()
+                    .poll_dump(&mut cx, &mut buffer, &mut frames)
+            };
+            if pass == 3 {
+                assert!(result.is_pending());
+                assert!(frames.is_empty());
+            } else {
+                assert!(matches!(result, Poll::Ready(Ok(1))));
+                assert!(matches!(frames.as_slice(), [Frame::Crypto(_, ())]));
+                if let Some(previous) = &previous {
+                    assert_eq!(&bytes, previous);
+                }
+                previous = Some(bytes);
+            }
+        }
     }
 }

@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     ops::Deref,
     sync::{Arc, Mutex},
+    task::Poll,
 };
 
 use super::ConnectionId;
@@ -11,7 +12,7 @@ use crate::{
         GetFrameType, NewConnectionIdFrame, RetireConnectionIdFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::{ArcSendWaker, Signals},
+    net::tx::ArcSendWakers,
     token::ResetToken,
     util::IndexDeque,
     varint::{VARINT_MAX, VarInt},
@@ -315,7 +316,7 @@ where
 {
     retired_cids: RETIRED,
     allocated_cids: VecDeque<(u64, ConnectionId)>,
-    waker: Option<ArcSendWaker>,
+    waker: Option<ArcSendWakers>,
     is_retired: bool,
     is_using: bool,
 }
@@ -338,22 +339,22 @@ where
         }
 
         if let Some(waker) = self.waker.take() {
-            waker.wake_by(Signals::CONNECTION_ID);
+            waker.wake_all();
         }
     }
 
-    fn borrow_cid(&mut self, tx_waker: ArcSendWaker) -> Result<Option<ConnectionId>, Signals> {
+    fn borrow_cid(&mut self, tx_waker: ArcSendWakers) -> Poll<Option<ConnectionId>> {
         if self.is_retired {
-            return Ok(None);
+            return Poll::Ready(None);
         }
 
         if self.allocated_cids.is_empty() {
             self.waker = Some(tx_waker);
-            Err(Signals::CONNECTION_ID)
+            Poll::Pending
         } else {
             let cid = self.allocated_cids[0].1;
             self.is_using = true;
-            Ok(Some(cid))
+            Poll::Ready(Some(cid))
         }
     }
 
@@ -381,7 +382,7 @@ where
             }
 
             if let Some(waker) = self.waker.take() {
-                waker.wake_by(Signals::CONNECTION_ID);
+                waker.wake_all();
             }
         }
     }
@@ -421,10 +422,7 @@ where
     /// If the corresponding path which applied this cid is inactive,
     /// then this cid apply is retired.
     /// In this case, None will be returned.
-    pub fn borrow_cid(
-        &'_ self,
-        tx_waker: ArcSendWaker,
-    ) -> Result<Option<BorrowedCid<'_, RETIRED>>, Signals> {
+    pub fn borrow_cid(&'_ self, tx_waker: ArcSendWakers) -> Poll<Option<BorrowedCid<'_, RETIRED>>> {
         self.0.lock().unwrap().borrow_cid(tx_waker).map(|cid| {
             cid.map(|cid| BorrowedCid {
                 cid_cell: &self.0,
@@ -496,17 +494,17 @@ mod tests {
         let cid_apply0 = remote_cids.apply_dcid();
         remote_cids.apply_initial_dcid(initial_dcid, &cid_apply0);
 
-        let waker = ArcSendWaker::new();
+        let waker = ArcSendWakers::default();
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == initial_dcid
+            Poll::Ready(Some(cid)) if *cid == initial_dcid
         ));
 
         // Will return Pending, because the peer hasn't issue any connection id
         let cid_apply1 = remote_cids.apply_dcid();
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-            Err(Signals::CONNECTION_ID)
+            Poll::Pending
         ));
 
         let new_dcid = ConnectionId::random_gen(8);
@@ -516,21 +514,21 @@ mod tests {
 
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == initial_dcid
+            Poll::Ready(Some(cid)) if *cid == initial_dcid
         ));
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == new_dcid
+            Poll::Ready(Some(cid)) if *cid == new_dcid
         ));
 
         // Additionally, a new request will be made because if the peer-issued CID is
         // insufficient, it will still return Pending.
         remote_cids.retire_prior_to(1);
         let cid_apply2 = remote_cids.apply_dcid();
-        assert!(cid_apply2.borrow_cid(waker.clone()).is_err());
+        assert!(cid_apply2.borrow_cid(waker.clone()).is_pending());
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == initial_dcid
+            Poll::Ready(Some(cid)) if *cid == initial_dcid
         ));
     }
 
@@ -555,16 +553,16 @@ mod tests {
 
         let cid_apply1 = guard.apply_dcid();
 
-        let waker = ArcSendWaker::new();
+        let waker = ArcSendWakers::default();
         assert_eq!(cid_apply0.0.lock().unwrap().allocated_cids[0].0, 0);
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == cids[0]
+            Poll::Ready(Some(cid)) if *cid == cids[0]
         ));
         assert_eq!(cid_apply1.0.lock().unwrap().allocated_cids[0].0, 1);
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == cids[1]
+            Poll::Ready(Some(cid)) if *cid == cids[1]
         ));
 
         guard.retire_prior_to(4);
@@ -578,11 +576,11 @@ mod tests {
 
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == cids[0]
+            Poll::Ready(Some(cid)) if *cid == cids[0]
         ));
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-            Ok(Some(cid)) if *cid == cids[1]
+            Poll::Ready(Some(cid)) if *cid == cids[1]
         ));
 
         guard.arrange_idle_cid();
@@ -599,11 +597,11 @@ mod tests {
 
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-            Ok(Some(entry)) if *entry == cids[4]
+            Poll::Ready(Some(entry)) if *entry == cids[4]
         ));
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-           Ok(Some(entry)) if *entry == cids[5]
+           Poll::Ready(Some(entry)) if *entry == cids[5]
         ));
 
         cid_apply1.retire();
@@ -641,14 +639,14 @@ mod tests {
         let cid_apply1 = guard.apply_dcid();
         assert_eq!(cid_apply0.0.lock().unwrap().allocated_cids[0].0, 4);
         assert_eq!(cid_apply1.0.lock().unwrap().allocated_cids[0].0, 5);
-        let waker = ArcSendWaker::new();
+        let waker = ArcSendWakers::default();
         assert!(matches!(
             cid_apply0.borrow_cid(waker.clone()),
-           Ok(Some(entry)) if *entry == cids[4]
+           Poll::Ready(Some(entry)) if *entry == cids[4]
         ));
         assert!(matches!(
             cid_apply1.borrow_cid(waker.clone()),
-            Ok(Some(entry)) if *entry == cids[5]
+            Poll::Ready(Some(entry)) if *entry == cids[5]
         ));
     }
 }

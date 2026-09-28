@@ -1,15 +1,12 @@
-/// Fixed per-packet limits; assembly does not debit these values.
-/// Flow credit remains in qbase's shared flow controller; STREAM sources acquire
-/// it there, rather than copying it into each Path.
-#[derive(Debug)]
-pub struct Constraints {
-    pub capacity: usize,
-    pub congestion: usize,
-    pub anti_amplification: usize,
-}
+use std::{
+    sync::Mutex,
+    task::{Context, Poll, Waker},
+};
 
-use std::sync::Mutex;
-
+use qbase::{
+    error::{Error, ErrorKind, QuicError},
+    net::tx::ArcSendWakers,
+};
 use qcongestion::PathStatus;
 
 use crate::path::PathState;
@@ -18,6 +15,7 @@ use crate::path::PathState;
 pub struct AntiAmplifier {
     pub(crate) state: Mutex<PathState>,
     status: PathStatus,
+    wakers: ArcSendWakers,
 }
 
 impl AntiAmplifier {
@@ -28,12 +26,36 @@ impl AntiAmplifier {
                 sent_bytes: 0,
             }),
             status,
+            wakers: Default::default(),
         }
+    }
+
+    pub fn poll_credit(&self, cx: &mut Context<'_>) -> Poll<Result<usize, Error>> {
+        self.wakers.register(cx.waker());
+        if *self.state.lock().unwrap() == PathState::Retired {
+            return Poll::Ready(Err(QuicError::with_default_fty(
+                ErrorKind::NoViablePath,
+                "path retired",
+            )
+            .into()));
+        }
+        Poll::Ready(Ok(self.balance()))
+    }
+
+    pub fn cancel(&self, waker: &Waker) {
+        self.wakers.cancel(waker);
+    }
+
+    pub(crate) fn retire(&self) {
+        *self.state.lock().unwrap() = PathState::Retired;
+        self.wakers.wake_all();
     }
 
     pub fn balance(&self) -> usize {
         match *self.state.lock().unwrap() {
-            PathState::ClientHandshaking | PathState::Validated => usize::MAX,
+            PathState::ClientHandshaking | PathState::ClientValidating | PathState::Validated => {
+                usize::MAX
+            }
             PathState::AmplifyGuard {
                 rcvd_bytes,
                 sent_bytes,
@@ -54,6 +76,8 @@ impl AntiAmplifier {
                 self.status.release_anti_amplification_limit();
             }
         }
+        drop(state);
+        self.wakers.wake_all();
     }
 
     pub fn grant(&self) {
@@ -62,6 +86,8 @@ impl AntiAmplifier {
             *state = PathState::Validated;
             self.status.release_anti_amplification_limit();
         }
+        drop(state);
+        self.wakers.wake_all();
     }
 
     pub fn on_sent(&self, bytes: usize) {
@@ -84,6 +110,19 @@ impl AntiAmplifier {
             *state = PathState::ClientHandshaking;
             self.status.release_anti_amplification_limit();
         }
+    }
+
+    pub(crate) fn client_validating(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(
+            *state,
+            PathState::AmplifyGuard { .. } | PathState::ClientHandshaking
+        ) {
+            *state = PathState::ClientValidating;
+            self.status.release_anti_amplification_limit();
+        }
+        drop(state);
+        self.wakers.wake_all();
     }
 
     pub(crate) fn guard(&self) {

@@ -5,7 +5,6 @@ use qbase::{
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     frame::{HandshakeDoneFrame, io::SendFrame},
-    net::tx::Signals,
     param::ParameterId,
     role::Role,
     token::ArcTokenRegistry,
@@ -36,7 +35,6 @@ pub async fn server_growing(
     let idle = paths.idle();
     let closed = paths.closed();
     let initial = &initial_phase.initial;
-    let send_wakers = &initial.send_wakers;
     let local_cids = crate::ArcLocalCids::new(
         initial_phase.scid,
         route
@@ -125,11 +123,7 @@ pub async fn server_growing(
         let establish = async {
             let client_scid = client_parameters
                 .get::<qbase::cid::ConnectionId>(ParameterId::InitialSourceConnectionId);
-            if paths
-                .snapshot()
-                .iter()
-                .any(|path| path.dcid() != client_scid)
-            {
+            if initial_phase.dcid() != client_scid {
                 return Err(QuicError::with_default_fty(
                     ErrorKind::TransportParameter,
                     "client initial source connection ID mismatch",
@@ -138,12 +132,11 @@ pub async fn server_growing(
             }
 
             let handshake_keys = tls_ctx.read_keys().await?;
-            let handshake = Arc::new(Space::<ArcKeys>::new(
+            let handshake = Arc::new(Space::new(
                 Epoch::Handshake,
-                send_wakers.clone(),
+                ArcKeys::from(handshake_keys),
                 |_| {},
             ));
-            handshake.install_hs_keys(handshake_keys)?;
             initial.crypto.recver.retire();
 
             tokio::spawn(crate::tls::read_crypto_stream_to_tls(
@@ -174,16 +167,12 @@ pub async fn server_growing(
                 initial_phase.reliable_frames.clone(),
                 cid_registry.clone(),
                 initial_dcid,
+                qtransport::keys::ArcOneRttKeys::from(tls_ctx.read_keys().await?),
             )?;
             cid_registry
                 .local
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
-
-            mature_phase
-                .spaces
-                .data
-                .install_1rtt_keys(tls_ctx.read_keys().await?)?;
 
             let initial_flight = tls_ctx.read_msg_at(CryptoLevel::Initial).await?;
             initial
@@ -262,9 +251,8 @@ pub async fn server_growing(
                 .spaces
                 .data
                 .keys
-                .try_get()
+                .get()
                 .expect("live Data keys")
-                .expect("installed Data keys")
                 .allow_update();
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
@@ -273,7 +261,6 @@ pub async fn server_growing(
                 .reliable_frames
                 .send_frame([HandshakeDoneFrame]);
             paths.handshake_confirmed();
-            send_wakers.wake_all_by(Signals::all());
 
             Ok::<_, Error>((
                 summary.remote,

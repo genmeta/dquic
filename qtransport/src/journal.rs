@@ -8,16 +8,14 @@ use std::{
 
 use qbase::{
     error::{ErrorKind, QuicError},
-    frame::AckFrame,
-    net::tx::Signals,
+    frame::{AckFrame, Frame},
     packet::PacketNumber,
     util::IndexDeque,
     varint::VARINT_MAX,
 };
 use tokio::time::Instant;
 
-use super::write::PacketError;
-use crate::{Error, GuaranteedFrame};
+use crate::{Error, GuaranteedFrame, keys::PacketError};
 
 const MAX_RECORDS: usize = 8192;
 const MAX_SKIPPED_PNS: usize = 256;
@@ -49,9 +47,9 @@ enum SentPacketState {
 }
 
 #[derive(Default)]
-pub(crate) struct SendJournal {
+pub struct SendJournal {
     packets: BTreeMap<u64, SentPacket>,
-    frames: IndexDeque<Option<GuaranteedFrame>, { u64::MAX }>,
+    frames: IndexDeque<Option<Frame>, { u64::MAX }>,
     deadlines: BTreeSet<(Instant, u64)>,
     next_pn: u64,
     largest_acked: u64,
@@ -59,6 +57,13 @@ pub(crate) struct SendJournal {
 }
 
 impl SendJournal {
+    pub fn frames(&self, pn: u64) -> impl Iterator<Item = &Frame> {
+        self.packets[&pn]
+            .frame_range
+            .clone()
+            .map(|index| self.frames[index].as_ref().unwrap())
+    }
+
     /// Fix the retention deadline at successful submission; loss never restarts it.
     pub fn mark_sent(
         &mut self,
@@ -88,7 +93,9 @@ impl SendJournal {
 
     fn take_frames(&mut self, range: Range<u64>, mut on_frame: impl FnMut(GuaranteedFrame)) {
         for index in range {
-            on_frame(self.frames[index].take().unwrap());
+            if let Ok(frame) = GuaranteedFrame::try_from(self.frames[index].take().unwrap()) {
+                on_frame(frame);
+            }
         }
         self.reclaim();
     }
@@ -104,7 +111,11 @@ impl SendJournal {
             record.state = SentPacketState::Retransmitted { expire_after };
             self.deadlines.insert((expire_after, pn));
             for index in record.frame_range.clone() {
-                on_frame(self.frames[index].as_ref().unwrap());
+                if let Ok(frame) =
+                    GuaranteedFrame::try_from(self.frames[index].as_ref().unwrap().clone())
+                {
+                    on_frame(&frame);
+                }
             }
         }
     }
@@ -167,7 +178,7 @@ impl Default for ArcSendJournal {
 }
 
 impl ArcSendJournal {
-    pub(crate) fn lock_guard(&self) -> MutexGuard<'_, SendJournal> {
+    pub fn lock_guard(&self) -> MutexGuard<'_, SendJournal> {
         self.0.lock().unwrap()
     }
 
@@ -183,7 +194,7 @@ impl ArcSendJournal {
     }
 
     /// Abandon a sealed but unsubmitted packet and return its reliable data.
-    pub(crate) fn cancel(&self, pn: u64) {
+    pub fn cancel(&self, pn: u64) {
         let mut records = self.0.lock().unwrap();
         if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
             records.skipped_pns.insert(pn);
@@ -211,6 +222,7 @@ impl ArcSendJournal {
     }
     /// Allocate and encode a PN and retain its descriptors in one operation.
     /// The caller fixes the sealing generation while this operation runs.
+    #[cfg(test)]
     pub(crate) fn record_pending(
         &self,
         generation: impl Into<Option<u64>>,
@@ -219,7 +231,7 @@ impl ArcSendJournal {
         let mut records = self.0.lock().unwrap();
         if records.packets.len() >= MAX_RECORDS || records.frames.len() + frames.len() > MAX_FRAMES
         {
-            return Err(PacketError::Blocked(Signals::TRANSPORT));
+            return Err(PacketError::Blocked(std::task::Poll::Pending));
         }
         let pn = records.next_pn;
         if pn > VARINT_MAX {
@@ -233,7 +245,7 @@ impl ArcSendJournal {
         records.next_pn += 1;
         let start = records.frames.largest();
         for frame in frames.drain(..) {
-            records.frames.push_back(Some(frame)).unwrap();
+            records.frames.push_back(Some(frame.into())).unwrap();
         }
         let frame_range = start..records.frames.largest();
         records.packets.insert(
@@ -246,6 +258,58 @@ impl ArcSendJournal {
         );
         Ok((pn, encoded))
     }
+    /// Reserve a unique packet number before constructing a packet.
+    pub fn next_pn(&self) -> Result<(u64, PacketNumber), PacketError> {
+        let mut records = self.lock_guard();
+        let pn = records.next_pn;
+        if pn > VARINT_MAX {
+            return Err(Error::from(QuicError::with_default_fty(
+                ErrorKind::AeadLimitReached,
+                "packet numbers exhausted",
+            ))
+            .into());
+        }
+        records.next_pn += 1;
+        let start = records.frames.largest();
+        records.packets.insert(
+            pn,
+            SentPacket {
+                generation: None,
+                frame_range: start..start,
+                state: SentPacketState::Pending,
+            },
+        );
+        Ok((pn, PacketNumber::encode(pn, records.largest_acked)))
+    }
+
+    /// Record a sealed packet. Submission starts its timers separately.
+    pub fn on_sent(&self, pn: u64, frames: impl IntoIterator<Item = Frame>) {
+        let mut records = self.lock_guard();
+        assert!(
+            records.packets.get(&pn).is_some_and(
+                |p| matches!(p.state, SentPacketState::Pending) && p.frame_range.is_empty()
+            ),
+            "packet number must be reserved once"
+        );
+        let start = records.frames.largest();
+        for frame in frames {
+            records.frames.push_back(Some(frame)).unwrap();
+        }
+        let end = records.frames.largest();
+        records.packets.insert(
+            pn,
+            SentPacket {
+                generation: None,
+                frame_range: start..end,
+                state: SentPacketState::Pending,
+            },
+        );
+    }
+
+    pub fn set_generation(&self, pn: u64, generation: u64) {
+        self.lock_guard().packets.get_mut(&pn).unwrap().generation = Some(generation);
+    }
+
     /// Fix the retention deadline at successful submission; loss never restarts it.
     pub fn mark_sent(
         &self,
@@ -260,6 +324,7 @@ impl ArcSendJournal {
 
     /// Failed or abandoned submission: return its frames before reclaiming the record.
     /// Called by the Sender that still owns this pending packet.
+    #[cfg(test)]
     pub fn cancel_pending(&self, pn: u64, frames: &mut Vec<GuaranteedFrame>) {
         let mut records = self.0.lock().unwrap();
         if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
@@ -338,7 +403,11 @@ impl ArcSendJournal {
             while let Some((&pn, _)) = records.packets.range(range.clone()).next() {
                 let record = records.remove_packet(pn, SentPacketState::Acked).unwrap();
                 for index in record.frame_range {
-                    on_frame(&records.frames[index].take().unwrap());
+                    if let Ok(frame) =
+                        GuaranteedFrame::try_from(records.frames[index].take().unwrap())
+                    {
+                        on_frame(&frame);
+                    }
                 }
                 if let Some(generation) = record.generation {
                     acknowledged.push(generation);
@@ -1052,5 +1121,38 @@ mod tests {
         );
         assert!(records.record_pending(0, &mut Vec::new()).is_err());
         assert!(records.record_pending(0, &mut Vec::new()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use qbase::frame::{Frame, MaxDataFrame, ReliableFrame};
+
+    use super::*;
+    #[test]
+    fn reserving_recording_and_failed_submission_are_separate() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let output = recovered.clone();
+        let journal = ArcSendJournal::new(move |frame| output.lock().unwrap().push(frame.clone()));
+        let (pn, encoded) = journal.next_pn().unwrap();
+        assert_eq!(pn, 0);
+        assert_eq!(encoded.size(), 2);
+        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        assert!(journal.acknowledge(&ack, |_| {}).is_err());
+        let mut frames = Vec::with_capacity(8);
+        let frame = MaxDataFrame::new(42u32.into());
+        frames.push(Frame::MaxData(frame));
+        let capacity = frames.capacity();
+        journal.on_sent(pn, frames.drain(..));
+        assert!(frames.is_empty());
+        assert_eq!(frames.capacity(), capacity);
+        assert!(journal.acknowledge(&ack, |_| {}).is_err());
+        journal.cancel(pn);
+        assert_eq!(
+            *recovered.lock().unwrap(),
+            vec![GuaranteedFrame::Reliable(ReliableFrame::MaxData(frame))]
+        );
+        assert_eq!(journal.next_pn().unwrap().0, 1);
+        assert!(journal.acknowledge(&ack, |_| {}).is_err());
     }
 }

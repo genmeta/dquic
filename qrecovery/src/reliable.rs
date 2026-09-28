@@ -2,38 +2,40 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, MutexGuard},
+    task::{Context, Poll, Waker},
 };
 
+use bytes::BufMut;
 use qbase::{
-    frame::{EncodeSize, FrameFeature, io::SendFrame},
-    net::tx::{ArcSendWakers, Signals},
-    packet::{Package, PacketContent},
+    error::Error,
+    frame::{EncodeSize, Frame, FrameFeature, io::SendFrame},
+    net::tx::ArcSendWakers,
+    packet::{ConstraintBuffer, Package},
 };
 
 /// A deque for data space to send reliable frames.
 ///
 /// Like its name, it is just a queue. [`DataStreams`] or other components that need to send reliable
 /// frames write frames to this queue by calling [`SendFrame::send_frame`]. The transport layer can
-/// load the frames from the queue into the packet by calling [`try_load_frames_into`].
+/// load the frames from the queue into the packet by calling [`Package::poll_dump`].
 ///
 /// # Example
 /// ```rust, no_run
 /// use qbase::frame::{HandshakeDoneFrame, ReliableFrame, io::SendFrame};
-/// use qrecovery::reliable::ArcReliableFrameDeque;
-/// # let data_wakers = Default::default();
-/// let mut reliable_frame_deque = ArcReliableFrameDeque::<ReliableFrame>::with_capacity_and_wakers(10, data_wakers);
+/// use qrecovery::reliable::ArcReliableFrames;
+/// let mut reliable_frame_deque = ArcReliableFrames::<ReliableFrame>::with_capacity(10);
 /// reliable_frame_deque.send_frame([HandshakeDoneFrame]);
 /// ```
 ///
 /// [`DataStreams`]: crate::streams::DataStreams
-/// [`try_load_frames_into`]: ArcReliableFrameDeque::try_load_frames_into
+/// [`Package::poll_dump`]: qbase::packet::Package::poll_dump
 #[derive(Debug, Default)]
-pub struct ArcReliableFrameDeque<F> {
+pub struct ArcReliableFrames<F> {
     frames: Arc<Mutex<VecDeque<F>>>,
     tx_wakers: ArcSendWakers,
 }
 
-impl<F> Clone for ArcReliableFrameDeque<F> {
+impl<F> Clone for ArcReliableFrames<F> {
     fn clone(&self) -> Self {
         Self {
             frames: self.frames.clone(),
@@ -42,129 +44,195 @@ impl<F> Clone for ArcReliableFrameDeque<F> {
     }
 }
 
-impl<F> ArcReliableFrameDeque<F> {
+impl<F> ArcReliableFrames<F> {
     /// Create a new empty deque with at least the specified capacity.
-    pub fn with_capacity_and_wakers(capacity: usize, tx_wakers: ArcSendWakers) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             frames: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-            tx_wakers,
+            tx_wakers: ArcSendWakers::default(),
         }
     }
 
     fn frames_guard(&self) -> MutexGuard<'_, VecDeque<F>> {
         self.frames.lock().unwrap()
     }
-
-    /// Try to load the frame in deque and encode it into the `packet`.
-    pub fn try_load_frames_into<P: ?Sized>(&self, packet: &mut P) -> Result<(), Signals>
-    where
-        for<'a> &'a F: Package<P>,
-    {
-        let mut deque = self.frames_guard();
-        if deque.is_empty() {
-            return Err(Signals::TRANSPORT);
-        }
-        let mut wrote_frame = false;
-        while let Some(mut frame) = deque.front() {
-            match frame.dump(packet) {
-                Ok(_) => {
-                    wrote_frame = true;
-                    deque.pop_front();
-                }
-                Err(signals) if !wrote_frame => return Err(signals),
-                Err(_) => break,
-            }
-        }
-        Ok(())
-    }
 }
 
-impl<F, P: ?Sized> Package<P> for ArcReliableFrameDeque<F>
-where
-    for<'a> &'a F: Package<P>,
-{
-    fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
-        self.try_load_frames_into(packet)?;
-        Ok(PacketContent::EffectivePayload)
-    }
-}
-
-impl<T, F> SendFrame<T> for ArcReliableFrameDeque<F>
+impl<T, F> SendFrame<T> for ArcReliableFrames<F>
 where
     F: EncodeSize + FrameFeature,
     T: Into<F>,
 {
     fn send_frame<I: IntoIterator<Item = T>>(&self, iter: I) {
         self.frames_guard().extend(iter.into_iter().map(Into::into));
-        self.tx_wakers.wake_all_by(Signals::TRANSPORT);
+        self.tx_wakers.wake_all();
+    }
+}
+
+impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        let mut queue = self.frames_guard();
+        if queue.is_empty() {
+            self.tx_wakers.register(cx.waker());
+            return Poll::Pending;
+        }
+        let start = frames.len();
+        while let Some(frame) = queue.front_mut() {
+            match frame.poll_dump(cx, buffer, frames) {
+                Poll::Ready(Ok(n)) if n > 0 => {
+                    queue.pop_front();
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending if frames.len() == start => {
+                    self.tx_wakers.register(cx.waker());
+                    return Poll::Pending;
+                }
+                _ => break,
+            }
+        }
+        Poll::Ready(Ok(frames.len() - start))
+    }
+
+    fn cancel(&mut self, waker: &Waker) {
+        self.tx_wakers.cancel(waker);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use qbase::{
-        frame::{EncodeSize, FrameType, GetFrameType, io::SendFrame},
-        net::tx::Signals,
-        packet::{Package, PacketContent},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, Waker},
     };
 
-    use super::ArcReliableFrameDeque;
+    use bytes::BytesMut;
+    use qbase::{
+        frame::{HandshakeDoneFrame, ReliableFrame, io::SendFrame},
+        packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package},
+    };
 
-    #[derive(Clone)]
-    struct TestFrame;
+    use super::ArcReliableFrames;
 
-    struct LimitedPacket {
-        remaining_frames: usize,
-        written_frames: usize,
-    }
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
 
-    impl EncodeSize for TestFrame {}
-
-    impl GetFrameType for TestFrame {
-        fn frame_type(&self) -> FrameType {
-            FrameType::HandshakeDone
+    impl std::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    impl Package<Vec<()>> for &TestFrame {
-        fn dump(&mut self, target: &mut Vec<()>) -> Result<PacketContent, Signals> {
-            target.push(());
-            Ok(PacketContent::EffectivePayload)
-        }
-    }
-
-    impl Package<LimitedPacket> for &TestFrame {
-        fn dump(&mut self, target: &mut LimitedPacket) -> Result<PacketContent, Signals> {
-            if target.remaining_frames == 0 {
-                return Err(Signals::CONGESTION);
-            }
-            target.remaining_frames -= 1;
-            target.written_frames += 1;
-            Ok(PacketContent::EffectivePayload)
+    #[test]
+    fn only_pending_polls_register_waiters() {
+        for (queued, quota, expected) in [
+            (1, 1, Poll::Ready(Ok(1))),
+            (1, 0, Poll::Ready(Ok(0))),
+            (0, 1, Poll::Pending),
+        ] {
+            let mut queue = ArcReliableFrames::<HandshakeDoneFrame>::with_capacity(2);
+            queue.send_frame(std::iter::repeat_n(HandshakeDoneFrame, queued));
+            let wakes = Arc::new(WakeCount::default());
+            let waker = Waker::from(wakes.clone());
+            let mut bytes = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: quota,
+                credit: 1,
+                min_size: 0,
+                max_size: 1,
+                ..Default::default()
+            };
+            let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            let result =
+                queue.poll_dump(&mut Context::from_waker(&waker), &mut buffer, &mut frames);
+            assert_eq!(result, expected);
+            queue.send_frame([HandshakeDoneFrame]);
+            assert_eq!(
+                wakes.0.load(Ordering::Relaxed),
+                usize::from(result.is_pending())
+            );
         }
     }
 
     #[test]
     fn reliable_queue_preserves_content_when_only_some_frames_fit() {
-        let mut queue: ArcReliableFrameDeque<TestFrame> =
-            ArcReliableFrameDeque::with_capacity_and_wakers(2, Default::default());
-        queue.send_frame([TestFrame, TestFrame]);
-        let mut packet = LimitedPacket {
-            remaining_frames: 1,
-            written_frames: 0,
+        let mut queue: ArcReliableFrames<ReliableFrame> = ArcReliableFrames::with_capacity(2);
+        queue.send_frame([HandshakeDoneFrame, HandshakeDoneFrame]);
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..2 {
+            let mut bytes = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: 1,
+                credit: 1,
+                min_size: 0,
+                max_size: 1,
+                ..Default::default()
+            };
+            let mut buffer = ConstraintBuffer::new(
+                &mut bytes,
+                &mut limits,
+                OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                0,
+                0,
+            );
+            assert!(matches!(
+                queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+                Poll::Ready(Ok(1))
+            ));
+            assert_eq!(frames.len(), 1);
+            assert_eq!(&bytes[..], &[0x1e]);
+        }
+        assert!(queue.frames_guard().is_empty());
+    }
+    #[test]
+    fn concrete_frame_queue_keeps_a_blocked_frame_and_reports_empty() {
+        let mut queue = ArcReliableFrames::<HandshakeDoneFrame>::with_capacity(1);
+        queue.send_frame([HandshakeDoneFrame]);
+        let mut bytes = BytesMut::new();
+        let mut frames = Vec::new();
+        let mut cx = Context::from_waker(Waker::noop());
+        let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        let mut limits = Constraints {
+            flow_ctrl: 0,
+            send_quota: 0,
+            credit: 1,
+            min_size: 0,
+            max_size: 1,
+            ..Default::default()
         };
-
-        assert_eq!(queue.dump(&mut packet), Ok(PacketContent::EffectivePayload));
-        assert_eq!(packet.written_frames, 1);
-
-        let mut next_packet = LimitedPacket {
-            remaining_frames: 1,
-            written_frames: 0,
-        };
-        assert_eq!(
-            queue.dump(&mut next_packet),
-            Ok(PacketContent::EffectivePayload)
+        {
+            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            assert!(matches!(
+                queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+                Poll::Ready(Ok(0))
+            ));
+        }
+        assert!(bytes.is_empty());
+        assert!(frames.is_empty());
+        limits.send_quota = 1;
+        let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+        assert!(matches!(
+            queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+            Poll::Ready(Ok(1))
+        ));
+        assert!(
+            queue
+                .poll_dump(&mut cx, &mut buffer, &mut frames)
+                .is_pending()
         );
-        assert_eq!(next_packet.written_frames, 1);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(&bytes[..], &[0x1e]);
     }
 }

@@ -1,10 +1,9 @@
-use std::sync::{Arc, Mutex, MutexGuard};
-
-use qbase::{
-    Epoch,
-    frame::AckFrame,
-    net::tx::{ArcSendWaker, Signals},
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    task::{Context, Poll},
 };
+
+use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
@@ -41,7 +40,7 @@ pub struct CongestionController {
     trackers: [Arc<dyn Feedback>; 3],
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
     path_status: PathStatus,
-    tx_waker: ArcSendWaker,
+    tx_waker: ArcSendWakers,
 }
 
 impl CongestionController {
@@ -51,7 +50,7 @@ impl CongestionController {
         max_ack_delay: Duration,
         trackers: [Arc<dyn Feedback>; 3],
         path_status: PathStatus,
-        tx_waker: ArcSendWaker,
+        tx_waker: ArcSendWakers,
     ) -> Self {
         let algorithm: Box<dyn Control> = match algorithm {
             Algorithm::Bbr => todo!("implement BBR"),
@@ -450,7 +449,7 @@ impl CongestionController {
 
     fn send_ack_eliciting_packet(&mut self, epoch: Epoch, count: usize) {
         self.need_send_ack_eliciting_packets[epoch] += count;
-        self.tx_waker.wake_by(Signals::PING);
+        self.tx_waker.wake_all();
     }
 
     #[inline]
@@ -529,7 +528,7 @@ impl ArcCC {
         max_ack_delay: Duration,
         trackers: [Arc<dyn Feedback>; 3],
         path_status: PathStatus,
-        tx_waker: ArcSendWaker,
+        tx_waker: ArcSendWakers,
     ) -> Self {
         let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
             algorithm,
@@ -548,11 +547,32 @@ impl ArcCC {
                     if weak.upgrade().is_none() {
                         break;
                     }
-                    tx_waker.wake_by(Signals::CONGESTION | Signals::TRANSPORT | Signals::PING);
+                    tx_waker.wake_all();
                 }
             });
         }
         cc
+    }
+
+    pub fn cancel(&self, waker: &std::task::Waker) {
+        self.0.lock().unwrap().tx_waker.cancel(waker);
+    }
+
+    pub fn poll_send_quota(&self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
+        let mut guard = self.0.lock().unwrap();
+        guard.tx_waker.register(cx.waker());
+        if guard
+            .loss_detection_timer
+            .is_some_and(|t| t <= Instant::now())
+        {
+            let count = guard.on_loss_detection_timeout();
+            if count > 6 {
+                return Poll::Ready(Err(TooManyPtos(count)));
+            }
+        }
+        let quota = guard.send_quota();
+        guard.pending_burst = quota < guard.path_status.mtu();
+        Poll::Ready(Ok(if guard.pending_burst { 0 } else { quota }))
     }
 
     /// Install negotiated local ACK scheduling and peer ACK/PTO bounds.
@@ -595,23 +615,23 @@ impl super::Transport for ArcCC {
 
         if guard.pending_burst && guard.send_quota() >= guard.path_status.mtu() {
             guard.pending_burst = false;
-            guard.tx_waker.wake_by(Signals::CONGESTION);
+            guard.tx_waker.wake_all();
         }
         if guard.need_ack() {
-            guard.tx_waker.wake_by(Signals::TRANSPORT);
+            guard.tx_waker.wake_all();
         }
 
         Ok(())
     }
 
-    fn send_quota(&self) -> Result<usize, Signals> {
+    fn send_quota(&self) -> usize {
         let mut guard = self.0.lock().unwrap();
         let send_quota = guard.send_quota();
         if send_quota >= guard.path_status.mtu() {
-            Ok(send_quota)
+            send_quota
         } else {
             guard.pending_burst = true;
-            Err(Signals::CONGESTION)
+            0
         }
     }
 
@@ -683,7 +703,7 @@ impl super::Transport for ArcCC {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU16};
 
-    use qbase::net::tx::ArcSendWaker;
+    use qbase::net::tx::ArcSendWakers;
 
     use super::*;
     use crate::{HandshakeStatus, Transport};
@@ -713,7 +733,7 @@ mod tests {
             Duration::from_millis(25),
             [feedback.clone(), feedback.clone(), feedback],
             path_status,
-            ArcSendWaker::new(),
+            ArcSendWakers::default(),
         )
     }
 
@@ -776,7 +796,7 @@ mod tests {
             Duration::from_millis(25),
             [feedback.clone(), feedback.clone(), feedback],
             path_status,
-            ArcSendWaker::new(),
+            ArcSendWakers::default(),
         );
 
         controller.on_packet_sent(0, Epoch::Initial, true, true, MSS);

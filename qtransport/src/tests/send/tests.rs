@@ -16,11 +16,7 @@ use qbase::{
 use super::{fixture::TestSender as Sender, *};
 use crate::{keys::OpenPacket, transport::Transport};
 
-fn sender(transport: &Transport, path: &Path) -> Sender {
-    transport
-        .data
-        .send_wakers
-        .replace(path.pathway, &path.send_waker);
+fn sender(_transport: &Transport, path: &Path) -> Sender {
     Sender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone())
 }
 fn header() -> OneRttHeader {
@@ -60,8 +56,9 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     let [(_client, transport, path), (_server, peer, _)] = crate::tests::pair(1);
     let mut sender = sender(&transport, &path);
     let fixed = crate::tests::fixed_keys();
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let limit = Constraints {
+        flow_ctrl: std::cell::Cell::new(usize::MAX),
         capacity: 1200,
         congestion: 1200,
         anti_amplification: 1200,
@@ -113,7 +110,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
             .is_some()
     );
     let mut datagram = (
-        DatagramFrame::new(false, 5u32.into()),
+        DatagramFrame::new(true, 5u32.into()),
         Bytes::from_static(b"hello"),
     );
     let zero = sender
@@ -146,8 +143,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     assert!(
         peer.data
             .keys
-            .try_get()
-            .unwrap()
+            .get()
             .unwrap()
             .open(decode(one.bytes()), |_| Ok(1), Duration::ZERO)
             .unwrap()
@@ -168,7 +164,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
 #[tokio::test]
 async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let recovered = Arc::new(AtomicUsize::new(0));
     let journal = ArcSendJournal::new({
         let recovered = recovered.clone();
@@ -185,8 +181,13 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
                     return Ok(None);
                 }
                 let frame = ReliableFrame::MaxData(MaxDataFrame::new((remaining as u32).into()));
-                let packet =
-                    sender.assemble_1rtt_packet(&keys, header(), &journal, limit, [&mut &frame])?;
+                let packet = sender.assemble_1rtt_packet(
+                    &keys,
+                    header(),
+                    &journal,
+                    limit,
+                    [&mut frame.clone()],
+                )?;
                 if packet.is_some() {
                     remaining -= 1;
                 }
@@ -262,7 +263,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
 #[tokio::test]
 async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let status = qcongestion::PathStatus::new(
         Arc::new(qcongestion::HandshakeStatus::new(true)),
         Arc::new(std::sync::atomic::AtomicU16::new(1200)),
@@ -271,7 +272,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     credit.on_received(800);
     let mut sender = sender(&transport, &path);
     sender.anti_amplifier = credit.clone();
-    let quota = sender.congestion.send_quota().unwrap();
+    let quota = sender.congestion.send_quota();
     let bytes = [Bytes::from(vec![7; 800])];
     let mut offset = 0;
     let count = sender
@@ -306,7 +307,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
 #[tokio::test]
 async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let recovered = Arc::new(AtomicUsize::new(0));
     let journal = ArcSendJournal::new({
         let recovered = recovered.clone();
@@ -316,6 +317,9 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
     });
     let mut sender = sender(&transport, &path);
     let challenge = PathChallengeFrame::random();
+    let mut ack_source = Some(ack(99));
+    let mut challenge_source = Some(challenge);
+    let mut response_source = Some(PathResponseFrame::from(challenge));
     let mut count = 0;
     assert_eq!(
         sender
@@ -330,10 +334,10 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
                     &journal,
                     limit,
                     [
-                        &mut ack(99),
-                        &mut { challenge },
-                        &mut PathResponseFrame::from(challenge),
-                        &mut &frame,
+                        &mut ack_source,
+                        &mut challenge_source,
+                        &mut response_source,
+                        &mut frame.clone(),
                     ],
                 )?;
                 if packet.is_some() {
@@ -368,14 +372,15 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
     let mut sender = sender(&transport, &path);
     let keys = crate::tests::fixed_keys();
-    let missing = crate::keys::ArcKeys::<u64>::new_pending();
+    let retired = crate::keys::ArcKeys::new(42u64);
+    retired.retire();
     let initial = ArcSendJournal::default();
     let handshake = ArcSendJournal::default();
     let mut index = 0;
     assert_eq!(
         sender
             .burst(|sender, limit| {
-                assert_eq!(missing.try_get(), Ok(None)); // no wait, other levels still make progress
+                assert_eq!(retired.get(), Err(crate::keys::KeyRetired));
                 index += 1;
                 match index {
                     1 => sender.assemble_long_packet(
@@ -421,7 +426,7 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
 async fn sent_callback_can_acknowledge_and_retire_path() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
     let mut sender = sender(&transport, &path);
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let mut ping = Some(PingFrame);
     assert_eq!(
         sender
@@ -474,7 +479,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
         ),
     );
     let mut sender = Sender::new(pathway, path.cc.clone(), path.anti_amplifier.clone());
-    let keys = transport.data.keys.try_get().unwrap().unwrap();
+    let keys = transport.data.keys.get().unwrap();
     let mut packets = Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS);
     let allocation = packets.as_ptr();
     let frames = sender.send_frames.as_ptr();
@@ -492,7 +497,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
                     header(),
                     &transport.data.send_journal,
                     constraints,
-                    [&mut &frame],
+                    [&mut frame.clone()],
                 )
             })
             .unwrap();
