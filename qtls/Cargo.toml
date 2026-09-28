@@ -21,7 +21,7 @@ rustls = { git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf8
 signature = "2"
 spki = "0.7"
 thiserror = { workspace = true }
-x509-cert = "0.2"
+x509-cert = "0.3"
 x509-parser = { workspace = true }
 zeroize = "1.7"
 
