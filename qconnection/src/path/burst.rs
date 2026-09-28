@@ -18,12 +18,12 @@ use qbase::{
         tx::{ArcSendWaker, Signals},
     },
     packet::{
-        AssemblePacket, Package, PacketContent, PacketInfo, ProductHeader,
+        AssemblePacket, PacketContent, PacketInfo, ProductHeader,
         header::{
             long::{HandshakeHeader, InitialHeader, ZeroRttHeader, io::LongHeaderBuilder},
             short::OneRttHeader,
         },
-        io::{Packages, PadProbe, PadTo20, PadToFull, Repeat},
+        io::{Package, Packages, PadProbe, PadTo20, PadToFull, Repeat},
         signal::SpinBit,
     },
     role::Role,

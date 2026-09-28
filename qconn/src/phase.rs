@@ -1,14 +1,12 @@
 //! Shared sending material. Each path reads the current phase for every burst.
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use bytes::BufMut;
 use qbase::{
     Epoch,
     cid::{ArcCidCell, ConnectionId},
     error::{ErrorKind, QuicError},
     frame::io::SendFrame,
-    net::tx::{ArcSendWakers, Signals},
-    packet::{Package, PacketContent, Type, io::Repeat},
+    net::tx::ArcSendWakers,
     param::ParameterId,
     role::Role,
     sid::handy::ConsistentConcurrency,
@@ -16,31 +14,12 @@ use qbase::{
 use qtransport::{
     GuaranteedFrame,
     keys::{ArcKeys, ArcOneRttKeys},
-    send::write::PacketWriter,
     space::{Space, Spaces},
     transport::Transport,
 };
 
-fn dump_sources<const N: usize>(
-    packet: &mut PacketWriter<'_>,
-    sources: [&mut dyn for<'a> Package<PacketWriter<'a>>; N],
-) -> Result<PacketContent, Signals> {
-    let remaining = packet.remaining_mut();
-    let mut content = PacketContent::default();
-    let mut signals = Signals::empty();
-    for source in sources {
-        match source.dump(packet) {
-            Ok(loaded) => content += loaded,
-            Err(blocked) => signals |= blocked,
-        }
-    }
-    (remaining != packet.remaining_mut())
-        .then_some(content)
-        .ok_or(signals)
-}
-
 use crate::{
-    ArcParameters, CidRegistry, DataStreams, Error, FlowController, ReliableFrames,
+    ArcParameters, CidRegistry, DataStreams, Error, FlowController, ArcReliableFrames,
     terminate::ArcTerminator,
 };
 
@@ -49,46 +28,41 @@ pub struct InitialPhase {
     pub initial: Arc<Space<ArcKeys>>,
     pub scid: ConnectionId,
     pub odcid: ConnectionId,
-    pub reliable_frames: ReliableFrames,
+    dcid: Mutex<ConnectionId>,
+    pub reliable_frames: ArcReliableFrames,
     pub(crate) terminator: ArcTerminator,
 }
 
 impl InitialPhase {
     pub fn new(scid: ConnectionId, odcid: ConnectionId, keys: qtls::BidirectionalKeys) -> Self {
-        let wakers = ArcSendWakers::new();
-        let reliable_frames = ReliableFrames::with_capacity_and_wakers(0, wakers.clone());
-        Self::with_components(scid, odcid, keys, wakers, reliable_frames)
+        let reliable_frames = ArcReliableFrames::with_capacity(0);
+        Self::with_components(scid, odcid, keys, reliable_frames)
     }
 
     pub fn with_components(
         scid: ConnectionId,
         odcid: ConnectionId,
         keys: qtls::BidirectionalKeys,
-        wakers: ArcSendWakers,
-        reliable_frames: ReliableFrames,
+        reliable_frames: ArcReliableFrames,
     ) -> Self {
-        let initial = Arc::new(Space::<ArcKeys>::new(Epoch::Initial, wakers, |_| {}));
-        let terminator = ArcTerminator::normal(initial.send_wakers.clone());
-        initial
-            .install_initial_keys(keys)
-            .expect("fresh Initial keys");
+        let initial = Arc::new(Space::new(
+            Epoch::Initial,
+            ArcKeys::new(Arc::new(keys)),
+            |_| {},
+        ));
+        let terminator = ArcTerminator::normal();
         Self {
             initial,
             scid,
             odcid,
+            dcid: Mutex::new(odcid),
             reliable_frames,
             terminator,
         }
     }
-}
 
-impl Package<PacketWriter<'_>> for &InitialPhase {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        use qbase::packet::r#type::long::{Type as Long, Ver1};
-        if packet.packet_type() != Type::Long(Long::V1(Ver1::INITIAL)) {
-            return Err(Signals::empty());
-        }
-        self.initial.crypto.outgoing().dump(packet)
+    pub fn dcid(&self) -> ConnectionId {
+        *self.dcid.lock().unwrap()
     }
 }
 
@@ -98,9 +72,9 @@ pub struct MaturePhase {
     pub scid: ConnectionId,
     pub streams: DataStreams,
     pub flow: FlowController,
-    pub reliable_frames: ReliableFrames,
+    pub reliable_frames: ArcReliableFrames,
     pub cid_registry: CidRegistry,
-    pub initial_dcid: ArcCidCell<ReliableFrames>,
+    pub initial_dcid: ArcCidCell<ArcReliableFrames>,
     pub peer_cid: ConnectionId,
     pub parameters: ArcParameters,
     pub(crate) terminator: ArcTerminator,
@@ -112,9 +86,10 @@ impl MaturePhase {
         handshake: Arc<Space<ArcKeys>>,
         parameters: ArcParameters,
         peer_cid: ConnectionId,
-        reliable_frames: ReliableFrames,
+        reliable_frames: ArcReliableFrames,
         cid_registry: CidRegistry,
-        initial_dcid: ArcCidCell<ReliableFrames>,
+        initial_dcid: ArcCidCell<ArcReliableFrames>,
+        keys: ArcOneRttKeys,
     ) -> Result<(Arc<Self>, Arc<Transport>), Error> {
         if parameters.remote::<ConnectionId>(ParameterId::InitialSourceConnectionId) != peer_cid {
             return Err(QuicError::with_default_fty(
@@ -147,7 +122,6 @@ impl MaturePhase {
                 parameters.server(),
                 concurrency,
                 reliable_frames.clone(),
-                early.initial.send_wakers.clone(),
                 None,
             ),
             Role::Server => DataStreams::new(
@@ -156,7 +130,6 @@ impl MaturePhase {
                 parameters.client(),
                 concurrency,
                 reliable_frames.clone(),
-                early.initial.send_wakers.clone(),
                 None,
             ),
         };
@@ -164,13 +137,12 @@ impl MaturePhase {
             parameters.remote(ParameterId::InitialMaxData),
             parameters.local(ParameterId::InitialMaxData),
             reliable_frames.clone(),
-            early.initial.send_wakers.clone(),
         );
         let recover_streams = streams.clone();
         let reliable = reliable_frames.clone();
         let data = Arc::new(Space::<ArcOneRttKeys>::new(
             Epoch::Data,
-            early.initial.send_wakers.clone(),
+            keys,
             move |frame| match frame {
                 GuaranteedFrame::Stream(frame) => recover_streams.may_loss_data(frame),
                 GuaranteedFrame::Reliable(frame) => reliable.send_frame([frame.clone()]),
@@ -204,46 +176,11 @@ impl MaturePhase {
     }
 }
 
-impl Package<PacketWriter<'_>> for &MaturePhase {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        use qbase::packet::r#type::long::{Type as Long, Ver1};
-        match packet.packet_type() {
-            Type::Long(Long::V1(Ver1::INITIAL)) => {
-                self.spaces.initial.crypto.outgoing().dump(packet)
-            }
-            Type::Long(Long::V1(Ver1::HANDSHAKE)) => {
-                self.spaces.handshake.crypto.outgoing().dump(packet)
-            }
-            Type::Short(_) => {
-                let mut crypto = self.spaces.data.crypto.outgoing();
-                let mut reliable = self.reliable_frames.clone();
-                let mut streams = Repeat(self.streams.package(self.flow.sender.clone(), false));
-                dump_sources(packet, [&mut crypto, &mut reliable, &mut streams])
-            }
-            _ => Err(Signals::empty()),
-        }
-    }
-}
-
 /// Initial and Handshake packet sources available before peer parameters complete Data.
 pub struct HandshakePhase {
     pub initial: Arc<InitialPhase>,
     pub handshake: Arc<Space<ArcKeys>>,
     pub(crate) terminator: ArcTerminator,
-}
-
-impl Package<PacketWriter<'_>> for &HandshakePhase {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        use qbase::packet::r#type::long::{Type as Long, Ver1};
-        match packet.packet_type() {
-            Type::Long(Long::V1(Ver1::INITIAL)) => {
-                let mut initial = self.initial.as_ref();
-                initial.dump(packet)
-            }
-            Type::Long(Long::V1(Ver1::HANDSHAKE)) => self.handshake.crypto.outgoing().dump(packet),
-            _ => Err(Signals::empty()),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -253,12 +190,12 @@ pub enum ConnPhase {
     Mature(Arc<MaturePhase>),
 }
 
-impl Package<PacketWriter<'_>> for &ConnPhase {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
+impl ConnPhase {
+    pub fn dcid(&self) -> ConnectionId {
         match self {
-            ConnPhase::Initial(phase) => phase.as_ref().dump(packet),
-            ConnPhase::Handshake(phase) => phase.as_ref().dump(packet),
-            ConnPhase::Mature(phase) => phase.as_ref().dump(packet),
+            Self::Initial(p) => p.dcid(),
+            Self::Handshake(p) => p.initial.dcid(),
+            Self::Mature(p) => p.peer_cid,
         }
     }
 }
@@ -271,10 +208,9 @@ pub struct ArcConnPhase {
 
 impl ArcConnPhase {
     pub fn initial(sender: InitialPhase) -> Self {
-        let send_wakers = sender.initial.send_wakers.clone();
         Self {
             phase: Arc::new(Mutex::new(ConnPhase::Initial(Arc::new(sender)))),
-            send_wakers,
+            send_wakers: ArcSendWakers::default(),
         }
     }
 
@@ -286,8 +222,22 @@ impl ArcConnPhase {
         self.phase.lock().unwrap().clone()
     }
 
-    pub(crate) fn send_wakers(&self) -> ArcSendWakers {
-        self.send_wakers.clone()
+    pub(crate) fn set_dcid(&self, dcid: ConnectionId) {
+        match &*self.phase.lock().unwrap() {
+            ConnPhase::Initial(p) => *p.dcid.lock().unwrap() = dcid,
+            ConnPhase::Handshake(p) => *p.initial.dcid.lock().unwrap() = dcid,
+            ConnPhase::Mature(_) => return,
+        }
+        self.send_wakers.wake_all();
+    }
+
+    pub(crate) fn poll_phase(&self, cx: &mut std::task::Context<'_>) -> MutexGuard<'_, ConnPhase> {
+        self.send_wakers.register(cx.waker());
+        self.lock_guard()
+    }
+
+    pub(crate) fn cancel(&self, waker: &std::task::Waker) {
+        self.send_wakers.cancel(waker);
     }
 
     pub(crate) fn terminator(&self) -> ArcTerminator {
@@ -303,19 +253,17 @@ impl ArcConnPhase {
         initial: Arc<InitialPhase>,
         handshake: Arc<Space<ArcKeys>>,
     ) {
-        let wakers = initial.initial.send_wakers.clone();
         let terminator = initial.terminator.clone();
         *self.phase.lock().unwrap() = ConnPhase::Handshake(Arc::new(HandshakePhase {
             initial,
             handshake,
             terminator,
         }));
-        wakers.wake_all_by(Signals::KEYS);
+        self.send_wakers.wake_all();
     }
 
     pub(crate) fn enter_mature(&self, sender: Arc<MaturePhase>) {
-        let wakers = sender.spaces.initial.send_wakers.clone();
         *self.phase.lock().unwrap() = ConnPhase::Mature(sender);
-        wakers.wake_all_by(Signals::all());
+        self.send_wakers.wake_all();
     }
 }

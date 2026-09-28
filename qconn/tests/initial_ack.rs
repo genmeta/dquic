@@ -1,7 +1,6 @@
 mod common;
 
 use std::{
-    collections::VecDeque,
     future::poll_fn,
     io::IoSliceMut,
     sync::{
@@ -18,7 +17,6 @@ use qbase::{
     net::{
         addr::EndpointAddr,
         route::{Line, Link, Pathway},
-        tx::Signals,
     },
     packet::{DataHeader, GetDcid, LongHeaderBuilder, Packet, PacketReader, long},
     role::Role,
@@ -27,10 +25,7 @@ use qbase::{
 use qconn::{Scope, ServerRegistry, TlsContext};
 use qprotocol::{QuicProtocol, UdpSocket};
 use qtransport::{
-    packet::CipherPacket,
-    path::Path,
-    router::QuicRouter,
-    send::{self, constraints::Constraints, records::ArcSendJournal},
+    journal::ArcSendJournal, packet::CipherPacket, path::Path, router::QuicRouter,
     space::ArcFeedback,
 };
 
@@ -72,30 +67,15 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.
     let data = [hello.slice(..4)];
     let mut crypto = (CryptoFrame::new(0u32.into(), 4u32.into()), data.as_slice());
-    let mut buffers = vec![BytesMut::with_capacity(1200)];
-    let mut frames = Vec::new();
-    let mut pending = VecDeque::new();
-    let packet = send::assemble_long_packet(
-        pathway,
-        &path.cc,
-        &mut buffers,
-        &mut frames,
-        &mut pending,
-        &mut Signals::empty(),
-        &keys.sealing,
+    let packet = common::seal(
         LongHeaderBuilder::with_cid(odcid, scid).initial(vec![]),
+        &keys.sealing,
         &ArcSendJournal::default(),
-        &Constraints {
-            capacity: 1200,
-            congestion: 1200,
-            anti_amplification: 1200,
-        },
         [&mut crypto],
     )
-    .unwrap()
     .unwrap();
     QuicRouter::global().receive(
-        BytesMut::from(packet.bytes()),
+        BytesMut::from(packet.as_ref()),
         Pathway::new(local, EndpointAddr::direct(client_addr)),
         Link::new(server_addr, client_addr),
         8,
@@ -128,7 +108,10 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         .unwrap()
         .unwrap();
     let mut acks = 0;
-    for frame in FrameReader::new(opened.body(), packet.packet_type) {
+    for frame in FrameReader::new(
+        opened.body(),
+        qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(odcid, scid).initial(vec![])),
+    ) {
         match frame.unwrap().0 {
             Frame::Ack(ack) => {
                 assert_eq!(ack.largest(), 0);

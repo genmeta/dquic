@@ -15,12 +15,15 @@
 //! }
 //! ```
 mod connection;
+pub mod journal;
 pub mod keys;
 pub mod packet;
 pub mod path;
 pub mod recv;
 pub mod router;
-pub mod send;
+#[cfg(test)]
+#[path = "tests/send.rs"]
+mod send;
 pub mod space;
 pub mod transport;
 
@@ -29,9 +32,9 @@ pub use qbase::{
     error::Error, param::fixed::ArcParameters, role::Role, sid::StreamId, varint::VarInt,
 };
 pub use qrecovery::{recv::StopSending, send::CancelStream, streams::error::StreamError};
-pub type ReliableFrames = qrecovery::reliable::ArcReliableFrameDeque<qbase::frame::ReliableFrame>;
-pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ReliableFrames>>;
-pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ReliableFrames>>;
+pub type ArcReliableFrames = qrecovery::reliable::ArcReliableFrames<qbase::frame::ReliableFrame>;
+pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ArcReliableFrames>>;
+pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ArcReliableFrames>>;
 
 use qbase::frame::{CryptoFrame, Frame, ReliableFrame, StreamFrame};
 

@@ -4,24 +4,24 @@ use qbase::flow::FlowController;
 use qrecovery::streams::DataStreams;
 use tokio::time::Instant;
 
-use crate::{ArcParameters, Error, ReliableFrames, keys::ArcOneRttKeys, space::Space};
+use crate::{ArcParameters, Error, ArcReliableFrames, keys::ArcOneRttKeys, space::Space};
 
 /// Fully constructed application-data components, shared with the original receive pipes.
 pub struct Transport {
     pub data: Arc<Space<ArcOneRttKeys>>,
     pub parameters: ArcParameters,
-    pub streams: DataStreams<ReliableFrames>,
-    pub flow: FlowController<ReliableFrames>,
-    pub reliable_frames: ReliableFrames,
+    pub streams: DataStreams<ArcReliableFrames>,
+    pub flow: FlowController<ArcReliableFrames>,
+    pub reliable_frames: ArcReliableFrames,
 }
 
 impl Transport {
     pub fn new(
         data: Arc<Space<ArcOneRttKeys>>,
         parameters: ArcParameters,
-        streams: DataStreams<ReliableFrames>,
-        flow: FlowController<ReliableFrames>,
-        reliable_frames: ReliableFrames,
+        streams: DataStreams<ArcReliableFrames>,
+        flow: FlowController<ArcReliableFrames>,
+        reliable_frames: ArcReliableFrames,
     ) -> Self {
         Self {
             data,

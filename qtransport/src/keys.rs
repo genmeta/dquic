@@ -1,11 +1,8 @@
-//! Keys own readiness, retirement, and packet protection generations.
+//! Keys own retirement and packet protection generations.
 use std::{
     collections::VecDeque,
-    future::Future,
     ops::RangeInclusive,
-    pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -20,55 +17,26 @@ use qbase::{
 };
 use tokio::time::Instant;
 
-use crate::{Error, send::write::PacketError};
+use crate::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PacketError {
+    #[cfg(test)]
+    #[error("packet assembly blocked: {0:?}")]
+    Blocked(std::task::Poll<()>),
+    #[error(transparent)]
+    Connection(#[from] crate::Error),
+    #[error("invalid packet layout or capacity")]
+    Layout,
+    #[error(transparent)]
+    Crypto(#[from] qtls::CryptoError),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("keys retired")]
 pub struct KeyRetired;
 
-#[derive(Clone)]
-pub enum KeyState<K> {
-    Pending,
-    Waiting(Waker),
-    Ready(K),
-    Retired,
-}
-
-impl<K> KeyState<K> {
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<&K, KeyRetired>> {
-        match self {
-            Self::Ready(keys) => Poll::Ready(Ok(keys)),
-            Self::Retired => Poll::Ready(Err(KeyRetired)),
-            Self::Waiting(waker) if waker.will_wake(cx.waker()) => Poll::Pending,
-            Self::Pending | Self::Waiting(_) => {
-                *self = Self::Waiting(cx.waker().clone());
-                Poll::Pending
-            }
-        }
-    }
-}
-
-impl<K: Clone + Unpin> Future for KeyState<K> {
-    type Output = Result<K, KeyRetired>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.get_mut().poll_ready(cx).map(|keys| keys.cloned())
-    }
-}
-
-pub struct ArcKeys<K = Arc<qtls::BidirectionalKeys>>(Arc<Mutex<KeyState<K>>>);
-
-impl<K: Clone> Future for ArcKeys<K> {
-    type Output = Result<K, KeyRetired>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0
-            .lock()
-            .unwrap()
-            .poll_ready(cx)
-            .map(|keys| keys.cloned())
-    }
-}
+pub struct ArcKeys<K = Arc<qtls::BidirectionalKeys>>(Arc<Mutex<Result<K, KeyRetired>>>);
 
 impl<K> Clone for ArcKeys<K> {
     fn clone(&self) -> Self {
@@ -77,47 +45,27 @@ impl<K> Clone for ArcKeys<K> {
 }
 
 impl<K: Clone> ArcKeys<K> {
-    /// Snapshot material without registering a waiter; distinguish pending from retired.
-    pub fn try_get(&self) -> Result<Option<K>, KeyRetired> {
-        match &*self.0.lock().unwrap() {
-            KeyState::Ready(keys) => Ok(Some(keys.clone())),
-            KeyState::Pending | KeyState::Waiting(_) => Ok(None),
-            KeyState::Retired => Err(KeyRetired),
-        }
+    pub fn get(&self) -> Result<K, KeyRetired> {
+        self.0.lock().unwrap().clone()
     }
 }
 
 impl<K> ArcKeys<K> {
-    pub fn new_pending() -> Self {
-        Self(Arc::new(Mutex::new(KeyState::Pending)))
-    }
-
-    pub fn install(&self, keys: K) -> Result<(), Error> {
-        let mut state = self.0.lock().unwrap();
-        if !matches!(*state, KeyState::Pending | KeyState::Waiting(_)) {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "keys already installed or retired",
-            )
-            .into());
-        }
-        if let KeyState::Waiting(waker) = std::mem::replace(&mut *state, KeyState::Ready(keys)) {
-            waker.wake();
-        }
-        Ok(())
+    pub fn new(keys: K) -> Self {
+        Self(Arc::new(Mutex::new(Ok(keys))))
     }
 
     pub fn retire(&self) {
-        let mut state = self.0.lock().unwrap();
-        if let KeyState::Waiting(waker) = std::mem::replace(&mut *state, KeyState::Retired) {
-            waker.wake();
-        }
+        *self.0.lock().unwrap() = Err(KeyRetired);
     }
 }
 
-impl<K> Default for ArcKeys<K> {
-    fn default() -> Self {
-        Self::new_pending()
+impl From<qtls::InstalledKeys> for ArcKeys {
+    fn from(keys: qtls::InstalledKeys) -> Self {
+        let qtls::InstalledKeys::Handshake(keys) = keys else {
+            unreachable!("expected TLS Handshake keys");
+        };
+        Self::new(Arc::new(keys))
     }
 }
 
@@ -135,7 +83,7 @@ pub struct OneRttKeys {
 
 /// A fixed sending generation, reserved together with its packet number.
 /// No key-manager lock is held while encrypting or submitting the packet.
-pub(crate) struct OneRttSealingKey {
+pub struct OneRttSealingKey {
     headers: Arc<HeaderKeys>,
     packet: qtls::PacketKey,
     generation: u64,
@@ -300,19 +248,10 @@ impl OneRttPacketKeys {
     }
 }
 
-#[derive(Clone)]
-pub struct ArcOneRttKeys(ArcKeys<OneRttKeys>);
+pub type ArcOneRttKeys = ArcKeys<OneRttKeys>;
 
-impl ArcOneRttKeys {
-    pub fn try_get(&self) -> Result<Option<OneRttKeys>, KeyRetired> {
-        self.0.try_get()
-    }
-
-    pub fn new_pending() -> Self {
-        Self(ArcKeys::new_pending())
-    }
-
-    pub fn install(&self, keys: qtls::OneRttKeyMaterial) -> Result<(), Error> {
+impl From<qtls::OneRttKeyMaterial> for ArcOneRttKeys {
+    fn from(keys: qtls::OneRttKeyMaterial) -> Self {
         let mut packets = VecDeque::with_capacity(3);
         packets.push_back(PacketKeys {
             generation: 0,
@@ -321,7 +260,7 @@ impl ArcOneRttKeys {
             sealing: keys.packet.sealing,
             expires: None,
         });
-        self.0.install(OneRttKeys {
+        Self::new(OneRttKeys {
             headers: Arc::new(HeaderKeys {
                 opening: keys.opening_header,
                 sealing: keys.sealing_header,
@@ -335,23 +274,14 @@ impl ArcOneRttKeys {
             })),
         })
     }
-
-    pub fn retire(&self) {
-        self.0.retire();
-    }
 }
 
-impl Default for ArcOneRttKeys {
-    fn default() -> Self {
-        Self::new_pending()
-    }
-}
-
-impl Future for ArcOneRttKeys {
-    type Output = Result<OneRttKeys, KeyRetired>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().0).poll(cx)
+impl From<qtls::InstalledKeys> for ArcOneRttKeys {
+    fn from(keys: qtls::InstalledKeys) -> Self {
+        let qtls::InstalledKeys::OneRtt(keys) = keys else {
+            unreachable!("expected TLS 1-RTT keys");
+        };
+        Self::from(keys)
     }
 }
 
@@ -397,7 +327,7 @@ impl OneRttKeys {
 
     /// Allocate the PN while the generation is fixed, then reserve one AEAD use.
     /// The returned key remains valid across later local and peer key updates.
-    pub(crate) fn reserve<T>(
+    pub fn reserve<T>(
         &self,
         allocate: impl FnOnce(u64) -> Result<T, PacketError>,
     ) -> Result<(T, OneRttSealingKey), PacketError> {
@@ -442,6 +372,8 @@ pub trait SealPacket {
     /// Fixed keys return (); 1-RTT keys return the sending generation and Key Phase.
     type Output;
 
+    fn tag_len(&self) -> usize;
+
     /// Protect the PN in pn_offset..body_offset and a reserved authentication tag.
     /// The caller supplies enough ciphertext/tag for a sample starting at pn_offset + 4.
     fn seal(
@@ -474,6 +406,10 @@ impl OpenPacket for qtls::DirectionalKeys {
 impl SealPacket for qtls::DirectionalKeys {
     type Output = ();
 
+    fn tag_len(&self) -> usize {
+        self.packet.tag_len()
+    }
+
     fn seal(
         &self,
         pn: u64,
@@ -500,6 +436,10 @@ impl SealPacket for qtls::DirectionalKeys {
 impl SealPacket for OneRttKeys {
     type Output = (u64, KeyPhaseBit);
 
+    fn tag_len(&self) -> usize {
+        OneRttKeys::tag_len(self)
+    }
+
     fn seal(
         &self,
         pn: u64,
@@ -515,6 +455,10 @@ impl SealPacket for OneRttKeys {
 
 impl SealPacket for OneRttSealingKey {
     type Output = (u64, KeyPhaseBit);
+
+    fn tag_len(&self) -> usize {
+        self.packet.tag_len()
+    }
 
     fn seal(
         &self,
@@ -628,7 +572,8 @@ fn open_with(
 
 #[cfg(test)]
 mod tests {
-    use futures::FutureExt;
+    use std::task::{Context, Poll};
+
     use qbase::{
         cid::ConnectionId,
         frame::PingFrame,
@@ -641,9 +586,8 @@ mod tests {
 
     fn ready() -> OneRttKeys {
         let ([client, _], _) = crate::tests::handshake();
-        let keys = ArcOneRttKeys::new_pending();
-        keys.install(client).unwrap();
-        keys.now_or_never().unwrap().unwrap()
+        let keys = ArcOneRttKeys::from(client);
+        keys.get().unwrap()
     }
     fn packet(
         pn: u64,
@@ -657,6 +601,7 @@ mod tests {
         let mut frames = Vec::new();
         packet.assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -673,69 +618,39 @@ mod tests {
     }
 
     #[test]
-    fn try_get_never_replaces_the_receive_waiter() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Wake(AtomicUsize);
-        impl futures::task::ArcWake for Wake {
-            fn wake_by_ref(this: &Arc<Self>) {
-                this.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let keys = ArcKeys::<u64>::new_pending();
-        assert_eq!(keys.try_get(), Ok(None));
-        let mut receiving = keys.clone();
-        let wake = Arc::new(Wake(AtomicUsize::new(0)));
-        let waker = futures::task::waker(wake.clone());
-        assert!(
-            Pin::new(&mut receiving)
-                .poll(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
-        assert_eq!(keys.try_get(), Ok(None));
-        assert_eq!(keys.try_get(), Ok(None));
-        keys.install(42).unwrap();
-        assert_eq!(wake.0.load(Ordering::Relaxed), 1);
-        assert_eq!(keys.try_get(), Ok(Some(42)));
-        assert_eq!(
-            Pin::new(&mut receiving).poll(&mut Context::from_waker(&waker)),
-            Poll::Ready(Ok(42))
-        );
+    fn snapshots_share_material_and_retirement() {
+        let material = Arc::new(vec![1, 2, 3]);
+        let keys = ArcKeys::new(material.clone());
+        let other = keys.clone();
+        let snapshot = keys.get().unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &material));
+        assert!(Arc::ptr_eq(&other.get().unwrap(), &material));
         keys.retire();
-        assert_eq!(keys.try_get(), Err(KeyRetired));
-        assert_eq!(
-            Pin::new(&mut receiving).poll(&mut Context::from_waker(&waker)),
-            Poll::Ready(Err(KeyRetired))
-        );
+        assert_eq!(keys.get(), Err(KeyRetired));
+        assert_eq!(other.get(), Err(KeyRetired));
+        assert_eq!(*snapshot, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
-    async fn one_rtt_wait_yields_shared_material_and_reports_retirement() {
-        let keys = ArcOneRttKeys::new_pending();
-        assert!(matches!(keys.try_get(), Ok(None)));
-        let mut waiting = keys.clone();
-        assert!(futures::poll!(&mut waiting).is_pending());
-        assert!(matches!(keys.try_get(), Ok(None)));
+    #[test]
+    fn one_rtt_snapshots_share_updates_and_retirement() {
         let ([client, _], _) = crate::tests::handshake();
-        keys.install(client).unwrap();
-        let material = waiting.await.unwrap();
-        let snapshot = keys.try_get().unwrap().unwrap();
+        let keys = ArcOneRttKeys::from(client);
+        let material = keys.get().unwrap();
+        let snapshot = keys.clone().get().unwrap();
         assert!(Arc::ptr_eq(&snapshot.packets, &material.packets));
-        let shared = keys.clone().await.unwrap();
         material.allow_update();
-        shared.update().unwrap();
+        snapshot.update().unwrap();
         assert_eq!(packet(0, &material).unwrap().generation, Some(1));
         keys.retire();
-        assert!(matches!(keys.try_get(), Err(KeyRetired)));
-        assert!(matches!(keys.await, Err(KeyRetired)));
+        assert!(matches!(keys.get(), Err(KeyRetired)));
     }
 
     #[test]
     fn seal_reports_the_phase_authenticated_in_the_header() {
         let (materials, _) = crate::tests::handshake();
         let [sending, receiving] = materials.map(|material| {
-            let keys = ArcOneRttKeys::new_pending();
-            keys.install(material).unwrap();
-            keys.now_or_never().unwrap().unwrap()
+            let keys = ArcOneRttKeys::from(material);
+            keys.get().unwrap()
         });
         sending.allow_update();
         let journal = ArcRcvdJournal::with_capacity(0, None);
@@ -789,11 +704,8 @@ mod tests {
     #[test]
     fn duplicate_packet_skips_aead() {
         let ([client, server], _) = crate::tests::handshake();
-        let sending = ArcOneRttKeys::new_pending();
-        sending.install(client).unwrap();
-        let bytes = packet(0, &sending.now_or_never().unwrap().unwrap())
-            .unwrap()
-            .into_buffer();
+        let sending = ArcOneRttKeys::from(client);
+        let bytes = packet(0, &sending.get().unwrap()).unwrap().into_buffer();
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0)
             .next()
             .unwrap()
@@ -826,12 +738,10 @@ mod tests {
     #[test]
     fn reserved_packet_keys_stay_bound_across_updates_and_reverse_encryption() {
         let ([client, server], _) = crate::tests::handshake();
-        let material = ArcOneRttKeys::new_pending();
-        material.install(client).unwrap();
-        let keys = material.now_or_never().unwrap().unwrap();
-        let peer = ArcOneRttKeys::new_pending();
-        peer.install(server).unwrap();
-        let peer = peer.now_or_never().unwrap().unwrap();
+        let material = ArcOneRttKeys::from(client);
+        let keys = material.get().unwrap();
+        let peer = ArcOneRttKeys::from(server);
+        let peer = peer.get().unwrap();
         let journal = ArcRcvdJournal::with_capacity(0, None);
         let open = |bytes: &[u8]| {
             let qbase::packet::Packet::Data(packet) =
@@ -904,13 +814,11 @@ mod tests {
     #[tokio::test]
     async fn key_updates_preserve_reordering_and_do_not_double_advance_sealing() {
         let ([client, server], _) = crate::tests::handshake();
-        let sending = ArcOneRttKeys::new_pending();
-        sending.install(client).unwrap();
-        let sending = sending.await.unwrap();
+        let sending = ArcOneRttKeys::from(client);
+        let sending = sending.get().unwrap();
         sending.allow_update();
-        let receiving = ArcOneRttKeys::new_pending();
-        receiving.install(server).unwrap();
-        let receiving = receiving.await.unwrap();
+        let receiving = ArcOneRttKeys::from(server);
+        let receiving = receiving.get().unwrap();
         receiving.allow_update();
         let client = sending.clone();
         let server = receiving.clone();
@@ -1000,13 +908,11 @@ mod tests {
     #[tokio::test]
     async fn peer_can_update_again_while_local_update_is_disallowed() {
         let ([client, server], _) = crate::tests::handshake();
-        let sending = ArcOneRttKeys::new_pending();
-        sending.install(client).unwrap();
-        let sending = sending.await.unwrap();
+        let sending = ArcOneRttKeys::from(client);
+        let sending = sending.get().unwrap();
         sending.allow_update();
-        let receiving = ArcOneRttKeys::new_pending();
-        receiving.install(server).unwrap();
-        let receiving = receiving.await.unwrap();
+        let receiving = ArcOneRttKeys::from(server);
+        let receiving = receiving.get().unwrap();
         receiving.allow_update();
         let client = sending.clone();
         let server = receiving.clone();
@@ -1089,13 +995,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn local_update_keeps_old_opening_until_peer_uses_the_new_pair() {
         let ([client, server], _) = crate::tests::handshake();
-        let sending = ArcOneRttKeys::new_pending();
-        sending.install(server).unwrap();
-        let sending = sending.await.unwrap();
+        let sending = ArcOneRttKeys::from(server);
+        let sending = sending.get().unwrap();
         sending.allow_update();
-        let receiving = ArcOneRttKeys::new_pending();
-        receiving.install(client).unwrap();
-        let receiving = receiving.await.unwrap();
+        let receiving = ArcOneRttKeys::from(client);
+        let receiving = receiving.get().unwrap();
         receiving.allow_update();
         let keys = receiving.clone();
         let journal = ArcRcvdJournal::with_capacity(0, None);
@@ -1152,7 +1056,7 @@ mod tests {
             .confidentiality_limit();
         keys.packets.lock().unwrap().sealed_count = limit - 1;
         assert!(
-            keys.reserve::<()>(|_| Err(PacketError::Blocked(qbase::net::tx::Signals::TRANSPORT)))
+            keys.reserve::<()>(|_| Err(PacketError::Blocked(Poll::Pending)))
                 .is_err()
         );
         keys.reserve(|_| Ok(())).unwrap();
@@ -1185,12 +1089,10 @@ mod tests {
     #[test]
     fn authentication_failures_enforce_the_integrity_limit() {
         let ([client, server], _) = crate::tests::handshake();
-        let sending = ArcOneRttKeys::new_pending();
-        sending.install(client).unwrap();
-        let sending = sending.now_or_never().unwrap().unwrap();
-        let receiving = ArcOneRttKeys::new_pending();
-        receiving.install(server).unwrap();
-        let receiving = receiving.now_or_never().unwrap().unwrap();
+        let sending = ArcOneRttKeys::from(client);
+        let sending = sending.get().unwrap();
+        let receiving = ArcOneRttKeys::from(server);
+        let receiving = receiving.get().unwrap();
         {
             let mut packets = receiving.packets.lock().unwrap();
             packets.failed_opened = packets.keys.back().unwrap().opening.integrity_limit() - 1;
@@ -1213,88 +1115,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retirement_wakes_a_pending_key_wait_and_cannot_be_reinstalled() {
-        let keys = ArcKeys::<()>::new_pending();
-        let waiting = keys.clone();
-        let task = tokio::spawn(waiting);
-        tokio::task::yield_now().await;
-        keys.retire();
-        assert_eq!(task.await.unwrap(), Err(KeyRetired));
-        assert_eq!(keys.try_get(), Err(KeyRetired));
-        assert!(keys.install(()).is_err());
-    }
-
-    #[tokio::test]
-    async fn retiring_pending_one_rtt_keys_wakes_the_waiter_with_key_retired() {
-        let keys = ArcOneRttKeys::new_pending();
-        let mut waiting = keys.clone();
-        let (entered, pending) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            assert!(futures::poll!(&mut waiting).is_pending());
-            entered.send(()).unwrap();
-            waiting.await
-        });
-        pending.await.unwrap();
-        keys.retire();
-        assert!(matches!(keys.try_get(), Err(KeyRetired)));
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), task)
-                .await
-                .unwrap()
-                .unwrap(),
-            Err(KeyRetired)
-        ));
-    }
-
-    #[test]
-    fn key_state_future_preserves_ready_material_and_reports_retirement() {
-        let material = Arc::new(vec![1, 2, 3]);
-        let mut state = KeyState::Pending;
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        assert!(Pin::new(&mut state).poll(&mut cx).is_pending());
-        assert!(Pin::new(&mut state).poll(&mut cx).is_pending());
-        state = KeyState::Ready(material.clone());
-        for _ in 0..2 {
-            let Poll::Ready(Ok(keys)) = Pin::new(&mut state).poll(&mut cx) else {
-                panic!()
-            };
-            assert!(Arc::ptr_eq(&material, &keys));
-        }
-        state = KeyState::Retired;
-        assert_eq!(
-            Pin::new(&mut state).poll(&mut cx),
-            Poll::Ready(Err(KeyRetired))
-        );
-    }
-
-    #[tokio::test]
-    async fn installing_keys_wakes_the_future_and_keeps_the_shared_material() {
-        let keys = ArcKeys::new_pending();
-        let mut waiting = keys.clone();
-        let (entered, pending) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            assert!(futures::poll!(&mut waiting).is_pending());
-            entered.send(()).unwrap();
-            waiting.await
-        });
-        pending.await.unwrap();
-        let material = Arc::new(vec![1, 2, 3]);
-        keys.install(material.clone()).unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&received, &material));
-        assert!(Arc::ptr_eq(&keys.clone().await.unwrap(), &material));
-        keys.retire();
-        assert_eq!(keys.await, Err(KeyRetired));
-    }
-
-    #[tokio::test]
     async fn sealing_does_not_wait_for_socket_submission() {
         let [(_client, transport, path), _] = crate::tests::pair(1);
-        let keys = transport.data.keys.clone().await.unwrap();
+        let keys = transport.data.keys.get().unwrap();
         let mut sender = crate::tests::Sender::new(keys.clone(), transport, path).unwrap();
         sender.heartbeat();
         assert!(sender.prepare().unwrap());

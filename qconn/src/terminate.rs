@@ -1,15 +1,15 @@
 //! Closing and Draining state for a connection.
 use std::{
     sync::{Arc, Mutex, MutexGuard},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use qbase::{
-    frame::ConnectionCloseFrame,
-    net::tx::{ArcSendWakers, Signals},
-    packet::{Package, PacketContent, Type},
+    frame::{ConnectionCloseFrame, Frame},
+    net::tx::ArcSendWakers,
+    packet::{ConstraintBuffer, Package, Type},
 };
-use qtransport::send::write::PacketWriter;
 use tokio::time::Instant;
 
 use crate::{CloseReason, Error};
@@ -42,11 +42,11 @@ pub(crate) struct Terminator {
 pub struct ArcTerminator(Arc<Mutex<Terminator>>);
 
 impl ArcTerminator {
-    pub(crate) fn normal(send_wakers: ArcSendWakers) -> Self {
+    pub(crate) fn normal() -> Self {
         Self(Arc::new(Mutex::new(Terminator {
             state: State::Normal,
             sync_msg: None,
-            send_wakers,
+            send_wakers: ArcSendWakers::default(),
         })))
     }
 
@@ -94,7 +94,7 @@ impl ArcTerminator {
         }
         let send_wakers = terminator.send_wakers.clone();
         drop(terminator);
-        send_wakers.wake_all_by(Signals::all());
+        send_wakers.wake_all();
     }
 
     /// Count one authenticated packet. Only Closing schedules another CLOSE response.
@@ -122,7 +122,7 @@ impl ArcTerminator {
             terminator.sync_msg = Some(frame);
             let send_wakers = terminator.send_wakers.clone();
             drop(terminator);
-            send_wakers.wake_all_by(Signals::TRANSPORT);
+            send_wakers.wake_all();
         }
     }
 
@@ -154,7 +154,7 @@ impl ArcTerminator {
         }
         let send_wakers = terminator.send_wakers.clone();
         drop(terminator);
-        send_wakers.wake_all_by(Signals::all());
+        send_wakers.wake_all();
     }
 
     pub(crate) fn terminate(&self) {
@@ -163,7 +163,7 @@ impl ArcTerminator {
         terminator.sync_msg = None;
         let send_wakers = terminator.send_wakers.clone();
         drop(terminator);
-        send_wakers.wake_all_by(Signals::all());
+        send_wakers.wake_all();
     }
 
     /// Wait for the deadline of the state observed by this sole waiter.
@@ -186,23 +186,45 @@ impl ArcTerminator {
     }
 }
 
-impl Package<PacketWriter<'_>> for &ArcTerminator {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
+impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
         let mut terminator = self.lock_guard();
-        let Some(frame) = terminator.sync_msg.as_ref() else {
-            return Err(Signals::empty());
-        };
-        let mut frame = if matches!(packet.packet_type(), Type::Long(_)) {
-            match frame {
-                ConnectionCloseFrame::App(frame) => ConnectionCloseFrame::Quic(frame.conceal()),
-                ConnectionCloseFrame::Quic(_) => frame.clone(),
+        if matches!(terminator.state, State::Draining { .. } | State::Terminated) {
+            return Poll::Ready(Err(qbase::error::QuicError::with_default_fty(
+                qbase::error::ErrorKind::None,
+                "connection terminated",
+            )
+            .into()));
+        }
+        let Some(frame) = &terminator.sync_msg else {
+            if matches!(terminator.state, State::Closing { .. }) {
+                buffer.limits.set_max_size(0);
             }
-        } else {
-            frame.clone()
+            terminator.send_wakers.register(cx.waker());
+            return Poll::Pending;
         };
-        let content = frame.dump(packet)?;
-        terminator.sync_msg = None;
-        Ok(content)
+        let mut frame = match (buffer.packet_type, frame) {
+            (Type::Long(_), ConnectionCloseFrame::App(frame)) => {
+                ConnectionCloseFrame::Quic(frame.conceal())
+            }
+            (_, frame) => frame.clone(),
+        };
+        let result = frame.poll_dump(cx, buffer, frames);
+        if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+            terminator.sync_msg = None;
+        } else {
+            buffer.limits.set_max_size(0);
+        }
+        result
+    }
+
+    fn cancel(&mut self, waker: &Waker) {
+        self.lock_guard().send_wakers.cancel(waker);
     }
 }
 
@@ -213,7 +235,6 @@ mod tests {
     use qbase::{
         error::{ErrorKind, QuicError},
         frame::ConnectionCloseFrame,
-        net::tx::ArcSendWakers,
     };
     use tokio::time::Instant;
 
@@ -232,8 +253,56 @@ mod tests {
     }
 
     #[test]
+    fn closing_without_a_written_frame_preserves_send_budget() {
+        use std::task::{Context, Poll, Waker};
+
+        use qbase::packet::{ConstraintBuffer, Constraints, GetType, Limit, OneRttHeader, Package};
+
+        for (pending, overhead) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
+            let terminator = ArcTerminator::normal();
+            terminator.on_error(&local_reason(), Duration::from_secs(3));
+            if pending {
+                terminator.lock_guard().sync_msg.take();
+            }
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: 2400,
+                credit: 2400,
+                min_size: 0,
+                max_size: 1 + overhead,
+                overhead,
+                ..Default::default()
+            };
+            let mut bytes = bytes::BytesMut::new();
+            let mut frames = Vec::new();
+            let mut buffer = ConstraintBuffer::new(
+                &mut bytes,
+                &mut limits,
+                OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                0,
+                0,
+            );
+            let result = (&terminator).poll_dump(
+                &mut Context::from_waker(Waker::noop()),
+                &mut buffer,
+                &mut frames,
+            );
+            if pending {
+                assert!(result.is_pending());
+            } else {
+                assert!(matches!(result, Poll::Ready(Ok(0))));
+                assert!(terminator.lock_guard().sync_msg.is_some());
+            }
+            assert!(frames.is_empty());
+            assert_eq!(limits.send_quota, 2400);
+            assert_eq!(limits.credit, 2400);
+            assert_eq!(limits.max_size(), 0);
+        }
+    }
+
+    #[test]
     fn closing_sends_immediately_and_again_after_five_packets() {
-        let terminator = ArcTerminator::normal(ArcSendWakers::new());
+        let terminator = ArcTerminator::normal();
         let duration = Duration::from_secs(3);
         terminator.on_error(&local_reason(), duration);
         assert!(terminator.lock_guard().sync_msg.take().is_some());
@@ -248,7 +317,7 @@ mod tests {
 
     #[test]
     fn closing_sends_again_when_a_later_packet_crosses_the_time_threshold() {
-        let terminator = ArcTerminator::normal(ArcSendWakers::new());
+        let terminator = ArcTerminator::normal();
         let duration = Duration::from_secs(3);
         terminator.on_error(&local_reason(), duration);
         assert!(terminator.lock_guard().sync_msg.take().is_some());
@@ -259,7 +328,7 @@ mod tests {
 
     #[test]
     fn direct_peer_close_enters_draining_with_one_sync_message() {
-        let terminator = ArcTerminator::normal(ArcSendWakers::new());
+        let terminator = ArcTerminator::normal();
         let frame = close_frame("peer");
         terminator.on_rcvd_close_connection_frame(frame.clone(), Duration::from_secs(3));
         assert_eq!(terminator.lock_guard().sync_msg.take(), Some(frame));
@@ -268,7 +337,7 @@ mod tests {
 
     #[test]
     fn peer_close_during_closing_discards_the_local_sync_message() {
-        let terminator = ArcTerminator::normal(ArcSendWakers::new());
+        let terminator = ArcTerminator::normal();
         terminator.on_error(&local_reason(), Duration::from_secs(3));
         terminator.on_rcvd_close_connection_frame(close_frame("peer"), Duration::from_secs(3));
         assert!(terminator.lock_guard().sync_msg.take().is_none());
@@ -276,7 +345,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn wait_uses_the_initial_deadline_without_a_notification() {
-        let terminator = ArcTerminator::normal(ArcSendWakers::new());
+        let terminator = ArcTerminator::normal();
         let duration = Duration::from_secs(30);
         terminator.on_error(&local_reason(), duration);
         let waiter = tokio::spawn({

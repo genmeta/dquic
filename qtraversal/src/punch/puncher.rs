@@ -5,6 +5,7 @@ use std::{
     ops::Deref,
     str::FromStr,
     sync::{Arc, Mutex},
+    task::Poll,
     time::Duration,
 };
 
@@ -19,12 +20,10 @@ use qbase::{
         NatType,
         addr::EndpointAddr,
         route::{Line, Link, Pathway, Route},
-        tx::Signals,
     },
     packet::{
-        Package, PacketSpace, ProductHeader,
-        header::short::OneRttHeader,
-        io::{AssemblePacket, Packages, PadTo20},
+        Assemble, Package, PacketSpace, ProductHeader, header::short::OneRttHeader,
+        io::AssemblePacket,
     },
 };
 use qevent::telemetry::Instrument;
@@ -315,22 +314,34 @@ where
         iface: &(impl IO + ?Sized),
         link: Link,
         ttl: u8,
-        packages: P,
+        mut packages: P,
     ) -> io::Result<()>
     where
-        P: for<'b> Package<S::PacketAssembler<'b>>,
-        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
+        P: for<'b> Package<<S::PacketAssembler<'b> as Assemble<1>>::Buffer>,
     {
         let mut buffer = [0; 128];
-        let sent_bytes = (|| {
+        let sent_bytes = {
             let mut packet = self
                 .packet_space
-                .new_packet(self.product_header.new_header()?, &mut buffer)?;
-            packet.assemble_packet(&mut Packages((packages, PadTo20)))?;
-            let (sent_bytes, _props) = packet.encrypt_and_protect_packet();
-            Result::<_, Signals>::Ok(sent_bytes)
-        })()
-        .map_err(|s| io::Error::other(format!("Failed to assemble packet: {s:?}")))?;
+                .new_packet(
+                    self.product_header
+                        .new_header()
+                        .map_err(|s| io::Error::other(format!("header unavailable: {s:?}")))?,
+                    &mut buffer,
+                )
+                .map_err(|s| io::Error::other(format!("packet unavailable: {s:?}")))?;
+            let mut frames = Vec::new();
+            match packet.assemble(
+                &mut std::task::Context::from_waker(std::task::Waker::noop()),
+                [&mut packages],
+                &mut frames,
+            ) {
+                Poll::Ready(Ok(n)) if n > 0 => {}
+                Poll::Ready(Err(error)) => return Err(io::Error::other(error)),
+                _ => return Err(io::Error::other("punch frame did not fit")),
+            }
+            packet.encrypt_and_protect_packet().0
+        };
 
         let line = Line::new(link, ttl, None, sent_bytes as u16);
         let route = Route::new(link.into(), line);
@@ -344,10 +355,7 @@ where
         iface: &(impl IO + ?Sized),
         link: Link,
         frame: PunchDoneFrame,
-    ) where
-        PunchDoneFrame: for<'b> Package<S::PacketAssembler<'b>>,
-        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
-    {
+    ) {
         for attempt in 0..PUNCH_DONE_CONFIRM_RETRIES {
             if let Err(error) = self.send_packet(iface, link, HELLO_TTL, frame).await {
                 tracing::debug!(target: "punch", %link, ?error, "failed to send direct PunchDone confirmation");
@@ -364,11 +372,7 @@ where
         link: Link,
         punch_id: PunchId,
         ttl: u8,
-    ) -> io::Result<()>
-    where
-        PadTo20: for<'b> Package<S::PacketAssembler<'b>>,
-        PunchHelloFrame: for<'b> Package<S::PacketAssembler<'b>>,
-    {
+    ) -> io::Result<()> {
         tracing::debug!(target: "punch", %punch_id, %link, ttl, "starting collision attack");
         let mut random_ports = HashSet::new();
         let dst = link.dst;
@@ -478,9 +482,6 @@ where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
     PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-    for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
 {
     pub fn add_local_address(
         &self,
@@ -1731,9 +1732,6 @@ where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
     PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-    for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
 {
     type Output = ();
 
@@ -1778,9 +1776,6 @@ where
     TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
     PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
     S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-    for<'b> PunchDoneFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PunchHelloFrame: Package<S::PacketAssembler<'b>>,
-    for<'b> PadTo20: Package<S::PacketAssembler<'b>>,
 {
     type Output = ();
 

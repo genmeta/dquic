@@ -3,10 +3,10 @@ use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
     ops::Range,
+    task::Poll,
 };
 
 use bytes::Bytes;
-use qbase::net::tx::Signals;
 
 /// To indicate the state of a data segment, it is colored.
 #[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
@@ -121,11 +121,11 @@ impl BufMap {
         predicate: P,
         flow_limit: usize,
         send_window_size: u64,
-    ) -> Result<(Range<u64>, bool), Signals>
+    ) -> Result<(Range<u64>, bool), Poll<()>>
     where
         P: Fn(u64) -> Option<usize>,
     {
-        let mut signals = Signals::WRITTEN | Signals::TRANSPORT;
+        let mut availability = Poll::Pending;
         // 先找到第一个能发送的区间，并将该区间染成Flight，返回原State
         self.0
             .iter_mut()
@@ -133,16 +133,13 @@ impl BufMap {
             .find(|(.., state)| {
                 if state.offset() >= send_window_size {
                     // 如果offset已经超过了发送窗口大小，说明该区间不能被发送
-                    signals |= Signals::FLOW_CONTROL;
+                    availability = Poll::Ready(());
                     return false;
                 }
                 // 选择Pending的区间（如果流控允许），或者选择Lost的区间
                 match state.color() {
                     Color::Pending if flow_limit != 0 => return true,
-                    Color::Pending => {
-                        signals &= !Signals::WRITTEN;
-                        signals |= Signals::FLOW_CONTROL
-                    }
+                    Color::Pending => availability = Poll::Ready(()),
                     Color::Lost => return true,
                     _ => {}
                 }
@@ -152,7 +149,7 @@ impl BufMap {
                 // 如果区间的offset不符合predicate，就不发送这一段
                 // 其实选择到的第一段数据数据的offset已经是最小的了，如果最小的offset都不能发送，那么后面片段肯定也不能发送
                 let Some(available) = predicate(state.offset()) else {
-                    signals |= Signals::CONGESTION;
+                    availability = Poll::Ready(());
                     return None;
                 };
 
@@ -199,7 +196,7 @@ impl BufMap {
                 }
                 (start..end, color == Color::Pending)
             })
-            .ok_or(signals)
+            .ok_or(availability)
     }
 
     // 收到了ack确认，确认的数据不需再发送，对于头部连续确认的数据，就可以删掉。
@@ -696,7 +693,7 @@ impl SendBuf {
     /// * `bool`: whether the data is new(not retransmitted).
     /// * `(&[u8], &[u8])`: the data picked up, duo to the internal buffer is a ring buffer, the data
     ///   picked up is in two parts, the begin of the second slice are the end of the first slice
-    pub fn pick_up<P>(&mut self, predicate: P, flow_limit: usize) -> Result<Data<'_>, Signals>
+    pub fn pick_up<P>(&mut self, predicate: P, flow_limit: usize) -> Result<Data<'_>, Poll<()>>
     where
         P: Fn(u64) -> Option<usize>,
     {
@@ -776,7 +773,7 @@ impl SendBuf {
 
 #[cfg(test)]
 mod tests {
-    use qbase::net::tx::Signals;
+    use std::task::Poll;
 
     use super::{BufMap, Color, State};
 
@@ -827,7 +824,7 @@ mod tests {
     fn test_bufmap_pick() {
         let mut buf_map = BufMap::default();
         let range = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX);
-        assert_eq!(range, Err(Signals::TRANSPORT | Signals::WRITTEN));
+        assert_eq!(range, Err(Poll::Pending));
         assert!(buf_map.0.is_empty());
 
         buf_map.extend_to(200);

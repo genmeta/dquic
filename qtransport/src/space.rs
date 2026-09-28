@@ -1,19 +1,15 @@
 //! Packet-number spaces and recovery feedback. No parent connection back-reference.
 use std::sync::{Arc, Mutex};
 
-use qbase::{
-    Epoch,
-    error::{ErrorKind, QuicError},
-    net::tx::{ArcSendWakers, Signals},
-};
+use qbase::Epoch;
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
 use tokio::time::Instant;
 
 use crate::{
     GuaranteedFrame,
+    journal::ArcSendJournal,
     keys::{ArcKeys, ArcOneRttKeys},
-    send::records::ArcSendJournal,
 };
 
 #[derive(Default)]
@@ -71,71 +67,35 @@ pub struct Space<K> {
     pub crypto: CryptoStream,
     pub send_journal: ArcSendJournal,
     pub rcvd_journal: ArcRcvdJournal,
-    pub send_wakers: ArcSendWakers,
 }
 
-impl<K: Default> Space<K> {
-    /// Create pending keys and the CRYPTO stream together. CRYPTO loss is recovered
+impl<K> Space<K> {
+    /// Create a space with ready keys. CRYPTO loss is recovered
     /// internally; on_loss only receives the remaining frame owners.
     pub fn new(
         epoch: Epoch,
-        send_wakers: ArcSendWakers,
+        keys: K,
         on_loss: impl Fn(&GuaranteedFrame) + Send + Sync + 'static,
     ) -> Self {
-        let crypto = CryptoStream::new(send_wakers.clone());
+        let crypto = CryptoStream::new();
         let outgoing = crypto.outgoing();
         Self {
             epoch,
-            keys: K::default(),
+            keys,
             crypto,
             send_journal: ArcSendJournal::new(move |frame| match frame {
                 GuaranteedFrame::Crypto(frame) => outgoing.may_loss_data(frame),
                 frame => on_loss(frame),
             }),
             rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
-            send_wakers,
         }
-    }
-}
-
-impl Space<ArcKeys> {
-    pub fn install_initial_keys(&self, keys: qtls::BidirectionalKeys) -> Result<(), crate::Error> {
-        self.keys.install(Arc::new(keys))?;
-        self.send_wakers.wake_all_by(Signals::KEYS);
-        Ok(())
-    }
-
-    pub fn install_hs_keys(&self, keys: qtls::InstalledKeys) -> Result<(), crate::Error> {
-        let qtls::InstalledKeys::Handshake(keys) = keys else {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "expected TLS Handshake keys",
-            )
-            .into());
-        };
-        self.install_initial_keys(keys)
-    }
-}
-
-impl Space<ArcOneRttKeys> {
-    pub fn install_1rtt_keys(&self, keys: qtls::InstalledKeys) -> Result<(), crate::Error> {
-        let qtls::InstalledKeys::OneRtt(keys) = keys else {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "expected TLS 1-RTT keys",
-            )
-            .into());
-        };
-        self.keys.install(keys)?;
-        self.send_wakers.wake_all_by(Signals::KEYS);
-        Ok(())
     }
 }
 
 impl<K: Clone> Space<ArcKeys<K>> {
     /// Notify the same frame owners as CC loss feedback, independent of path lifetime.
     pub fn on_tick(&self, now: Instant) {
-        if self.keys.try_get().is_ok() {
+        if self.keys.get().is_ok() {
             self.send_journal
                 .on_tick(now, |frame| self.send_journal.recover(frame));
         }
@@ -146,16 +106,6 @@ impl<K: Clone> Space<ArcKeys<K>> {
         self.keys.retire();
         self.crypto.sender.retire();
         self.crypto.recver.retire();
-    }
-}
-
-impl Space<ArcOneRttKeys> {
-    /// Notify frame owners while Data packet keys remain live.
-    pub fn on_tick(&self, now: Instant) {
-        if self.keys.try_get().is_ok() {
-            self.send_journal
-                .on_tick(now, |frame| self.send_journal.recover(frame));
-        }
     }
 }
 
@@ -188,10 +138,9 @@ mod tests {
 
         let recovered = Arc::new(AtomicUsize::new(0));
         let counter = recovered.clone();
-        let space = Space::<ArcKeys<()>>::new(Epoch::Data, Default::default(), move |_| {
+        let space = Space::new(Epoch::Data, ArcKeys::new(()), move |_| {
             counter.fetch_add(1, Ordering::Relaxed);
         });
-        space.keys.install(()).unwrap();
         feedback.start(space.send_journal.clone());
         let first = record(&space.send_journal);
         paths[0].may_loss(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());

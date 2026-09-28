@@ -31,10 +31,10 @@ pub use listener::{AcceptBiStream, AcceptUniStream};
 use qbase::{
     error::Error,
     frame::{
-        StreamCtlFrame, StreamFrame,
+        Frame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
+    packet::{ConstraintBuffer, Package},
     param::{ArcParameters, core::Parameters},
     role::Role,
     sid::{ControlStreamsConcurrency, StreamId},
@@ -92,7 +92,6 @@ where
         remote_params: &Parameters<RR>,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
-        tx_wakers: ArcSendWakers,
         metrics: Option<qbase::metric::ArcConnectionMetrics>,
     ) -> Self {
         Self(Arc::new(raw::DataStreams::new(
@@ -101,7 +100,6 @@ where
             remote_params,
             ctrl,
             ctrl_frames,
-            tx_wakers,
             metrics,
         )))
     }
@@ -211,5 +209,22 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.streams.poll_open_uni_stream(cx, self.params)
+    }
+}
+
+impl<TX, B: bytes::BufMut + ?Sized> Package<B> for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        self.0.poll_dump(cx, buffer, frames)
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        self.0.cancel(waker);
     }
 }

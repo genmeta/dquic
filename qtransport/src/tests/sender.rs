@@ -1,5 +1,4 @@
 //! Component wiring for the established-connection integration tests.
-use qbase::packet::io::Repeat;
 use qcongestion::Transport as _;
 use qprotocol::protocol::quic::QuicProtocol;
 
@@ -24,10 +23,6 @@ impl Sender {
         transport: Arc<Transport>,
         path: Arc<Path>,
     ) -> Result<Self, Error> {
-        transport
-            .data
-            .send_wakers
-            .replace(path.pathway, &path.send_waker);
         let inner = PacketSender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone());
         Ok(Self {
             inner,
@@ -105,10 +100,6 @@ impl Sender {
 impl Drop for Sender {
     fn drop(&mut self) {
         self.inner.cancel_pending();
-        self.transport
-            .data
-            .send_wakers
-            .remove_if(&self.path.pathway, &self.path.send_waker);
     }
 }
 
@@ -144,15 +135,28 @@ pub(crate) fn assemble_data(
     let mut challenge = path.challenge();
     let mut crypto = transport.data.crypto.outgoing();
     let mut reliable = transport.reliable_frames.clone();
-    let mut streams = Repeat(
-        transport
-            .streams
-            .package(transport.flow.sender.clone(), false),
-    );
+    let mut streams = transport.streams.clone();
+    let mut credit = transport.flow.sender.credit(streams.fresh_bytes())?;
+    constraints.flow_ctrl.set(credit.available());
+    for packet in sender.pending() {
+        if packet.epoch() == Epoch::Data
+            && packet
+                .largest_acked
+                .is_some_and(|pn| ack.as_ref().is_some_and(|ack| pn >= ack.largest()))
+        {
+            ack = None;
+        }
+        if packet.response == response {
+            response = None;
+        }
+        if packet.challenge == challenge {
+            challenge = None;
+        }
+    }
     let mut ping =
         (heartbeat || path.cc.need_send_ack_eliciting(Epoch::Data) != 0).then_some(PingFrame);
-    let header = OneRttHeader::new(Default::default(), path.dcid());
-    if heartbeat {
+    let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
+    let result = if heartbeat {
         sender.assemble_1rtt_packet(
             keys,
             header,
@@ -184,5 +188,7 @@ pub(crate) fn assemble_data(
                 &mut streams,
             ],
         )
-    }
+    };
+    credit.post_sent(credit.available() - constraints.flow_ctrl.get());
+    result
 }

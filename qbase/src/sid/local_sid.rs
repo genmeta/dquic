@@ -10,7 +10,7 @@ use crate::{
         MaxStreamsFrame, StreamsBlockedFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::{ArcSendWakers, Signals},
+    net::tx::ArcSendWakers,
     sid::MAX_STREAMS_LIMIT,
     varint::VarInt,
 };
@@ -81,7 +81,7 @@ where
         if *max_streams < val {
             // The rejected 0rtt stream can be sent again, as if new data was written.
             if *max_streams < self.unallocated[dir as usize] {
-                self.tx_wakers.wake_all_by(Signals::WRITTEN);
+                self.tx_wakers.wake_all();
             }
             for waker in self.wakers[dir as usize].drain(..) {
                 waker.wake();
