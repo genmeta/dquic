@@ -1,6 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
+    task::{Context, Poll},
 };
 
 use crate::{
@@ -9,7 +10,7 @@ use crate::{
         DataBlockedFrame, FrameType, MaxDataFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::{ArcSendWakers, Signals},
+    net::tx::ArcSendWakers,
     varint::VarInt,
 };
 
@@ -28,13 +29,13 @@ struct SendControler<TX> {
 }
 
 impl<TX> SendControler<TX> {
-    fn new(initial_max_data: u64, broker: TX, tx_wakers: ArcSendWakers) -> Self {
+    fn new(initial_max_data: u64, broker: TX) -> Self {
         Self {
             sent_data: 0,
             max_data: initial_max_data,
             flow_limited: false,
             broker,
-            tx_wakers,
+            tx_wakers: ArcSendWakers::default(),
         }
     }
 
@@ -42,7 +43,7 @@ impl<TX> SendControler<TX> {
         if max_data > self.max_data {
             self.max_data = max_data;
             self.flow_limited = false;
-            self.tx_wakers.wake_all_by(Signals::FLOW_CONTROL);
+            self.tx_wakers.wake_all();
         }
     }
 
@@ -68,7 +69,7 @@ impl<TX> SendControler<TX> {
     fn return_back(&mut self, flow: u64) {
         self.sent_data -= flow;
         if self.avaliable() > 0 {
-            self.tx_wakers.wake_all_by(Signals::FLOW_CONTROL);
+            self.tx_wakers.wake_all();
         }
     }
 
@@ -115,11 +116,10 @@ impl<TX> ArcSendControler<TX> {
     ///
     /// `initial_max_data` is allowed to be 0, which is reasonable when creating a
     /// connection without knowing the peer's `iniitial_max_data` setting.
-    pub fn new(initial_max_data: u64, broker: TX, tx_wakers: ArcSendWakers) -> Self {
+    pub fn new(initial_max_data: u64, broker: TX) -> Self {
         Self(Arc::new(Mutex::new(Ok(SendControler::new(
             initial_max_data,
             broker,
-            tx_wakers,
         )))))
     }
 
@@ -157,6 +157,26 @@ impl<TX> ArcSendControler<TX> {
         }
     }
 
+    pub fn poll_credit(
+        &self,
+        cx: &mut Context<'_>,
+        quota: usize,
+    ) -> Poll<Result<Credit<'_, TX>, Error>>
+    where
+        TX: SendFrame<DataBlockedFrame>,
+    {
+        if let Ok(inner) = self.0.lock().unwrap().as_ref() {
+            inner.tx_wakers.register(cx.waker());
+        }
+        Poll::Ready(self.credit(quota))
+    }
+
+    pub fn cancel(&self, waker: &std::task::Waker) {
+        if let Ok(inner) = self.0.lock().unwrap().as_ref() {
+            inner.tx_wakers.cancel(waker);
+        }
+    }
+
     pub fn revise_max_data(&self, zero_rtt_rejected: bool, max_data: u64) {
         if let Ok(inner) = self.0.lock().unwrap().deref_mut() {
             inner.revise_max_data(zero_rtt_rejected, max_data);
@@ -169,6 +189,9 @@ impl<TX> ArcSendControler<TX> {
         let mut guard = self.0.lock().unwrap();
         if guard.deref().is_err() {
             return;
+        }
+        if let Ok(inner) = guard.as_ref() {
+            inner.tx_wakers.wake_all();
         }
         *guard = Err(error.clone());
     }
@@ -344,14 +367,9 @@ impl<TX: Clone> FlowController<TX> {
     /// Unfortunately, at the beginning, the peer's `initial_max_data` is unknown.
     /// Therefore, peer's `initial_max_data` can be set to 0 initially,
     /// and then updated later after obtaining the peer's `initial_max_data` setting.
-    pub fn new(
-        peer_initial_max_data: u64,
-        local_initial_max_data: u64,
-        broker: TX,
-        tx_wakers: ArcSendWakers,
-    ) -> Self {
+    pub fn new(peer_initial_max_data: u64, local_initial_max_data: u64, broker: TX) -> Self {
         Self {
-            sender: ArcSendControler::new(peer_initial_max_data, broker.clone(), tx_wakers),
+            sender: ArcSendControler::new(peer_initial_max_data, broker.clone()),
             recver: ArcRecvController::new(local_initial_max_data, broker),
         }
     }
@@ -414,7 +432,7 @@ mod tests {
     #[test]
     fn test_send_controler() {
         let broker = SendControllerBroker::default();
-        let controler = ArcSendControler::new(0, broker.clone(), Default::default());
+        let controler = ArcSendControler::new(0, broker.clone());
         controler.increase_limit(100);
         let mut credit = controler.credit(200).unwrap();
         assert_eq!(credit.available(), 100);

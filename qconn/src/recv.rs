@@ -153,12 +153,12 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
             path.activity
                 .on_rcvd(qbase::packet::PacketContent::default());
             if let Some(dcid) = initial_scid.get() {
-                path.set_dcid(*dcid);
+                processed_paths.phase().set_dcid(*dcid);
             }
             if role == Role::Client || epoch == Epoch::Handshake {
                 processed_paths.select_path(path);
             }
-            if epoch == Epoch::Handshake && (role == Role::Server || path.is_selected()) {
+            if epoch == Epoch::Handshake && processed_paths.is_handshake_path(path) {
                 path.validate();
             }
             Ok(())
@@ -361,6 +361,9 @@ pub(crate) async fn tick(
             }
         }
         let active_paths = paths.snapshot();
+        for path in &active_paths {
+            path.activity.on_tick(now);
+        }
         let pto = active_paths
             .iter()
             .map(|p| p.cc.pto_base(Epoch::Data))
@@ -382,7 +385,7 @@ pub(crate) async fn tick(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{task::Poll, time::Duration};
 
     use bytes::BytesMut;
     use qbase::{
@@ -392,10 +395,7 @@ mod tests {
         packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
         time::ArcConnIdle,
     };
-    use qtransport::{
-        packet::CipherPacket,
-        send::{self, constraints::Constraints, records::ArcSendJournal},
-    };
+    use qtransport::{journal::ArcSendJournal, packet::CipherPacket};
 
     use super::*;
     use crate::{ArcConnPhase, InitialPhase};
@@ -418,6 +418,43 @@ mod tests {
             .into()
     }
 
+    fn seal<H, const N: usize>(
+        header: H,
+        keys: &qtls::DirectionalKeys,
+        journal: &ArcSendJournal,
+        sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
+    ) -> Result<BytesMut, crate::Error>
+    where
+        H: qbase::packet::HeaderSize + qbase::packet::GetType,
+        for<'a> &'a mut BytesMut: qbase::packet::header::io::WriteHeader<H>,
+    {
+        use qbase::packet::assemble::Assemble;
+        let mut buffer = BytesMut::with_capacity(1200);
+        let pn = journal.next_pn().unwrap();
+        let packet = crate::send::Packet::new(header, pn, &mut buffer)?;
+        let mut limits = qbase::packet::assemble::Constraints {
+            flow_ctrl: usize::MAX,
+            send_quota: 1200,
+            credit: 1200,
+            min_size: 1200,
+            max_size: 1200,
+            ..Default::default()
+        };
+        let mut packet = crate::send::SendingPacket {
+            packet,
+            keys,
+            limits: &mut limits,
+        };
+        let mut frames = Vec::new();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), Poll::Ready(Ok(n)) if n > 0)
+        );
+        packet.seal()?;
+        journal.on_sent(pn.0, frames.drain(..));
+        Ok(buffer)
+    }
+
     async fn receive_ping(
         role: Role,
         epoch: Epoch,
@@ -427,61 +464,23 @@ mod tests {
     ) {
         let space = Arc::new(Space::<ArcKeys>::new(
             epoch,
-            paths.phase().send_wakers(),
+            ArcKeys::new(Arc::new(keys(role == Role::Server))),
             |_| {},
         ));
-        space
-            .keys
-            .install(Arc::new(keys(role == Role::Server)))
-            .unwrap();
-        let mut buffers = vec![BytesMut::with_capacity(1200)];
-        let mut send_frames = Vec::new();
-        let mut pns = std::collections::VecDeque::new();
-        let mut signals = qbase::net::tx::Signals::empty();
         let keys = keys(role != Role::Server);
         let header = LongHeaderBuilder::with_cid(
             ConnectionId::from_slice(b"localcid"),
             ConnectionId::from_slice(b"peercid0"),
         );
-        let constraints = Constraints {
-            capacity: 1200,
-            congestion: 1200,
-            anti_amplification: 1200,
-        };
         let journal = ArcSendJournal::default();
         let mut ping = PingFrame;
         let packet = if epoch == Epoch::Initial {
-            send::assemble_long_packet(
-                path.pathway,
-                &path.cc,
-                &mut buffers,
-                &mut send_frames,
-                &mut pns,
-                &mut signals,
-                &keys.sealing,
-                header.initial(vec![]),
-                &journal,
-                &constraints,
-                [&mut ping],
-            )
+            seal(header.initial(vec![]), &keys.sealing, &journal, [&mut ping])
         } else {
-            send::assemble_long_packet(
-                path.pathway,
-                &path.cc,
-                &mut buffers,
-                &mut send_frames,
-                &mut pns,
-                &mut signals,
-                &keys.sealing,
-                header.handshake(),
-                &journal,
-                &constraints,
-                [&mut ping],
-            )
+            seal(header.handshake(), &keys.sealing, &journal, [&mut ping])
         }
-        .unwrap()
         .unwrap();
-        let mut bytes = BytesMut::from(packet.bytes());
+        let mut bytes = BytesMut::from(packet.as_ref());
         if corrupt {
             let last = bytes.len() - 1;
             bytes[last] ^= 1;
@@ -576,13 +575,33 @@ mod tests {
     async fn client_selects_authenticated_initial_or_handshake_instead_of_first_added_path() {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             let (paths, first, second) = paths(Role::Client);
-            assert!(!first.is_selected() && !second.is_selected());
+            let original_dcid = paths.phase().get().dcid();
+            assert_eq!(
+                (first.selected(), second.selected()),
+                (Path::MP_INITIAL, Path::MP_INITIAL)
+            );
             receive_ping(Role::Client, epoch, true, &paths, &first).await;
-            assert!(!first.is_selected() && !second.is_selected());
+            assert_eq!(
+                (first.selected(), second.selected()),
+                (Path::MP_INITIAL, Path::MP_INITIAL)
+            );
+            assert_eq!(paths.phase().get().dcid(), original_dcid);
             receive_ping(Role::Client, epoch, false, &paths, &second).await;
-            assert!(!first.is_selected() && second.is_selected());
+            assert_eq!(
+                (first.selected(), second.selected()),
+                (Path::SUSPEND, Path::SELECTED)
+            );
+            if epoch == Epoch::Initial {
+                assert_eq!(
+                    paths.phase().get().dcid(),
+                    ConnectionId::from_slice(b"peercid0")
+                );
+            }
             receive_ping(Role::Client, epoch, false, &paths, &first).await;
-            assert!(!first.is_selected() && second.is_selected());
+            assert_eq!(
+                (first.selected(), second.selected()),
+                (Path::SUSPEND, Path::SELECTED)
+            );
             paths.retire_all();
         }
     }
@@ -591,11 +610,20 @@ mod tests {
     async fn server_initial_does_not_select_but_authenticated_handshake_does() {
         let (paths, first, second) = paths(Role::Server);
         receive_ping(Role::Server, Epoch::Initial, false, &paths, &first).await;
-        assert!(!first.is_selected() && !second.is_selected());
+        assert_eq!(
+            (first.selected(), second.selected()),
+            (Path::MP_INITIAL, Path::MP_INITIAL)
+        );
         receive_ping(Role::Server, Epoch::Handshake, true, &paths, &first).await;
-        assert!(!first.is_selected() && !second.is_selected());
+        assert_eq!(
+            (first.selected(), second.selected()),
+            (Path::MP_INITIAL, Path::MP_INITIAL)
+        );
         receive_ping(Role::Server, Epoch::Handshake, false, &paths, &second).await;
-        assert!(!first.is_selected() && second.is_selected());
+        assert_eq!(
+            (first.selected(), second.selected()),
+            (Path::SUSPEND, Path::SELECTED)
+        );
         paths.retire_all();
     }
     #[tokio::test]
@@ -606,16 +634,11 @@ mod tests {
         let (paths, first, second) = paths(Role::Server);
         let space = Arc::new(Space::<ArcKeys>::new(
             Epoch::Initial,
-            paths.phase().send_wakers(),
+            ArcKeys::new(Arc::new(keys(true))),
             |_| {},
         ));
         let server_keys = keys(true);
-        space.keys.install(Arc::new(keys(true))).unwrap();
         first.validate();
-        let mut buffers = vec![BytesMut::with_capacity(1200)];
-        let mut send_frames = Vec::new();
-        let mut pns = std::collections::VecDeque::new();
-        let mut signals = qbase::net::tx::Signals::empty();
         let header = || {
             LongHeaderBuilder::with_cid(
                 ConnectionId::from_slice(b"peercid0"),
@@ -628,45 +651,24 @@ mod tests {
             .write_all(b"server hello")
             .await
             .unwrap();
-        let constraints = Constraints {
-            capacity: 1200,
-            congestion: 2400,
-            anti_amplification: 2400,
-        };
         let mut ping = PingFrame;
-        let packet = send::assemble_long_packet(
-            first.pathway,
-            &first.cc,
-            &mut buffers,
-            &mut send_frames,
-            &mut pns,
-            &mut signals,
-            &server_keys.sealing,
+        let packet = seal(
             header().initial(vec![]),
+            &server_keys.sealing,
             &space.send_journal,
-            &constraints,
             [&mut ping],
         )
-        .unwrap()
         .unwrap();
-        pns.push_back(packet);
+        drop(packet);
         let mut crypto = space.crypto.outgoing();
-        let packet = send::assemble_long_packet(
-            first.pathway,
-            &first.cc,
-            &mut buffers,
-            &mut send_frames,
-            &mut pns,
-            &mut signals,
-            &server_keys.sealing,
+        let packet = seal(
             header().initial(vec![]),
+            &server_keys.sealing,
             &space.send_journal,
-            &constraints,
             [&mut crypto],
         )
-        .unwrap()
         .unwrap();
-        pns.push_back(packet);
+        drop(packet);
         for pn in [0, 1] {
             space
                 .send_journal
@@ -674,37 +676,30 @@ mod tests {
         }
         let client_keys = keys(false);
         let journal = ArcSendJournal::default();
-        let constraints = Constraints {
-            capacity: 1200,
-            congestion: 1200,
-            anti_amplification: 1200,
-        };
         for pn in [0u32, 1] {
             let mut ack = AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
-            let packet = send::assemble_long_packet(
-                first.pathway,
-                &first.cc,
-                &mut buffers,
-                &mut send_frames,
-                &mut pns,
-                &mut signals,
-                &client_keys.sealing,
+            let packet = seal(
                 header().initial(vec![]),
+                &client_keys.sealing,
                 &journal,
-                &constraints,
                 [&mut ack],
             )
-            .unwrap()
             .unwrap();
             receive_bytes(
-                BytesMut::from(packet.bytes()),
+                BytesMut::from(packet.as_ref()),
                 space.clone(),
                 &paths,
                 &second,
             )
             .await;
-            assert!(!first.is_selected());
-            assert_eq!(second.is_selected(), pn == 1);
+            assert_eq!(
+                (first.selected(), second.selected()),
+                if pn == 1 {
+                    (Path::SUSPEND, Path::SELECTED)
+                } else {
+                    (Path::MP_INITIAL, Path::MP_INITIAL)
+                }
+            );
         }
         assert!(second.cc.need_ack(Epoch::Initial).is_none());
         paths.retire_all();

@@ -1,13 +1,14 @@
 use std::{
     ops::Range,
     sync::{Arc, RwLock},
+    task::Poll,
 };
 
 use bytes::BufMut;
 use qbase::{
     frame::AckFrame,
-    net::tx::Signals,
-    packet::{InvalidPacketNumber, Package, PacketContent, PacketNumber, PacketWriter},
+    net::tx::ArcSendWakers,
+    packet::{InvalidPacketNumber, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};
@@ -132,7 +133,7 @@ impl RcvdJournal {
         largest: u64,
         rcvd_time: Instant,
         mut capacity: usize,
-    ) -> Result<AckFrame, Signals> {
+    ) -> Result<AckFrame, Poll<()>> {
         let (range_start, previous_ranges) = match self.packets.range_containing(largest) {
             Some(range_index) => (
                 self.packets.ranges[range_index].start,
@@ -142,24 +143,24 @@ impl RcvdJournal {
             // has since been retired, the trigger still proves that this packet was received, so a
             // singleton ACK is valid and lets that path finish its pending ACK cycle.
             None if largest < self.packets.retired_before => (largest, &[][..]),
-            None => return Err(Signals::TRANSPORT),
+            None => return Err(Poll::Pending),
         };
-        let largest = VarInt::from_u64(largest).map_err(|_| Signals::TRANSPORT)?;
+        let largest = VarInt::from_u64(largest).map_err(|_| Poll::Pending)?;
         let delay: u64 = rcvd_time
             .elapsed()
             .as_micros()
             .try_into()
             .unwrap_or(VARINT_MAX)
             .min(VARINT_MAX);
-        let delay = VarInt::from_u64(delay).map_err(|_| Signals::TRANSPORT)?;
+        let delay = VarInt::from_u64(delay).map_err(|_| Poll::Pending)?;
         let first_range =
-            VarInt::from_u64(largest.into_u64() - range_start).map_err(|_| Signals::TRANSPORT)?;
+            VarInt::from_u64(largest.into_u64() - range_start).map_err(|_| Poll::Pending)?;
 
         // Frame type + Largest Acknowledged + ACK Delay + ACK Range Count + First ACK Range.
         let min_len =
             1 + largest.encoding_size() + delay.encoding_size() + 1 + first_range.encoding_size();
         if capacity < min_len {
-            return Err(Signals::CONGESTION);
+            return Err(Poll::Ready(()));
         }
         capacity -= min_len;
 
@@ -177,10 +178,10 @@ impl RcvdJournal {
         for previous in previous_ranges.iter().rev() {
             let gap = current_start
                 .checked_sub(previous.end + 1)
-                .ok_or(Signals::TRANSPORT)?;
-            let gap = VarInt::from_u64(gap).map_err(|_| Signals::TRANSPORT)?;
-            let ack = VarInt::from_u64(previous.end - previous.start - 1)
-                .map_err(|_| Signals::TRANSPORT)?;
+                .ok_or(Poll::Pending)?;
+            let gap = VarInt::from_u64(gap).map_err(|_| Poll::Pending)?;
+            let ack =
+                VarInt::from_u64(previous.end - previous.start - 1).map_err(|_| Poll::Pending)?;
             let size = range_count_size_increment(ranges.len())
                 + gap.encoding_size()
                 + ack.encoding_size();
@@ -200,6 +201,7 @@ impl RcvdJournal {
 #[derive(Debug, Clone, Default)]
 pub struct ArcRcvdJournal {
     inner: Arc<RwLock<RcvdJournal>>,
+    waiters: ArcSendWakers,
 }
 
 impl ArcRcvdJournal {
@@ -209,6 +211,7 @@ impl ArcRcvdJournal {
                 capacity,
                 max_ack_delay,
             ))),
+            waiters: Default::default(),
         }
     }
 
@@ -235,6 +238,8 @@ impl ArcRcvdJournal {
             .write()
             .unwrap()
             .on_rcvd_pn(pn, is_ack_eliciting, pto);
+        // TODO: 可不是收到包，马上就唤醒发送Ack
+        self.waiters.wake_all();
     }
 
     pub fn gen_ack_frame_util(
@@ -242,7 +247,7 @@ impl ArcRcvdJournal {
         largest: u64,
         rcvd_time: Instant,
         capacity: usize,
-    ) -> Result<AckFrame, Signals> {
+    ) -> Result<AckFrame, Poll<()>> {
         self.inner
             .read()
             .unwrap()
@@ -253,6 +258,7 @@ impl ArcRcvdJournal {
         AckPackege {
             journal: self,
             need_ack,
+            exponent: 0,
         }
     }
 }
@@ -260,28 +266,15 @@ impl ArcRcvdJournal {
 pub struct AckPackege<'r> {
     journal: &'r ArcRcvdJournal,
     need_ack: Option<(u64, Instant)>,
+    pub exponent: u32,
 }
 
+#[cfg(test)]
 impl AckPackege<'_> {
-    fn gen_ack_frame(&self, capacity: usize) -> Result<AckFrame, Signals> {
-        let (largest, rcvd_time) = self.need_ack.ok_or(Signals::TRANSPORT)?;
+    fn gen_ack_frame(&self, capacity: usize) -> Result<AckFrame, Poll<()>> {
+        let (largest, rcvd_time) = self.need_ack.ok_or(Poll::Pending)?;
         self.journal
             .gen_ack_frame_util(largest, rcvd_time, capacity)
-    }
-}
-
-impl<'r, Target> Package<Target> for AckPackege<'r>
-where
-    Target: AsRef<PacketWriter<'r>> + ?Sized,
-    AckFrame: Package<Target>,
-{
-    fn dump(&mut self, target: &mut Target) -> Result<PacketContent, Signals> {
-        // Packet numbers and ACK ranges are connection/epoch scoped, but ACK scheduling is
-        // path-local. Start at this path's trigger so a high PN received on another path cannot
-        // consume this ACK cycle while leaving the trigger outside a capacity-limited frame.
-        self.gen_ack_frame(target.as_ref().remaining_mut())?
-            .dump(target)?;
-        Ok(PacketContent::NonAckEliciting)
     }
 }
 
@@ -415,5 +408,69 @@ mod tests {
                 retired_before: self.packets.retired_before,
             }
         }
+    }
+}
+
+impl<B: BufMut + ?Sized> qbase::packet::assemble::Package<B> for AckPackege<'_> {
+    fn poll_dump(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut qbase::packet::assemble::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, qbase::error::Error>> {
+        use std::task::Poll;
+        buffer.for_frame(
+            qbase::frame::FrameType::Ack(qbase::frame::Ecn::None),
+            frames,
+        );
+        let journal = self.journal.inner.read().unwrap();
+        let ack = match self
+            .need_ack
+            .ok_or(Poll::Pending)
+            .and_then(|(largest, time)| {
+                journal.gen_ack_frame_util(largest, time, buffer.remaining_mut())
+            }) {
+            Ok(ack) => ack,
+            Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
+            Err(Poll::Pending) => {
+                self.journal.waiters.register(cx.waker());
+                return Poll::Pending;
+            }
+        };
+        drop(journal);
+        let mut ack = AckFrame::new(
+            VarInt::from_u64(ack.largest()).unwrap(),
+            VarInt::from_u64(ack.delay() >> self.exponent).unwrap(),
+            VarInt::from_u64(ack.first_range()).unwrap(),
+            ack.ranges().clone(),
+            ack.ecn(),
+        );
+        let result = ack.poll_dump(cx, buffer, frames);
+        if matches!(result, Poll::Ready(Ok(1))) {
+            self.need_ack = None;
+        }
+        result
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        self.journal.waiters.cancel(waker);
+    }
+}
+impl<B: BufMut + ?Sized> qbase::packet::assemble::Package<B> for ArcRcvdJournal {
+    fn poll_dump(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut qbase::packet::assemble::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, qbase::error::Error>> {
+        let journal = self.inner.read().unwrap();
+        let Some(latest) = journal.packets.largest() else {
+            self.waiters.register(cx.waker());
+            return Poll::Pending;
+        };
+        drop(journal);
+        self.ack_package(Some(latest)).poll_dump(cx, buffer, frames)
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        self.waiters.cancel(waker);
     }
 }

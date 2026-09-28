@@ -8,7 +8,6 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use futures::FutureExt;
 use qbase::{
     Epoch,
     cid::{ConnectionId, Registry},
@@ -18,7 +17,6 @@ use qbase::{
     net::{
         addr::EndpointAddr,
         route::{Link, Pathway},
-        tx::ArcSendWakers,
     },
     packet::{DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader},
     param::{
@@ -39,7 +37,7 @@ use crate::{
     recv::{receive_packet, run_receive},
     send::{
         constraints::Constraints,
-        write::{Packet as SendingPacket, PacketError, PacketWriter},
+        write::{Packet as SendingPacket, PacketError},
     },
     space::Space,
     transport::Transport,
@@ -149,8 +147,7 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         .set(ParameterId::InitialMaxStreamsUni, limits)
         .unwrap();
     let params = ArcParameters::new(role, Arc::new(client), Arc::new(server));
-    let wakers = ArcSendWakers::default();
-    let reliable = ReliableFrames::with_capacity_and_wakers(0, wakers.clone());
+    let reliable = ArcReliableFrames::with_capacity(0);
     let streams = match role {
         Role::Client => DataStreams::new(
             role,
@@ -158,7 +155,6 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
             params.server(),
             Box::new(DemandConcurrency),
             reliable.clone(),
-            wakers.clone(),
             None,
         ),
         Role::Server => DataStreams::new(
@@ -167,11 +163,10 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
             params.client(),
             Box::new(DemandConcurrency),
             reliable.clone(),
-            wakers.clone(),
             None,
         ),
     };
-    let data = Arc::new(Space::<ArcOneRttKeys>::new(Epoch::Data, wakers.clone(), {
+    let data = Arc::new(Space::new(Epoch::Data, ArcOneRttKeys::from(keys), {
         let streams = streams.clone();
         let reliable = reliable.clone();
         move |frame| match frame {
@@ -183,19 +178,11 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
             GuaranteedFrame::Crypto(_) => unreachable!("Space recovers CRYPTO internally"),
         }
     }));
-    data.install_1rtt_keys(qtls::InstalledKeys::OneRtt(keys))
-        .unwrap();
-    data.keys
-        .clone()
-        .now_or_never()
-        .unwrap()
-        .unwrap()
-        .allow_update();
+    data.keys.get().unwrap().allow_update();
     let flow = FlowController::new(
         params.remote(ParameterId::InitialMaxData),
         params.local(ParameterId::InitialMaxData),
         reliable.clone(),
-        wakers,
     );
     Arc::new(Transport::new(data, params, streams, flow, reliable))
 }
@@ -219,7 +206,7 @@ pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 
     .unwrap()
 }
 pub(crate) fn keys(transport: &Transport) -> OneRttKeys {
-    transport.data.keys.clone().now_or_never().unwrap().unwrap()
+    transport.data.keys.get().unwrap()
 }
 
 fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
@@ -241,7 +228,6 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
-    path.set_dcid(ConnectionId::from_slice(b"original"));
     path.handshake_confirmed();
     path.validate();
     path
@@ -315,9 +301,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     let (pn, frames) = transport
         .data
         .keys
-        .clone()
-        .now_or_never()
-        .unwrap()
+        .get()
         .unwrap()
         .open(
             parse(bytes),
@@ -379,6 +363,7 @@ fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
     packet
         .assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -434,6 +419,7 @@ fn header_protection_padding_obeys_every_packet_limit() {
         let mut recorded = Vec::new();
         let mut packet = SendingPacket::new(BytesMut::zeroed(minimum), header, 16).unwrap();
         let mut constraints = Constraints {
+            flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity: minimum,
             congestion: minimum,
             anti_amplification: minimum,
@@ -487,6 +473,7 @@ fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
     packet
         .assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -545,10 +532,9 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 material.opening.packet.tag_len(),
             )
             .unwrap();
-        let space = Arc::new(Space::<ArcKeys>::new(epoch, Default::default(), |_| {}));
-        space.install_initial_keys(material).unwrap();
-        let ready = space.keys.clone().await.unwrap();
-        assert!(Arc::ptr_eq(&space.keys.clone().await.unwrap(), &ready));
+        let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(material)), |_| {}));
+        let ready = space.keys.get().unwrap();
+        assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
         let (inbox, rcvd_pkt) = channel::new();
         assert!(enqueue(&inbox, Packet::Data(parse(&bytes))));
         assert!(enqueue(&inbox, Packet::Data(parse(&bytes))));
@@ -614,7 +600,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 .is_err()
         );
         space.retire();
-        assert!(matches!(space.keys.clone().await, Err(KeyRetired)));
+        assert!(matches!(space.keys.get(), Err(KeyRetired)));
     }
 }
 
@@ -651,7 +637,7 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
 }
 
 #[tokio::test]
-async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and_keep_close_receiving()
+async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_keep_close_receiving()
  {
     use qbase::{
         ArcReceiving,
@@ -667,14 +653,16 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), close.clone());
     let initial = Arc::new(Space::<ArcKeys>::new(
         Epoch::Initial,
-        Default::default(),
+        crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
         |_| {},
     ));
     let handshake = Arc::new(Space::<ArcKeys>::new(
         Epoch::Handshake,
-        Default::default(),
+        ArcKeys::new(Arc::new(fixed_keys())),
         |_| {},
     ));
+    initial.retire();
+    handshake.retire();
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
     let cid_registry = Registry::new(
@@ -715,7 +703,7 @@ async fn router_and_receive_topology_deliver_streams_while_other_spaces_wait_and
     let cid = ConnectionId::from_slice(b"original");
     let route = router.insert(cid.into(), inbox.clone());
     router.receive(initial_datagram(cid, 1200), link.into(), link, 8);
-    // This handshake packet also waits for keys; neither wait may block Data.
+    // Packets in retired spaces do not block Data.
     let mut packet = parse(&initial_datagram(cid, 1200));
     packet.header = qbase::packet::DataHeader::Long(qbase::packet::long::DataHeader::Handshake(
         qbase::packet::LongHeaderBuilder::with_cid(cid, cid).handshake(),
@@ -846,7 +834,7 @@ async fn frame_dispatcher_connects_crypto_cids_tokens_and_peer_close_to_original
     use qrecovery::crypto::CryptoStream;
     use tokio::io::AsyncReadExt;
     let [(client, ct, cp), (_server, _, _)] = pair(1);
-    let crypto = std::array::from_fn(|_| CryptoStream::new(Default::default()));
+    let crypto = std::array::from_fn(|_| CryptoStream::new());
     let retired = ArcReceiving::default();
     let issued = ArcReceiving::default();
     let token = ArcReceiving::default();
@@ -954,9 +942,7 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
     let (_, frames) = st
         .data
         .keys
-        .clone()
-        .now_or_never()
-        .unwrap()
+        .get()
         .unwrap()
         .open(
             parse(&bytes),
@@ -999,6 +985,7 @@ fn a_large_frame_that_fits_is_assembled_before_later_sources() {
     packet
         .assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -1014,7 +1001,7 @@ fn a_large_frame_that_fits_is_assembled_before_later_sources() {
 fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
     use qbase::frame::{MaxDataFrame, ReliableFrame, io::SendFrame};
 
-    let mut reliable = ReliableFrames::with_capacity_and_wakers(600, Default::default());
+    let mut reliable = ArcReliableFrames::with_capacity(600);
     reliable.send_frame(
         (0..600).map(|i| ReliableFrame::MaxData(MaxDataFrame::new(VarInt::from_u32(1000 + i)))),
     );
@@ -1035,6 +1022,7 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
         packet
             .assemble(
                 &Constraints {
+                    flow_ctrl: std::cell::Cell::new(usize::MAX),
                     capacity: 1200,
                     congestion: 1200,
                     anti_amplification: 1200,
@@ -1206,9 +1194,7 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
     assert!(
         st.data
             .keys
-            .clone()
-            .now_or_never()
-            .unwrap()
+            .get()
             .unwrap()
             .open(
                 parse(&forged),
@@ -1237,6 +1223,7 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     )
     .unwrap();
     let constraints = Constraints {
+        flow_ctrl: std::cell::Cell::new(usize::MAX),
         capacity: 1200,
         congestion: 0,
         anti_amplification: 1200,
@@ -1264,6 +1251,7 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     assert!(matches!(
         packet.assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 10
@@ -1285,6 +1273,7 @@ fn packet_assembly_uses_fixed_limits_across_ack_data_and_padding() {
     )
     .unwrap();
     let mut constraints = Constraints {
+        flow_ctrl: std::cell::Cell::new(usize::MAX),
         capacity: 100,
         congestion: 0,
         anti_amplification: 100,
@@ -1321,7 +1310,6 @@ fn packet_assembly_uses_fixed_limits_across_ack_data_and_padding() {
 
 #[tokio::test]
 async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
-    use qbase::packet::{Package, io::Repeat};
     use tokio::io::AsyncWriteExt;
 
     for limited in 0..3 {
@@ -1337,10 +1325,11 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
         writer.write_all(&stream_data).await.unwrap();
         let mut crypto = ct.data.crypto.outgoing();
-        let mut streams = Repeat(ct.streams.package(ct.flow.sender.clone(), false));
+        let mut streams = ct.streams.clone();
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
         let mut constraints = Constraints {
+            flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity: 1200,
             congestion: 1200,
             anti_amplification: 1200,
@@ -1361,24 +1350,13 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
                 _ => &mut constraints.anti_amplification,
             };
             *limit = if pn == 0 { 24 } else { 80 };
+            let result = packet.assemble(&constraints, &mut recorded, [&mut crypto, &mut streams]);
             if pn == 0 {
-                // Direct sources use the same constrained, recording writer as assemble.
-                let mut target = PacketWriter::new(&mut packet, &constraints, &mut recorded);
-                assert!(crypto.dump(&mut target).is_err());
-                assert!(streams.dump(&mut target).is_err());
-                assert!(recorded.as_slice().is_empty());
+                assert!(result.is_err());
+                assert!(recorded.is_empty());
                 continue;
             }
-            if pn % 2 == 0 {
-                packet
-                    .assemble(&constraints, &mut recorded, [&mut crypto, &mut streams])
-                    .unwrap();
-            } else {
-                let mut target = PacketWriter::new(&mut packet, &constraints, &mut recorded);
-                let crypto_result = crypto.dump(&mut target);
-                let stream_result = streams.dump(&mut target);
-                assert!(crypto_result.is_ok() || stream_result.is_ok());
-            }
+            result.unwrap();
             assert!(!recorded.is_empty());
             let pending = seal_packet(
                 packet,
@@ -1462,7 +1440,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
 async fn close_fails_business_apis_and_preserves_data_keys() {
     let [(client, ct, _), _] = pair(1);
     client.clone().close(VarInt::from_u32(0), "closed");
-    assert!(matches!(ct.data.keys.try_get(), Ok(Some(_))));
+    assert!(ct.data.keys.get().is_ok());
     assert!(client.open_uni_stream().await.is_err());
 }
 
@@ -1488,17 +1466,16 @@ async fn peer_key_update_is_authenticated_before_installing_and_old_keys_expire(
 }
 
 #[tokio::test]
-async fn receiving_waits_for_keys_without_a_command_queue() {
+async fn receiving_starts_with_ready_keys() {
     let (materials, _) = handshake();
     let [client, server] = materials;
     let ct = transport(Role::Client, client, 1);
     let cp = path(&ct, 0);
     let space = Arc::new(Space::<ArcOneRttKeys>::new(
         Epoch::Data,
-        Default::default(),
+        ArcOneRttKeys::from(server),
         |_| {},
     ));
-    let opening = space.keys.clone();
     let (inbox, rcvd_pkt) = channel::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -1519,9 +1496,6 @@ async fn receiving_waits_for_keys_without_a_command_queue() {
         |_| panic!("receive failed"),
     ));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
-    tokio::task::yield_now().await;
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-    opening.install(server).unwrap();
     drop(inbox);
     task.await.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -1534,9 +1508,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     let (pn, frames) = st
         .data
         .keys
-        .clone()
-        .now_or_never()
-        .unwrap()
+        .get()
         .unwrap()
         .open(
             parse(&bytes),
@@ -1575,6 +1547,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     packet
         .assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -1587,9 +1560,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     let (pn, frames) = st
         .data
         .keys
-        .clone()
-        .now_or_never()
-        .unwrap()
+        .get()
         .unwrap()
         .open(
             parse(bytes.bytes()),
@@ -1642,10 +1613,11 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     let mut frames = Vec::new();
     let mut crypto = ct.data.crypto.outgoing();
     let mut reliable = ct.reliable_frames.clone();
-    let mut streams = ct.streams.package(ct.flow.sender.clone(), false);
+    let mut streams = ct.streams.clone();
     packet
         .assemble(
             &Constraints {
+                flow_ctrl: std::cell::Cell::new(usize::MAX),
                 capacity: 1200,
                 congestion: 1200,
                 anti_amplification: 1200,
@@ -1740,10 +1712,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     drop(sender);
     drop(original);
     // Path retirement alone must not make the stream range available again.
-    let mut streams = transport
-        .streams
-        .package(transport.flow.sender.clone(), false);
-    use qbase::packet::Package;
+    let mut streams = transport.streams.clone();
     let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
@@ -1751,15 +1720,23 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     )
     .unwrap();
     let constraints = Constraints {
+        flow_ctrl: std::cell::Cell::new(usize::MAX),
         capacity: 1200,
         congestion: 1200,
         anti_amplification: 1200,
     };
     let mut frames = Vec::new();
-    let mut target = PacketWriter::new(&mut packet, &constraints, &mut frames);
-    assert!(streams.dump(&mut target).is_err());
+    assert!(
+        packet
+            .assemble(&constraints, &mut frames, [&mut streams])
+            .is_err()
+    );
     transport.on_tick(tokio::time::Instant::now());
-    assert!(streams.dump(&mut target).is_err());
+    assert!(
+        packet
+            .assemble(&constraints, &mut frames, [&mut streams])
+            .is_err()
+    );
 
     tokio::time::advance(retransmit_after).await;
     transport.on_tick(tokio::time::Instant::now());
@@ -1893,7 +1870,6 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
-    path.set_dcid(ConnectionId::from_slice(b"original"));
     path.handshake_confirmed();
     path.validate();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
@@ -1964,7 +1940,6 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
             path_idle(),
             [feedback.clone(), feedback.clone(), feedback],
         ));
-        path.set_dcid(ConnectionId::from_slice(b"original"));
         path.handshake_confirmed();
         path
     });
@@ -2008,7 +1983,6 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
         path_idle(),
         [feedback.clone(), feedback.clone(), feedback],
     ));
-    path.set_dcid(original.dcid());
     path.handshake_confirmed();
     path.on_datagram_received(400);
     path.set_challenge(qbase::frame::PathChallengeFrame::random());
@@ -2076,7 +2050,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     let (retained, rcvd_pkt) = channel::new();
     let space = Arc::new(Space::<crate::keys::ArcKeys>::new(
         Epoch::Initial,
-        Default::default(),
+        crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
         |_| {},
     ));
     let mut task = tokio::spawn(run_receive(

@@ -4,12 +4,12 @@
 //! acknowledge Initial fragments before it has received a complete ClientHello.
 //! Every path burst reads that shared sending snapshot.
 
-mod burst;
 mod endpoint;
 mod lifecycle;
 mod paths;
 pub mod phase;
 pub mod recv;
+pub mod send;
 mod signals;
 mod terminate;
 pub mod tls;
@@ -23,15 +23,15 @@ pub use qbase::{
     net::route::{Scope, Scopes},
     param::fixed::ArcParameters,
 };
-pub use qtransport::{ArcConnection, CloseReason, ReliableFrames};
+pub use qtransport::{ArcConnection, CloseReason, ArcReliableFrames};
 pub use signals::HandshakeSignals;
 pub use tls::TlsContext;
-pub type DataStreams = qrecovery::streams::DataStreams<ReliableFrames>;
-pub type FlowController = qbase::flow::FlowController<ReliableFrames>;
+pub type DataStreams = qrecovery::streams::DataStreams<ArcReliableFrames>;
+pub type FlowController = qbase::flow::FlowController<ArcReliableFrames>;
 pub type ArcLocalCids =
-    qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ReliableFrames>>;
+    qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
 pub type CidRegistry =
-    qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ReliableFrames>>;
+    qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
 pub type Connected = (
     Option<qtls::LocalAuthority>,
     qtls::RemoteAuthority,

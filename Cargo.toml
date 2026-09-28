@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["qconnection", "dquic", "h3-shim"]
 members = [
     "qmacro",
     "qbase",
@@ -10,12 +11,12 @@ members = [
     "qinterface",
     "qprotocol",
     "qdatagram",
-    "qconnection",
+    # "qconnection",
     "qconn",
     "qtls",
     "qtransport",
-    "dquic",
-    "h3-shim",
+    # "dquic",
+    # "h3-shim",
     "qtraversal",
     "qresolve",
 ]
@@ -27,12 +28,12 @@ default-members = [
     "qcongestion",
     "qinterface",
     "qprotocol",
-    "qconnection",
+    # "qconnection",
     "qconn",
     "qtls",
     "qtransport",
-    "dquic",
-    "h3-shim",
+    # "dquic",
+    # "h3-shim",
     "qtraversal",
 ]
 
@@ -47,7 +48,7 @@ categories = ["network-programming", "asynchronous"]
 rust-version = "1.88.0"
 
 [workspace.dependencies]
-arc-swap = "1"
+# arc-swap = "1"
 bitflags = "2"
 bon = "3"
 bytes = "1"
@@ -89,14 +90,14 @@ x509-parser = "0.18"
 
 # dev-dependencies, for examples
 clap = { version = "4", features = ["derive"] }
-h3 = "0.0.8"
+# h3 = "0.0.8"
 http = "1"
-indicatif = { version = "0.18", features = ["tokio"] }
+# indicatif = { version = "0.18", features = ["tokio"] }
 parking_lot = "0.12"
-postcard = { version = "1", features = ["use-std"] }
-rustls-native-certs = "0.8"
+# postcard = { version = "1", features = ["use-std"] }
+# rustls-native-certs = "0.8"
 tracing-subscriber = "0.3"
-tracing-appender = "0.2"
+# tracing-appender = "0.2"
 
 # members
 qmacro = { path = "./qmacro", version = "0.5.1" }
@@ -104,14 +105,14 @@ qbase = { path = "./qbase", version = "0.6.4" }
 qevent = { path = "./qevent", version = "0.6.2" }
 qudp = { path = "./qudp", version = "0.7.2" }
 qinterface = { path = "./qinterface", version = "0.7.2" }
-qdatagram = { path = "./qdatagram", version = "0.6.2" }
+# qdatagram = { path = "./qdatagram", version = "0.6.2" }
 qresolve = { path = "./qresolve", version = "0.8.1" }
 qrecovery = { path = "./qrecovery", version = "0.6.2" }
-qtraversal = { path = "./qtraversal", version = "0.7.2" }
+# qtraversal = { path = "./qtraversal", version = "0.7.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.2" }
-qconnection = { path = "./qconnection", version = "0.8.2" }
+# qconnection = { path = "./qconnection", version = "0.8.2" }
 qtls = { path = "./qtls", version = "0.6.1" }
-dquic = { path = "./dquic", version = "0.7.2" }
+# dquic = { path = "./dquic", version = "0.7.2" }
 
 
 [profile.bench]

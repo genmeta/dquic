@@ -9,7 +9,7 @@ use qbase::{
     cid::{ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
     error::{ErrorKind, QuicError},
-    net::{route::Scopes, tx::ArcSendWakers},
+    net::route::Scopes,
     packet::{GetDcid, GetScid},
     param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
     role::Role,
@@ -20,7 +20,7 @@ use qtransport::{packet::channel, router::QuicRouter};
 use tokio::sync::oneshot;
 
 use crate::{
-    Accepted, ArcConnPhase, Connected, Error, InitialPhase, Paths, ReliableFrames, TlsContext,
+    Accepted, ArcConnPhase, Connected, Error, InitialPhase, Paths, ArcReliableFrames, TlsContext,
     client_growing,
 };
 
@@ -94,8 +94,7 @@ impl QuicEndpoint {
         let initial_keys = identity
             .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
             .map_err(|error| internal_error(error.to_string()))?;
-        let wakers = ArcSendWakers::new();
-        let reliable_frames = ReliableFrames::with_capacity_and_wakers(0, wakers.clone());
+        let reliable_frames = ArcReliableFrames::with_capacity(0);
         let (inbox, rcvd_pkt) = channel::new();
         let cid_registry =
             QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
@@ -116,7 +115,6 @@ impl QuicEndpoint {
             scid,
             odcid,
             initial_keys,
-            wakers,
             reliable_frames,
         ));
         let idle = ArcConnIdle::new(
@@ -211,9 +209,7 @@ impl ServerRegistry {
                     return;
                 };
 
-                let send_wakers = ArcSendWakers::new();
-                let reliable_frames =
-                    ReliableFrames::with_capacity_and_wakers(0, send_wakers.clone());
+                let reliable_frames = ArcReliableFrames::with_capacity(0);
                 let cid_registry =
                     router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone());
                 let scid = cid_registry.gen_unique_cid();
@@ -221,16 +217,13 @@ impl ServerRegistry {
                     scid,
                     odcid,
                     initial_keys,
-                    send_wakers.clone(),
                     reliable_frames,
                 ));
                 let idle =
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, DEFAULT_HEARTBEAT_INTERVAL);
+                phase.set_dcid(peer_cid);
                 let paths = Paths::new(Role::Server, phase, idle);
-                paths
-                    .add_path(pathway)
-                    .expect("fresh server path")
-                    .set_dcid(peer_cid);
+                paths.add_path(pathway).expect("fresh server path");
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
                 }

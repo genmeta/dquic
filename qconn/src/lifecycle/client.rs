@@ -4,7 +4,6 @@ use qbase::{
     ArcReceiving, Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
-    net::tx::Signals,
     param::{ClientParameters, ParameterId},
     role::Role,
     token::ArcTokenRegistry,
@@ -16,7 +15,7 @@ use qtransport::{
 
 use super::{any, close_error};
 use crate::{
-    ArcParameters, CloseReason, ConnPhase, Connected, Error, MaturePhase, Paths, ReliableFrames,
+    ArcParameters, CloseReason, ConnPhase, Connected, Error, MaturePhase, Paths, ArcReliableFrames,
     TlsContext,
 };
 
@@ -27,7 +26,7 @@ pub async fn client_growing(
     paths: Arc<Paths>,
     rcvd_pkt: RcvdPacket,
     tls_context: TlsContext,
-    router_registry: QuicRouterRegistry<ReliableFrames>,
+    router_registry: QuicRouterRegistry<ArcReliableFrames>,
     token_registry: ArcTokenRegistry,
     established: impl FnOnce(Result<Connected, Error>),
 ) -> CloseReason {
@@ -39,7 +38,6 @@ pub async fn client_growing(
     };
 
     let initial = &initial_phase.initial;
-    let send_wakers = &initial.send_wakers;
     let cid_registry = qbase::cid::Registry::new(
         Role::Client,
         initial_phase.odcid,
@@ -72,12 +70,11 @@ pub async fn client_growing(
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
-            let handshake = Arc::new(Space::<ArcKeys>::new(
+            let handshake = Arc::new(Space::new(
                 Epoch::Handshake,
-                send_wakers.clone(),
+                ArcKeys::from(handshake_keys),
                 |_| {},
             ));
-            handshake.install_hs_keys(handshake_keys)?;
             phase.enter_handshake(initial_phase.clone(), handshake.clone());
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
@@ -109,9 +106,6 @@ pub async fn client_growing(
             );
             let server_scid = parameters
                 .remote::<qbase::cid::ConnectionId>(ParameterId::InitialSourceConnectionId);
-            for path in paths.snapshot() {
-                path.set_dcid(server_scid);
-            }
             let initial_dcid = cid_registry.remote.apply_dcid();
             cid_registry
                 .remote
@@ -125,6 +119,7 @@ pub async fn client_growing(
                 initial_phase.reliable_frames.clone(),
                 cid_registry.clone(),
                 initial_dcid,
+                qtransport::keys::ArcOneRttKeys::from(tls_context.read_keys().await?),
             )?;
             phase.enter_mature(mature_phase.clone());
             cid_registry
@@ -147,10 +142,6 @@ pub async fn client_growing(
                 },
             ));
 
-            mature_phase
-                .spaces
-                .data
-                .install_1rtt_keys(tls_context.read_keys().await?)?;
             tokio::spawn(crate::tls::read_tls_to_crypto_stream(
                 tls_context.clone(),
                 CryptoLevel::OneRtt,
@@ -169,7 +160,6 @@ pub async fn client_growing(
             let remote = summary.remote.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
-            send_wakers.wake_all_by(Signals::all());
 
             Ok::<_, Error>((
                 (
@@ -210,9 +200,8 @@ pub async fn client_growing(
                 .spaces
                 .data
                 .keys
-                .try_get()
+                .get()
                 .expect("live Data keys")
-                .expect("installed Data keys")
                 .allow_update();
             paths.handshake_confirmed();
             closed.clone().await.expect("growing owns close").expect("first close reason")

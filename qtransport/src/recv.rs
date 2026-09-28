@@ -1,5 +1,5 @@
 //! Receive engines are functions. Their closures capture already connected component pipes.
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use qbase::{
@@ -8,19 +8,20 @@ use qbase::{
     error::{ErrorKind, QuicError},
     flow::FlowController,
     frame::{
-        ConnectionCloseFrame, Frame, FrameReader, GetFrameType, NewConnectionIdFrame,
+        AckFrame, ConnectionCloseFrame, Frame, FrameReader, GetFrameType, NewConnectionIdFrame,
         NewTokenFrame, RetireConnectionIdFrame, io::ReceiveFrame,
     },
     net::route::{Link, Pathway},
     packet::{GetType, PacketContent},
-    varint::VARINT_MAX,
+    param::ParameterId,
+    varint::{VARINT_MAX, VarInt},
 };
 use qcongestion::Transport as _;
 use qrecovery::{crypto::CryptoStream, streams::DataStreams};
 
 use crate::{
-    ArcParameters, Error, ReliableFrames,
-    keys::{ArcKeys, ArcOneRttKeys, KeyRetired, OneRttKeys},
+    ArcParameters, ArcReliableFrames, Error, GuaranteedFrame,
+    keys::{ArcKeys, ArcOneRttKeys, OneRttKeys},
     packet::{
         CipherPacket, PlainPacket,
         channel::{PacketReceiver, RcvdPacket},
@@ -36,8 +37,8 @@ use crate::{
 pub fn frame_dispatcher<LOCAL, REMOTE>(
     data: Arc<Space<ArcOneRttKeys>>,
     parameters: ArcParameters,
-    streams: DataStreams<ReliableFrames>,
-    flow: FlowController<ReliableFrames>,
+    streams: DataStreams<ArcReliableFrames>,
+    flow: FlowController<ArcReliableFrames>,
     crypto: [CryptoStream; 3],
     cid_registry: Registry<LOCAL, REMOTE>,
     tokens: impl ReceiveFrame<NewTokenFrame> + Send + Sync,
@@ -53,7 +54,7 @@ where
         match frame {
             Frame::Padding(_) | Frame::Ping(_) => Ok(()),
             Frame::Ack(frame) if epoch == Epoch::Data => {
-                crate::send::acknowledge(&data, &streams, &parameters, &frame, path, on_ack)
+                acknowledge(&data, &streams, &parameters, &frame, path, on_ack)
             }
             Frame::Crypto(frame, bytes) => crypto[epoch].incoming().recv_frame((frame, bytes)),
             Frame::Stream(frame, bytes) => {
@@ -218,17 +219,17 @@ pub fn receive_packet<K>(
         .on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
     path.cc
         .on_pkt_rcvd(space.epoch, pn, content.is_ack_eliciting());
-    path.send_waker.wake_by(qbase::net::tx::Signals::TRANSPORT);
+    path.send_waker.wake_all();
     Ok(content)
 }
 
-/// One key waiter per space. Closing keeps this same engine alive for CLOSE frames.
+/// Keys are ready before this engine starts. Closing keeps it alive for CLOSE frames.
 /// Retirement ends only this space; closing the inbox ends idle packet waits.
 /// Dispatch receives the same ready material used to open the packet.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_receive<H, K, M>(
+pub async fn run_receive<H, M>(
     mut packets: PacketReceiver<H>,
-    space: Arc<Space<K>>,
+    space: Arc<Space<ArcKeys<M>>>,
     mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
     is_closing: impl Fn() -> bool,
@@ -237,7 +238,7 @@ pub async fn run_receive<H, K, M>(
     mut on_error: impl FnMut(Error),
 ) where
     H: GetType,
-    K: Clone + Future<Output = Result<M, KeyRetired>>,
+    M: Clone,
 {
     while let Some((packet, pathway, link)) = packets.recv().await {
         let Some(path) = path_for(pathway, link) else {
@@ -245,7 +246,7 @@ pub async fn run_receive<H, K, M>(
         };
         path.on_datagram_received(packet.payload_len());
         let epoch = space.epoch;
-        let Ok(keys) = space.keys.clone().await else {
+        let Ok(keys) = space.keys.get() else {
             break;
         };
         let result = open(&keys, packet, path.cc.get_pto(epoch)).and_then(|opened| {
@@ -270,4 +271,48 @@ pub async fn run_receive<H, K, M>(
             on_error(error);
         }
     }
+}
+
+/// Data ACK pipe target. Capture the original components before Transport is created.
+/// Lock the receiving path CC before the journal, so ACK observes committed sends.
+/// Report acknowledged generations to the receive task's ready OneRttKeys.
+pub fn acknowledge(
+    data: &Space<ArcOneRttKeys>,
+    streams: &DataStreams<ArcReliableFrames>,
+    parameters: &ArcParameters,
+    ack: &AckFrame,
+    received_on: &Arc<Path>,
+    on_ack: impl Fn(u64),
+) -> Result<(), Error> {
+    let acknowledged = {
+        let mut congestion = received_on.cc.lock();
+        let exponent: u64 = parameters.remote(ParameterId::AckDelayExponent);
+        let delay = ack
+            .delay()
+            .checked_shl(exponent as u32)
+            .unwrap_or(VARINT_MAX)
+            .min(VARINT_MAX);
+        let acknowledged = data.send_journal.acknowledge(ack, |frame| match frame {
+            GuaranteedFrame::Crypto(frame) => data.crypto.outgoing().on_data_acked(frame),
+            GuaranteedFrame::Stream(frame) => streams.on_data_acked(*frame),
+            GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
+                qbase::frame::StreamCtlFrame::ResetStream(frame),
+            )) => streams.on_reset_acked(*frame),
+            _ => {}
+        })?;
+        let ack = AckFrame::new(
+            VarInt::from_u64(ack.largest()).unwrap(),
+            VarInt::from_u64(delay).unwrap(),
+            VarInt::from_u64(ack.first_range()).unwrap(),
+            ack.ranges().clone(),
+            ack.ecn(),
+        );
+        congestion.on_ack_rcvd(Epoch::Data, &ack, tokio::time::Instant::now());
+        acknowledged
+    };
+    for generation in acknowledged {
+        on_ack(generation);
+    }
+    received_on.send_waker.wake_all();
+    Ok(())
 }

@@ -1,22 +1,17 @@
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering::*},
-    },
+    sync::atomic::{AtomicBool, Ordering::*},
     task::{Context, Poll, ready},
 };
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use qbase::{
     error::{Error, ErrorKind, QuicError},
-    flow::ArcSendControler,
     frame::{
-        DataBlockedFrame, FrameType, GetFrameType, ResetStreamFrame,
-        STREAM_FRAME_MAX_ENCODING_SIZE, StreamCtlFrame, StreamFrame,
+        Frame, FrameType, GetFrameType, ResetStreamFrame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::{ArcSendWakers, Signals},
-    packet::{Package, PacketContent},
+    net::tx::ArcSendWakers,
+    packet::ConstraintBuffer,
     param::{ArcParameters, ParameterId, core::Parameters},
     role::Role,
     sid::{
@@ -50,7 +45,7 @@ use crate::{
 /// When the application wants to send data to the peer, it will call [`write`] method on [`Writer`]
 /// to write data to the [`SendBuf`].
 ///
-/// Protocol layer will call [`try_load_data_into`] to read data from the streams into stream frames and
+/// Protocol layer will call [`Package::poll_dump`] to read data from the streams into stream frames and
 /// write the frame into the quic packet.
 ///
 /// ## Stream control frame
@@ -93,7 +88,7 @@ use crate::{
 /// [`write`]: tokio::io::AsyncWriteExt::write
 /// [`SendBuf`]: crate::send::SendBuf
 /// [`send_frame`]: SendFrame::send_frame
-/// [`try_load_data_into`]: DataStreams::try_load_data_into
+/// [`Package::poll_dump`]: qbase::packet::Package::poll_dump
 /// [`recv_data`]: DataStreams::recv_data
 /// [`recv_stream_control`]: DataStreams::recv_stream_control
 /// [`on_data_acked`]: DataStreams::on_data_acked
@@ -141,61 +136,43 @@ impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    /// Try to load data from streams into the `packet`,
-    /// with a `flow_limit` which limits the max size of fresh data.
-    /// Returns the size of fresh data.
-    fn try_load_data_into_once<P, FTX>(
+    fn poll_dump_once<B: BufMut + ?Sized>(
         &self,
-        packet: &mut P,
-        flow_ctrl: &ArcSendControler<FTX>,
-        zero_rtt: bool,
-    ) -> Result<(), Signals>
-    where
-        P: BufMut + ?Sized,
-        for<'a> (StreamFrame, &'a [Bytes]): Package<P>,
-        FTX: SendFrame<DataBlockedFrame>,
-    {
-        // todo: use core::range instead in rust 2024
+        output: &mut super::io::Output<Ext<TX>>,
+        cx: &mut Context<'_>,
+        buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, Error>> {
         use core::ops::Bound::*;
-
-        if packet.remaining_mut() < STREAM_FRAME_MAX_ENCODING_SIZE {
-            return Err(Signals::CONGESTION);
-        }
-
-        let mut guard = self.output.streams();
-        let output = guard.as_mut().map_err(|_| Signals::empty())?; // connection closed
-
-        if zero_rtt && self.tls_fin.load(Acquire) {
-            return Err(Signals::TLS_FIN); // should load 1rtt
-        }
-
-        let Ok(mut credit) = flow_ctrl.credit(packet.remaining_mut()) else {
-            return Err(Signals::empty()); // connection closed
-        };
-
-        fn try_load_data_into_once<'s, P, TX: 's + Clone>(
+        fn poll_streams<'s, TX: 's + Clone, B: BufMut + ?Sized>(
             streams: impl Iterator<Item = (StreamId, &'s (Outgoing<TX>, IOState), usize)>,
-            packet: &mut P,
-            flow_limit: usize,
-        ) -> Result<(StreamId, usize, usize), Signals>
-        where
-            P: BufMut + ?Sized,
-            for<'a> (StreamFrame, &'a [Bytes]): Package<P>,
-        {
-            let mut signals = Signals::TRANSPORT;
-            for (sid, (outgoing, _ios), tokens) in streams {
-                match outgoing.try_load_data_into(packet, sid, flow_limit, tokens) {
-                    Ok((data_len, is_fresh)) => {
-                        let remain_tokens = tokens - data_len;
-                        let fresh_bytes = if is_fresh { data_len } else { 0 };
-                        return Ok((sid, remain_tokens, fresh_bytes));
+            cx: &mut Context<'_>,
+            buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
+            frames: &mut Vec<qbase::frame::Frame>,
+        ) -> Result<(StreamId, usize, usize), Poll<Result<usize, Error>>> {
+            let mut availability = Poll::Pending;
+            for (sid, (outgoing, _), tokens) in streams {
+                let start = frames.len();
+                let credit = buffer.limits.flow_ctrl();
+                match outgoing.poll_dump_with_tokens(cx, buffer, frames, tokens) {
+                    Poll::Ready(Ok(n)) if n > 0 => {
+                        let length = frames[start..]
+                            .iter()
+                            .filter_map(|f| match f {
+                                qbase::frame::Frame::Stream(f, ()) => Some(f.len()),
+                                _ => None,
+                            })
+                            .sum::<usize>();
+                        return Ok((sid, tokens - length, credit - buffer.limits.flow_ctrl()));
                     }
-                    Err(s) => signals |= s,
+                    Poll::Ready(Ok(_)) => availability = Poll::Ready(Ok(0)),
+                    Poll::Ready(Err(error)) => return Err(Poll::Ready(Err(error))),
+                    Poll::Pending => {}
                 }
             }
-            Err(signals)
+            Err(availability)
         }
-
+        let start = frames.len();
         // 不一定所有流都允许被发送，比如，0rtt被拒绝max_streams会倒缩，此时大于max_streams的流就不允许被发送
         let remote_role = self.stream_ids.remote.role();
         let max_streams_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
@@ -209,18 +186,19 @@ where
         // 该tokens是令牌桶算法的token，为了多条Stream的公平性，给每个流定期地发放tokens，不累积
         // 各流轮流按令牌桶算法发放的tokens来整理数据去发送
         const DEFAULT_TOKENS: usize = 4096;
-        let (sid, remain_tokens, fresh_bytes) = match &output.cursor {
+        let result = match &output.cursor {
             // rev([..=sid]) + rev([sid+1..])
-            Some((sid, tokens)) if *tokens == 0 => try_load_data_into_once(
+            Some((sid, tokens)) if *tokens == 0 => poll_streams(
                 (output.outgoings.range(..=sid).rev())
                     .chain(output.outgoings.range((Excluded(sid), Unbounded)).rev())
                     .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS))
                     .filter(|(sid, ..)| stream_allowed(sid)),
-                packet,
-                credit.available(),
+                cx,
+                buffer,
+                frames,
             ),
             // [sid] + rev([..sid]) + rev([sid+1..])
-            Some((sid, tokens)) => try_load_data_into_once(
+            Some((sid, tokens)) => poll_streams(
                 Option::into_iter(
                     output
                         .outgoings
@@ -233,104 +211,33 @@ where
                         .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS)),
                 )
                 .filter(|(sid, ..)| stream_allowed(sid)),
-                packet,
-                credit.available(),
+                cx,
+                buffer,
+                frames,
             ),
             // rev([..])
-            None => try_load_data_into_once(
+            None => poll_streams(
                 (output.outgoings.range(..).rev())
                     .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS))
                     .filter(|(sid, ..)| stream_allowed(sid)),
-                packet,
-                credit.available(),
+                cx,
+                buffer,
+                frames,
             ),
-        }?;
+        };
+        let (sid, remain_tokens, fresh_bytes) = match result {
+            Ok(result) => result,
+            Err(result) => return result,
+        };
 
         output.cursor = Some((sid, remain_tokens));
-        credit.post_sent(fresh_bytes);
 
-        // Update metrics when fresh data is sent
         if fresh_bytes > 0
             && let Some(metrics) = &self.metrics
         {
             metrics.on_data_sent(fresh_bytes as u64);
         }
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn package(
-        self: &Arc<Self>,
-        flow_ctrl: ArcSendControler<TX>,
-        zero_rtt: bool,
-    ) -> StreamFramePackages<TX>
-    where
-        TX: SendFrame<DataBlockedFrame>,
-    {
-        StreamFramePackages {
-            data_stream: self.clone(),
-            flow_ctrl,
-            zero_rtt,
-        }
-    }
-
-    /// Try to load data from streams into the packet.
-    ///
-    /// # Fairness
-    ///
-    /// It's fair between streams.
-    ///
-    /// We have implemented a token bucket algorithm, and this method will read the data of each stream
-    /// sequentially.  Starting from the first stream, when a stream exhausts its tokens (default is 4096,
-    /// depending on the priority of the stream), or there is no data to send, the method will move to
-    /// the next stream, and so on.
-    ///
-    /// # Flow control
-    ///
-    /// QUIC employs a limit-based flow control scheme where a receiver advertises the limit of total
-    /// bytes it is prepared to receive on a given stream or for the entire connection. This leads to
-    /// two levels of data flow control in QUIC, stream level and connection level.
-    ///
-    /// Stream-level flow control had limited by the [`write`] calls on [`Writer`], if the application
-    /// wants to write more data than the stream's flow control limit , the [`write`] call will be
-    /// blocked until the sending window is updated.
-    ///
-    /// For connection-level flow control, it's limited by the parameter `flow_limit` of this method.
-    /// The amount of new data(never sent) will be read from the stream is less or equal to `flow_limit`.
-    ///
-    /// # Returns
-    ///
-    /// If no data written to the buffer, the method will return [`None`], or a tuple will be
-    /// returned:
-    ///
-    /// * [`StreamFrame`]: The stream frame to be sent.
-    /// * [`usize`]: The number of bytes written to the buffer.
-    /// * [`usize`]: The number of new data writen to the buffer.
-    ///
-    /// [`write`]: tokio::io::AsyncWriteExt::write
-    pub fn try_load_data_into<P, FTX>(
-        &self,
-        packet: &mut P,
-        flow_ctrl: &ArcSendControler<FTX>,
-        zero_rtt: bool,
-    ) -> Result<(), Signals>
-    where
-        P: BufMut + ?Sized,
-        for<'a> (StreamFrame, &'a [Bytes]): Package<P>,
-        FTX: SendFrame<DataBlockedFrame>,
-    {
-        use core::ops::ControlFlow::*;
-
-        // 取唯一一个最新的错误（如果有）
-        let (Continue(result) | Break(result)) =
-            core::iter::from_fn(|| Some(self.try_load_data_into_once(packet, flow_ctrl, zero_rtt)))
-                .try_fold(Err(Signals::empty()), |result, once| match (result, once) {
-                    (_, Ok(())) => Continue(Ok(())),
-                    (Ok(()), Err(_no_more)) => Break(Ok(())),
-                    (Err(_), Err(signals)) => Break(Err(signals)),
-                });
-        result
+        Poll::Ready(Ok(frames.len() - start))
     }
 
     /// Called when the stream frame acked.
@@ -583,26 +490,7 @@ where
         input.on_conn_error(error);
         listener.on_conn_error(error);
         self.stream_ids.on_conn_error();
-    }
-}
-
-pub struct StreamFramePackages<TX> {
-    data_stream: Arc<DataStreams<TX>>,
-    flow_ctrl: ArcSendControler<TX>,
-    zero_rtt: bool,
-}
-
-impl<TX, P> Package<P> for StreamFramePackages<TX>
-where
-    TX: SendFrame<StreamCtlFrame> + SendFrame<DataBlockedFrame> + Clone + Send + 'static,
-    P: BufMut + ?Sized,
-    for<'a> (StreamFrame, &'a [Bytes]): Package<P>,
-{
-    #[inline]
-    fn dump(&mut self, packet: &mut P) -> Result<PacketContent, Signals> {
-        self.data_stream
-            .try_load_data_into_once(packet, &self.flow_ctrl, self.zero_rtt)?;
-        Ok(PacketContent::EffectivePayload)
+        self.tx_wakers.wake_all();
     }
 }
 
@@ -616,10 +504,10 @@ where
         remote_params: &Parameters<RR>,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
-        tx_wakers: ArcSendWakers,
         metrics: Option<qbase::metric::ArcConnectionMetrics>,
     ) -> Self {
         use ParameterId::*;
+        let tx_wakers = ArcSendWakers::default();
         Self {
             role,
             stream_ids: StreamIds::new(
@@ -717,6 +605,7 @@ where
         let io_state = IOState::bidirection();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state.clone());
         input.insert(sid, Incoming::new(arc_recver.clone()), io_state);
+        self.tx_wakers.wake_all();
         Poll::Ready(Ok(Some((
             sid,
             (Reader::new(arc_recver), Writer::new(arc_sender)),
@@ -761,6 +650,7 @@ where
         let arc_sender = self.create_sender(sid, snd_buf_size);
         let io_state = IOState::send_only();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
+        self.tx_wakers.wake_all();
         Poll::Ready(Ok(Some((sid, Writer::new(arc_sender)))))
     }
 
@@ -814,6 +704,7 @@ where
                     let io_state = IOState::bidirection();
                     input.insert(sid, Incoming::new(arc_recver.clone()), io_state.clone());
                     output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
+                    self.tx_wakers.wake_all();
                     listener.push_bi_stream(sid, (arc_recver, arc_sender));
                 }
                 Ok(())
@@ -850,7 +741,6 @@ where
             sid,
             buf_size,
             Ext(self.ctrl_frames.clone()),
-            self.tx_wakers.clone(),
             self.metrics.clone(),
         )
     }
@@ -868,16 +758,13 @@ mod tests {
         task::{Context, Poll},
     };
 
-    use bytes::{BufMut, BytesMut, buf::UninitSlice};
+    use bytes::BytesMut;
     use qbase::{
-        flow::ArcSendControler,
         frame::{Frame, io::SendFrame},
-        net::tx::ArcSendWakers,
-        packet::{Package, PacketContent, RecordFrame},
+        packet::PacketContent,
         param::handy::{client_parameters, server_parameters},
         role::Role,
         sid::{Dir, handy::DemandConcurrency},
-        util::Buffer,
     };
     use tokio::io::AsyncWrite;
 
@@ -891,25 +778,91 @@ mod tests {
         fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
     }
 
-    struct TestPacket(BytesMut);
+    #[tokio::test]
+    async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Wake, Waker},
+        };
 
-    // Safety: every method delegates to BytesMut without changing its initialized-length rules.
-    unsafe impl BufMut for TestPacket {
-        fn remaining_mut(&self) -> usize {
-            self.0.remaining_mut()
+        use tokio::io::AsyncWriteExt;
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
         }
-
-        unsafe fn advance_mut(&mut self, cnt: usize) {
-            unsafe { self.0.advance_mut(cnt) };
-        }
-
-        fn chunk_mut(&mut self) -> &mut UninitSlice {
-            self.0.chunk_mut()
-        }
-    }
-
-    impl<D: Buffer> RecordFrame<Frame<D>, D> for TestPacket {
-        fn record_frame(&mut self, _frame: &Frame<D>) {}
+        let streams = DataStreams::new(
+            Role::Client,
+            &client_parameters(),
+            &server_parameters(),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        let a = Arc::new(Counter(AtomicUsize::new(0)));
+        let b = Arc::new(Counter(AtomicUsize::new(0)));
+        let wa = Waker::from(a.clone());
+        let wb = Waker::from(b.clone());
+        let poll = |waker: &Waker| {
+            use qbase::packet::{Constraints, GetType, OneRttHeader};
+            let mut bytes = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 100,
+                send_quota: 128,
+                credit: 128,
+                min_size: 0,
+                max_size: 128,
+                ..Default::default()
+            };
+            streams.poll_dump(
+                &mut Context::from_waker(waker),
+                &mut qbase::packet::ConstraintBuffer::new(
+                    &mut bytes,
+                    &mut limits,
+                    OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                    0,
+                    0,
+                ),
+                &mut frames,
+            )
+        };
+        assert!(poll(&wa).is_pending());
+        assert!(poll(&wb).is_pending());
+        let Poll::Ready(Ok(Some((_, mut writer)))) =
+            streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100)
+        else {
+            panic!("stream should open");
+        };
+        assert_eq!(a.0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.0.load(Ordering::Relaxed), 1);
+        // Re-polling discovers the new stream and subscribes both paths to its state.
+        assert!(poll(&wa).is_pending());
+        assert!(poll(&wb).is_pending());
+        streams.cancel(&wa);
+        writer.write_all(b"data").await.unwrap();
+        assert_eq!(a.0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.0.load(Ordering::Relaxed), 2);
+        assert!(matches!(poll(&wb), Poll::Ready(Ok(n)) if n > 0));
+        streams.cancel(&wb);
+        writer.write_all(b"more").await.unwrap();
+        assert_eq!(b.0.load(Ordering::Relaxed), 2);
+        let c = Arc::new(Counter(AtomicUsize::new(0)));
+        let wc = Waker::from(c.clone());
+        assert!(matches!(poll(&wc), Poll::Ready(Ok(n)) if n > 0));
+        let Poll::Ready(Ok(Some((_, mut next)))) =
+            streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100)
+        else {
+            panic!("stream should open");
+        };
+        assert_eq!(a.0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.0.load(Ordering::Relaxed), 2);
+        assert_eq!(c.0.load(Ordering::Relaxed), 0);
+        streams.cancel(&wc);
+        use crate::send::CancelStream;
+        writer.cancel(0);
+        next.cancel(0);
     }
 
     #[test]
@@ -927,7 +880,6 @@ mod tests {
             &server_parameters(),
             Box::new(DemandConcurrency),
             MockFrameSender,
-            ArcSendWakers::default(),
             None,
         );
         let sid = qbase::sid::StreamId::new(Role::Client, Dir::Bi, 0);
@@ -968,7 +920,6 @@ mod tests {
             &server_parameters(),
             Box::new(DemandConcurrency),
             MockFrameSender,
-            ArcSendWakers::default(),
             None,
         ));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
@@ -987,12 +938,99 @@ mod tests {
         let mut writer = Writer::new(sender);
         assert!(Pin::new(&mut writer).poll_shutdown(&mut cx).is_pending());
 
-        let flow_ctrl = ArcSendControler::new(1024, MockFrameSender, ArcSendWakers::default());
-        let mut package = streams.package(flow_ctrl, false);
-        let mut packet = TestPacket(BytesMut::with_capacity(128));
-        assert_eq!(
-            package.dump(&mut packet),
-            Ok(PacketContent::EffectivePayload)
+        let mut packet = BytesMut::with_capacity(128);
+        let mut limits = qbase::packet::Constraints {
+            flow_ctrl: 0,
+            send_quota: 128,
+            credit: 128,
+            min_size: 0,
+            max_size: 128,
+            ..Default::default()
+        };
+        use qbase::packet::GetType;
+        let mut buffer = qbase::packet::ConstraintBuffer::new(
+            &mut packet,
+            &mut limits,
+            qbase::packet::OneRttHeader::new(Default::default(), Default::default()).get_type(),
+            0,
+            0,
         );
+        let mut frames = Vec::new();
+        assert!(
+            matches!(streams.poll_dump(&mut cx, &mut buffer, &mut frames), Poll::Ready(Ok(n)) if n > 0)
+        );
+        assert_eq!(
+            qbase::packet::assemble::content(&frames),
+            PacketContent::EffectivePayload
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, Frame::Stream(frame, ()) if frame.is_fin()))
+        );
+    }
+}
+
+impl<TX> DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    /// Bound reservations by actual pending fresh bytes; idle polling must not reserve and refund flow credit.
+    pub fn fresh_bytes(&self) -> usize {
+        let streams = self.output.streams();
+        let Ok(output) = streams.as_ref() else {
+            return 0;
+        };
+        let remote = self.stream_ids.remote.role();
+        let bidi = self.stream_ids.local.opened_streams(Dir::Bi);
+        let uni = self.stream_ids.local.opened_streams(Dir::Uni);
+        output
+            .outgoings
+            .iter()
+            .filter(|(sid, _)| {
+                sid.role() == remote
+                    || (sid.dir() == Dir::Bi && sid.id() < bidi)
+                    || (sid.dir() == Dir::Uni && sid.id() < uni)
+            })
+            .map(|(_, (stream, _))| stream.fresh_bytes())
+            .fold(0usize, usize::saturating_add)
+    }
+
+    pub(crate) fn poll_dump<B: BufMut + ?Sized>(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        // Keep stream insertion serialized with checking readiness and registering.
+        let mut guard = self.output.streams();
+        let output = match guard.as_mut() {
+            Ok(output) => output,
+            Err(error) => return Poll::Ready(Err(error.clone())),
+        };
+        let start = frames.len();
+        loop {
+            match self.poll_dump_once(output, cx, buffer, frames) {
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(n)) if n > 0 => {}
+                _ if frames.len() != start => return Poll::Ready(Ok(frames.len() - start)),
+                Poll::Pending => {
+                    self.tx_wakers.register(cx.waker());
+                    return Poll::Pending;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    pub(crate) fn cancel(&self, waker: &std::task::Waker) {
+        self.tx_wakers.cancel(waker);
+        if let Ok(output) = self.output.streams().as_mut() {
+            for (outgoing, _) in output.values_mut() {
+                <Outgoing<Ext<TX>> as qbase::packet::Package<bytes::BytesMut>>::cancel(
+                    outgoing, waker,
+                );
+            }
+        }
     }
 }

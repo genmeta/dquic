@@ -2,35 +2,34 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU16, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicU8, AtomicU16, Ordering},
     },
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
+use bytes::BufMut;
 use qbase::{
-    cid::ConnectionId,
-    frame::{PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
-    net::{
-        route::Pathway,
-        tx::{ArcSendWaker, Signals},
-    },
+    frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
+    net::{route::Pathway, tx::ArcSendWakers},
+    packet::{ConstraintBuffer, Package},
     role::Role,
     time::PathIdleTimer,
 };
 use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, PathStatus, Transport as _};
 
-use crate::{
-    Error,
-    send::{
-        constraints::{AntiAmplifier, Constraints},
-        write::PendingPacket,
-    },
-};
+use crate::Error;
+mod anti_amplifier;
+pub use anti_amplifier::AntiAmplifier;
+
+#[cfg(test)]
+use crate::send::{constraints::Constraints, write::PendingPacket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
     ClientHandshaking,
+    ClientValidating,
     AmplifyGuard {
         rcvd_bytes: usize,
         sent_bytes: usize,
@@ -41,25 +40,30 @@ pub enum PathState {
 
 pub struct Path {
     pub pathway: Pathway,
-    dcid: RwLock<ConnectionId>,
-    selected: AtomicBool,
+    // 0xff: undecided, 0: not selected, 1: selected, 2: handshake confirmed.
+    selected: AtomicU8,
     handshake: Arc<HandshakeStatus>,
     pub cc: ArcCC,
     challenge: Mutex<Option<(PathChallengeFrame, bool)>>,
-    pub send_waker: ArcSendWaker,
+    pub send_waker: ArcSendWakers,
     responses: Mutex<VecDeque<PathResponseFrame>>,
     pub anti_amplifier: Arc<AntiAmplifier>,
     pub activity: PathIdleTimer,
 }
 
 impl Path {
+    pub const MP_INITIAL: u8 = 0xFF;
+    pub const SUSPEND: u8 = 0;
+    pub const SELECTED: u8 = 1;
+    pub const HANDSHAKED: u8 = 2;
+
     pub fn new(
         pathway: Pathway,
         role: Role,
         activity: PathIdleTimer,
         feedback: [Arc<dyn Feedback>; 3],
     ) -> Self {
-        let send_waker = ArcSendWaker::new();
+        let send_waker = ArcSendWakers::default();
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         let status = PathStatus::new(handshake.clone(), Arc::new(AtomicU16::new(1200)));
         let cc = ArcCC::new(
@@ -71,8 +75,7 @@ impl Path {
         );
         Self {
             pathway,
-            dcid: RwLock::new(ConnectionId::default()),
-            selected: AtomicBool::new(false),
+            selected: AtomicU8::new(u8::MAX),
             handshake,
             cc,
             challenge: Mutex::new(None),
@@ -83,28 +86,36 @@ impl Path {
         }
     }
 
-    pub fn dcid(&self) -> ConnectionId {
-        *self.dcid.read().unwrap()
+    pub fn decide(&self, selected: bool) {
+        self.selected.store(
+            if selected {
+                Self::SELECTED
+            } else {
+                Self::SUSPEND
+            },
+            Ordering::Release,
+        );
+        self.send_waker.wake_all();
     }
-    pub fn set_dcid(&self, dcid: ConnectionId) {
-        *self.dcid.write().unwrap() = dcid;
-        self.send_waker.wake_by(Signals::CONNECTION_ID);
-    }
-    pub fn select(&self) {
-        self.selected.store(true, Ordering::Release);
-    }
-    pub fn is_selected(&self) -> bool {
+
+    pub fn selected(&self) -> u8 {
         self.selected.load(Ordering::Acquire)
     }
+
     pub fn got_handshake_key(&self) {
         self.handshake.got_handshake_key();
     }
+
     pub fn handshake_confirmed(&self) {
         self.handshake.handshake_confirmed();
+        self.selected.store(2, Ordering::Release);
+        self.send_waker.wake_all();
     }
+
     pub fn state(&self) -> PathState {
         *self.anti_amplifier.state.lock().unwrap()
     }
+
     pub fn is_validated(&self) -> bool {
         self.state() == PathState::Validated
     }
@@ -115,33 +126,42 @@ impl Path {
         if self.amplification_credit() >= 1200 {
             self.cc.grant_anti_amplification();
         }
-        self.send_waker.wake_by(Signals::CREDIT);
+        self.send_waker.wake_all();
     }
 
     pub fn client_handshaking(&self) {
         self.anti_amplifier.client_handshaking();
         self.cc.grant_anti_amplification();
-        self.send_waker.wake_by(Signals::CREDIT);
+        self.send_waker.wake_all();
+    }
+
+    pub fn client_validating(&self) {
+        self.anti_amplifier.client_validating();
+        self.cc.grant_anti_amplification();
+        self.send_waker.wake_all();
     }
 
     pub fn guard_amplification(&self) {
         self.anti_amplifier.guard();
         *self.challenge.lock().unwrap() = None;
         self.responses.lock().unwrap().clear();
-        self.send_waker.wake_by(Signals::CREDIT);
+        self.send_waker.wake_all();
     }
 
     pub fn validate(&self) {
         self.anti_amplifier.grant();
         *self.challenge.lock().unwrap() = None;
         self.cc.grant_anti_amplification();
-        self.send_waker.wake_by(Signals::PATH_VALIDATE);
+        self.send_waker.wake_all();
     }
 
     pub fn set_challenge(&self, challenge: PathChallengeFrame) {
-        if matches!(self.state(), PathState::AmplifyGuard { .. }) {
+        if matches!(
+            self.state(),
+            PathState::AmplifyGuard { .. } | PathState::ClientValidating
+        ) {
             *self.challenge.lock().unwrap() = Some((challenge, false));
-            self.send_waker.wake_by(Signals::TRANSPORT);
+            self.send_waker.wake_all();
         }
     }
 
@@ -157,37 +177,58 @@ impl Path {
     }
 
     pub fn retire(&self) {
-        *self.anti_amplifier.state.lock().unwrap() = PathState::Retired;
+        self.anti_amplifier.retire();
         self.clear_challenge();
         self.responses.lock().unwrap().clear();
-        self.send_waker.wake_by(Signals::all());
+        self.send_waker.wake_all();
     }
 
     pub fn amplification_credit(&self) -> usize {
         self.anti_amplifier.balance()
     }
 
+    #[cfg(test)]
     pub fn constraints(&self, capacity: usize, probe: bool) -> Constraints {
         Constraints {
+            flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity,
-            congestion: self
-                .cc
-                .send_quota()
-                .unwrap_or(0)
-                .max(if probe { 1200 } else { 0 }),
+            congestion: self.cc.send_quota().max(if probe { 1200 } else { 0 }),
             anti_amplification: self.amplification_credit(),
         }
     }
+
     pub fn challenge(&self) -> Option<PathChallengeFrame> {
         self.challenge
             .lock()
             .unwrap()
             .and_then(|(challenge, sent)| (!sent).then_some(challenge))
     }
+
     pub fn response(&self) -> Option<PathResponseFrame> {
         self.responses.lock().unwrap().front().copied()
     }
+
+    pub fn on_frame_assembled(&self, frame: &qbase::frame::Frame) {
+        match frame {
+            qbase::frame::Frame::PathResponse(frame) => {
+                let mut responses = self.responses.lock().unwrap();
+                if responses.front() == Some(frame) {
+                    responses.pop_front();
+                }
+            }
+            qbase::frame::Frame::PathChallenge(frame) => {
+                if let Some((challenge, submitted)) = self.challenge.lock().unwrap().as_mut()
+                    && challenge == frame
+                {
+                    *submitted = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Confirm only path validation frames whose datagram reached the socket.
+    #[cfg(test)]
     pub fn on_packet_sent(&self, packet: &PendingPacket) {
         if let Some(frame) = packet.response {
             let mut responses = self.responses.lock().unwrap();
@@ -216,7 +257,118 @@ impl ReceiveFrame<PathChallengeFrame> for Path {
             }
             responses.push_back(response);
         }
-        self.send_waker.wake_by(Signals::TRANSPORT);
+        self.send_waker.wake_all();
         Ok(())
+    }
+}
+
+impl<B: BufMut + ?Sized> Package<B> for &Path {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        let responses = self.responses.lock().unwrap();
+        let challenge = self.challenge.lock().unwrap();
+        let response = responses.front().copied();
+        let challenge_frame = challenge.and_then(|(frame, sent)| (!sent).then_some(frame));
+        if response.is_none() && challenge_frame.is_none() {
+            self.send_waker.register(cx.waker());
+            return Poll::Pending;
+        }
+        drop(challenge);
+        drop(responses);
+        let start = frames.len();
+        let mut result = Poll::Pending;
+        if let Some(mut response) = response {
+            result = response.poll_dump(cx, buffer, frames);
+        }
+        if let Some(mut challenge) = challenge_frame {
+            match challenge.poll_dump(cx, buffer, frames) {
+                Poll::Pending => {}
+                ready => result = ready,
+            }
+        }
+        for frame in &frames[start..] {
+            self.on_frame_assembled(frame);
+        }
+        if frames.len() > start {
+            Poll::Ready(Ok(frames.len() - start))
+        } else {
+            result
+        }
+    }
+
+    fn cancel(&mut self, waker: &Waker) {
+        self.send_waker.cancel(waker);
+    }
+}
+
+#[cfg(test)]
+mod package_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use qbase::{
+        net::addr::EndpointAddr,
+        packet::{Constraints, GetType, OneRttHeader},
+        time::ArcConnIdle,
+    };
+
+    use super::*;
+
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn validation_registers_only_when_both_sources_are_empty() {
+        for queued in [false, true] {
+            for quota in [0, 128] {
+                let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::default());
+                let path = Path::new(
+                    Pathway::new(
+                        EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+                        EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+                    ),
+                    Role::Server,
+                    ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+                    [feedback.clone(), feedback.clone(), feedback],
+                );
+                if queued {
+                    path.recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
+                        .unwrap();
+                    path.set_challenge(PathChallengeFrame::from_slice(&[2; 8]));
+                }
+                let counter = Arc::new(Counter(AtomicUsize::new(0)));
+                let waker = Waker::from(counter.clone());
+                let mut bytes = bytes::BytesMut::new();
+                let mut frames = Vec::new();
+                let mut limits = Constraints {
+                    flow_ctrl: 0,
+                    send_quota: quota,
+                    credit: 128,
+                    min_size: 0,
+                    max_size: 128,
+                    ..Default::default()
+                };
+                let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                let result = (&path).poll_dump(
+                    &mut Context::from_waker(&waker),
+                    &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
+                    &mut frames,
+                );
+                assert_eq!(result.is_pending(), !queued);
+                if queued {
+                    assert_eq!(result, Poll::Ready(Ok(if quota == 0 { 0 } else { 2 })));
+                }
+                path.recv_frame(PathChallengeFrame::from_slice(&[3; 8]))
+                    .unwrap();
+                assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
+            }
+        }
     }
 }

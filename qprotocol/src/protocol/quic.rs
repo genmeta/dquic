@@ -1,6 +1,8 @@
 use std::{
+    future::poll_fn,
     io::{self, IoSlice},
     sync::{Arc, RwLock, Weak},
+    task::{Context, Poll},
 };
 
 use bytes::BytesMut;
@@ -90,17 +92,27 @@ impl QuicProtocol {
 
     /// Submit one batch, returning the number of datagrams in the accepted prefix.
     pub async fn send(&self, pathway: Pathway, packets: &[IoSlice<'_>]) -> io::Result<usize> {
-        std::future::poll_fn(|cx| self.poll_send(cx, pathway, packets)).await
+        poll_fn(|cx| self.poll_send(cx, pathway, packets)).await
+    }
+
+    /// Run submission and its caller's accounting in one synchronous poll.
+    /// The callback may hold short-lived locks; none survive a Pending result.
+    pub async fn send_with(
+        &self,
+        pathway: Pathway,
+        packets: &[IoSlice<'_>],
+        mut submit: impl FnMut(&mut dyn FnMut() -> Poll<io::Result<usize>>) -> Poll<io::Result<usize>>,
+    ) -> io::Result<usize> {
+        poll_fn(|cx| submit(&mut || self.poll_send(cx, pathway, packets))).await
     }
 
     /// Pending submits nothing. A partial success is returned immediately for accounting.
     pub fn poll_send(
         &self,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         pathway: Pathway,
         packets: &[IoSlice<'_>],
-    ) -> std::task::Poll<io::Result<usize>> {
-        use std::task::Poll;
+    ) -> Poll<io::Result<usize>> {
         if packets.is_empty() {
             return Poll::Ready(Ok(0));
         }
@@ -128,12 +140,12 @@ impl QuicProtocol {
     /// Submit complete datagrams, including the Forward header for a mediated Pathway.
     pub fn poll_send_datagrams(
         &self,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         pathway: Pathway,
         packets: &[IoSlice<'_>],
-    ) -> std::task::Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<usize>> {
         if packets.is_empty() {
-            return std::task::Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(0));
         }
         let packets = &packets[..packets.len().min(Self::MAX_DATAGRAMS)];
         let socket = self.find_socket(pathway.local()).ok_or_else(|| {

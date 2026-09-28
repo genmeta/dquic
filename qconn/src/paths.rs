@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
 
@@ -8,7 +8,7 @@ use qbase::{
     ArcReceiving, Epoch,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
-    net::{route::Pathway, tx::Signals},
+    net::route::Pathway,
     role::Role,
     time::ArcConnIdle,
 };
@@ -27,6 +27,7 @@ pub struct Paths {
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
     role: Role,
+    selected: OnceLock<Weak<Path>>,
     idle: ArcConnIdle,
     feedback: [ArcFeedback; 3],
     closed: ArcReceiving<CloseReason>,
@@ -49,6 +50,7 @@ impl Paths {
             entries: Mutex::new(BTreeMap::new()),
             responses: Mutex::new(HashMap::new()),
             role,
+            selected: OnceLock::new(),
             idle,
             feedback,
             closed: ArcReceiving::default(),
@@ -84,32 +86,41 @@ impl Paths {
                 .each_ref()
                 .map(|feedback| Arc::new(feedback.clone()) as Arc<dyn qcongestion::Feedback>),
         ));
-        if handshaking && !entries.values().any(|path| path.is_selected()) {
+        if entries.values().any(|path| path.selected() == 2) {
+            path.handshake_confirmed();
+            if self.role == Role::Client {
+                path.client_validating();
+            }
+        } else if self.selected.get().is_some() {
+            path.decide(false);
+        } else if handshaking {
             path.client_handshaking();
         }
-        self.phase.send_wakers().replace(pathway, &path.send_waker);
         entries.insert(pathway, path.clone());
         drop(entries);
 
-        tokio::spawn(crate::burst::sending(self.clone(), path.clone()));
-        path.send_waker.wake_by(Signals::all());
+        tokio::spawn(crate::send::sending(self.clone(), path.clone()));
+        path.send_waker.wake_all();
         Ok(path)
     }
 
-    pub(crate) fn select_path(&self, path: &Path) {
+    pub(crate) fn select_path(&self, path: &Arc<Path>) {
         let entries = self.entries.lock().unwrap();
-        if entries.values().any(|path| path.is_selected()) {
+        if self.selected.set(Arc::downgrade(path)).is_err() {
             return;
         }
-        path.select();
-        for other in entries.values().filter(|other| {
-            other.state() == PathState::ClientHandshaking && other.pathway != path.pathway
-        }) {
-            other.guard_amplification();
+        for other in entries.values() {
+            other.decide(other.pathway == path.pathway);
+            if other.selected() == 0 {
+                other.guard_amplification();
+            }
         }
-        self.phase
-            .send_wakers()
-            .wake_all_by(qbase::net::tx::Signals::TRANSPORT);
+    }
+
+    pub(crate) fn is_handshake_path(&self, path: &Path) -> bool {
+        self.selected
+            .get()
+            .is_some_and(|selected| std::ptr::eq(selected.as_ptr(), path))
     }
 
     pub(crate) fn phase(&self) -> ArcConnPhase {
@@ -124,6 +135,7 @@ impl Paths {
         self.idle.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn feedback(&self) -> [ArcFeedback; 3] {
         self.feedback.clone()
     }
@@ -157,17 +169,26 @@ impl Paths {
     }
 
     pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
-        for path in self.snapshot() {
-            path.handshake_confirmed();
-            if path.state() == PathState::ClientHandshaking && path.is_selected() {
+        let entries = self.entries.lock().unwrap();
+        for path in entries.values() {
+            if self.is_handshake_path(path) {
                 path.validate();
+            } else if self.role == Role::Client {
+                path.client_validating();
             }
-            self.start_validation(&path);
+            path.handshake_confirmed();
+            self.start_validation(path);
         }
     }
 
     pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if !matches!(path.state(), PathState::AmplifyGuard { .. }) {
+        if path.selected() != 2 {
+            return;
+        }
+        if !matches!(
+            path.state(),
+            PathState::AmplifyGuard { .. } | PathState::ClientValidating
+        ) {
             return;
         }
         let mut responses = self.responses.lock().unwrap();
@@ -182,7 +203,10 @@ impl Paths {
         tokio::spawn(async move {
             let challenge = PathChallengeFrame::random();
             for _ in 0..3 {
-                if !matches!(path.state(), PathState::AmplifyGuard { .. }) {
+                if !matches!(
+                    path.state(),
+                    PathState::AmplifyGuard { .. } | PathState::ClientValidating
+                ) {
                     break;
                 }
                 path.set_challenge(challenge);
@@ -204,7 +228,10 @@ impl Paths {
             {
                 paths.responses.lock().unwrap().remove(&path.pathway);
                 path.clear_challenge();
-                if matches!(path.state(), PathState::AmplifyGuard { .. }) {
+                if matches!(
+                    path.state(),
+                    PathState::AmplifyGuard { .. } | PathState::ClientValidating
+                ) {
                     paths.remove(&path);
                     if paths.snapshot().is_empty() {
                         paths.on_error(
@@ -319,7 +346,7 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use qbase::{cid::ConnectionId, net::addr::EndpointAddr};
-    use qtransport::{keys::ArcKeys, space::Space};
+    use qtransport::space::Space;
 
     use super::*;
     use crate::InitialPhase;
@@ -367,7 +394,12 @@ mod tests {
         assert_eq!(second.amplification_credit(), usize::MAX);
         let incoming = paths.on_incoming_path(pathway(30004)).unwrap();
         assert_eq!(incoming.amplification_credit(), 0);
+        assert_eq!(first.selected(), u8::MAX);
+        assert_eq!(second.selected(), u8::MAX);
         paths.select_path(&first);
+        assert_eq!(first.selected(), 1);
+        assert_eq!(second.selected(), 0);
+        assert_eq!(incoming.selected(), 0);
         assert_eq!(first.state(), PathState::ClientHandshaking);
         assert_eq!(
             second.state(),
@@ -384,10 +416,10 @@ mod tests {
             panic!()
         };
         paths.phase.enter_handshake(
-            initial,
-            Arc::new(Space::<ArcKeys>::new(
+            initial.clone(),
+            Arc::new(Space::new(
                 Epoch::Handshake,
-                paths.phase.send_wakers(),
+                initial.initial.keys.clone(),
                 |_| {},
             )),
         );
@@ -398,6 +430,24 @@ mod tests {
                 .amplification_credit(),
             0
         );
+        paths.handshake_confirmed();
+        assert!(paths.snapshot().iter().all(|path| path.selected() == 2));
+        assert!(first.is_validated());
+        assert!(!second.is_validated());
+        assert_eq!(second.state(), PathState::ClientValidating);
+        assert_eq!(second.amplification_credit(), usize::MAX);
+        assert!(paths.is_handshake_path(&first));
+        let added = paths.add_path(pathway(30006)).unwrap();
+        assert_eq!(added.selected(), 2);
+        assert_eq!(added.state(), PathState::ClientValidating);
+        paths.start_validation(&added);
+        tokio::task::yield_now().await;
+        assert!(first.challenge().is_none());
+        assert!(second.challenge().is_some());
+        assert!(added.challenge().is_some());
+        paths.on_path_response(&second, second.challenge().unwrap().into());
+        tokio::task::yield_now().await;
+        assert!(second.is_validated());
         paths.retire_all();
     }
 
@@ -407,6 +457,9 @@ mod tests {
         let first = paths.add_path(pathway(30002)).unwrap();
         let second = paths.add_path(pathway(30003)).unwrap();
         assert_eq!(first.amplification_credit(), 0);
+        paths.start_validation(&first);
+        assert!(paths.responses.lock().unwrap().is_empty());
+        first.handshake_confirmed();
         paths.start_validation(&first);
         paths.start_validation(&first);
         tokio::task::yield_now().await;
@@ -428,6 +481,7 @@ mod tests {
     async fn validation_times_out_after_three_attempts_and_retirement_cancels_waiting() {
         let paths = paths(Role::Server);
         let path = paths.add_path(pathway(30002)).unwrap();
+        path.handshake_confirmed();
         paths.start_validation(&path);
         tokio::task::yield_now().await;
         for _ in 0..3 {
@@ -442,6 +496,7 @@ mod tests {
             matches!(paths.closed().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
         );
         let replacement = paths.add_path(pathway(30002)).unwrap();
+        replacement.handshake_confirmed();
         paths.start_validation(&replacement);
         tokio::task::yield_now().await;
         let response = paths

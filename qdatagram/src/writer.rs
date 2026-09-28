@@ -3,14 +3,14 @@ use std::{
     io,
     ops::DerefMut,
     sync::{Arc, Mutex},
+    task::Poll,
 };
 
 use bytes::{BufMut, Bytes};
 use qbase::{
     error::Error,
     frame::{DatagramFrame, EncodeSize},
-    net::tx::{ArcSendWakers, Signals},
-    packet::Package,
+    net::tx::ArcSendWakers,
     varint::VarInt,
 };
 
@@ -22,10 +22,10 @@ struct RawDatagramWriter {
 }
 
 impl RawDatagramWriter {
-    fn new(tx_wakers: ArcSendWakers) -> Self {
+    fn new() -> Self {
         Self {
             datagrams: VecDeque::new(),
-            tx_wakers,
+            tx_wakers: ArcSendWakers::default(),
         }
     }
 }
@@ -35,8 +35,8 @@ impl RawDatagramWriter {
 pub struct DatagramOutgoing(Arc<Mutex<Result<RawDatagramWriter, Error>>>);
 
 impl DatagramOutgoing {
-    pub fn new(tx_wakers: ArcSendWakers) -> DatagramOutgoing {
-        DatagramOutgoing(Arc::new(Mutex::new(Ok(RawDatagramWriter::new(tx_wakers)))))
+    pub fn new() -> DatagramOutgoing {
+        DatagramOutgoing(Arc::new(Mutex::new(Ok(RawDatagramWriter::new()))))
     }
 
     /// Try to reate a new instance of [`DatagramWriter`].
@@ -61,7 +61,7 @@ impl DatagramOutgoing {
         })
     }
 
-    // Same logic with `try_load_data_into`, only used for test purpose.
+    // Reference encoder used to check DATAGRAM length and padding decisions.
     #[cfg(test)]
     fn try_read_datagram(&self, mut buf: &mut [u8]) -> Option<(DatagramFrame, usize)> {
         use qbase::frame::io::WriteDataFrame;
@@ -96,67 +96,6 @@ impl DatagramOutgoing {
             }
         };
         Some((frame, available - buf.remaining_mut()))
-    }
-
-    /// Attempts to load the datagram frame into the packet.
-    ///
-    /// # Encoding
-    ///
-    /// [`DatagramFrame`] has two types:
-    /// - frame type `0x30`: The datagram frame without the data's length.
-    ///
-    /// The size of this form of frame is `1 byte` + `the size of the data`.
-    ///
-    /// - frame type `0x31`: The datagram frame with the data's length.
-    ///
-    /// The size of this form of frame is `1 byte` + `the size of the data's length` + `the size of the data`.
-    ///
-    /// The datagram won't be split into multiple frames. If the remaining space of packet is not enough to encode the datagram frame,
-    /// the datagram will not be loaded.
-    ///
-    /// This method tries to encode the [`DatagramFrame`] with the data's length first (frame type `0x31`).
-    ///
-    /// If remaining space of the packet is not enough to encode the length,
-    /// it will encode the [`DatagramFrame`] without the data's length (frame type `0x30`).
-    /// Because no frame can be put after the datagram frame without length,
-    /// padding frames will be put before the datagram frame.
-    /// In this case, the packet will be filled.
-    pub fn try_load_data_into<P>(&self, packet: &mut P) -> Result<(), Signals>
-    where
-        P: BufMut + ?Sized,
-        (DatagramFrame, Bytes): Package<P>,
-    {
-        let mut guard = self.0.lock().unwrap();
-        let Ok(writer) = guard.as_mut() else {
-            return Err(Signals::empty()); // connection closed
-        };
-        let Some(datagram) = writer.datagrams.front() else {
-            return Err(Signals::TRANSPORT);
-        };
-
-        let available = packet.remaining_mut();
-
-        let max_encoding_size = available.saturating_sub(datagram.len());
-        if max_encoding_size == 0 {
-            return Err(Signals::CONGESTION);
-        }
-
-        let data = writer.datagrams.pop_front().expect("unreachable");
-        let data_len = VarInt::try_from(data.len()).unwrap();
-        let frame_without_len = DatagramFrame::new(false, data_len);
-        let frame_with_len = DatagramFrame::new(true, data_len);
-        match max_encoding_size {
-            // Encode length
-            n if n >= frame_with_len.encoding_size() => {
-                (frame_with_len, data).dump(packet).unwrap();
-            }
-            // Do not encode length, may need padding
-            n => {
-                packet.put_bytes(0, n - frame_without_len.encoding_size());
-                (frame_without_len, data).dump(packet).unwrap();
-            }
-        }
-        Ok(())
     }
 
     /// When a connection error occurs, set the internal state to an error state.
@@ -221,7 +160,7 @@ impl DatagramWriter {
                         ),
                     ));
                 }
-                writer.tx_wakers.wake_all_by(Signals::TRANSPORT);
+                writer.tx_wakers.wake_all();
                 writer.datagrams.push_back(data.clone());
                 Ok(())
             }
@@ -274,6 +213,55 @@ impl DatagramWriter {
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn only_pending_polls_register_waiters() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Context, Wake, Waker},
+        };
+
+        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package};
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for queued in [false, true] {
+            for quota in [0, 128] {
+                let mut source = DatagramOutgoing::new();
+                let writer = source.new_writer(128).unwrap();
+                if queued {
+                    writer.send_bytes(Bytes::from_static(b"hello")).unwrap();
+                }
+                let counter = Arc::new(Counter(AtomicUsize::new(0)));
+                let waker = Waker::from(counter.clone());
+                let mut bytes = bytes::BytesMut::new();
+                let mut frames = Vec::new();
+                let mut limits = Constraints {
+                    flow_ctrl: 0,
+                    send_quota: quota,
+                    credit: 128,
+                    min_size: 0,
+                    max_size: 128,
+                    ..Default::default()
+                };
+                let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                let result = source.poll_dump(
+                    &mut Context::from_waker(&waker),
+                    &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
+                    &mut frames,
+                );
+                assert_eq!(result.is_pending(), !queued);
+                if queued {
+                    assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
+                }
+                writer.send_bytes(Bytes::from_static(b"next")).unwrap();
+                assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
+            }
+        }
+    }
+
     use qbase::{
         error::{ErrorKind, QuicError},
         frame::{
@@ -286,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_datagram_writer_with_length() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
         let data = Bytes::from_static(b"hello world");
@@ -309,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_datagram_writer_without_length() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
         let data = Bytes::from_static(b"hello world");
@@ -331,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_datagram_writer_unwritten() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
         let data = Bytes::from_static(b"hello world");
@@ -346,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_datagram_writer_padding_first() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
         // Will be encoded to 2 bytes
@@ -371,14 +359,55 @@ mod tests {
     }
 
     #[test]
+    fn package_preserves_datagram_length_and_padding_strategy() {
+        use std::task::{Context, Poll, Waker};
+
+        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader};
+        for (length, capacity) in [(11, 12), (64, 66), (64, 100)] {
+            let data = Bytes::from(vec![b'a'; length]);
+            let expected = DatagramOutgoing::new();
+            expected
+                .new_writer(1024)
+                .unwrap()
+                .send_bytes(data.clone())
+                .unwrap();
+            let mut bytes = vec![0; capacity];
+            let (_, written) = expected.try_read_datagram(&mut bytes).unwrap();
+            let mut source = DatagramOutgoing::new();
+            source.new_writer(1024).unwrap().send_bytes(data).unwrap();
+            let mut actual = Vec::new();
+            let mut limits = Constraints {
+                flow_ctrl: 0,
+                send_quota: capacity,
+                credit: capacity,
+                min_size: 0,
+                max_size: capacity,
+                ..Default::default()
+            };
+            let mut buffer = ConstraintBuffer::new(
+                &mut actual,
+                &mut limits,
+                OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                0,
+                0,
+            );
+            let mut frames = Vec::new();
+            assert!(
+                matches!(qbase::packet::Package::poll_dump(&mut source, &mut Context::from_waker(Waker::noop()), &mut buffer, &mut frames), Poll::Ready(Ok(n)) if n == frames.len() && n > 0)
+            );
+            assert_eq!(actual, bytes[..written]);
+        }
+    }
+
+    #[test]
     fn test_datagram_writer_exceeds_limit() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         assert!(outgoing.new_writer(0).is_err());
     }
 
     #[test]
     fn test_datagram_writer_on_conn_error() {
-        let outgoing = DatagramOutgoing::new(Default::default());
+        let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
         outgoing.on_conn_error(
@@ -391,5 +420,51 @@ mod tests {
         );
         let writer_guard = writer.writer.lock().unwrap();
         assert!(writer_guard.as_ref().is_err());
+    }
+}
+
+impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
+    fn poll_dump(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
+        frames: &mut Vec<qbase::frame::Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        use std::task::Poll;
+        let mut guard = self.0.lock().unwrap();
+        let writer = match guard.as_mut() {
+            Ok(writer) => writer,
+            Err(error) => return Poll::Ready(Err(error.clone())),
+        };
+        let Some(data) = writer.datagrams.front() else {
+            writer.tx_wakers.register(cx.waker());
+            return Poll::Pending;
+        };
+        let before = frames.len();
+        buffer.for_frame(qbase::frame::FrameType::Datagram(1), frames);
+        let length = VarInt::try_from(data.len()).unwrap();
+        let mut frame = DatagramFrame::new(true, length);
+        if !buffer.can_fit(frame.encoding_size() + data.len()) {
+            frame = DatagramFrame::new(false, length);
+            if !buffer.can_fit(frame.encoding_size() + data.len()) {
+                return Poll::Ready(Ok(0));
+            }
+            let padding = buffer.remaining_mut() - frame.encoding_size() - data.len();
+            if padding > 0 {
+                buffer.put_bytes(0, padding);
+                frames.push(qbase::frame::Frame::Padding(qbase::frame::PaddingFrame));
+            }
+        }
+        let result = (frame, data.clone()).poll_dump(cx, buffer, frames);
+        if matches!(result, Poll::Ready(Ok(1))) {
+            writer.datagrams.pop_front();
+            return Poll::Ready(Ok(frames.len() - before));
+        }
+        result
+    }
+    fn cancel(&mut self, waker: &std::task::Waker) {
+        if let Ok(writer) = self.0.lock().unwrap().as_ref() {
+            writer.tx_wakers.cancel(waker);
+        }
     }
 }

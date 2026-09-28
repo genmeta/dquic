@@ -36,13 +36,13 @@ pub use header::{
     LongHeaderBuilder, OneRttHeader, RetryHeader, VersionNegotiationHeader, ZeroRttHeader, long,
 };
 
+pub mod assemble;
 /// The io module provides the functions to parse the QUIC packet.
 ///
 /// The writing of the QUIC packet is not provided here, they are written in place.
 pub mod io;
-pub use io::{
-    AssemblePacket, Package, PacketInfo, PacketSpace, PacketWriter, ProductHeader, RecordFrame,
-};
+pub use assemble::{Assemble, ConstraintBuffer, Constraints, Limit, Package};
+pub use io::{AssemblePacket, PacketInfo, PacketSpace, PacketWriter, ProductHeader, RecordFrame};
 
 /// Encoding and decoding of packet number
 pub mod number;
@@ -192,6 +192,28 @@ impl Iterator for PacketReader {
                 self.raw_bytes.clear(); // no longer parsing
                 Some(Err(error))
             }
+        }
+    }
+}
+
+impl HeaderSize for DataHeader {
+    fn size(&self) -> usize {
+        match self {
+            Self::Long(long::DataHeader::Initial(h)) => h.size(),
+            Self::Long(long::DataHeader::Handshake(h)) => h.size(),
+            Self::Long(long::DataHeader::ZeroRtt(h)) => h.size(),
+            Self::Short(h) => h.size(),
+        }
+    }
+}
+
+impl<B: BufMut> WriteHeader<DataHeader> for B {
+    fn put_header(&mut self, header: &DataHeader) {
+        match header {
+            DataHeader::Long(long::DataHeader::Initial(h)) => self.put_header(h),
+            DataHeader::Long(long::DataHeader::Handshake(h)) => self.put_header(h),
+            DataHeader::Long(long::DataHeader::ZeroRtt(h)) => self.put_header(h),
+            DataHeader::Short(h) => self.put_header(h),
         }
     }
 }

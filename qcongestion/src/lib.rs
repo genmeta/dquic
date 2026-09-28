@@ -1,4 +1,4 @@
-use qbase::{Epoch, frame::AckFrame, net::tx::Signals};
+use qbase::{Epoch, frame::AckFrame};
 use qevent::quic::recovery::PacketLostTrigger;
 use thiserror::Error;
 use tokio::time::{Duration, Instant};
@@ -26,8 +26,8 @@ pub trait Transport {
     fn do_tick(&self) -> Result<(), TooManyPtos>;
 
     /// Returns how many bytes can be sent at the moment.
-    /// If the congestion controller is not ready, returns an signal that should be waited for.
-    fn send_quota(&self) -> Result<usize, Signals>;
+    /// Returns zero when the congestion controller is not ready.
+    fn send_quota(&self) -> usize;
 
     /// Gets the retransmission and expiration time for the given epoch.
     fn retransmit_and_expire_time(&self, epoch: Epoch) -> (Duration, Duration);

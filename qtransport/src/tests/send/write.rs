@@ -1,32 +1,17 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
+use std::task::Poll;
+
+use bytes::{Buf, BufMut, BytesMut};
 use qbase::{
-    frame::{
-        self, AckFrame, ConnectionCloseFrame, CryptoFrame, DatagramFrame, EncodeSize, Frame,
-        FrameFeature, FrameType, GetFrameType, PathChallengeFrame, PathResponseFrame, PingFrame,
-        ReliableFrame, StreamFrame, io::WriteFrame,
-    },
-    net::tx::Signals,
+    frame::{self, Frame, FrameType, PathChallengeFrame, PathResponseFrame, ReliableFrame},
     packet::{
         GetType, HeaderSize, KeyPhaseBit, LongSpecificBits, Package, PacketContent, PacketNumber,
         ShortSpecificBits, Type, WritePacketNumber, header::io::WriteHeader,
     },
-    util::{Buffer, WriteData},
 };
 
 use super::{constraints::Constraints, records::ArcSendJournal};
+pub use crate::keys::PacketError;
 use crate::{GuaranteedFrame, keys::SealPacket};
-
-#[derive(Debug, thiserror::Error)]
-pub enum PacketError {
-    #[error("packet assembly blocked: {0:?}")]
-    Blocked(Signals),
-    #[error(transparent)]
-    Connection(#[from] crate::Error),
-    #[error("invalid packet layout or capacity")]
-    Layout,
-    #[error(transparent)]
-    Crypto(#[from] qtls::CryptoError),
-}
 
 /// Sealed bytes and submission metadata; recovery frames belong to ArcSendJournal.
 /// It contains no borrowed source, journal lock, or buffer reference.
@@ -133,10 +118,6 @@ impl Packet {
         })
     }
 
-    pub fn datagram(&self) -> &Datagram {
-        &self.datagram
-    }
-
     pub(crate) fn has_path_frames(&self) -> bool {
         self.challenge.is_some() || self.response.is_some()
     }
@@ -145,32 +126,64 @@ impl Packet {
         &mut self,
         constraints: &Constraints,
         records: &mut Vec<GuaranteedFrame>,
-        sources: [&mut dyn for<'a> Package<PacketWriter<'a>>; N],
+        sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     ) -> Result<PacketContent, PacketError> {
-        self.assemble_pending(constraints, records, sources, &[])
-    }
-
-    pub(crate) fn assemble_pending<const N: usize>(
-        &mut self,
-        constraints: &Constraints,
-        records: &mut Vec<GuaranteedFrame>,
-        sources: [&mut dyn for<'a> Package<PacketWriter<'a>>; N],
-        pending: &[PendingPacket],
-    ) -> Result<PacketContent, PacketError> {
-        let start = self.cursor;
-        let mut writer = PacketWriter::new(self, constraints, records);
-        writer.pending = pending;
-        let mut blocked = Signals::empty();
+        let mut limits = qbase::packet::Constraints {
+            flow_ctrl: constraints.flow_ctrl.get(),
+            send_quota: constraints.congestion,
+            credit: constraints.anti_amplification,
+            min_size: self.body_offset + 18,
+            max_size: constraints.capacity.min(self.datagram.msg.len()),
+            ..Default::default()
+        };
+        let mut frames = Vec::new();
+        let mut bytes = &mut self.datagram.msg[self.cursor..];
+        let mut buffer = qbase::packet::ConstraintBuffer::new(
+            &mut bytes,
+            &mut limits,
+            self.packet_type,
+            self.cursor,
+            self.tag_len,
+        );
+        let mut blocked = Poll::Pending;
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         for source in sources {
-            match source.dump(&mut writer) {
-                Ok(_) => {}
-                Err(signals) => blocked |= signals,
+            match source.poll_dump(&mut cx, &mut buffer, &mut frames) {
+                Poll::Ready(Ok(_)) => blocked = Poll::Ready(()),
+                Poll::Ready(Err(error)) => return Err(PacketError::Connection(error)),
+                Poll::Pending => {}
             }
         }
-        if writer.packet.cursor == start {
+        if frames.is_empty() {
             return Err(PacketError::Blocked(blocked));
         }
-        Ok(writer.packet.content)
+        let padding = buffer
+            .limits
+            .min_size()
+            .saturating_sub(buffer.written() + self.tag_len);
+        if padding != 0 {
+            buffer.put_bytes(0, padding);
+            frames.push(Frame::Padding(frame::PaddingFrame));
+        }
+        self.cursor = buffer.written();
+        constraints.flow_ctrl.set(limits.flow_ctrl);
+        self.content += qbase::packet::assemble::content(&frames);
+        self.in_flight |= qbase::packet::assemble::in_flight(&frames);
+        for frame in frames {
+            match frame {
+                Frame::Ack(ack) => self.largest_acked = Some(ack.largest()),
+                Frame::Crypto(frame, _) => records.push(GuaranteedFrame::Crypto(frame)),
+                Frame::Stream(frame, _) => records.push(GuaranteedFrame::Stream(frame)),
+                Frame::PathChallenge(frame) => self.challenge = Some(frame),
+                Frame::PathResponse(frame) => self.response = Some(frame),
+                frame => {
+                    if let Ok(reliable) = ReliableFrame::try_from(&frame) {
+                        records.push(GuaranteedFrame::Reliable(reliable));
+                    }
+                }
+            }
+        }
+        Ok(self.content)
     }
 
     /// Padding makes the entire packet count toward the congestion limit.
@@ -187,7 +200,7 @@ impl Packet {
             || length > constraints.capacity.min(constraints.anti_amplification)
             || length > constraints.congestion
         {
-            return Err(PacketError::Blocked(Signals::CONGESTION));
+            return Err(PacketError::Blocked(Poll::Ready(())));
         }
         if length > size {
             self.datagram.msg[self.cursor..length - self.tag_len].fill(0);
@@ -279,207 +292,6 @@ impl Packet {
     }
 }
 
-/// A packet write target with borrowed limits and reusable recovery records.
-pub struct PacketWriter<'a> {
-    packet: &'a mut Packet,
-    constraints: &'a Constraints,
-    records: &'a mut Vec<GuaranteedFrame>,
-    pub pending: &'a [PendingPacket],
-}
-
-impl<'a> PacketWriter<'a> {
-    pub fn new(
-        packet: &'a mut Packet,
-        constraints: &'a Constraints,
-        records: &'a mut Vec<GuaranteedFrame>,
-    ) -> Self {
-        Self {
-            packet,
-            constraints,
-            records,
-            pending: &[],
-        }
-    }
-
-    /// The datagram being assembled, including its encoded header and frame bytes.
-    pub fn datagram(&self) -> &Datagram {
-        &self.packet.datagram
-    }
-
-    pub fn packet_type(&self) -> Type {
-        self.packet.packet_type
-    }
-
-    fn write<D: Buffer>(&mut self, frame: &Frame<D>) -> Result<PacketContent, Signals>
-    where
-        for<'b, 'c> &'b mut &'c mut [u8]: WriteData<D>,
-    {
-        let packet = &mut self.packet;
-        let constraints = self.constraints;
-        let frame_type = frame.frame_type();
-        let duplicate = self.pending.iter().any(|sent| match frame {
-            Frame::Ack(ack) => {
-                sent.epoch() == epoch(packet.packet_type)
-                    && sent.largest_acked.is_some_and(|pn| pn >= ack.largest())
-            }
-            Frame::PathChallenge(frame) => sent.challenge == Some(*frame),
-            Frame::PathResponse(frame) => sent.response == Some(*frame),
-            _ => false,
-        });
-        if duplicate {
-            return Err(Signals::TRANSPORT);
-        }
-        if !frame_type.belongs_to(packet.packet_type) {
-            return Err(Signals::TRANSPORT);
-        }
-        let data_len = match frame {
-            Frame::Crypto(_, data) | Frame::Stream(_, data) | Frame::Datagram(_, data) => {
-                data.len()
-            }
-            _ => 0,
-        };
-        let length = frame.encoding_size().saturating_add(data_len);
-        let end = packet.cursor.saturating_add(length);
-        // PacketNumber::encode uses at least two bytes. Budget HP padding for that
-        // shortest encoding before allocating the PN (the remaining two bytes are headroom).
-        let padded_end = end.max((packet.body_offset + 18).saturating_sub(packet.tag_len));
-        let content = PacketContent::from(frame_type);
-        let in_flight = packet.in_flight
-            || content.is_ack_eliciting()
-            || matches!(frame, Frame::Padding(_))
-            || padded_end != end;
-        let size = padded_end + packet.tag_len;
-        if size
-            > packet
-                .datagram
-                .msg
-                .len()
-                .min(constraints.capacity)
-                .min(constraints.anti_amplification)
-            || (in_flight && size > constraints.congestion)
-        {
-            return Err(Signals::CONGESTION);
-        }
-        let mut writer = &mut packet.datagram.msg[packet.cursor..end];
-        writer.put_frame(frame);
-        assert!(
-            writer.is_empty(),
-            "frame encoder must match its declared size"
-        );
-        packet.datagram.msg[end..padded_end].fill(0);
-        packet.cursor = padded_end;
-        packet.content += content;
-        packet.in_flight = in_flight;
-        match frame {
-            Frame::Ack(ack) => packet.largest_acked = Some(ack.largest()),
-            Frame::Crypto(frame, _) => self.records.push(GuaranteedFrame::Crypto(*frame)),
-            Frame::Stream(frame, _) => self.records.push(GuaranteedFrame::Stream(*frame)),
-            Frame::PathChallenge(frame) => packet.challenge = Some(*frame),
-            Frame::PathResponse(frame) => packet.response = Some(*frame),
-            frame => {
-                if let Ok(reliable) = ReliableFrame::try_from(frame) {
-                    self.records.push(GuaranteedFrame::Reliable(reliable));
-                }
-            }
-        }
-        Ok(content)
-    }
-}
-
-// Raw writes are STREAM pre-padding; data sources see the constrained capacity.
-unsafe impl BufMut for PacketWriter<'_> {
-    fn remaining_mut(&self) -> usize {
-        // Sources may omit STREAM's length; reserve room to encode it explicitly.
-        self.packet
-            .datagram
-            .msg
-            .len()
-            .min(self.constraints.capacity)
-            .min(self.constraints.anti_amplification)
-            .min(self.constraints.congestion)
-            .saturating_sub(self.packet.cursor + self.packet.tag_len)
-            .saturating_sub(qbase::varint::VarInt::MAX_SIZE)
-    }
-
-    unsafe fn advance_mut(&mut self, count: usize) {
-        assert!(count <= self.remaining_mut());
-        assert!(
-            self.packet.datagram.msg[self.packet.cursor..self.packet.cursor + count]
-                .iter()
-                .all(|byte| *byte == 0),
-            "raw packet writes are reserved for STREAM pre-padding"
-        );
-        self.packet.cursor += count;
-        if count != 0 {
-            self.packet.in_flight = true;
-            self.packet.content += PacketContent::from(FrameType::Padding);
-        }
-    }
-
-    fn chunk_mut(&mut self) -> &mut UninitSlice {
-        let end = self.packet.cursor + self.remaining_mut();
-        UninitSlice::new(&mut self.packet.datagram.msg[self.packet.cursor..end])
-    }
-}
-
-impl Package<PacketWriter<'_>> for (CryptoFrame, &[Bytes]) {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&Frame::Crypto(self.0, self.1))
-    }
-}
-
-impl Package<PacketWriter<'_>> for AckFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::Ack(self.clone()))
-    }
-}
-
-impl Package<PacketWriter<'_>> for PingFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::Ping(*self))
-    }
-}
-
-impl Package<PacketWriter<'_>> for ConnectionCloseFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::Close(self.clone()))
-    }
-}
-
-impl Package<PacketWriter<'_>> for (StreamFrame, &[Bytes]) {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        let mut frame = self.0;
-        frame.set_len_bit(frame::Len::Explicit);
-        packet.write(&Frame::Stream(frame, self.1))
-    }
-}
-
-impl Package<PacketWriter<'_>> for &ReliableFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::from((*self).clone()))
-    }
-}
-
-impl Package<PacketWriter<'_>> for frame::PathChallengeFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::PathChallenge(*self))
-    }
-}
-
-impl Package<PacketWriter<'_>> for frame::PathResponseFrame {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        packet.write(&<Frame>::PathResponse(*self))
-    }
-}
-
-impl Package<PacketWriter<'_>> for (DatagramFrame, Bytes) {
-    fn dump(&mut self, packet: &mut PacketWriter<'_>) -> Result<PacketContent, Signals> {
-        // Explicit length permits another source or trailing HP padding.
-        let frame = DatagramFrame::new(true, self.0.len());
-        packet.write(&Frame::Datagram(frame, &self.1))
-    }
-}
-
 pub fn epoch(packet_type: Type) -> qbase::Epoch {
     use qbase::packet::r#type::long::{Type as Long, Ver1};
     match packet_type {
@@ -491,7 +303,7 @@ pub fn epoch(packet_type: Type) -> qbase::Epoch {
 
 #[cfg(test)]
 mod tests {
-    use qbase::packet::OneRttHeader;
+    use qbase::{frame::AckFrame, packet::OneRttHeader};
 
     use super::*;
 
@@ -511,12 +323,13 @@ mod tests {
         packet
             .assemble(
                 &Constraints {
+                    flow_ctrl: std::cell::Cell::new(usize::MAX),
                     capacity: 1200,
                     congestion: 1200,
                     anti_amplification: 1200,
                 },
                 &mut frames,
-                [&mut &frame],
+                [&mut frame.clone()],
             )
             .unwrap();
         let ((pn, encoded), key) = keys
@@ -548,6 +361,7 @@ mod tests {
         )
         .unwrap();
         let constraints = Constraints {
+            flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity: 1200,
             congestion: 0,
             anti_amplification: 1200,

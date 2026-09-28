@@ -116,7 +116,7 @@ async fn queued_output_is_bounded_without_waiting_for_its_reader() {
 #[tokio::test]
 async fn tls_io_exits_naturally_when_the_context_fails() {
     let [_, server] = pair(false);
-    let crypto = std::array::from_fn(|_| CryptoStream::new(Default::default()));
+    let crypto = std::array::from_fn(|_| CryptoStream::new());
     let closed = ArcReceiving::default();
     let reads = [
         CryptoLevel::Initial,
@@ -150,7 +150,7 @@ async fn tls_io_exits_naturally_when_the_context_fails() {
 #[tokio::test]
 async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
-    let crypto = CryptoStream::new(Default::default());
+    let crypto = CryptoStream::new();
     let closed = ArcReceiving::default();
     let reader = tokio::spawn(qconn::tls::read_crypto_stream_to_tls(
         server.clone(),
@@ -185,7 +185,7 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
 #[tokio::test]
 async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
     let [client, _] = pair(false);
-    let crypto: [CryptoStream; 3] = std::array::from_fn(|_| CryptoStream::new(Default::default()));
+    let crypto: [CryptoStream; 3] = std::array::from_fn(|_| CryptoStream::new());
     let closed = ArcReceiving::default();
     // ClientHello is still pending, but its destination can no longer accept it.
     crypto[0].sender.retire();
