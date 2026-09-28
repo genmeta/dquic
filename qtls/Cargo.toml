@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-der = "0.7"
+der = "0.8"
 pkix-path = { version = "0.3.2", default-features = false, features = ["std"] }
 pkix-revocation = { version = "0.3.3", default-features = false, features = ["ocsp"] }
 ring = { workspace = true, optional = true }
