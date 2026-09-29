@@ -48,7 +48,7 @@ qconnection::client_growing(
 ).await;
 ```
 
-服务端调用 `server_growing` 并传入 `ServerParameters`。双方参数齐备后直接构造 `param::fixed::ArcParameters`，不再使用参数回调。
+服务端调用 `server_growing` 并传入 `ServerParameters`。双方各自先创建 `param::Requirements`，客户端初始化原始 DCID；Initial 包解密和解析成功后，在交付 CRYPTO 数据前记录包头 SCID。双方参数齐备后构造 `param::ArcParameters`，由 growing 调用 `authenticate_cids(requirements)` 验证 CID，再创建 MaturePhase。Retry 的 CID 记录和校验接口已具备，完整 Retry 握手仍未接入。
 
 ## 阶段与退出
 

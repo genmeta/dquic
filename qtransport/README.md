@@ -74,7 +74,7 @@ buffer 与布局。Data ACK 回调捕获本次解密的就绪材料；Space 的�
 
 ## 与底层组件的兼容
 
-- qtransport 导出的 `ArcParameters` 位于 `qbase::param::fixed`，由完整双方参数构造，同步只读。旧 `qbase::param::ArcParameters` 保留用于旧版 qconnection 的兼容；没有把异步参数或连接错误带入成熟 Transport。
+- qtransport 导出的 `ArcParameters` 位于 `qbase::param`，由完整双方参数构造，同步只读。remembered 由它保存，CID 校验要求由握手阶段独立创建的 `Requirements` 保存；不再保留旧参数等待状态和连接错误状态。
 - qrecovery 增加已知窗口的开流/接流入口。关闭通过原有 input/output/listener 传播；Listener 管理 accept 的唤醒，不额外增加 DataStreams 关闭订阅或登记已移除的流端点。
 - qprotocol 的 `poll_send` / `send` 接受一批 IoSlice，每项是一个 UDP datagram，返回成功提交的前缀数量。Sender 按累计 CC/反放大信用组包；部分成功保留原密文后缀，后续续发；Pending 不记账。每批上限复用 qudp::BATCH_SIZE。
 - 一次非阻塞提交先借用本路径 CC，再按 Epoch 顺序借用涉及的 journal；成功前缀的 journal/反放大/CC 记账完成后释放数据锁。ACK 同样先借用接收路径 CC，再访问 journal；不增加空锁或 pending ACK。组包、加密、等待可写和发送回调都不持这些 guard。Space/Path 停止只更新状态并唤醒任务，已通过本轮许可检查的批次允许完成，后续提交清理停止层的 pending。

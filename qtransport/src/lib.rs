@@ -28,7 +28,7 @@ pub mod transport;
 
 pub use connection::{ArcConnection, CloseReason};
 pub use qbase::{
-    error::Error, param::fixed::ArcParameters, role::Role, sid::StreamId, varint::VarInt,
+    error::Error, param::ArcParameters, role::Role, sid::StreamId, varint::VarInt,
 };
 pub use qrecovery::{recv::StopSending, send::CancelStream, streams::error::StreamError};
 pub type ArcReliableFrames = qrecovery::reliable::ArcReliableFrames<qbase::frame::ReliableFrame>;

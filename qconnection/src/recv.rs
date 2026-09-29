@@ -1,5 +1,5 @@
 //! Space nodes capture their pipes once; parameter completion only adds the Data node.
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use qbase::{
     ArcReceiving, Epoch,
@@ -7,11 +7,13 @@ use qbase::{
     frame::{ConnectionCloseFrame, Frame, io::ReceiveFrame},
     net::route::{Link, Pathway, Scopes},
     packet::{GetScid, GetType, OneRttHeader},
+    param::Requirements,
     role::Role,
     token::ArcTokenRegistry,
 };
 use qtransport::{
     keys::{ArcKeys, OneRttKeys},
+    packet::RcvdPacketHeader,
     path::Path,
     recv,
     space::Space,
@@ -27,10 +29,11 @@ pub(crate) async fn recv_client_ih_pkt_and_deliver_frames<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
+    requirements: Arc<Mutex<Requirements>>,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
 {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, |_| true).await;
+    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, requirements, |_| true).await;
 }
 
 pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
@@ -38,13 +41,19 @@ pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
+    requirements: Arc<Mutex<Requirements>>,
     scopes: Scopes,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
 {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, move |pathway| {
-        pathway.belongs_to(scopes)
-    })
+    recv_ih_pkt_and_deliver_frames_if(
+        packets,
+        space,
+        paths,
+        closed,
+        requirements,
+        move |pathway| pathway.belongs_to(scopes),
+    )
     .await;
 }
 
@@ -53,13 +62,21 @@ pub(crate) async fn recv_pending_server_initial(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
+    requirements: Arc<Mutex<Requirements>>,
     scopes: Arc<OnceLock<Scopes>>,
 ) {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, move |pathway| {
-        scopes
-            .get()
-            .is_none_or(|scopes| pathway.belongs_to(*scopes))
-    })
+    recv_ih_pkt_and_deliver_frames_if(
+        packets,
+        space,
+        paths,
+        closed,
+        requirements,
+        move |pathway| {
+            scopes
+                .get()
+                .is_none_or(|scopes| pathway.belongs_to(*scopes))
+        },
+    )
     .await;
 }
 
@@ -68,15 +85,16 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
+    requirements: Arc<Mutex<Requirements>>,
     belongs_to_scope: impl Fn(&Pathway) -> bool,
 ) where
-    H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
+    H: GetScid + GetType + RcvdPacketHeader,
 {
     let role = paths.role();
     let ack_paths = paths.clone();
-    let initial_scid = Arc::new(std::sync::OnceLock::new());
+    let initial_scid = Arc::new(OnceLock::new());
     let close_paths = paths.clone();
-    let processed_paths = paths.clone();
+    let inspect_paths = paths.clone();
     recv::run_receive(
         packets,
         space.epoch,
@@ -109,6 +127,26 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
                 Ok(opened)
             }
         },
+        move |epoch, path| {
+            inspect_paths.on_rcvd_packet();
+            path.activity
+                .on_rcvd(qbase::packet::PacketContent::default());
+            if let Some(dcid) = initial_scid.get() {
+                // This runs before CRYPTO delivery can wake the TLS consumer.
+                requirements
+                    .lock()
+                    .unwrap()
+                    .initial_scid_from_peer_need_equal(*dcid);
+                inspect_paths.phase().set_dcid(*dcid);
+            }
+            if role == Role::Client || epoch == Epoch::Handshake {
+                inspect_paths.select_path(path);
+            }
+            if epoch == Epoch::Handshake && inspect_paths.is_handshake_path(path) {
+                path.validate();
+            }
+            Ok(())
+        },
         {
             let space = space.clone();
             move |_, epoch, frame, path| match frame {
@@ -135,21 +173,6 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
                 .into()),
             }
         },
-        move |epoch, path| {
-            processed_paths.on_rcvd_packet();
-            path.activity
-                .on_rcvd(qbase::packet::PacketContent::default());
-            if let Some(dcid) = initial_scid.get() {
-                processed_paths.phase().set_dcid(*dcid);
-            }
-            if role == Role::Client || epoch == Epoch::Handshake {
-                processed_paths.select_path(path);
-            }
-            if epoch == Epoch::Handshake && processed_paths.is_handshake_path(path) {
-                path.validate();
-            }
-            Ok(())
-        },
         move |error| {
             closed.set(error.into());
         },
@@ -169,7 +192,7 @@ pub(crate) async fn receive_client_data(
     on_handshake_done: impl Fn() + Send + Sync,
 ) {
     let close_paths = paths.clone();
-    let processed_paths = paths.clone();
+    let inspect_paths = paths.clone();
     receive_data(
         packets,
         sender,
@@ -184,7 +207,7 @@ pub(crate) async fn receive_client_data(
         None,
         move |epoch, frame, path| close_paths.on_rcvd_close(epoch, path, frame),
         |_, path| {
-            processed_paths.on_rcvd_packet();
+            inspect_paths.on_rcvd_packet();
             path.activity
                 .on_rcvd(qbase::packet::PacketContent::default());
         },
@@ -206,7 +229,7 @@ pub(crate) async fn receive_server_data(
     scopes: Scopes,
 ) {
     let close_paths = paths.clone();
-    let processed_paths = paths.clone();
+    let inspect_paths = paths.clone();
     receive_data(
         packets,
         sender,
@@ -226,7 +249,7 @@ pub(crate) async fn receive_server_data(
         None,
         move |epoch, frame, path| close_paths.on_rcvd_close(epoch, path, frame),
         |_, path| {
-            processed_paths.on_rcvd_packet();
+            inspect_paths.on_rcvd_packet();
             path.activity
                 .on_rcvd(qbase::packet::PacketContent::default());
         },
@@ -248,7 +271,7 @@ pub(crate) async fn receive_data(
     tokens: ArcTokenRegistry,
     ready: Option<ArcReceiving<bool>>,
     on_close: impl Fn(Epoch, ConnectionCloseFrame, &Arc<Path>) + Send + Sync,
-    on_processed: impl Fn(Epoch, &Arc<Path>),
+    inspect: impl Fn(Epoch, &Arc<Path>),
     on_handshake_done: impl Fn() + Send + Sync,
     on_error: impl Fn(crate::Error),
 ) {
@@ -303,12 +326,12 @@ pub(crate) async fn receive_data(
                 pto,
             )
         },
+        |epoch, path| {
+            inspect(epoch, path);
+            Ok(())
+        },
         |keys, epoch, frame, path| {
             dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
-        },
-        |epoch, path| {
-            on_processed(epoch, path);
-            Ok(())
         },
         |error| {
             sender.spaces.data.streams.on_conn_error(&error);
@@ -444,7 +467,7 @@ mod tests {
         corrupt: bool,
         paths: &Arc<Paths>,
         path: &Arc<Path>,
-    ) {
+    ) -> Requirements {
         let space = Arc::new(Space::<ArcKeys>::new(
             epoch,
             ArcKeys::new(Arc::new(keys(role == Role::Server))),
@@ -467,7 +490,7 @@ mod tests {
             let last = bytes.len() - 1;
             bytes[last] ^= 1;
         }
-        receive_bytes(bytes, space, paths, path).await;
+        receive_bytes(bytes, space, paths, path).await
     }
 
     async fn receive_bytes(
@@ -475,7 +498,11 @@ mod tests {
         space: Arc<Space<ArcKeys>>,
         paths: &Arc<Paths>,
         path: &Arc<Path>,
-    ) {
+    ) -> Requirements {
+        let requirements = Arc::new(Mutex::new(match paths.role() {
+            Role::Client => Requirements::new_client(ConnectionId::from_slice(b"original")),
+            Role::Server => Requirements::new_server(),
+        }));
         let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
             panic!()
         };
@@ -493,9 +520,14 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames_if(rx, space, paths.clone(), paths.closed(), |_| {
-                    true
-                })
+                recv_ih_pkt_and_deliver_frames_if(
+                    rx,
+                    space,
+                    paths.clone(),
+                    paths.closed(),
+                    requirements.clone(),
+                    |_| true,
+                )
                 .await;
             }
             DataHeader::Long(long::DataHeader::Handshake(header)) => {
@@ -507,13 +539,19 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames_if(rx, space, paths.clone(), paths.closed(), |_| {
-                    true
-                })
+                recv_ih_pkt_and_deliver_frames_if(
+                    rx,
+                    space,
+                    paths.clone(),
+                    paths.closed(),
+                    requirements.clone(),
+                    |_| true,
+                )
                 .await;
             }
             _ => panic!(),
         }
+        *requirements.lock().unwrap()
     }
 
     fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
@@ -541,6 +579,36 @@ mod tests {
             ))
             .unwrap();
         (paths, first, second)
+    }
+
+    #[tokio::test]
+    async fn only_authenticated_initial_packets_fill_cid_requirements() {
+        for role in [Role::Client, Role::Server] {
+            for epoch in [Epoch::Initial, Epoch::Handshake] {
+                for corrupt in [true, false] {
+                    let (paths, first, _) = paths(role);
+                    let requirements = receive_ping(role, epoch, corrupt, &paths, &first).await;
+                    let initial_scid = match requirements {
+                        Requirements::Client {
+                            initial_scid,
+                            origin_dcid,
+                            retry_scid,
+                        } => {
+                            assert_eq!(origin_dcid, ConnectionId::from_slice(b"original"));
+                            assert_eq!(retry_scid, None);
+                            initial_scid
+                        }
+                        Requirements::Server { initial_scid } => initial_scid,
+                    };
+                    assert_eq!(
+                        initial_scid,
+                        (!corrupt && epoch == Epoch::Initial)
+                            .then(|| ConnectionId::from_slice(b"peercid0"))
+                    );
+                    paths.retire_all();
+                }
+            }
+        }
     }
 
     #[tokio::test]

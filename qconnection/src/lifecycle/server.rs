@@ -1,11 +1,11 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use qbase::{
     Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     frame::{HandshakeDoneFrame, io::SendFrame},
-    param::ParameterId,
+    param::{ParameterId, Requirements},
     role::Role,
     token::ArcTokenRegistry,
 };
@@ -34,6 +34,7 @@ pub async fn server_growing(
     };
     let idle = paths.idle();
     let closed = paths.closed();
+    let requirements = Arc::new(Mutex::new(Requirements::new_server()));
     let initial = &initial_phase.initial;
     let local_cids = crate::ArcLocalCids::new(
         initial_phase.scid,
@@ -47,6 +48,7 @@ pub async fn server_growing(
         initial.clone(),
         paths.clone(),
         closed.clone(),
+        requirements.clone(),
         scopes.clone(),
     ));
 
@@ -120,21 +122,11 @@ pub async fn server_growing(
     );
     let result = {
         let establish = async {
-            let client_scid = client_parameters
-                .get::<qbase::cid::ConnectionId>(ParameterId::InitialSourceConnectionId);
-            if initial_phase.dcid() != client_scid {
-                return Err(QuicError::with_default_fty(
-                    ErrorKind::TransportParameter,
-                    "client initial source connection ID mismatch",
-                )
-                .into());
-            }
+            let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
+            parameters.authenticate_cids(*requirements.lock().unwrap())?;
 
             let handshake_keys = tls_ctx.read_keys().await?;
-            let handshake = Arc::new(Space::new(
-                Epoch::Handshake,
-                ArcKeys::from(handshake_keys),
-            ));
+            let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
             initial.crypto.recver.retire();
 
             tokio::spawn(crate::tls::read_crypto_stream_to_tls(
@@ -148,10 +140,11 @@ pub async fn server_growing(
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
+                requirements.clone(),
                 scopes,
             ));
 
-            let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
+            let client_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
             let initial_dcid = cid_registry.remote.apply_dcid();
             cid_registry
                 .remote
