@@ -13,7 +13,7 @@ use qtransport::{keys::ArcKeys, packet::CipherPacket, space::Space};
 use tokio::io::AsyncWriteExt;
 
 use super::*;
-use crate::{HandshakePhase, InitialPhase};
+use crate::InitialPhase;
 fn keys(server: bool) -> qtls::BidirectionalKeys {
     qtls::default_provider()
         .cipher_suites
@@ -125,11 +125,11 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
 
 #[tokio::test]
 async fn collector_mixes_spaces_and_selected_crypto_advances() {
-    let initial = Arc::new(InitialPhase::new(
+    let initial = InitialPhase::new(
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
-    ));
+    );
     let message = vec![42; 7200];
     initial
         .initial
@@ -149,16 +149,8 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         .write_all(b"handshake")
         .await
         .unwrap();
-    let phase = crate::ArcConnPhase::initial(InitialPhase::new(
-        ConnectionId::from_slice(b"clientid"),
-        ConnectionId::from_slice(b"original"),
-        keys(false),
-    ));
-    *phase.lock_guard() = ConnPhase::Handshake(Arc::new(HandshakePhase {
-        initial: initial.clone(),
-        handshake,
-        terminator: initial.terminator.clone(),
-    }));
+    let phase = crate::ArcConnPhase::initial(initial);
+    phase.enter_handshake(handshake);
     let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
     let paths = Paths::new(Role::Client, phase.clone(), idle.clone());
     let pathway = Pathway::new(
@@ -247,14 +239,11 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     .await
                     .unwrap();
                 if handshaking {
-                    phase.enter_handshake(
-                        initial.clone(),
-                        Arc::new(Space::new(
-                            Epoch::Handshake,
-                            initial.initial.keys.clone(),
-                            |_| {},
-                        )),
-                    );
+                    phase.enter_handshake(Arc::new(Space::new(
+                        Epoch::Handshake,
+                        initial.initial.keys.clone(),
+                        |_| {},
+                    )));
                 }
                 let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
                 let paths = Paths::new(role, phase.clone(), idle.clone());
@@ -900,8 +889,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
     }
 }
 
-#[tokio::test]
-async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
+fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
     use qbase::param::{
         fixed::ArcParameters,
         handy::{client_parameters, server_parameters},
@@ -954,6 +942,97 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
     )
     .unwrap();
+    (initial, mature)
+}
+
+#[test]
+fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let (initial, mature) = mature_server_phase();
+    let phase = crate::ArcConnPhase::initial(initial);
+    let first = Arc::new(Counter::default());
+    let second = Arc::new(Counter::default());
+    let a = Waker::from(first.clone());
+    let b = Waker::from(second.clone());
+    let mut cx = Context::from_waker(&a);
+    let ConnPhase::Initial(initial) = phase.poll_phase(&mut cx).clone() else {
+        panic!("expected Initial");
+    };
+    drop(phase.poll_phase(&mut cx));
+    drop(phase.poll_phase(&mut Context::from_waker(&b)));
+    phase.cancel(&b);
+    phase.set_dcid(ConnectionId::from_slice(b"peer0000"));
+    assert_eq!(initial.dcid(), ConnectionId::from_slice(b"peer0000"));
+    assert_eq!(first.0.load(Ordering::Relaxed), 1);
+    assert_eq!(second.0.load(Ordering::Relaxed), 0);
+    drop(phase.poll_phase(&mut Context::from_waker(&b)));
+
+    phase.enter_handshake(mature.spaces.handshake.clone());
+    assert_eq!(first.0.load(Ordering::Relaxed), 2);
+    assert_eq!(second.0.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        Arc::strong_count(&first),
+        3,
+        "Handshake preserves Initial subscriptions"
+    );
+    assert_eq!(Arc::strong_count(&second), 3);
+    assert_eq!(
+        Arc::strong_count(&initial),
+        1,
+        "Handshake must not own InitialPhase"
+    );
+    drop(initial);
+
+    let ConnPhase::Handshake(handshake) = phase.get() else {
+        panic!("expected Handshake");
+    };
+    assert!(Arc::ptr_eq(&handshake.initial, &mature.spaces.initial));
+    assert_eq!(handshake.scid, mature.scid);
+    assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"peer0000"));
+    phase.cancel(&b);
+    phase.set_dcid(ConnectionId::from_slice(b"peer0001"));
+    assert_eq!(handshake.dcid(), ConnectionId::from_slice(b"peer0001"));
+    assert_eq!(first.0.load(Ordering::Relaxed), 3);
+    assert_eq!(second.0.load(Ordering::Relaxed), 1);
+    drop(phase.poll_phase(&mut cx));
+    drop(phase.poll_phase(&mut cx));
+    drop(phase.poll_phase(&mut Context::from_waker(&b)));
+
+    phase.enter_mature(mature);
+    assert_eq!(first.0.load(Ordering::Relaxed), 4);
+    assert_eq!(second.0.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        Arc::strong_count(&first),
+        2,
+        "Handshake releases subscriptions"
+    );
+    assert_eq!(Arc::strong_count(&second), 2);
+    assert!(matches!(&*phase.poll_phase(&mut cx), ConnPhase::Mature(_)));
+    drop(phase.poll_phase(&mut Context::from_waker(&b)));
+    assert_eq!(
+        Arc::strong_count(&first),
+        2,
+        "Mature must not register wakers"
+    );
+    assert_eq!(Arc::strong_count(&second), 2);
+    phase.cancel(&a);
+    phase.set_dcid(ConnectionId::from_slice(b"ignored0"));
+    assert_eq!(first.0.load(Ordering::Relaxed), 4);
+    assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"client00"));
+}
+
+#[tokio::test]
+async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
+    let (initial, mature) = mature_server_phase();
     for crypto in [
         &mature.spaces.initial.crypto,
         &mature.spaces.handshake.crypto,

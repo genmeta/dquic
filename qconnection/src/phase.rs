@@ -31,6 +31,7 @@ pub struct InitialPhase {
     dcid: Mutex<ConnectionId>,
     pub reliable_frames: ArcReliableFrames,
     pub(crate) terminator: ArcTerminator,
+    upgrade_wakers: ArcSendWakers,
 }
 
 impl InitialPhase {
@@ -58,9 +59,27 @@ impl InitialPhase {
             dcid: Mutex::new(odcid),
             reliable_frames,
             terminator,
+            upgrade_wakers: ArcSendWakers::default(),
         }
     }
 
+    pub fn dcid(&self) -> ConnectionId {
+        *self.dcid.lock().unwrap()
+    }
+}
+
+/// Initial and Handshake packet sources available before peer parameters complete Data.
+pub struct HandshakePhase {
+    pub initial: Arc<Space<ArcKeys>>,
+    pub handshake: Arc<Space<ArcKeys>>,
+    pub scid: ConnectionId,
+    dcid: Mutex<ConnectionId>,
+    pub reliable_frames: ArcReliableFrames,
+    pub(crate) terminator: ArcTerminator,
+    upgrade_wakers: ArcSendWakers,
+}
+
+impl HandshakePhase {
     pub fn dcid(&self) -> ConnectionId {
         *self.dcid.lock().unwrap()
     }
@@ -176,13 +195,6 @@ impl MaturePhase {
     }
 }
 
-/// Initial and Handshake packet sources available before peer parameters complete Data.
-pub struct HandshakePhase {
-    pub initial: Arc<InitialPhase>,
-    pub handshake: Arc<Space<ArcKeys>>,
-    pub(crate) terminator: ArcTerminator,
-}
-
 #[derive(Clone)]
 pub enum ConnPhase {
     Initial(Arc<InitialPhase>),
@@ -191,79 +203,103 @@ pub enum ConnPhase {
 }
 
 impl ConnPhase {
+    fn upgrade_wakers(&self) -> Option<&ArcSendWakers> {
+        match self {
+            Self::Initial(p) => Some(&p.upgrade_wakers),
+            Self::Handshake(p) => Some(&p.upgrade_wakers),
+            Self::Mature(_) => None,
+        }
+    }
+
     pub fn dcid(&self) -> ConnectionId {
         match self {
             Self::Initial(p) => p.dcid(),
-            Self::Handshake(p) => p.initial.dcid(),
+            Self::Handshake(p) => p.dcid(),
             Self::Mature(p) => p.peer_cid,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct ArcConnPhase {
-    phase: Arc<Mutex<ConnPhase>>,
-    send_wakers: ArcSendWakers,
-}
+pub struct ArcConnPhase(Arc<Mutex<ConnPhase>>);
 
 impl ArcConnPhase {
     pub fn initial(sender: InitialPhase) -> Self {
-        Self {
-            phase: Arc::new(Mutex::new(ConnPhase::Initial(Arc::new(sender)))),
-            send_wakers: ArcSendWakers::default(),
-        }
+        Self(Arc::new(Mutex::new(ConnPhase::Initial(Arc::new(sender)))))
     }
 
     pub fn lock_guard(&self) -> MutexGuard<'_, ConnPhase> {
-        self.phase.lock().unwrap()
+        self.0.lock().unwrap()
     }
 
     pub fn get(&self) -> ConnPhase {
-        self.phase.lock().unwrap().clone()
+        self.0.lock().unwrap().clone()
     }
 
     pub(crate) fn set_dcid(&self, dcid: ConnectionId) {
-        match &*self.phase.lock().unwrap() {
-            ConnPhase::Initial(p) => *p.dcid.lock().unwrap() = dcid,
-            ConnPhase::Handshake(p) => *p.initial.dcid.lock().unwrap() = dcid,
+        let phase = self.lock_guard();
+        let upgrade_wakers = match &*phase {
+            ConnPhase::Initial(p) => {
+                *p.dcid.lock().unwrap() = dcid;
+                p.upgrade_wakers.clone()
+            }
+            ConnPhase::Handshake(p) => {
+                *p.dcid.lock().unwrap() = dcid;
+                p.upgrade_wakers.clone()
+            }
             ConnPhase::Mature(_) => return,
-        }
-        self.send_wakers.wake_all();
+        };
+        drop(phase);
+        upgrade_wakers.wake_all();
     }
 
     pub(crate) fn poll_phase(&self, cx: &mut std::task::Context<'_>) -> MutexGuard<'_, ConnPhase> {
-        self.send_wakers.register(cx.waker());
-        self.lock_guard()
+        let phase = self.lock_guard();
+        if let Some(wakers) = phase.upgrade_wakers() {
+            wakers.register(cx.waker());
+        }
+        phase
     }
 
     pub(crate) fn cancel(&self, waker: &std::task::Waker) {
-        self.send_wakers.cancel(waker);
+        if let Some(wakers) = self.lock_guard().upgrade_wakers() {
+            wakers.cancel(waker);
+        }
     }
 
     pub(crate) fn terminator(&self) -> ArcTerminator {
-        match &*self.phase.lock().unwrap() {
+        match &*self.0.lock().unwrap() {
             ConnPhase::Initial(phase) => phase.terminator.clone(),
             ConnPhase::Handshake(phase) => phase.terminator.clone(),
             ConnPhase::Mature(phase) => phase.terminator.clone(),
         }
     }
 
-    pub(crate) fn enter_handshake(
-        &self,
-        initial: Arc<InitialPhase>,
-        handshake: Arc<Space<ArcKeys>>,
-    ) {
-        let terminator = initial.terminator.clone();
-        *self.phase.lock().unwrap() = ConnPhase::Handshake(Arc::new(HandshakePhase {
-            initial,
+    pub(crate) fn enter_handshake(&self, handshake: Arc<Space<ArcKeys>>) {
+        let mut phase = self.lock_guard();
+        let ConnPhase::Initial(initial) = &*phase else {
+            unreachable!("enter_handshake starts with InitialPhase")
+        };
+        let upgrade_wakers = initial.upgrade_wakers.clone();
+        *phase = ConnPhase::Handshake(Arc::new(HandshakePhase {
+            initial: initial.initial.clone(),
             handshake,
-            terminator,
+            scid: initial.scid,
+            dcid: Mutex::new(initial.dcid()),
+            reliable_frames: initial.reliable_frames.clone(),
+            terminator: initial.terminator.clone(),
+            upgrade_wakers: upgrade_wakers.clone(),
         }));
-        self.send_wakers.wake_all();
+        drop(phase);
+        upgrade_wakers.wake_all();
     }
 
-    pub(crate) fn enter_mature(&self, sender: Arc<MaturePhase>) {
-        *self.phase.lock().unwrap() = ConnPhase::Mature(sender);
-        self.send_wakers.wake_all();
+    pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
+        let previous = std::mem::replace(&mut *self.lock_guard(), ConnPhase::Mature(phase));
+        if let Some(wakers) = previous.upgrade_wakers() {
+            for waker in wakers.drain() {
+                waker.wake();
+            }
+        }
     }
 }

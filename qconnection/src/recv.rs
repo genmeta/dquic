@@ -337,7 +337,7 @@ pub(crate) async fn tick(
         match &snapshot {
             crate::ConnPhase::Initial(phase) => phase.initial.on_tick(now),
             crate::ConnPhase::Handshake(phase) => {
-                phase.initial.initial.on_tick(now);
+                phase.initial.on_tick(now);
                 phase.handshake.on_tick(now);
             }
             crate::ConnPhase::Mature(phase) => {
