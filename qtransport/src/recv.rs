@@ -21,13 +21,10 @@ use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
 
 use crate::{
     ArcParameters, ArcReliableFrames, Error,
-    keys::{ArcKeys, OneRttKeys},
-    packet::{
-        CipherPacket, PlainPacket,
-        channel::{PacketReceiver, RcvdPacket},
-    },
+    keys::ArcKeys,
+    packet::{CipherPacket, PlainPacket, channel::PacketReceiver},
     path::Path,
-    space::{DataSpace, Space},
+    space::DataSpace,
 };
 
 /// Connect existing components once. No task, registry or extra frame buffer is created here.
@@ -82,130 +79,11 @@ where
     }
 }
 
-/// One coroutine drives all receive spaces. A pending Handshake key does not block Initial/Data.
-/// qconnection owns spawning and queue closure, path creation, TLS progression and final route removal.
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    rcvd_pkt: RcvdPacket,
-    initial: Arc<Space<ArcKeys>>,
-    handshake: Arc<Space<ArcKeys>>,
-    data: Arc<DataSpace>,
-    path_for: impl Fn(Pathway, Link) -> Option<Arc<Path>> + Sync,
-    dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
-    on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
-    on_error: impl Fn(Error),
-) {
-    let RcvdPacket {
-        initial: initial_rx,
-        handshake: handshake_rx,
-        zero_rtt: _,
-        one_rtt: one_rtt_rx,
-    } = rcvd_pkt;
-    tokio::join!(
-        run_receive(
-            initial_rx,
-            initial.epoch,
-            initial.keys.clone(),
-            initial.rcvd_journal.clone(),
-            &path_for,
-            |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                packet
-                    .decrypt_long_packet(&keys.opening, |pn| initial.rcvd_journal.decode_pn(pn))
-                    .transpose()
-                    .map_err(Into::into)
-            },
-            |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
-            &on_processed,
-            &on_error
-        ),
-        run_receive(
-            handshake_rx,
-            handshake.epoch,
-            handshake.keys.clone(),
-            handshake.rcvd_journal.clone(),
-            &path_for,
-            |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                packet
-                    .decrypt_long_packet(&keys.opening, |pn| handshake.rcvd_journal.decode_pn(pn))
-                    .transpose()
-                    .map_err(Into::into)
-            },
-            |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
-            &on_processed,
-            &on_error
-        ),
-        run_receive(
-            one_rtt_rx,
-            Epoch::Data,
-            data.keys.clone(),
-            data.rcvd_journal.clone(),
-            &path_for,
-            |keys: &OneRttKeys, packet, pto| {
-                keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
-            },
-            |keys, epoch, frame, path| {
-                dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
-            },
-            &on_processed,
-            &on_error
-        ),
-    );
-}
-
 /// Dispatch must synchronously accept ownership or return a terminal error. A full
 /// reliable pipe is an error, never an ACK followed by silent frame loss.
-/// on_processed executes before CRYPTO can wake the TLS driver. Packet and CLOSE
+/// inspect executes before CRYPTO can wake the TLS driver. Packet and CLOSE
 /// notifications are unconditional; the owner handles connection state.
-pub fn receive_packet(
-    pn: u64,
-    frames: FrameReader,
-    epoch: Epoch,
-    journal: &ArcRcvdJournal,
-    path: &Arc<Path>,
-    mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
-    mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
-) -> Result<PacketContent, Error> {
-    // TODO: 创建啥 Vec，开销就大了，后面要整改
-    let mut decoded = Vec::new();
-    let mut content = PacketContent::default();
-    for frame in frames {
-        let (frame, kind) = frame.map_err(|error| {
-            QuicError::with_default_fty(ErrorKind::FrameEncoding, error.to_string())
-        })?;
-        content += PacketContent::from(kind);
-        if matches!(frame, Frame::Padding(_)) {
-            continue;
-        }
-        if let Frame::Crypto(frame, bytes) = &frame
-            && frame.offset().saturating_add(bytes.len() as u64) > VARINT_MAX
-        {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::FrameEncoding,
-                "CRYPTO range exceeds maximum offset",
-            )
-            .into());
-        }
-        decoded.push(frame);
-    }
-    on_processed(epoch, path)?;
-    // CLOSE reaches the control owner even when ordinary component pipes are full.
-    if let Some(frame) = decoded
-        .iter()
-        .find(|frame| matches!(frame, Frame::Close(_)))
-    {
-        dispatch(epoch, frame.clone(), path)?;
-        return Ok(PacketContent::default());
-    }
-    for frame in decoded {
-        dispatch(epoch, frame, path)?;
-    }
-    let pto = path.cc.get_pto(epoch);
-    journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
-    path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
-    path.send_waker.wake_all();
-    Ok(content)
-}
-
+///
 /// Keys are ready before this engine starts. Closing keeps it alive for CLOSE frames.
 /// Retirement ends only this space; closing the inbox ends idle packet waits.
 /// Dispatch receives the same ready material used to open the packet.
@@ -217,13 +95,14 @@ pub async fn run_receive<H, M>(
     journal: ArcRcvdJournal,
     mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
+    mut inspect: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
-    mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
 ) where
     H: GetType,
     M: Clone,
 {
+    let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = packets.recv().await {
         let Some(path) = path_for(pathway, link) else {
             continue;
@@ -236,15 +115,31 @@ pub async fn run_receive<H, M>(
             if let Some(packet) = opened {
                 let pn = packet.pn();
                 let frames = FrameReader::new(packet.body(), packet.get_type());
-                receive_packet(
-                    pn,
-                    frames,
-                    epoch,
-                    &journal,
-                    &path,
-                    |epoch, frame, path| dispatch(&keys, epoch, frame, path),
-                    &mut on_processed,
-                )?;
+                let mut content = PacketContent::default();
+                for frame in frames {
+                    let (frame, fty) = frame?;
+                    content += PacketContent::from(fty);
+                    if matches!(frame, Frame::Padding(_)) {
+                        continue;
+                    }
+                    parsed_frames.push(frame);
+                }
+                inspect(epoch, &path)?;
+                // CLOSE reaches the control owner even when ordinary component pipes are full.
+                if let Some(frame) = parsed_frames
+                    .iter()
+                    .find(|frame| matches!(frame, Frame::Close(_)))
+                {
+                    dispatch(&keys, epoch, frame.clone(), &path)?;
+                    return Ok(());
+                }
+                for frame in parsed_frames.drain(..) {
+                    dispatch(&keys, epoch, frame, &path)?;
+                }
+                let pto = path.cc.get_pto(epoch);
+                journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
+                path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
+                path.send_waker.wake_all();
             }
             Ok(())
         });

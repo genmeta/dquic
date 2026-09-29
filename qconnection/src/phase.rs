@@ -7,7 +7,6 @@ use std::{
 use qbase::{
     Epoch,
     cid::{ArcCidCell, ConnectionId},
-    error::{ErrorKind, QuicError},
     net::tx::ArcSendWakers,
     param::ParameterId,
     role::Role,
@@ -125,26 +124,6 @@ impl MaturePhase {
         initial_dcid: ArcCidCell<ArcReliableFrames>,
         keys: ArcOneRttKeys,
     ) -> Result<(Arc<Self>, Arc<Transport>), Error> {
-        if parameters.remote::<ConnectionId>(ParameterId::InitialSourceConnectionId) != peer_cid {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::TransportParameter,
-                "peer Initial source CID mismatch",
-            )
-            .into());
-        }
-        if parameters.role() == Role::Client
-            && (parameters.remote::<ConnectionId>(ParameterId::OriginalDestinationConnectionId)
-                != early.odcid
-                || parameters
-                    .server()
-                    .contains(ParameterId::RetrySourceConnectionId))
-        {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::TransportParameter,
-                "server original/retry CID mismatch",
-            )
-            .into());
-        }
         let concurrency = Box::new(ConsistentConcurrency::new(
             parameters.local(ParameterId::InitialMaxStreamsBidi),
             parameters.local(ParameterId::InitialMaxStreamsUni),

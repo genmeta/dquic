@@ -570,21 +570,7 @@ where
         cx: &mut Context<'_>,
         arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let mut params = arc_params.lock_guard()?;
-
-        let snd_buf_size = match params.remembered() {
-            Some(remembered) => remembered.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote),
-            None => match params.get_remote(ParameterId::InitialMaxStreamDataBidiRemote) {
-                Some(value) => value,
-                None => {
-                    ready!(params.poll_ready(cx));
-                    // tail recursion should be optimized by compiler
-                    return self.poll_open_bi_stream(cx, arc_params);
-                }
-            },
-        };
-
-        drop(params);
+        let snd_buf_size = arc_params.remote(ParameterId::InitialMaxStreamDataBidiRemote);
         self.poll_open_bi_with_limit(cx, snd_buf_size)
     }
 
@@ -618,21 +604,7 @@ where
         cx: &mut Context<'_>,
         arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
-        let mut params = arc_params.lock_guard()?;
-
-        let snd_buf_size = match params.remembered() {
-            Some(remembered) => remembered.get::<u64>(ParameterId::InitialMaxStreamDataUni),
-            None => match params.get_remote(ParameterId::InitialMaxStreamDataBidiRemote) {
-                Some(value) => value,
-                None => {
-                    ready!(params.poll_ready(cx));
-                    // tail recursion should be optimized by compiler
-                    return self.poll_open_uni_stream(cx, arc_params);
-                }
-            },
-        };
-
-        drop(params);
+        let snd_buf_size = arc_params.remote(ParameterId::InitialMaxStreamDataUni);
         self.poll_open_uni_with_limit(cx, snd_buf_size)
     }
 
@@ -776,6 +748,75 @@ mod tests {
 
     impl<F> SendFrame<F> for MockFrameSender {
         fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
+    }
+
+    #[test]
+    fn open_uni_uses_the_remote_unidirectional_limit() {
+        use qbase::param::{ArcParameters, ParameterId};
+
+        use crate::send::CancelStream;
+
+        let mut client = client_parameters();
+        client
+            .set(ParameterId::InitialMaxStreamDataUni, 0u32)
+            .unwrap();
+        let server = server_parameters();
+        let streams = DataStreams::new(
+            Role::Server,
+            &server,
+            &client,
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        let parameters = ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let Poll::Ready(Ok(Some((_, mut writer)))) =
+            streams.poll_open_uni_stream(&mut cx, &parameters)
+        else {
+            panic!("ready parameters must allow opening the stream immediately");
+        };
+        let ready = writer.poll_ready(&mut cx);
+        writer.cancel(0);
+        assert!(ready.is_pending(), "zero uni limit must block writing");
+    }
+
+    #[test]
+    fn ready_streams_use_current_parameters_even_with_remembered_limits() {
+        use qbase::param::{ArcParameters, ServerParameters};
+
+        use crate::send::CancelStream;
+
+        let client = client_parameters();
+        let server = server_parameters();
+        let streams = DataStreams::new(
+            Role::Client,
+            &client,
+            &server,
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        // Remembered defaults prohibit writing; current parameters permit it.
+        let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server))
+            .with_remembered(Some(Arc::new(ServerParameters::default())));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let Poll::Ready(Ok(Some((_, (_, mut bi))))) =
+            streams.poll_open_bi_stream(&mut cx, &parameters)
+        else {
+            panic!("ready parameters must allow opening the bidirectional stream");
+        };
+        let Poll::Ready(Ok(Some((_, mut uni)))) =
+            streams.poll_open_uni_stream(&mut cx, &parameters)
+        else {
+            panic!("ready parameters must allow opening the unidirectional stream");
+        };
+        let bi_ready = bi.poll_ready(&mut cx);
+        let uni_ready = uni.poll_ready(&mut cx);
+        bi.cancel(0);
+        uni.cancel(0);
+        assert!(matches!(bi_ready, Poll::Ready(Ok(()))));
+        assert!(matches!(uni_ready, Poll::Ready(Ok(()))));
     }
 
     #[tokio::test]

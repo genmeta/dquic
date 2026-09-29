@@ -1,21 +1,18 @@
-use std::{
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, MutexGuard},
-    task::{Context, Poll, Waker},
-    time::Duration,
-};
+//! Complete, immutable transport parameters for both endpoints.
+//!
+//! CID requirements are collected independently during the handshake, before
+//! both parameter sets are available. Parameter access never waits for the peer.
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     cid::ConnectionId,
-    error::{Error, ErrorKind, QuicError},
+    error::{ErrorKind, QuicError},
     frame::FrameType,
     role::Role,
 };
 
 pub mod core;
 pub mod error;
-pub mod fixed;
 pub mod handy;
 pub mod io;
 pub mod preferred_address;
@@ -55,7 +52,7 @@ pub use self::{
 /// all these requirements are met.
 /// If not met, it is considered a TransportParameters error.
 #[derive(Debug, Clone, Copy)]
-enum Requirements {
+pub enum Requirements {
     Client {
         initial_scid: Option<ConnectionId>,
         retry_scid: Option<ConnectionId>,
@@ -66,456 +63,380 @@ enum Requirements {
     },
 }
 
-/// Transport parameters for QUIC.
-/// The transport parameters are used to negotiate the initial
-/// settings of a QUIC connection.
-///
-/// They are exchanged in the Initial packets of the handshake,
-/// including client and server transport parameters.
-/// Client transport parameters and server transport parameters
-/// exist independently and are not merged.
-/// They each constrain the behavior of the remote peer.
-///
-/// For different roles, local transport parameters and remote
-/// transport parameters differ.
-/// For example, as a client, the local transport parameters
-/// are client parameters, while remote transport parameters
-/// are server parameters. The same applies to the server.
-///
-/// Note that client transport parameters and server transport
-/// parameters are different, as some transport parameters can
-/// only appear in server transport parameters.
-/// Therefore, for a QUIC connection, the transport parameter
-/// sets for both ends are defined as follows.
-#[derive(Debug)]
-pub struct Parameters {
-    state: u8,
+impl Requirements {
+    pub fn new_client(origin_dcid: ConnectionId) -> Self {
+        Self::Client {
+            initial_scid: None,
+            retry_scid: None,
+            origin_dcid,
+        }
+    }
+
+    pub fn new_server() -> Self {
+        Self::Server { initial_scid: None }
+    }
+
+    /// Record the SCID from the peer's first authenticated Initial packet.
+    /// The peer's transport parameters need not be available yet.
+    pub fn initial_scid_from_peer_need_equal(&mut self, cid: ConnectionId) -> &mut Self {
+        match self {
+            Self::Client { initial_scid, .. } => *initial_scid = Some(cid),
+            Self::Server { initial_scid } => *initial_scid = Some(cid),
+        }
+        self
+    }
+
+    /// Record the SCID from an accepted Retry packet for later authentication.
+    pub fn retry_scid_from_server_need_equal(&mut self, cid: ConnectionId) -> &mut Self {
+        match self {
+            Self::Client { retry_scid, .. } => *retry_scid = Some(cid),
+            _ => unreachable!("not for server side"),
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ArcParameters {
+    role: Role,
     client: Arc<ClientParameters>,
     server: Arc<ServerParameters>,
     remembered: Option<Arc<ServerParameters>>,
-    requirements: Requirements,
-    wakers: Vec<Waker>,
 }
 
-impl Drop for Parameters {
-    fn drop(&mut self) {
-        self.wake_all();
-    }
+fn param_error(reason: &'static str) -> QuicError {
+    QuicError::new(
+        ErrorKind::TransportParameter,
+        FrameType::Crypto.into(),
+        reason,
+    )
 }
 
-impl Parameters {
-    const CLIENT_READY: u8 = 1;
-    const SERVER_READY: u8 = 2;
-
-    /// Creates a new client transport parameters, with the client
-    /// parameters and remembered server parameters if exist.
-    ///
-    /// It will wait for the server transport parameters to be
-    /// received and parsed.
-    pub fn new_client(
-        client: ClientParameters,
-        remembered: Option<ServerParameters>,
-        origin_dcid: ConnectionId,
-    ) -> Self {
+impl ArcParameters {
+    /// Both parameter sets are available immediately. Configure packet CID
+    /// observations and authenticate them before exposing the connection.
+    pub fn new(role: Role, client: Arc<ClientParameters>, server: Arc<ServerParameters>) -> Self {
         Self {
-            state: Self::CLIENT_READY,
-            client: Arc::new(client),
-            server: Arc::default(),
-            remembered: remembered.map(Arc::new),
-            requirements: Requirements::Client {
-                origin_dcid,
-                initial_scid: None,
-                retry_scid: None,
-            },
-            wakers: Vec::with_capacity(2),
-        }
-    }
-
-    /// Creates a new server transport parameters, with the server
-    /// parameters.
-    ///
-    /// It will wait for the client transport parameters to be
-    /// received and parsed.
-    pub fn new_server(server: ServerParameters) -> Self {
-        Self {
-            state: Self::SERVER_READY,
-            client: Arc::default(),
-            server: Arc::new(server),
+            role,
+            client,
+            server,
             remembered: None,
-            requirements: Requirements::Server { initial_scid: None },
-            wakers: Vec::with_capacity(2),
         }
+    }
+
+    /// Retain the client's previous server parameters as historical data.
+    /// Current remote parameters are always available through `remote`.
+    pub fn with_remembered(mut self, remembered: Option<Arc<ServerParameters>>) -> Self {
+        assert_eq!(self.role(), Role::Client);
+        self.remembered = remembered;
+        self
     }
 
     pub fn role(&self) -> Role {
-        match self.requirements {
-            Requirements::Client { .. } => Role::Client,
-            Requirements::Server { .. } => Role::Server,
-        }
+        self.role
     }
 
-    pub fn client(&self) -> Option<&Arc<ClientParameters>> {
-        if self.state & Self::CLIENT_READY != 0 {
-            Some(&self.client)
-        } else {
-            None
-        }
+    pub fn client(&self) -> &ClientParameters {
+        &self.client
     }
 
-    pub fn server(&self) -> Option<&Arc<ServerParameters>> {
-        if self.state & Self::SERVER_READY != 0 {
-            Some(&self.server)
-        } else {
-            None
-        }
+    pub fn server(&self) -> &ServerParameters {
+        &self.server
     }
 
-    /// Returns the remembered server transport parameters if exist,
-    /// which means the client connected the server, and stored the
-    /// server transport parameters.
-    ///
-    /// It is meaningful only for the client, to send early data
-    /// with 0Rtt packets before receving the server transport params.
     pub fn remembered(&self) -> Option<&Arc<ServerParameters>> {
         self.remembered.as_ref()
     }
 
-    pub fn get_local<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
+    pub fn local<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> V {
         match self.role() {
-            Role::Client => Some(self.client()?.get(id)),
-            Role::Server => Some(self.server()?.get(id)),
+            Role::Client => self.client.get(id),
+            Role::Server => self.server.get(id),
         }
     }
 
-    pub fn get_remote<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> Option<V> {
+    pub fn remote<V: TryFrom<ParameterValue>>(&self, id: ParameterId) -> V {
         match self.role() {
-            Role::Client => Some(self.server()?.get(id)),
-            Role::Server => Some(self.client()?.get(id)),
+            Role::Client => self.server.get(id),
+            Role::Server => self.client.get(id),
         }
     }
 
-    // fn set_retry_scid(&mut self, cid: ConnectionId) {
-    //     assert_eq!(self.role(), Role::Server);
-    //     self.server.set_retry_source_connection_id(cid);
-    // }
-
-    pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.state == Self::CLIENT_READY | Self::SERVER_READY {
-            Poll::Ready(())
-        } else {
-            self.wakers.push(cx.waker().clone());
-            Poll::Pending
-        }
-    }
-
-    pub fn is_remote_params_received(&self) -> bool {
-        match self.role() {
-            Role::Client => !self.server.is_empty(),
-            Role::Server => !self.client.is_empty(),
-        }
-    }
-
-    /// Returns true if the remote transport parameters have been received and authed.
-    ///
-    /// It is usually used to avoid processing remote transport parameters
-    /// more than once.
-    pub fn is_remote_params_ready(&self) -> bool {
-        self.state == Self::CLIENT_READY | Self::SERVER_READY
-    }
-
-    /// Being called when the remote transport parameters are received.
-    /// It will parse and check the remote transport parameters,
-    /// and wake all the wakers waiting for the remote transport parameters
-    /// if the remote transport parameters are valid.
-    pub fn recv_remote_params(
-        &mut self,
-        params: impl Into<PeerParameters>,
-    ) -> Result<(), QuicError> {
-        match params.into() {
-            PeerParameters::Client(p) => {
-                assert_eq!(self.role(), Role::Server);
-                assert!(self.client.is_empty());
-                self.client = Arc::new(p);
-            }
-            PeerParameters::Server(p) => {
-                assert_eq!(self.role(), Role::Client);
-                assert!(self.server.is_empty());
-                self.server = Arc::new(p);
-            }
-        }
-
-        // Because TLS and packet parsing are in parallel,
-        // the scid of the peer end may not be set when the transmission parameters of the peer are obtained.
-        // Therefore, if the scid of the other end is not set, authentication will not be performed first,
-        // and authentication will be performed when it is set.
-        if self.authenticate_cids()? {
-            self.state = Self::CLIENT_READY | Self::SERVER_READY;
-            self.remembered.take();
-            self.wake_all();
-            return Ok(());
-        }
-
-        Ok(())
-    }
-
-    fn wake_all(&mut self) {
-        for waker in self.wakers.drain(..) {
-            waker.wake();
-        }
-    }
-
-    /// No matter the client or server, after receiving the Initial
-    /// packet from the peer, the initial_source_connection_id in
-    /// the remote transport parameters must equal the source connection
-    /// id in the received Initial packet.
-    ///
-    /// If the peer's transmission parameters have not been verified,
-    /// it will be verified here. If verification fails, this method will
-    /// return Err.
-    pub fn initial_scid_from_peer_need_equal(
-        &mut self,
-        cid: ConnectionId,
-    ) -> Result<(), QuicError> {
-        let initial_scid = match &mut self.requirements {
-            Requirements::Client { initial_scid, .. } => initial_scid,
-            Requirements::Server { initial_scid } => initial_scid,
-        };
-        assert!(initial_scid.replace(cid).is_none());
-
-        // Because the TLS handshak and packet parsing are in parallel,
-        // the scid of the peer end may not be set when the transmission parameters of the peer are obtained.
-        // Therefore, if the scid of the other end is not set, authentication will not be performed first,
-        // and authentication will be performed when it is set.
-        if self.is_remote_params_received() && self.authenticate_cids()? {
-            self.state = Self::CLIENT_READY | Self::SERVER_READY;
-            self.remembered.take();
-            self.wake_all();
-            return Ok(());
-        }
-
-        Ok(())
-    }
-
-    /// After receiving the Retry packet from the server, the
-    /// retry_source_connection_id in the server transport parameters
-    /// must equal the source connection id in the Retry packet.
-    pub fn retry_scid_from_server_need_equal(&mut self, cid: ConnectionId) {
-        match &mut self.requirements {
-            Requirements::Client { retry_scid, .. } => *retry_scid = Some(cid),
-            Requirements::Server { .. } => panic!("server shuold never call this"),
-        }
-    }
-
-    pub fn initial_scid_from_peer(&self) -> Option<ConnectionId> {
-        match self.requirements {
-            Requirements::Client { initial_scid, .. } => initial_scid,
-            Requirements::Server { initial_scid, .. } => initial_scid,
-        }
-    }
-
-    fn authenticate_cids(&self) -> Result<bool, QuicError> {
-        fn param_error(reason: &'static str) -> QuicError {
-            QuicError::new(
-                ErrorKind::TransportParameter,
-                FrameType::Crypto.into(),
-                reason,
-            )
-        }
-
-        // Because TLS and packet parsing are in parallel,
-        // the scid of the peer end may not be set when the transmission parameters of the peer are obtained.
-        // Therefore, if the scid of the other end is not set, authentication will not be performed first,
-        // and authentication will be performed when it is set.
-        match self.requirements {
-            Requirements::Client {
-                initial_scid,
-                retry_scid: _,
-                origin_dcid,
-            } => {
-                let Some(initial_scid) = initial_scid else {
-                    return Ok(false);
-                };
+    /// Authenticate the peer's parameters against independently collected CID
+    /// requirements. Growing coroutines record the Initial SCID before calling this.
+    pub fn authenticate_cids(&self, requirements: Requirements) -> Result<(), QuicError> {
+        match (self.role, requirements) {
+            (
+                Role::Client,
+                Requirements::Client {
+                    initial_scid,
+                    retry_scid,
+                    origin_dcid,
+                },
+            ) => {
                 if self
                     .server
-                    .get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
+                    .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
                     != initial_scid
+                    && initial_scid.is_some()
                 {
                     return Err(param_error(
                         "Initial Source Connection ID from server mismatch",
                     ));
                 }
-                // 并不正确，要和intiial_scid一样地去验证
-                // if self.server.retry_source_connection_id() != retry_scid {
-                //     return Err(param_error("Retry Source Connection ID mismatch"));
-                // }
                 if self
                     .server
-                    .get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId)
-                    != origin_dcid
+                    .try_get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId)
+                    != Some(origin_dcid)
                 {
                     return Err(param_error("Original Destination Connection ID mismatch"));
                 }
-                Ok(true)
+                if self
+                    .server
+                    .try_get::<ConnectionId>(ParameterId::RetrySourceConnectionId)
+                    != retry_scid
+                {
+                    return Err(param_error("Retry Source Connection ID mismatch"));
+                }
             }
-            Requirements::Server { initial_scid } => {
-                let Some(initial_scid) = initial_scid else {
-                    return Ok(false);
-                };
+            (Role::Server, Requirements::Server { initial_scid }) => {
                 if self
                     .client
-                    .get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
+                    .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
                     != initial_scid
                 {
                     return Err(param_error(
                         "Initial Source Connection ID from client mismatch",
                     ));
                 }
-                Ok(true)
+            }
+            _ => {
+                return Err(param_error(
+                    "Connection ID requirements do not match endpoint role",
+                ));
             }
         }
+        Ok(())
     }
 
-    /// Returns None if the remote parameters are not ready.
-    pub fn negotiated_max_idle_timeout(&self) -> Option<Duration> {
-        let local_max_idle_timeout = self.get_local(ParameterId::MaxIdleTimeout)?;
-        let remote_max_idle_timeout = self.get_remote(ParameterId::MaxIdleTimeout)?;
-
-        Some(match (local_max_idle_timeout, remote_max_idle_timeout) {
-            // rfc: https://datatracker.ietf.org/doc/html/rfc9000#name-idle-timeout
-            // Each endpoint advertises a max_idle_timeout, but the effective value
-            // at an endpoint is computed as the minimum of the two advertised
-            // values (or the sole advertised value, if only one endpoint advertises
-            // a non-zero value). By announcing a max_idle_timeout, an endpoint
-            // commits to initiating an immediate close (Section 10.2) if
-            // it abandons the connection prior to the effective value.
+    /// The minimum nonzero advertised timeout, or `Duration::MAX` if disabled
+    /// by both endpoints (RFC 9000, section 10.1).
+    pub fn negotiated_max_idle_timeout(&self) -> Duration {
+        match (
+            self.local(ParameterId::MaxIdleTimeout),
+            self.remote(ParameterId::MaxIdleTimeout),
+        ) {
             (Duration::ZERO, Duration::ZERO) => Duration::MAX,
             (Duration::ZERO, d) | (d, Duration::ZERO) => d,
-            // rfc: https://datatracker.ietf.org/doc/html/rfc9000#name-idle-timeout
-            // If a max_idle_timeout is specified by either endpoint in its
-            // transport parameters (Section 18.2), the connection is silently
-            // closed and its state is discarded when it remains idle for longer
-            // than the minimum of the max_idle_timeout value advertised by both
-            // endpoints.
             (d1, d2) => d1.min(d2),
-        })
-    }
-}
-
-/// Shared transport parameter sets for both endpoints.
-///
-/// The local transport parameters are set initially, while
-/// the remote transport parameters must wait until they are
-/// received through network transmission and can be parsed.
-/// After parsing, the peer parameters must be immediately
-/// verified to ensure they meet the requirements and validity
-/// checks.
-///
-/// Note that a connection error may occur before receiving
-/// the remote transport parameters, such as network unreachable.
-/// In such cases, the entire connection parameters will be
-/// converted into an error state.
-#[derive(Debug, Clone)]
-pub struct ArcParameters(Arc<Mutex<Result<Parameters, Error>>>);
-
-// ArcParameters::lock_guard(&self) -> Result<ArcParametersGuard, Error>;
-// pub struct ArcParametersGuard: impl Deref<Target = Parameters>
-
-pub struct ParametersGuard<'a>(MutexGuard<'a, Result<Parameters, Error>>);
-
-impl Deref for ParametersGuard<'_> {
-    type Target = Parameters;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("parameters must be valid")
-    }
-}
-
-impl DerefMut for ParametersGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().expect("parameters must be valid")
-    }
-}
-
-impl From<Parameters> for ArcParameters {
-    fn from(params: Parameters) -> Self {
-        Self(Arc::new(Mutex::new(Ok(params))))
-    }
-}
-
-impl ArcParameters {
-    #[inline]
-    pub fn lock_guard(&self) -> Result<ParametersGuard<'_>, Error> {
-        let guard = self.0.lock().unwrap();
-        match guard.as_ref() {
-            Ok(_) => Ok(ParametersGuard(guard)),
-            Err(e) => Err(e.clone()),
-        }
-    }
-
-    #[inline]
-    pub async fn remote_ready(&self) -> Result<ParametersGuard<'_>, Error> {
-        std::future::poll_fn(|cx| {
-            let mut parameters = self.lock_guard()?;
-            parameters.poll_ready(cx).map(|()| Ok(parameters))
-        })
-        .await
-    }
-
-    // /// Sets the retry source connection ID in the server
-    // /// transport parameters.
-    // ///
-    // /// It is meaningful only for the client, because only
-    // /// server can send the Retry packet.
-    // pub fn set_retry_scid(&self, cid: ConnectionId) {
-    //     let mut guard = self.0.lock().unwrap();
-    //     if let Ok(params) = guard.deref_mut() {
-    //         params.set_retry_scid(cid);
-    //     }
-    // }
-
-    /// When some connection error occurred, convert this parameters
-    /// into error state.
-    pub fn on_conn_error(&self, error: &Error) {
-        let mut guard = self.0.lock().unwrap();
-        if guard.deref_mut().is_ok() {
-            *guard = Err(error.clone());
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::varint::VarInt;
 
-    fn create_test_client_params() -> ClientParameters {
-        let mut params = ClientParameters::default();
-        params
+    fn parameters(role: Role) -> ArcParameters {
+        let mut client = ClientParameters::default();
+        client
             .set(
                 ParameterId::InitialSourceConnectionId,
-                ConnectionId::from_slice(b"client_test"),
+                ConnectionId::from_slice(b"client"),
             )
             .unwrap();
-        params
-    }
-
-    fn create_test_server_params() -> ServerParameters {
-        let mut params = ServerParameters::default();
-        params
+        client.set(ParameterId::InitialMaxData, 11u32).unwrap();
+        let mut server = ServerParameters::default();
+        server
             .set(
                 ParameterId::InitialSourceConnectionId,
-                ConnectionId::from_slice(b"server_test"),
+                ConnectionId::from_slice(b"server"),
             )
             .unwrap();
-        params
+        server
             .set(
                 ParameterId::OriginalDestinationConnectionId,
-                ConnectionId::from_slice(b"original"),
+                ConnectionId::from_slice(b"origin"),
             )
             .unwrap();
-        params
+        server.set(ParameterId::InitialMaxData, 22u32).unwrap();
+        ArcParameters::new(role, Arc::new(client), Arc::new(server))
+    }
+
+    fn requirements(role: Role) -> Requirements {
+        match role {
+            Role::Client => Requirements::new_client(ConnectionId::from_slice(b"origin")),
+            Role::Server => Requirements::new_server(),
+        }
+    }
+
+    #[test]
+    fn both_parameter_sets_are_immediately_available_for_both_roles() {
+        for role in [Role::Client, Role::Server] {
+            let params = parameters(role);
+            assert_eq!(params.client().get::<u64>(ParameterId::InitialMaxData), 11);
+            assert_eq!(params.server().get::<u64>(ParameterId::InitialMaxData), 22);
+            let expected = if role == Role::Client {
+                (11, 22)
+            } else {
+                (22, 11)
+            };
+            assert_eq!(
+                (
+                    params.local::<u64>(ParameterId::InitialMaxData),
+                    params.remote::<u64>(ParameterId::InitialMaxData)
+                ),
+                expected
+            );
+            assert!(params.remembered().is_none());
+        }
+    }
+
+    #[test]
+    fn requirements_can_be_prepared_before_parameters() {
+        for (role, cid) in [(Role::Client, b"server"), (Role::Server, b"client")] {
+            let mut requirements = requirements(role);
+            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(cid));
+            let params = parameters(role);
+            assert_eq!(params.authenticate_cids(requirements), Ok(()));
+            assert_eq!(params.clone().authenticate_cids(requirements), Ok(()));
+        }
+    }
+
+    #[test]
+    fn initial_cid_mismatches_return_transport_parameter_errors() {
+        for role in [Role::Client, Role::Server] {
+            let mut requirements = requirements(role);
+            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"wrong"));
+            let params = parameters(role);
+            let reason = if role == Role::Client {
+                "Initial Source Connection ID from server mismatch"
+            } else {
+                "Initial Source Connection ID from client mismatch"
+            };
+            assert_eq!(
+                params.authenticate_cids(requirements),
+                Err(param_error(reason))
+            );
+        }
+    }
+
+    #[test]
+    fn missing_initial_cids_return_errors_instead_of_panicking() {
+        for role in [Role::Client, Role::Server] {
+            let mut requirements = requirements(role);
+            requirements.initial_scid_from_peer_need_equal(ConnectionId::default());
+            let mut params = parameters(role);
+            match role {
+                Role::Client => params.server = Arc::default(),
+                Role::Server => params.client = Arc::default(),
+            }
+            assert!(params.authenticate_cids(requirements).is_err());
+        }
+    }
+
+    #[test]
+    fn original_dcid_requires_an_independent_matching_observation() {
+        let mut requirements = Requirements::new_client(ConnectionId::from_slice(b"wrong"));
+        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        let mut params = parameters(Role::Client);
+        assert_eq!(
+            params.authenticate_cids(requirements),
+            Err(param_error("Original Destination Connection ID mismatch"))
+        );
+
+        let mut requirements = Requirements::new_client(ConnectionId::from_slice(b"origin"));
+        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        Arc::make_mut(&mut params.server)
+            .map
+            .remove(&ParameterId::OriginalDestinationConnectionId);
+        assert!(params.authenticate_cids(requirements).is_err());
+    }
+
+    #[test]
+    fn retry_cid_must_match_presence_and_value() {
+        let retry = ConnectionId::from_slice(b"retry");
+        for advertised in [None, Some(retry), Some(ConnectionId::from_slice(b"wrong"))] {
+            for received_retry in [false, true] {
+                let mut requirements = requirements(Role::Client);
+                if received_retry {
+                    requirements.retry_scid_from_server_need_equal(retry);
+                }
+                requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+                let mut params = parameters(Role::Client);
+                if let Some(cid) = advertised {
+                    Arc::make_mut(&mut params.server)
+                        .set(ParameterId::RetrySourceConnectionId, cid)
+                        .unwrap();
+                }
+                let expected = if advertised == received_retry.then_some(retry) {
+                    Ok(())
+                } else {
+                    Err(param_error("Retry Source Connection ID mismatch"))
+                };
+                assert_eq!(params.authenticate_cids(requirements), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn requirements_must_match_the_endpoint_role() {
+        for role in [Role::Client, Role::Server] {
+            let wrong_role = if role == Role::Client {
+                Role::Server
+            } else {
+                Role::Client
+            };
+            let mut requirements = requirements(wrong_role);
+            let params = parameters(role);
+            assert!(params.authenticate_cids(requirements).is_err());
+            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(
+                if wrong_role == Role::Client {
+                    b"server"
+                } else {
+                    b"client"
+                },
+            ));
+            assert!(params.authenticate_cids(requirements).is_err());
+        }
+    }
+
+    #[test]
+    fn remembered_parameters_survive_authentication_and_cloning() {
+        let mut requirements = requirements(Role::Client);
+        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        let remembered = Arc::new(ServerParameters::default());
+        let params = parameters(Role::Client).with_remembered(Some(remembered.clone()));
+        assert_eq!(params.authenticate_cids(requirements), Ok(()));
+        let cloned = params.clone();
+        assert!(Arc::ptr_eq(params.remembered().unwrap(), &remembered));
+        assert!(Arc::ptr_eq(cloned.remembered().unwrap(), &remembered));
+        assert_eq!(params.remote::<u64>(ParameterId::InitialMaxData), 22);
+        assert!(params.with_remembered(None).remembered().is_none());
+    }
+
+    #[test]
+    fn idle_timeout_is_symmetric_and_uses_the_minimum_nonzero_value() {
+        let short = Duration::from_secs(3);
+        let long = Duration::from_secs(9);
+        for role in [Role::Client, Role::Server] {
+            for (client, server, expected) in [
+                (Duration::ZERO, Duration::ZERO, Duration::MAX),
+                (Duration::ZERO, short, short),
+                (short, Duration::ZERO, short),
+                (short, long, short),
+                (long, short, short),
+            ] {
+                let mut params = parameters(role);
+                Arc::make_mut(&mut params.client)
+                    .set(ParameterId::MaxIdleTimeout, client)
+                    .unwrap();
+                Arc::make_mut(&mut params.server)
+                    .set(ParameterId::MaxIdleTimeout, server)
+                    .unwrap();
+                assert_eq!(params.negotiated_max_idle_timeout(), expected);
+            }
+        }
     }
 
     #[test]
@@ -536,69 +457,6 @@ mod tests {
             params.get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
             scid
         );
-    }
-
-    #[test]
-    fn test_parameters_new() {
-        let client_params = create_test_client_params();
-        let params =
-            Parameters::new_client(client_params, None, ConnectionId::from_slice(b"odcid"));
-        assert_eq!(params.role(), Role::Client);
-        assert_eq!(params.state, Parameters::CLIENT_READY);
-
-        let server_params = create_test_server_params();
-        let params = Parameters::new_server(server_params);
-        assert_eq!(params.role(), Role::Server);
-        assert_eq!(params.state, Parameters::SERVER_READY);
-    }
-
-    #[test]
-    fn test_authenticate_cids() {
-        let client_params = create_test_client_params();
-
-        let odcid = ConnectionId::from_slice(b"odcid");
-
-        let mut params = Parameters::new_client(client_params, None, odcid);
-
-        let server_cid = ConnectionId::from_slice(b"server_test");
-        params
-            .initial_scid_from_peer_need_equal(server_cid)
-            .unwrap();
-
-        params.server = Arc::new({
-            let mut server_params = ServerParameters::default();
-            server_params
-                .set(ParameterId::InitialSourceConnectionId, server_cid)
-                .unwrap();
-            server_params
-                .set(ParameterId::OriginalDestinationConnectionId, odcid)
-                .unwrap();
-            server_params
-        });
-
-        assert!(params.authenticate_cids().is_ok());
-    }
-
-    #[test]
-    fn test_parameters_as_client() {
-        let client_params = create_test_client_params();
-        let arc_params = ArcParameters::from(Parameters::new_client(
-            client_params,
-            None,
-            ConnectionId::from_slice(b"odcid"),
-        ));
-
-        // Test accessing parameters through lock_guard
-        let guard = arc_params.lock_guard().unwrap();
-
-        // Test local params
-        assert!(matches!(
-            guard.get_local::<VarInt>(ParameterId::MaxUdpPayloadSize),
-            Some(value) if value.into_u64() >= 1200
-        ));
-
-        // Test remembered params
-        assert!(guard.remembered().is_none());
     }
 
     #[test]
@@ -626,68 +484,5 @@ mod tests {
                 "MaxUdpPayloadSize's value 1000 is out of bounds 1200..=65527",
             ))
         );
-    }
-
-    #[test]
-    fn test_write_parameters() {
-        let client_params = create_test_client_params();
-        let params = ArcParameters::from(Parameters::new_client(
-            client_params,
-            None,
-            ConnectionId::from_slice(b"odcid"),
-        ));
-
-        // Test that we can access the parameters
-        let guard = params.lock_guard().unwrap();
-        assert_eq!(guard.role(), Role::Client);
-    }
-
-    #[test]
-    fn negotiated_idle_timeout_covers_all_zero_and_nonzero_combinations() {
-        fn negotiated(local: Duration, remote: Duration) -> Duration {
-            let mut client = create_test_client_params();
-            client
-                .set(ParameterId::MaxIdleTimeout, local)
-                .expect("valid idle timeout");
-            let mut server = create_test_server_params();
-            server
-                .set(ParameterId::MaxIdleTimeout, remote)
-                .expect("valid idle timeout");
-
-            let mut params =
-                Parameters::new_client(client, None, ConnectionId::from_slice(b"odcid"));
-            params.server = Arc::new(server);
-            params.state = Parameters::CLIENT_READY | Parameters::SERVER_READY;
-            params
-                .negotiated_max_idle_timeout()
-                .expect("both parameter sets are ready")
-        }
-
-        let short = Duration::from_secs(3);
-        let long = Duration::from_secs(9);
-        assert_eq!(negotiated(Duration::ZERO, Duration::ZERO), Duration::MAX);
-        assert_eq!(negotiated(Duration::ZERO, short), short);
-        assert_eq!(negotiated(short, Duration::ZERO), short);
-        assert_eq!(negotiated(long, short), short);
-    }
-
-    #[tokio::test]
-    async fn test_arc_parameters_error_handling() {
-        let arc_params = ArcParameters::from(Parameters::new_client(
-            create_test_client_params(),
-            None,
-            ConnectionId::from_slice(b"odcid"),
-        ));
-
-        // Simulate connection error
-        let error = QuicError::new(
-            ErrorKind::TransportParameter,
-            FrameType::Crypto.into(),
-            "test error",
-        )
-        .into();
-        arc_params.on_conn_error(&error);
-
-        assert!(arc_params.lock_guard().is_err());
     }
 }

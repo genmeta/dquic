@@ -877,7 +877,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
 
 fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
     use qbase::param::{
-        fixed::ArcParameters,
+        ArcParameters,
         handy::{client_parameters, server_parameters},
     };
     let initial = InitialPhase::new(

@@ -51,6 +51,12 @@ impl From<Error> for QuicError {
     }
 }
 
+impl From<Error> for crate::error::Error {
+    fn from(value: Error) -> Self {
+        Self::Quic(value.into())
+    }
+}
+
 impl From<nom::Err<Error>> for Error {
     fn from(error: nom::Err<Error>) -> Self {
         match error {

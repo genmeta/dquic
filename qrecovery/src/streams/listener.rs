@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
-    task::{Context, Poll, Waker, ready},
+    task::{Context, Poll, Waker},
 };
 
 use qbase::{
@@ -58,14 +58,7 @@ impl<TX> Listener<TX> {
         cx: &mut Context<'_>,
         arc_params: &ArcParameters,
     ) -> Poll<Result<(StreamId, (Reader<TX>, Writer<TX>)), QuicError>> {
-        let mut params = arc_params.lock_guard()?;
-        let snd_buf_size = match params.get_remote(ParameterId::InitialMaxStreamDataBidiLocal) {
-            Some(value) => value,
-            None => {
-                ready!(params.poll_ready(cx));
-                return self.poll_accept_bi_stream(cx, arc_params);
-            }
-        };
+        let snd_buf_size = arc_params.remote(ParameterId::InitialMaxStreamDataBidiLocal);
         if let Some((sid, (recver, sender))) = self.bi_streams.pop_front() {
             sender.update_window(snd_buf_size);
             // recver.update_window(rcv_buf_size);
