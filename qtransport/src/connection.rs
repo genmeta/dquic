@@ -12,7 +12,7 @@ use crate::{
     ArcParameters, Error, Role, StreamId, StreamReader, StreamWriter, VarInt, transport::Transport,
 };
 
-/// The source of a connection's first close request. qconn drives its lifecycle.
+/// The source of a connection's first close request. qconnection drives its lifecycle.
 #[derive(Debug, Clone)]
 pub enum CloseReason {
     App(AppError),
@@ -41,7 +41,7 @@ struct Connection {
 }
 
 impl ArcConnection {
-    /// Integration only: TLS and parameters are authenticated; qconn awaits the shared close signal.
+    /// Integration only: TLS and parameters are authenticated; qconnection awaits the shared close signal.
     #[doc(hidden)]
     pub fn new(transport: Arc<Transport>, alpn: Bytes, close: ArcReceiving<CloseReason>) -> Self {
         Self(Arc::new(Connection {
@@ -100,7 +100,7 @@ impl ArcConnection {
     pub async fn accept_uni_stream(&self) -> Result<(StreamId, StreamReader), Error> {
         self.0.transport.streams.accept_uni().await
     }
-    /// Stop all clones and streams immediately; qconn completes Closing/Draining.
+    /// Stop all clones and streams immediately; qconnection completes Closing/Draining.
     pub fn close(self, code: VarInt, reason: &str) {
         self.0.close(AppError::new(code, reason.to_owned()));
     }

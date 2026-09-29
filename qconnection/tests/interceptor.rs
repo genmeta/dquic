@@ -8,7 +8,7 @@ use qbase::{
     net::route::Pathway,
     param::{ClientParameters, ParameterId, WriteParameters},
 };
-use qconn::{Interceptor, Scope, ServerRegistry};
+use qconnection::{Interceptor, Scope, ServerRegistry};
 use qtls::{ClientStart, CryptoLevel, QuicVersion, TlsEvent};
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! Mature QUIC connection API. Handshake and Closing/Draining are driven by qconn.
+//! Mature QUIC connection API. Handshake and Closing/Draining are driven by qconnection.
 //! Protocol integration lives in the modules; applications only need the root exports.
 //!
 //! ```no_run

@@ -1,5 +1,5 @@
 //! Historical packet fixtures for receive/recovery regression tests.
-//! Production assembly and submission live in qconn::send.
+//! Production assembly and submission live in qconnection::send.
 #[path = "send/constraints.rs"]
 pub mod constraints;
 #[path = "send/records.rs"]

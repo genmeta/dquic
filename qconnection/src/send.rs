@@ -20,7 +20,6 @@ use qbase::{
         header::{GetType, io::WriteHeader},
     },
     param::ParameterId,
-    role::Role,
 };
 use qcongestion::{ArcCC, Transport as _};
 use qprotocol::QuicProtocol;
@@ -249,7 +248,11 @@ impl Collector<'_> {
             .then_some(PingFrame);
         limits.probe_quota = if ping.is_some() { 1200 } else { 0 };
         limits.max_size = 1200;
-        limits.min_size = if space.epoch == Epoch::Initial { 1200 } else { 0 };
+        limits.min_size = if space.epoch == Epoch::Initial {
+            1200
+        } else {
+            0
+        };
         let Some(buffer) = self.burst.datagrams.get_mut(index) else {
             return Ok(0);
         };
@@ -390,13 +393,7 @@ impl Collector<'_> {
         Poll::Ready(Ok(1))
     }
 
-    fn record(
-        &mut self,
-        epoch: Epoch,
-        pn: u64,
-        journal: &ArcSendJournal,
-        acked: &mut Option<u64>,
-    ) {
+    fn record(&mut self, epoch: Epoch, pn: u64, journal: &ArcSendJournal, acked: &mut Option<u64>) {
         let index = self.count();
         for frame in self.burst.frames.iter() {
             match frame {
