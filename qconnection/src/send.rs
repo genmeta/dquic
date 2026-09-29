@@ -146,19 +146,17 @@ impl Future for Collector<'_> {
                 while count < this.burst.datagrams.len() && limits.credit > 0 {
                     let before = count;
                     let header =
-                        LongHeaderBuilder::with_cid(phase.initial.dcid(), phase.initial.scid)
-                            .initial(vec![]);
+                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
                     count += this.collect_long(
                         cx,
-                        &phase.initial.initial,
+                        &phase.initial,
                         header,
-                        &mut phase.initial.initial.crypto.outgoing(),
+                        &mut phase.initial.crypto.outgoing(),
                         &mut limits,
                         &mut acked[Epoch::Initial],
                     )?;
                     let header =
-                        LongHeaderBuilder::with_cid(phase.initial.dcid(), phase.initial.scid)
-                            .handshake();
+                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).handshake();
                     count += this.collect_long(
                         cx,
                         &phase.handshake,

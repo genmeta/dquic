@@ -22,7 +22,7 @@ fn sending_journals(phase: &ConnPhase) -> [Option<ArcSendJournal>; 3] {
     match phase {
         ConnPhase::Initial(p) => [Some(p.initial.send_journal.clone()), None, None],
         ConnPhase::Handshake(p) => [
-            Some(p.initial.initial.send_journal.clone()),
+            Some(p.initial.send_journal.clone()),
             Some(p.handshake.send_journal.clone()),
             None,
         ],
@@ -172,10 +172,10 @@ pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
                 );
             }
             ConnPhase::Handshake(p) => {
-                cancel_space(&p.initial.initial, waker);
+                cancel_space(&p.initial, waker);
                 cancel_space(&p.handshake, waker);
                 <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
-                    &mut p.initial.reliable_frames.clone(),
+                    &mut p.reliable_frames.clone(),
                     waker,
                 );
             }
