@@ -13,6 +13,8 @@ env:
 
 jobs:
   nat-detection:
+    # qtraversal is excluded until its qinterface dependency is migrated.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +79,8 @@ jobs:
           done
 
   punch:
+    # qtraversal is excluded until its qinterface dependency is migrated.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
