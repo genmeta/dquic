@@ -40,7 +40,7 @@ impl Paths {
         let snapshot = phase.get();
         let initial = match &snapshot {
             ConnPhase::Initial(phase) => &phase.initial,
-            ConnPhase::Handshake(phase) => &phase.initial.initial,
+            ConnPhase::Handshake(phase) => &phase.initial,
             ConnPhase::Mature(phase) => &phase.spaces.initial,
         };
         feedback[Epoch::Initial].start(initial.send_journal.clone());
@@ -307,7 +307,7 @@ impl Paths {
         match &snapshot {
             ConnPhase::Initial(phase) => phase.initial.crypto.on_error(&error),
             ConnPhase::Handshake(phase) => {
-                phase.initial.initial.crypto.on_error(&error);
+                phase.initial.crypto.on_error(&error);
                 phase.handshake.crypto.on_error(&error);
             }
             ConnPhase::Mature(phase) => {
@@ -328,7 +328,7 @@ impl Paths {
         match &snapshot {
             ConnPhase::Initial(phase) => phase.initial.retire(),
             ConnPhase::Handshake(phase) => {
-                phase.initial.initial.retire();
+                phase.initial.retire();
                 phase.handshake.retire();
             }
             ConnPhase::Mature(phase) => {
@@ -415,14 +415,11 @@ mod tests {
         let ConnPhase::Initial(initial) = paths.phase.get() else {
             panic!()
         };
-        paths.phase.enter_handshake(
-            initial.clone(),
-            Arc::new(Space::new(
-                Epoch::Handshake,
-                initial.initial.keys.clone(),
-                |_| {},
-            )),
-        );
+        paths.phase.enter_handshake(Arc::new(Space::new(
+            Epoch::Handshake,
+            initial.initial.keys.clone(),
+            |_| {},
+        )));
         assert_eq!(
             paths
                 .add_path(pathway(30005))

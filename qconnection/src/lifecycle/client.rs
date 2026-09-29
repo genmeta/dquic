@@ -74,7 +74,7 @@ pub async fn client_growing(
                 ArcKeys::from(handshake_keys),
                 |_| {},
             ));
-            phase.enter_handshake(initial_phase.clone(), handshake.clone());
+            phase.enter_handshake(handshake.clone());
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
 

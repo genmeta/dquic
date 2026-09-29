@@ -236,7 +236,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     ));
     let initial = match phase.get() {
         ConnPhase::Initial(phase) => phase.initial.clone(),
-        ConnPhase::Handshake(phase) => phase.initial.initial.clone(),
+        ConnPhase::Handshake(phase) => phase.initial.clone(),
         ConnPhase::Mature(phase) => phase.spaces.initial.clone(),
     };
     assert!(initial.crypto.writer().write(&[]).await.is_err());
