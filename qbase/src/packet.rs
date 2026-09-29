@@ -9,7 +9,6 @@ use header::{LongHeader, io::WriteHeader};
 use crate::{
     cid::ConnectionId,
     frame::{ContainSpec, FrameFeature, FrameType, Spec},
-    packet::keys::DirectionalKeys,
 };
 
 /// QUIC packet parse error definitions.
@@ -56,9 +55,6 @@ pub mod decrypt;
 /// Include operations such as encrypting QUIC packets, adding header protection,
 /// and encoding the first byte of the packet with pn_len and key_phase optionally.
 pub mod encrypt;
-
-/// Encapsulate the crypto keys's logic for long headers and 1-RTT headers.
-pub mod keys;
 
 /// The sum type of all QUIC packet headers.
 #[derive(Debug, Clone)]

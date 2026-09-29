@@ -346,11 +346,15 @@ impl BindUri {
                     .as_iface_bind_uri()
                     .expect("Already checked BindUriScheme is iface");
 
-                let devices = crate::device::Devices::global();
-                let device = devices.get(interface).ok_or(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "device not found".to_string(),
-                ))?;
+                let device = netdev::get_interfaces()
+                    .into_iter()
+                    .find(|device| {
+                        device.name.trim_start_matches('{').trim_end_matches('}') == interface
+                    })
+                    .ok_or(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "device not found".to_string(),
+                    ))?;
                 let ip_addr = match ip_family {
                     Family::V4 => device.ipv4.first().map(|ipnet| IpAddr::V4(ipnet.addr())),
                     Family::V6 => device
@@ -539,9 +543,8 @@ mod tests {
         assert!(bind_uri.as_uri().query().is_none());
     }
 
-    // tokio runtime requeired for device listing
-    #[tokio::test]
-    async fn interface_not_found() {
+    #[test]
+    fn interface_not_found() {
         let bind_uri = BindUri::from_str(
             "iface://v4.ygiubiougbuyasiudbahsdbadfbkjadbhvkjabvckagdoiuehfjoiajhrpfhrbovhaelvkamdjkfs:8080",
         )
@@ -549,13 +552,16 @@ mod tests {
         assert!(SocketAddr::try_from(bind_uri).is_err_and(|e| e.kind() == io::ErrorKind::NotFound))
     }
 
-    #[tokio::test]
-    async fn iface_binding_retains_device_index() {
-        let devices = crate::device::Devices::global();
-        let (device_name, iface, ip) = devices
-            .interfaces()
+    #[test]
+    fn iface_binding_retains_device_index() {
+        let (device_name, iface, ip) = netdev::get_interfaces()
             .into_iter()
-            .find_map(|(device_name, iface)| {
+            .find_map(|iface| {
+                let device_name = iface
+                    .name
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+                    .to_owned();
                 iface
                     .ipv4
                     .first()

@@ -208,21 +208,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use derive_more::Deref;
+    use std::sync::Mutex;
 
     use super::*;
     use crate::{
         error::ErrorKind,
         frame::io::{ReceiveFrame, SendFrame},
-        util::ArcAsyncDeque,
     };
 
-    #[derive(Debug, Default, Clone, Deref)]
-    struct HandshakeDoneFrameTx(ArcAsyncDeque<HandshakeDoneFrame>);
+    #[derive(Debug, Default, Clone)]
+    struct HandshakeDoneFrameTx(Arc<Mutex<Vec<HandshakeDoneFrame>>>);
 
     impl SendFrame<HandshakeDoneFrame> for HandshakeDoneFrameTx {
         fn send_frame<I: IntoIterator<Item = HandshakeDoneFrame>>(&self, iter: I) {
-            (&self.0).extend(iter);
+            self.0.lock().unwrap().extend(iter);
         }
     }
 
@@ -283,6 +282,6 @@ mod tests {
         let handshake = ServerHandshake::new(HandshakeDoneFrameTx::default());
         handshake.done();
         assert!(handshake.is_handshake_done());
-        assert_eq!(handshake.output.len(), 1);
+        assert_eq!(handshake.output.0.lock().unwrap().len(), 1);
     }
 }

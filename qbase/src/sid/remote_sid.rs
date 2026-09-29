@@ -241,17 +241,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use derive_more::Deref;
-
     use super::*;
-    use crate::{sid::handy::ConsistentConcurrency, util::ArcAsyncDeque};
+    use crate::sid::handy::ConsistentConcurrency;
 
-    #[derive(Clone, Deref, Default)]
-    struct MaxStreamsFrameTx(ArcAsyncDeque<MaxStreamsFrame>);
+    #[derive(Clone, Default)]
+    struct MaxStreamsFrameTx(Arc<Mutex<Vec<MaxStreamsFrame>>>);
 
     impl SendFrame<MaxStreamsFrame> for MaxStreamsFrameTx {
         fn send_frame<I: IntoIterator<Item = MaxStreamsFrame>>(&self, iter: I) {
-            (&self.0).extend(iter);
+            self.0.lock().unwrap().extend(iter);
         }
     }
 

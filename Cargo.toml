@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["dquic", "h3-shim"]
+exclude = ["dquic", "h3-shim", "qtraversal"]
 members = [
     "qmacro",
     "qbase",
@@ -8,7 +8,6 @@ members = [
     "qrecovery",
     "qcongestion",
     "qudp",
-    "qinterface",
     "qprotocol",
     "qdatagram",
     "qconnection",
@@ -16,7 +15,6 @@ members = [
     "qtransport",
     # "dquic",
     # "h3-shim",
-    "qtraversal",
     "qresolve",
 ]
 default-members = [
@@ -25,14 +23,12 @@ default-members = [
     "qevent",
     "qrecovery",
     "qcongestion",
-    "qinterface",
     "qprotocol",
     "qconnection",
     "qtls",
     "qtransport",
     # "dquic",
     # "h3-shim",
-    "qtraversal",
 ]
 
 [workspace.package]
@@ -102,11 +98,9 @@ qmacro = { path = "./qmacro", version = "0.5.1" }
 qbase = { path = "./qbase", version = "0.6.4" }
 qevent = { path = "./qevent", version = "0.6.2" }
 qudp = { path = "./qudp", version = "0.7.2" }
-qinterface = { path = "./qinterface", version = "0.7.2" }
 # qdatagram = { path = "./qdatagram", version = "0.6.2" }
 qresolve = { path = "./qresolve", version = "0.8.1" }
 qrecovery = { path = "./qrecovery", version = "0.6.2" }
-# qtraversal = { path = "./qtraversal", version = "0.7.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.2" }
 qconnection = { path = "./qconnection", version = "0.6.1" }
 qtls = { path = "./qtls", version = "0.6.1" }

@@ -11,6 +11,9 @@ categories.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+derive_more = { workspace = true, features = ["display", "into"] }
+http = { workspace = true }
+netdev = { workspace = true }
 nom = { workspace = true }
 dashmap = { workspace = true }
 qbase = { workspace = true }

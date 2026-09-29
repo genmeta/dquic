@@ -6,6 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use nom::{Parser, multi::length_data};
+pub use rustls::quic::DirectionalKeys;
 
 use super::{
     error::Error,
@@ -566,8 +567,6 @@ impl AssemblePacket for PacketWriter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::{frame::CryptoFrame, varint::VarInt};
 
@@ -633,8 +632,8 @@ mod tests {
     fn header_protection_padding_precedes_an_omitted_length_stream() {
         let mut bytes = [0; 64];
         let keys = DirectionalKeys {
-            packet: Arc::new(TransparentKeys),
-            header: Arc::new(TransparentKeys),
+            packet: Box::new(TransparentKeys),
+            header: Box::new(TransparentKeys),
         };
         let header = OneRttHeader::new(Default::default(), Default::default());
         let mut packet = PacketWriter::new_short(
@@ -686,8 +685,8 @@ mod tests {
         let pn = (0, PacketNumber::encode(0, 0));
 
         let keys = DirectionalKeys {
-            packet: Arc::new(TransparentKeys),
-            header: Arc::new(TransparentKeys),
+            packet: Box::new(TransparentKeys),
+            header: Box::new(TransparentKeys),
         };
 
         let mut writer = PacketWriter::new_long(&header, &mut buffer, pn, keys).unwrap();
