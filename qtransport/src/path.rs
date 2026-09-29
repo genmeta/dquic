@@ -2,7 +2,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU8, AtomicU16, Ordering},
     },
     task::{Context, Poll, Waker},
@@ -16,8 +16,9 @@ use qbase::{
     packet::{ConstraintBuffer, Package},
     role::Role,
     time::PathIdleTimer,
+    util::IndexDeque,
 };
-use qcongestion::{Algorithm, ArcCC, Feedback, HandshakeStatus, PathStatus, Transport as _};
+use qcongestion::{Algorithm, ArcCC, Resend, HandshakeStatus, PathStatus, Transport as _};
 
 use crate::Error;
 mod anti_amplifier;
@@ -61,7 +62,7 @@ impl Path {
         pathway: Pathway,
         role: Role,
         activity: PathIdleTimer,
-        feedback: [Arc<dyn Feedback>; 3],
+        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
@@ -69,7 +70,7 @@ impl Path {
         let cc = ArcCC::new(
             Algorithm::NewReno,
             Duration::from_millis(25),
-            feedback,
+            trackers,
             status.clone(),
             send_waker.clone(),
         );
@@ -328,7 +329,6 @@ mod package_tests {
     async fn validation_registers_only_when_both_sources_are_empty() {
         for queued in [false, true] {
             for quota in [0, 128] {
-                let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::default());
                 let path = Path::new(
                     Pathway::new(
                         EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
@@ -336,7 +336,7 @@ mod package_tests {
                     ),
                     Role::Server,
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
-                    [feedback.clone(), feedback.clone(), feedback],
+                    Arc::default(),
                 );
                 if queued {
                     path.recv_frame(PathChallengeFrame::from_slice(&[1; 8]))

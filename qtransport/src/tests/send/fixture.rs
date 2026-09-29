@@ -9,12 +9,19 @@ pub struct TestSender {
     buffers: Vec<BytesMut>,
     pub(super) send_frames: Vec<GuaranteedFrame>,
     pns: VecDeque<PendingPacket>,
+    recovery: Option<Arc<DataSpace>>,
 }
 
 impl TestSender {
-    pub fn new(pathway: Pathway, congestion: ArcCC, anti_amplifier: Arc<AntiAmplifier>) -> Self {
+    pub fn new(
+        pathway: Pathway,
+        congestion: ArcCC,
+        anti_amplifier: Arc<AntiAmplifier>,
+        recovery: Option<Arc<DataSpace>>,
+    ) -> Self {
         Self {
             pathway,
+            recovery,
             congestion,
             anti_amplifier,
             buffers: (0..MAX_BURST_PACKETS)
@@ -34,7 +41,7 @@ impl TestSender {
         &mut self,
         keys: &qtls::DirectionalKeys,
         header: H,
-        journal: &ArcSendJournal,
+        journal: &ArcSentJournal,
         constraints: &Constraints,
         sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     ) -> Result<Option<PendingPacket>, Error>
@@ -50,6 +57,7 @@ impl TestSender {
             keys,
             header,
             journal,
+            &self.recovery,
             constraints,
             sources,
         )
@@ -59,7 +67,7 @@ impl TestSender {
         &mut self,
         keys: &OneRttKeys,
         header: OneRttHeader,
-        journal: &ArcSendJournal,
+        journal: &ArcSentJournal,
         constraints: &Constraints,
         sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     ) -> Result<Option<PendingPacket>, Error> {
@@ -72,6 +80,7 @@ impl TestSender {
             keys,
             header,
             journal,
+            &self.recovery,
             constraints,
             sources,
         )

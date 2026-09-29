@@ -17,17 +17,17 @@ use qbase::{
     varint::{VARINT_MAX, VarInt},
 };
 use qcongestion::Transport as _;
-use qrecovery::{crypto::CryptoStream, streams::DataStreams};
+use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal};
 
 use crate::{
-    ArcParameters, ArcReliableFrames, Error, GuaranteedFrame,
-    keys::{ArcKeys, ArcOneRttKeys, OneRttKeys},
+    ArcParameters, ArcReliableFrames, Error,
+    keys::{ArcKeys, OneRttKeys},
     packet::{
         CipherPacket, PlainPacket,
         channel::{PacketReceiver, RcvdPacket},
     },
     path::Path,
-    space::Space,
+    space::{DataSpace, Space},
 };
 
 /// Connect existing components once. No task, registry or extra frame buffer is created here.
@@ -35,9 +35,8 @@ use crate::{
 /// Data dispatch supplies an ACK callback capturing its already acquired OneRttKeys.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn frame_dispatcher<LOCAL, REMOTE>(
-    data: Arc<Space<ArcOneRttKeys>>,
+    data: Arc<DataSpace>,
     parameters: ArcParameters,
-    streams: DataStreams<ArcReliableFrames>,
     flow: FlowController<ArcReliableFrames>,
     crypto: [CryptoStream; 3],
     cid_registry: Registry<LOCAL, REMOTE>,
@@ -54,15 +53,15 @@ where
         match frame {
             Frame::Padding(_) | Frame::Ping(_) => Ok(()),
             Frame::Ack(frame) if epoch == Epoch::Data => {
-                acknowledge(&data, &streams, &parameters, &frame, path, on_ack)
+                acknowledge(&data, &parameters, &frame, path, on_ack)
             }
             Frame::Crypto(frame, bytes) => crypto[epoch].incoming().recv_frame((frame, bytes)),
             Frame::Stream(frame, bytes) => {
-                let fresh = streams.recv_frame((frame, bytes))?;
+                let fresh = data.streams.recv_frame((frame, bytes))?;
                 flow.recver.on_new_rcvd(kind, fresh).map(|_| ())
             }
             Frame::StreamCtl(frame) => {
-                let fresh = streams.recv_frame(frame)?;
+                let fresh = data.streams.recv_frame(frame)?;
                 flow.recver.on_new_rcvd(kind, fresh).map(|_| ())
             }
             Frame::MaxData(frame) => flow.sender.recv_frame(frame),
@@ -74,7 +73,7 @@ where
             Frame::Close(frame) => {
                 let error = Error::from(frame.clone());
                 data.crypto.on_error(&error);
-                streams.on_conn_error(&error);
+                data.streams.on_conn_error(&error);
                 flow.on_conn_error(&error);
                 on_close(epoch, frame, path)
             }
@@ -90,7 +89,7 @@ pub async fn run(
     rcvd_pkt: RcvdPacket,
     initial: Arc<Space<ArcKeys>>,
     handshake: Arc<Space<ArcKeys>>,
-    data: Arc<Space<ArcOneRttKeys>>,
+    data: Arc<DataSpace>,
     path_for: impl Fn(Pathway, Link) -> Option<Arc<Path>> + Sync,
     dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
     on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
@@ -105,7 +104,9 @@ pub async fn run(
     tokio::join!(
         run_receive(
             initial_rx,
-            initial.clone(),
+            initial.epoch,
+            initial.keys.clone(),
+            initial.rcvd_journal.clone(),
             &path_for,
             |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
                 packet
@@ -119,7 +120,9 @@ pub async fn run(
         ),
         run_receive(
             handshake_rx,
-            handshake.clone(),
+            handshake.epoch,
+            handshake.keys.clone(),
+            handshake.rcvd_journal.clone(),
             &path_for,
             |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
                 packet
@@ -133,7 +136,9 @@ pub async fn run(
         ),
         run_receive(
             one_rtt_rx,
-            data.clone(),
+            Epoch::Data,
+            data.keys.clone(),
+            data.rcvd_journal.clone(),
             &path_for,
             |keys: &OneRttKeys, packet, pto| {
                 keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
@@ -151,10 +156,11 @@ pub async fn run(
 /// reliable pipe is an error, never an ACK followed by silent frame loss.
 /// on_processed executes before CRYPTO can wake the TLS driver. Packet and CLOSE
 /// notifications are unconditional; the owner handles connection state.
-pub fn receive_packet<K>(
+pub fn receive_packet(
     pn: u64,
     frames: FrameReader,
-    space: &Space<K>,
+    epoch: Epoch,
+    journal: &ArcRcvdJournal,
     path: &Arc<Path>,
     mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
@@ -181,24 +187,21 @@ pub fn receive_packet<K>(
         }
         decoded.push(frame);
     }
-    on_processed(space.epoch, path)?;
+    on_processed(epoch, path)?;
     // CLOSE reaches the control owner even when ordinary component pipes are full.
     if let Some(frame) = decoded
         .iter()
         .find(|frame| matches!(frame, Frame::Close(_)))
     {
-        dispatch(space.epoch, frame.clone(), path)?;
+        dispatch(epoch, frame.clone(), path)?;
         return Ok(PacketContent::default());
     }
     for frame in decoded {
-        dispatch(space.epoch, frame, path)?;
+        dispatch(epoch, frame, path)?;
     }
-    let pto = path.cc.get_pto(space.epoch);
-    space
-        .rcvd_journal
-        .on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
-    path.cc
-        .on_pkt_rcvd(space.epoch, pn, content.is_ack_eliciting());
+    let pto = path.cc.get_pto(epoch);
+    journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
+    path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
     path.send_waker.wake_all();
     Ok(content)
 }
@@ -209,7 +212,9 @@ pub fn receive_packet<K>(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_receive<H, M>(
     mut packets: PacketReceiver<H>,
-    space: Arc<Space<ArcKeys<M>>>,
+    epoch: Epoch,
+    keys: ArcKeys<M>,
+    journal: ArcRcvdJournal,
     mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
     mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
@@ -224,8 +229,7 @@ pub async fn run_receive<H, M>(
             continue;
         };
         path.on_datagram_received(packet.payload_len());
-        let epoch = space.epoch;
-        let Ok(keys) = space.keys.get() else {
+        let Ok(keys) = keys.get() else {
             break;
         };
         let result = open(&keys, packet, path.cc.get_pto(epoch)).and_then(|opened| {
@@ -235,7 +239,8 @@ pub async fn run_receive<H, M>(
                 receive_packet(
                     pn,
                     frames,
-                    &space,
+                    epoch,
+                    &journal,
                     &path,
                     |epoch, frame, path| dispatch(&keys, epoch, frame, path),
                     &mut on_processed,
@@ -251,10 +256,9 @@ pub async fn run_receive<H, M>(
 
 /// Data ACK pipe target. Capture the original components before Transport is created.
 /// Lock the receiving path CC before the journal, so ACK observes committed sends.
-/// Report acknowledged generations to the receive task's ready OneRttKeys.
+/// Report the highest acknowledged generation to the receive task's ready OneRttKeys.
 pub fn acknowledge(
-    data: &Space<ArcOneRttKeys>,
-    streams: &DataStreams<ArcReliableFrames>,
+    data: &DataSpace,
     parameters: &ArcParameters,
     ack: &AckFrame,
     received_on: &Arc<Path>,
@@ -268,14 +272,7 @@ pub fn acknowledge(
             .checked_shl(exponent as u32)
             .unwrap_or(VARINT_MAX)
             .min(VARINT_MAX);
-        let acknowledged = data.send_journal.acknowledge(ack, |frame| match frame {
-            GuaranteedFrame::Crypto(frame) => data.crypto.outgoing().on_data_acked(frame),
-            GuaranteedFrame::Stream(frame) => streams.on_data_acked(*frame),
-            GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
-                qbase::frame::StreamCtlFrame::ResetStream(frame),
-            )) => streams.on_reset_acked(*frame),
-            _ => {}
-        })?;
+        let acknowledged = data.on_acked(ack)?;
         let ack = AckFrame::new(
             VarInt::from_u64(ack.largest()).unwrap(),
             VarInt::from_u64(delay).unwrap(),
@@ -286,7 +283,7 @@ pub fn acknowledge(
         congestion.on_ack_rcvd(Epoch::Data, &ack, tokio::time::Instant::now());
         acknowledged
     };
-    for generation in acknowledged {
+    if let Some(generation) = acknowledged {
         on_ack(generation);
     }
     received_on.send_waker.wake_all();

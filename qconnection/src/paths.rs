@@ -16,7 +16,6 @@ use qcongestion::Transport as _;
 use qtransport::{
     CloseReason,
     path::{Path, PathState},
-    space::ArcFeedback,
 };
 
 use crate::{ArcConnPhase, ConnPhase, Error, terminate::ArcTerminator};
@@ -29,21 +28,12 @@ pub struct Paths {
     role: Role,
     selected: OnceLock<Weak<Path>>,
     idle: ArcConnIdle,
-    feedback: [ArcFeedback; 3],
     closed: ArcReceiving<CloseReason>,
     terminator: ArcTerminator,
 }
 
 impl Paths {
     pub fn new(role: Role, phase: ArcConnPhase, idle: ArcConnIdle) -> Arc<Self> {
-        let feedback: [ArcFeedback; 3] = std::array::from_fn(|_| ArcFeedback::default());
-        let snapshot = phase.get();
-        let initial = match &snapshot {
-            ConnPhase::Initial(phase) => &phase.initial,
-            ConnPhase::Handshake(phase) => &phase.initial,
-            ConnPhase::Mature(phase) => &phase.spaces.initial,
-        };
-        feedback[Epoch::Initial].start(initial.send_journal.clone());
         let terminator = phase.terminator();
         Arc::new(Self {
             phase,
@@ -52,7 +42,6 @@ impl Paths {
             role,
             selected: OnceLock::new(),
             idle,
-            feedback,
             closed: ArcReceiving::default(),
             terminator,
         })
@@ -82,9 +71,7 @@ impl Paths {
             pathway,
             self.role,
             self.idle.timer(),
-            self.feedback
-                .each_ref()
-                .map(|feedback| Arc::new(feedback.clone()) as Arc<dyn qcongestion::Feedback>),
+            self.phase.get().trackers(),
         ));
         if entries.values().any(|path| path.selected() == 2) {
             path.handshake_confirmed();
@@ -133,11 +120,6 @@ impl Paths {
 
     pub(crate) fn idle(&self) -> ArcConnIdle {
         self.idle.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn feedback(&self) -> [ArcFeedback; 3] {
-        self.feedback.clone()
     }
 
     pub(crate) fn closed(&self) -> ArcReceiving<CloseReason> {
@@ -314,7 +296,7 @@ impl Paths {
                 phase.spaces.initial.crypto.on_error(&error);
                 phase.spaces.handshake.crypto.on_error(&error);
                 phase.spaces.data.crypto.on_error(&error);
-                phase.streams.on_conn_error(&error);
+                phase.spaces.data.streams.on_conn_error(&error);
                 phase.flow.on_conn_error(&error);
             }
         }
@@ -332,10 +314,15 @@ impl Paths {
                 phase.handshake.retire();
             }
             ConnPhase::Mature(phase) => {
-                phase.spaces.initial.retire();
-                phase.spaces.handshake.retire();
+                phase.retire_handshake_spaces();
                 phase.spaces.data.keys.retire();
             }
+        }
+        {
+            let trackers = snapshot.trackers();
+            let mut trackers = trackers.write().unwrap();
+            let end = trackers.largest();
+            trackers.drain_to(end).for_each(drop);
         }
         for path in active_paths {
             self.remove(&path);
@@ -418,7 +405,6 @@ mod tests {
         paths.phase.enter_handshake(Arc::new(Space::new(
             Epoch::Handshake,
             initial.initial.keys.clone(),
-            |_| {},
         )));
         assert_eq!(
             paths

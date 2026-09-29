@@ -153,7 +153,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         packet::LongHeaderBuilder,
     };
     use qtls::CryptoLevel;
-    use qtransport::journal::ArcSendJournal;
+    use qrecovery::journal::ArcSentJournal;
 
     let [tls, server_tls] =
         common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
@@ -215,7 +215,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let packet = common::seal(
         LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"server00")).initial(vec![]),
         &initial_keys(true).sealing,
-        &ArcSendJournal::default(),
+        &ArcSentJournal::default(),
         [&mut crypto],
     )
     .unwrap();

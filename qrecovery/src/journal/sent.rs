@@ -1,651 +1,1196 @@
+//! Space-wide packet numbers and recovery descriptors. Packet numbers are never returned.
 use std::{
-    collections::VecDeque,
-    ops::RangeInclusive,
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
 use qbase::{
-    error::{ErrorKind, QuicError},
-    frame::{AckFrame, GetFrameType},
+    error::{Error, ErrorKind, QuicError},
+    frame::{AckFrame, Frame, GuaranteedFrame},
     packet::PacketNumber,
+    util::IndexDeque,
     varint::VARINT_MAX,
 };
 use tokio::time::Instant;
 
-/// State for a sent packet that contains frames requiring ACK/loss feedback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SentPktState {
-    Pending {
-        nframes: usize,
-    },
-    Flighting {
-        nframes: usize,
-        sent_time: Instant,
-        expire_time: Instant,
-        retran_time: Instant,
-    },
-    Retransmitted {
-        nframes: usize,
-        sent_time: Instant,
-        expire_time: Instant,
-    },
-    Acked {
-        nframes: usize,
-        sent_time: Instant,
-        expire_time: Instant,
-    },
+/// Errors from reserving a packet in recovery test fixtures.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error("packet journal is full")]
+    Blocked,
+    #[error(transparent)]
+    Connection(#[from] Error),
 }
 
-impl SentPktState {
-    fn new(nframes: usize, sent_time: Instant, retran_time: Instant, expire_time: Instant) -> Self {
-        Self::Flighting {
-            nframes,
-            sent_time,
-            retran_time,
-            expire_time,
+const MAX_RECORDS: usize = 8192;
+const MAX_SKIPPED_PNS: usize = 256;
+// Includes empty slots pinned behind an earlier retained packet.
+const MAX_FRAMES: usize = MAX_RECORDS * 4;
+
+struct SentPacket {
+    generation: Option<u64>,
+    frame_range: Range<u64>,
+    state: SentPacketState,
+}
+
+/// Pending -> Flighting -> Retransmitted -> Retired.
+/// Pending can fail or become Acked, as can Flighting and Retransmitted.
+/// Terminal records and their indexes are removed together by PN.
+enum SentPacketState {
+    Pending,
+    Flighting {
+        retrans_at: Instant,
+        expire_after: Instant,
+    },
+    /// Frame owners have been notified once to retransmit under a new PN.
+    Retransmitted {
+        expire_after: Instant,
+    },
+    Failed,
+    Acked,
+    Retired,
+}
+
+#[derive(Default)]
+pub struct SentJournal {
+    packets: BTreeMap<u64, SentPacket>,
+    frames: IndexDeque<Option<Frame>, { u64::MAX }>,
+    deadlines: BTreeSet<(Instant, u64)>,
+    next_pn: u64,
+    largest_acked: u64,
+    skipped_pns: BTreeSet<u64>,
+}
+
+impl SentJournal {
+    pub fn frames(&self, pn: u64) -> impl Iterator<Item = &Frame> {
+        self.packets[&pn]
+            .frame_range
+            .clone()
+            .map(|index| self.frames[index].as_ref().unwrap())
+    }
+
+    /// Fix the retention deadline at successful submission; loss never restarts it.
+    pub fn on_sent(
+        &mut self,
+        pn: u64,
+        in_flight: bool,
+        retransmit_after: Duration,
+        retention: Duration,
+    ) {
+        let sent_at = Instant::now();
+        // An ACK may have already removed this Pending packet.
+        let Some(record) = self.packets.get_mut(&pn) else {
+            return;
+        };
+        if !matches!(record.state, SentPacketState::Pending) {
+            return;
+        }
+        if in_flight {
+            let retrans_at = sent_at + retransmit_after;
+            record.state = SentPacketState::Flighting {
+                retrans_at,
+                expire_after: sent_at + retention,
+            };
+            self.deadlines.insert((retrans_at, pn));
+        }
+        if !in_flight {
+            let record = self.remove_packet(pn, SentPacketState::Retired).unwrap();
+            self.take_frames(record.frame_range, drop);
         }
     }
 
-    fn nframes(&self) -> usize {
-        match self {
-            Self::Pending { nframes }
-            | Self::Flighting { nframes, .. }
-            | Self::Retransmitted { nframes, .. }
-            | Self::Acked { nframes, .. } => *nframes,
-        }
-    }
-
-    fn be_acked(&mut self) -> usize {
-        match *self {
-            Self::Flighting {
-                nframes,
-                sent_time,
-                expire_time,
-                ..
+    fn take_frames(&mut self, range: Range<u64>, mut on_frame: impl FnMut(GuaranteedFrame)) {
+        for index in range {
+            if let Ok(frame) = GuaranteedFrame::try_from(self.frames[index].take().unwrap()) {
+                on_frame(frame);
             }
-            | Self::Retransmitted {
-                nframes,
-                sent_time,
-                expire_time,
-            } => {
-                *self = Self::Acked {
-                    nframes,
-                    sent_time,
-                    expire_time,
-                };
-                nframes
-            }
-            Self::Pending { .. } | Self::Acked { .. } => 0,
         }
+        self.reclaim();
     }
 
-    fn maybe_lost(&mut self) -> usize {
-        match *self {
-            Self::Flighting {
-                nframes,
-                sent_time,
-                expire_time,
-                ..
-            } => {
-                *self = Self::Retransmitted {
-                    nframes,
-                    sent_time,
-                    expire_time,
-                };
-                nframes
-            }
-            Self::Retransmitted { nframes, .. } => nframes,
-            Self::Pending { .. } | Self::Acked { .. } => 0,
-        }
-    }
-
-    fn should_retransmit_after(&mut self, now: Instant) -> bool {
-        match *self {
-            Self::Flighting {
-                nframes,
-                sent_time,
-                retran_time,
-                expire_time,
-            } if retran_time < now => {
-                *self = Self::Retransmitted {
-                    nframes,
-                    sent_time,
-                    expire_time,
-                };
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn should_remain_after(&self, pn: u64, now: Instant) -> bool {
-        match self {
-            Self::Pending { .. } | Self::Flighting { .. } => true,
-            Self::Retransmitted { expire_time, .. } => {
-                if *expire_time > now {
-                    true
-                } else {
-                    tracing::trace!(target: "dquic", "retransmitted packet {pn} expired without ACK");
-                    false
+    fn retransmit(&mut self, pn: u64, mut on_frame: impl FnMut(&GuaranteedFrame)) {
+        if let Some(record) = self.packets.get_mut(&pn)
+            && let SentPacketState::Flighting {
+                retrans_at,
+                expire_after,
+            } = record.state
+        {
+            self.deadlines.remove(&(retrans_at, pn));
+            record.state = SentPacketState::Retransmitted { expire_after };
+            self.deadlines.insert((expire_after, pn));
+            for index in record.frame_range.clone() {
+                if let Ok(frame) =
+                    GuaranteedFrame::try_from(self.frames[index].as_ref().unwrap().clone())
+                {
+                    on_frame(&frame);
                 }
             }
-            Self::Acked { .. } => false,
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SentPacketRecord {
-    packet_number: u64,
-    state: SentPktState,
-}
-
-/// Reliable-frame feedback journal for sent packets.
-///
-/// Packet numbers are allocated by `next_pn`, while `sent_packets` only stores packets containing
-/// reliable frames. Pure ACK/PING/PADDING packets consume packet numbers but allocate no journal
-/// record, so a long-lived earlier packet cannot pin a dense tail of `Skipped` entries.
-#[derive(Debug, Default)]
-struct SentJournal<T> {
-    queue: VecDeque<T>,
-    sent_packets: VecDeque<SentPacketRecord>,
-    next_pn: u64,
-    largest_acked_pktno: u64,
-}
-
-impl<T: Clone> SentJournal<T> {
-    fn acked_record_numbers(&self, ack_frame: &AckFrame) -> Vec<u64> {
-        let ack_ranges = ack_frame.iter_ranges().collect::<Vec<_>>();
-        self.sent_packets
-            .iter()
-            .rev()
-            .filter(|record| {
-                !matches!(record.state, SentPktState::Pending { .. })
-                    && ack_ranges
-                        .iter()
-                        .any(|range| range.contains(&record.packet_number))
-            })
-            .map(|record| record.packet_number)
-            .collect()
-    }
-
-    fn on_packets_acked(&mut self, ack_frame: &AckFrame) -> std::vec::IntoIter<T> {
-        let ack_ranges = ack_frame
-            .iter_ranges()
-            .collect::<Vec<RangeInclusive<u64>>>();
-        let mut offset = self.queue.len();
-        let mut frames = Vec::new();
-        for record in self.sent_packets.iter_mut().rev() {
-            let nframes = record.state.nframes();
-            offset -= nframes;
-            if ack_ranges
-                .iter()
-                .any(|range| range.contains(&record.packet_number))
-            {
-                let len = record.state.be_acked();
-                frames.extend(self.queue.range(offset..offset + len).cloned());
-            }
+    /// Remove a terminal packet and its current deadline together.
+    /// The caller consumes or drops its frame slots before reclaiming the prefix.
+    fn remove_packet(&mut self, pn: u64, state: SentPacketState) -> Option<SentPacket> {
+        let mut record = self.packets.remove(&pn)?;
+        let deadline = match record.state {
+            SentPacketState::Flighting { retrans_at, .. } => Some(retrans_at),
+            SentPacketState::Retransmitted { expire_after } => Some(expire_after),
+            _ => None,
+        };
+        if let Some(deadline) = deadline {
+            self.deadlines.remove(&(deadline, pn));
         }
-        frames.into_iter()
+        record.state = state;
+        Some(record)
     }
 
-    fn record_index_and_offset(&self, pn: u64) -> Option<(usize, usize)> {
-        let mut offset = 0;
-        for (index, record) in self.sent_packets.iter().enumerate() {
-            if record.packet_number == pn {
-                return Some((index, offset));
-            }
-            if record.packet_number > pn {
+    fn on_tick(&mut self, now: Instant, mut on_frame: impl FnMut(&GuaranteedFrame)) {
+        while let Some(&(deadline, pn)) = self.deadlines.first() {
+            if deadline > now {
                 break;
             }
-            offset += record.state.nframes();
+            match self.packets[&pn].state {
+                SentPacketState::Flighting { .. } => {
+                    self.retransmit(pn, &mut on_frame);
+                }
+                SentPacketState::Retransmitted { .. } => {
+                    let record = self.remove_packet(pn, SentPacketState::Retired).unwrap();
+                    self.take_frames(record.frame_range, drop);
+                }
+                _ => unreachable!("only flighting and retransmitted packets have deadlines"),
+            }
         }
-        None
     }
 
-    fn on_packet_acked(&mut self, pn: u64) -> impl Iterator<Item = T> + '_ {
-        let (offset, len) = self
-            .record_index_and_offset(pn)
-            .map(|(index, offset)| {
-                let len = self.sent_packets[index].state.be_acked();
-                (offset, len)
-            })
-            .unwrap_or_default();
-        self.queue.range(offset..offset + len).cloned()
+    fn reclaim(&mut self) {
+        while matches!(self.frames.front(), Some((_, None))) {
+            self.frames.pop_front();
+        }
+    }
+}
+
+/// Shared sending journal for one packet-number space, across all path senders.
+/// PN allocation and batch recording hold the lock only for their own operation;
+/// Assembly and encryption run without a journal guard. Space locks the journal
+/// internally when recording the successfully submitted batch.
+#[derive(Clone, Default)]
+pub struct ArcSentJournal(Arc<Mutex<SentJournal>>);
+
+impl ArcSentJournal {
+    pub fn lock_guard(&self) -> MutexGuard<'_, SentJournal> {
+        self.0.lock().unwrap()
     }
 
-    fn may_loss_packet(&mut self, pn: u64) -> impl Iterator<Item = T> + '_ {
-        let (offset, len) = self
-            .record_index_and_offset(pn)
-            .map(|(index, offset)| {
-                let len = self.sent_packets[index].state.maybe_lost();
-                (offset, len)
-            })
-            .unwrap_or_default();
-        self.queue.range(offset..offset + len).cloned()
+    /// Abandon a sealed but unsubmitted packet and return its reliable data.
+    pub fn cancel(&self, pn: u64, on_frame: impl FnMut(GuaranteedFrame)) {
+        let mut records = self.0.lock().unwrap();
+        if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
+            records.skipped_pns.insert(pn);
+            if records.skipped_pns.len() > MAX_SKIPPED_PNS {
+                records.skipped_pns.pop_first();
+            }
+            records.take_frames(record.frame_range, on_frame);
+        }
     }
 
-    fn fast_retransmit(&mut self) -> std::vec::IntoIter<T> {
-        self.resize();
-        let now = Instant::now();
-        let largest_acked = self.largest_acked_pktno;
-        let mut offset = 0;
-        let mut frames = Vec::new();
-        for record in self
-            .sent_packets
-            .iter_mut()
-            .take_while(|record| record.packet_number < largest_acked)
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn starting_at(pn: u64) -> Self {
+        Self(Arc::new(Mutex::new(SentJournal {
+            next_pn: pn,
+            ..Default::default()
+        })))
+    }
+
+    pub fn has_capacity(&self) -> bool {
+        let records = self.0.lock().unwrap();
+        records.packets.len() < MAX_RECORDS && records.frames.len() < MAX_FRAMES
+    }
+    /// Allocate and encode a PN and retain its descriptors in one operation.
+    /// The caller fixes the sealing generation while this operation runs.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn record_pending(
+        &self,
+        generation: impl Into<Option<u64>>,
+        frames: &mut Vec<GuaranteedFrame>,
+    ) -> Result<(u64, PacketNumber), RecordError> {
+        let mut records = self.0.lock().unwrap();
+        if records.packets.len() >= MAX_RECORDS || records.frames.len() + frames.len() > MAX_FRAMES
         {
-            let end = offset + record.state.nframes();
-            if record.state.should_retransmit_after(now) {
-                frames.extend(self.queue.range(offset..end).cloned());
+            return Err(RecordError::Blocked);
+        }
+        let pn = records.next_pn;
+        if pn > VARINT_MAX {
+            return Err(Error::from(QuicError::with_default_fty(
+                ErrorKind::AeadLimitReached,
+                "packet numbers exhausted",
+            ))
+            .into());
+        }
+        let encoded = PacketNumber::encode(pn, records.largest_acked);
+        records.next_pn += 1;
+        let start = records.frames.largest();
+        for frame in frames.drain(..) {
+            records.frames.push_back(Some(frame.into())).unwrap();
+        }
+        let frame_range = start..records.frames.largest();
+        records.packets.insert(
+            pn,
+            SentPacket {
+                generation: generation.into(),
+                frame_range,
+                state: SentPacketState::Pending,
+            },
+        );
+        Ok((pn, encoded))
+    }
+    /// Reserve a unique packet number before constructing a packet.
+    pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
+        let mut records = self.lock_guard();
+        let pn = records.next_pn;
+        if pn > VARINT_MAX {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::AeadLimitReached,
+                "packet numbers exhausted",
+            )
+            .into());
+        }
+        records.next_pn += 1;
+        let start = records.frames.largest();
+        records.packets.insert(
+            pn,
+            SentPacket {
+                generation: None,
+                frame_range: start..start,
+                state: SentPacketState::Pending,
+            },
+        );
+        Ok((pn, PacketNumber::encode(pn, records.largest_acked)))
+    }
+
+    /// Record a sealed packet. Submission starts its timers separately.
+    pub fn on_assembled(
+        &self,
+        pn: u64,
+        generation: Option<u64>,
+        frames: impl IntoIterator<Item = Frame>,
+    ) {
+        let mut records = self.lock_guard();
+        assert!(
+            records.packets.get(&pn).is_some_and(
+                |p| matches!(p.state, SentPacketState::Pending) && p.frame_range.is_empty()
+            ),
+            "packet number must be reserved once"
+        );
+        let start = records.frames.largest();
+        for frame in frames {
+            records.frames.push_back(Some(frame)).unwrap();
+        }
+        let end = records.frames.largest();
+        records.packets.insert(
+            pn,
+            SentPacket {
+                generation,
+                frame_range: start..end,
+                state: SentPacketState::Pending,
+            },
+        );
+    }
+
+    /// Fix the retention deadline at successful submission; loss never restarts it.
+    pub fn on_sent(
+        &self,
+        pn: u64,
+        in_flight: bool,
+        retransmit_after: Duration,
+        retention: Duration,
+    ) {
+        self.lock_guard()
+            .on_sent(pn, in_flight, retransmit_after, retention);
+    }
+
+    /// Failed or abandoned submission: return its frames before reclaiming the record.
+    /// Called by the Sender that still owns this pending packet.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn cancel_pending(&self, pn: u64, frames: &mut Vec<GuaranteedFrame>) {
+        let mut records = self.0.lock().unwrap();
+        if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
+            records.skipped_pns.insert(pn);
+            if records.skipped_pns.len() > MAX_SKIPPED_PNS {
+                records.skipped_pns.pop_first();
             }
-            offset = end;
-        }
-        frames.into_iter()
-    }
-}
-
-impl<T> SentJournal<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            queue: VecDeque::with_capacity(capacity * 4),
-            sent_packets: VecDeque::with_capacity(capacity),
-            next_pn: 0,
-            largest_acked_pktno: 0,
+            records.take_frames(record.frame_range, |frame| frames.push(frame));
         }
     }
-
-    fn resize(&mut self) {
-        let now = Instant::now();
-        let (records, frames) = self
-            .sent_packets
-            .iter()
-            .take_while(|record| !record.state.should_remain_after(record.packet_number, now))
-            .fold((0usize, 0usize), |(records, frames), record| {
-                (records + 1, frames + record.state.nframes())
-            });
-        self.sent_packets.drain(..records);
-        self.queue.drain(..frames);
-    }
-}
-
-/// Records sent packets and the reliable frames they contain.
-#[derive(Debug, Default)]
-pub struct ArcSentJournal<T>(Arc<Mutex<SentJournal<T>>>);
-
-impl<T> Clone for ArcSentJournal<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T> ArcSentJournal<T> {
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(Arc::new(Mutex::new(SentJournal::with_capacity(capacity))))
-    }
-
-    pub fn rotate(&self) -> SentRotateGuard<'_, T> {
-        SentRotateGuard {
-            inner: self.0.lock().unwrap(),
+    /// Report loss directly to frame owners while retaining the original for late ACKs.
+    /// Like acknowledge, callbacks must not call back into CC or this journal.
+    pub fn resend(
+        &self,
+        pns: &mut dyn Iterator<Item = u64>,
+        mut on_frame: impl FnMut(&GuaranteedFrame),
+    ) {
+        let mut records = self.0.lock().unwrap();
+        for pn in pns {
+            records.retransmit(pn, &mut on_frame);
         }
     }
 
-    pub fn new_packet(&self) -> NewPacketGuard<'_, T> {
-        let inner = self.0.lock().unwrap();
-        assert!(inner.next_pn <= VARINT_MAX, "packet number exhausted");
-        let packet_number = inner.next_pn;
-        let origin_len = inner.queue.len();
-        NewPacketGuard {
-            trivial: false,
-            committed: false,
-            packet_number,
-            origin_len,
-            inner,
+    /// Process due deadlines and immediately notify frame owners of loss.
+    /// This does not depend on a Path or its sending task remaining alive.
+    /// Callbacks must not call back into CC or this journal.
+    pub fn on_tick(&self, now: Instant, on_frame: impl FnMut(&GuaranteedFrame)) {
+        self.0.lock().unwrap().on_tick(now, on_frame);
+    }
+
+    /// The receive path locks its CC before entering the journal, matching send order.
+    /// Remove acknowledged records, notify frame owners, then reclaim the queue prefix.
+    /// Return the highest newly acknowledged key generation, if any.
+    /// The callback must not call back into CC or this journal.
+    pub fn on_acked(
+        &self,
+        ack: &AckFrame,
+        mut on_frame: impl FnMut(&GuaranteedFrame),
+    ) -> Result<Option<u64>, Error> {
+        let mut records = self.0.lock().unwrap();
+        // qbase's decoder reads ACK fields; validate range arithmetic before its
+        // iterators or CC can see an authenticated but malformed ACK.
+        let invalid = || QuicError::with_default_fty(ErrorKind::FrameEncoding, "invalid ACK range");
+        let mut start = ack
+            .largest()
+            .checked_sub(ack.first_range())
+            .ok_or_else(invalid)?;
+        let mut ranges = Vec::with_capacity(ack.ranges().len() + 1);
+        ranges.push(start..=ack.largest());
+        for (gap, range) in ack.ranges() {
+            let end = start
+                .checked_sub(gap.into_u64())
+                .and_then(|pn| pn.checked_sub(2))
+                .ok_or_else(invalid)?;
+            start = end.checked_sub(range.into_u64()).ok_or_else(invalid)?;
+            ranges.push(start..=end);
         }
-    }
-
-    /// Commits recovery timestamps after an outstanding socket send completes.
-    /// Returns false if this PN is no longer pending. A pending packet never
-    /// participates in ACK/loss feedback before this transition.
-    pub fn mark_sent(&self, pn: u64, retran_timeout: Duration, expire_timeout: Duration) -> bool {
-        let mut inner = self.0.lock().unwrap();
-        let Some(index) = inner
-            .sent_packets
-            .iter()
-            .position(|record| record.packet_number == pn)
-        else {
-            return false;
-        };
-        let SentPktState::Pending { nframes } = inner.sent_packets[index].state else {
-            return false;
-        };
-        if nframes == 0 {
-            inner.sent_packets.remove(index);
-        } else {
-            let now = Instant::now();
-            inner.sent_packets[index].state =
-                SentPktState::new(nframes, now, now + retran_timeout, now + expire_timeout);
-        }
-        true
-    }
-
-    /// Cancels an unsent reservation and returns its frames to the caller.
-    /// The packet number remains consumed, including after encryption failed.
-    pub fn cancel_pending(&self, pn: u64) -> Vec<T> {
-        let mut inner = self.0.lock().unwrap();
-        let mut offset = 0;
-        for index in 0..inner.sent_packets.len() {
-            let record = inner.sent_packets[index];
-            if record.packet_number == pn {
-                let SentPktState::Pending { nframes } = record.state else {
-                    return Vec::new();
-                };
-                inner.sent_packets.remove(index);
-                return inner.queue.drain(offset..offset + nframes).collect();
-            }
-            offset += record.state.nframes();
-        }
-        Vec::new()
-    }
-}
-
-/// Handles peer ACK/loss feedback for retained reliable packets.
-pub struct SentRotateGuard<'a, T> {
-    inner: MutexGuard<'a, SentJournal<T>>,
-}
-
-impl<T: Clone> SentRotateGuard<'_, T> {
-    pub fn acked_packet_numbers(&self, ack_frame: &AckFrame) -> Vec<u64> {
-        self.inner.acked_record_numbers(ack_frame)
-    }
-
-    pub fn on_packets_acked(&mut self, ack_frame: &AckFrame) -> impl Iterator<Item = T> + '_ {
-        self.inner.on_packets_acked(ack_frame)
-    }
-
-    pub fn update_largest(&mut self, ack_frame: &AckFrame) -> Result<(), QuicError> {
-        if ack_frame.largest() >= self.inner.next_pn {
-            return Err(QuicError::new(
+        if ack.largest() >= records.next_pn
+            || ranges
+                .iter()
+                .any(|range| records.skipped_pns.range(range.clone()).next().is_some())
+        {
+            return Err(QuicError::with_default_fty(
                 ErrorKind::ProtocolViolation,
-                ack_frame.frame_type().into(),
-                "ACK frame largest PN is not smaller than the next PN to send",
-            ));
+                "ACK acknowledges an unsent packet",
+            )
+            .into());
         }
-        self.inner.largest_acked_pktno = self.inner.largest_acked_pktno.max(ack_frame.largest());
-        Ok(())
-    }
-
-    pub fn on_packet_acked(&mut self, pn: u64) -> impl Iterator<Item = T> + '_ {
-        self.inner.on_packet_acked(pn)
-    }
-
-    pub fn may_loss_packet(&mut self, pn: u64) -> impl Iterator<Item = T> + '_ {
-        self.inner.may_loss_packet(pn)
-    }
-
-    pub fn fast_retransmit(&mut self) -> impl Iterator<Item = T> + '_ {
-        self.inner.fast_retransmit()
-    }
-}
-
-impl<T> Drop for SentRotateGuard<'_, T> {
-    fn drop(&mut self) {
-        self.inner.resize();
-    }
-}
-
-/// Reserves a packet number and records frames while a packet is assembled.
-///
-/// Dropping this guard before either build method rolls back tentative frames and leaves the packet
-/// number available for reuse. A successful build consumes the PN but stores a record only when the
-/// packet contains reliable frames.
-#[derive(Debug)]
-pub struct NewPacketGuard<'a, T> {
-    trivial: bool,
-    committed: bool,
-    packet_number: u64,
-    origin_len: usize,
-    inner: MutexGuard<'a, SentJournal<T>>,
-}
-
-impl<T> NewPacketGuard<'_, T> {
-    pub fn pn(&self) -> (u64, PacketNumber) {
-        let encoded_pn = PacketNumber::encode(self.packet_number, self.inner.largest_acked_pktno);
-        (self.packet_number, encoded_pn)
-    }
-
-    pub fn record_trivial(&mut self) {
-        self.trivial = true;
-    }
-
-    pub fn record_frame(&mut self, frame: T) {
-        self.inner.queue.push_back(frame);
-    }
-
-    fn commit(&mut self) {
-        debug_assert_eq!(self.inner.next_pn, self.packet_number);
-        self.inner.next_pn = self
-            .inner
-            .next_pn
-            .checked_add(1)
-            .expect("packet number never overflows u64");
-        self.committed = true;
-    }
-
-    /// Burns the PN and retains frames without starting recovery timers. The
-    /// caller must subsequently mark_sent or cancel_pending exactly once.
-    pub fn build_pending(mut self) {
-        let nframes = self.inner.queue.len() - self.origin_len;
-        assert!(self.trivial || nframes > 0, "cannot commit an empty packet");
-        let packet_number = self.packet_number;
-        self.inner.sent_packets.push_back(SentPacketRecord {
-            packet_number,
-            state: SentPktState::Pending { nframes },
-        });
-        self.commit();
-    }
-
-    pub fn build_with_time(mut self, retran_timeout: Duration, expire_timeout: Duration) {
-        let nframes = self.inner.queue.len() - self.origin_len;
-        assert!(self.trivial || nframes > 0, "cannot commit an empty packet");
-        if nframes > 0 {
-            let sent_time = Instant::now();
-            self.inner.sent_packets.push_back(SentPacketRecord {
-                packet_number: self.packet_number,
-                state: SentPktState::new(
-                    nframes,
-                    sent_time,
-                    sent_time + retran_timeout,
-                    sent_time + expire_timeout,
-                ),
-            });
+        records.largest_acked = records.largest_acked.max(ack.largest());
+        let mut acknowledged = None;
+        // ACK ranges arrive from high to low; keep notifications in ascending PN order.
+        for range in ranges.into_iter().rev() {
+            while let Some((&pn, _)) = records.packets.range(range.clone()).next() {
+                let record = records.remove_packet(pn, SentPacketState::Acked).unwrap();
+                for index in record.frame_range {
+                    if let Ok(frame) =
+                        GuaranteedFrame::try_from(records.frames[index].take().unwrap())
+                    {
+                        on_frame(&frame);
+                    }
+                }
+                acknowledged = acknowledged.max(record.generation);
+            }
         }
-        self.commit();
-    }
-
-    pub fn build_trivial(mut self) {
-        assert_eq!(self.inner.queue.len(), self.origin_len);
-        assert!(self.trivial);
-        self.commit();
-    }
-}
-
-impl<T> Drop for NewPacketGuard<'_, T> {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.inner.queue.truncate(self.origin_len);
-        }
+        records.reclaim();
+        Ok(acknowledged)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use qbase::{frame::AckFrame, varint::VarInt};
+    use qbase::frame::ReliableFrame;
 
-    use super::*;
-
-    fn ack_packet(pn: u64) -> AckFrame {
+    use super::{GuaranteedFrame as Frame, *};
+    fn ack(pn: u64) -> AckFrame {
         AckFrame::new(
-            VarInt::from_u64(pn).unwrap(),
-            0_u32.into(),
-            0_u32.into(),
+            pn.try_into().unwrap(),
+            0u32.into(),
+            0u32.into(),
             vec![],
             None,
         )
     }
 
+    fn frame(value: u32) -> GuaranteedFrame {
+        Frame::Reliable(ReliableFrame::MaxData(qbase::frame::MaxDataFrame::new(
+            value.into(),
+        )))
+    }
+
+    fn acknowledged_values(records: &ArcSentJournal, pn: u64) -> Vec<u64> {
+        let mut values = Vec::new();
+        records
+            .on_acked(&ack(pn), |frame| match frame {
+                GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) => {
+                    values.push(frame.max_data());
+                }
+                _ => panic!("unexpected recovery frame"),
+            })
+            .unwrap();
+        values
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn pending_packets_do_not_start_recovery_or_return_ack_feedback() {
-        let journal = ArcSentJournal::with_capacity(0);
-        let mut packet = journal.new_packet();
-        packet.record_frame(7u64);
-        packet.build_pending();
-        tokio::time::advance(Duration::from_secs(60)).await;
-        {
-            let mut feedback = journal.rotate();
-            assert!(feedback.acked_packet_numbers(&ack_packet(0)).is_empty());
-            assert_eq!(feedback.on_packet_acked(0).count(), 0);
-            assert_eq!(feedback.may_loss_packet(0).count(), 0);
-            assert_eq!(feedback.fast_retransmit().count(), 0);
-        }
-        assert!(journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
-        assert!(!journal.mark_sent(0, Duration::from_secs(1), Duration::from_secs(3)));
+    async fn pending_ack_releases_frames_before_late_submission() {
+        let records = ArcSentJournal::default();
+        let pn = records.record_pending(7, &mut vec![frame(42)]).unwrap().0;
+        let mut acknowledged = Vec::new();
         assert_eq!(
-            journal.rotate().on_packet_acked(0).collect::<Vec<_>>(),
-            vec![7]
+            records
+                .on_acked(&ack(pn), |frame| acknowledged.push(frame.clone()))
+                .unwrap(),
+            Some(7)
         );
+        assert_eq!(acknowledged, [frame(42)]);
+        records.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.on_tick(Instant::now() + Duration::from_secs(4), |_| {
+            panic!("acked frame retransmitted")
+        });
+        assert!(
+            records
+                .on_acked(&ack(pn), |_| panic!("duplicate ACK notification"))
+                .unwrap()
+                .is_none()
+        );
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
+        assert!(journal.deadlines.is_empty());
     }
 
     #[test]
-    fn cancelled_pending_packet_returns_frames_and_never_reuses_pn() {
-        let journal = ArcSentJournal::with_capacity(0);
-        for frame in [7u64, 8, 9] {
-            let mut packet = journal.new_packet();
-            packet.record_frame(frame);
-            packet.build_pending();
-        }
-        assert_eq!(journal.cancel_pending(1), vec![8]);
-        assert!(journal.cancel_pending(1).is_empty());
-        assert_eq!(journal.new_packet().pn().0, 3);
-        for (pn, frame) in [(0, 7), (2, 9)] {
-            assert!(journal.mark_sent(pn, Duration::from_secs(1), Duration::from_secs(3)));
+    fn ack_returns_highest_generation_or_none() {
+        for (generations, expected) in [
+            (vec![None, None], None),
+            (vec![Some(0)], Some(0)),
+            (vec![Some(1), Some(7), Some(2), None, Some(7)], Some(7)),
+        ] {
+            let records = ArcSentJournal::default();
+            for generation in &generations {
+                records
+                    .record_pending(*generation, &mut vec![frame(42)])
+                    .unwrap();
+            }
+            let largest = (generations.len() as u64 - 1).try_into().unwrap();
+            let ack = AckFrame::new(largest, 0u32.into(), largest, vec![], None);
+            let mut confirmed = 0;
             assert_eq!(
-                journal.rotate().on_packet_acked(pn).collect::<Vec<_>>(),
-                vec![frame]
+                records.on_acked(&ack, |_| confirmed += 1).unwrap(),
+                expected
+            );
+            assert_eq!(confirmed, generations.len());
+            assert_eq!(
+                records
+                    .on_acked(&ack, |_| panic!("duplicate ACK notification"))
+                    .unwrap(),
+                None
             );
         }
     }
 
     #[test]
-    fn trivial_packets_only_advance_next_packet_number() {
-        let journal = ArcSentJournal::<u64>::with_capacity(1);
-        for expected in 0..100_000 {
-            let mut packet = journal.new_packet();
-            assert_eq!(packet.pn().0, expected);
-            packet.record_trivial();
-            packet.build_trivial();
-        }
-        let inner = journal.0.lock().unwrap();
-        assert_eq!(inner.next_pn, 100_000);
-        assert!(inner.sent_packets.is_empty());
-        assert!(inner.queue.is_empty());
-    }
-
-    #[test]
-    fn dropped_packet_rolls_back_frames_and_packet_number() {
-        let journal = ArcSentJournal::<u64>::with_capacity(1);
-        {
-            let mut packet = journal.new_packet();
-            assert_eq!(packet.pn().0, 0);
-            packet.record_frame(7);
-        }
-        let packet = journal.new_packet();
-        assert_eq!(packet.pn().0, 0);
-        drop(packet);
-        let inner = journal.0.lock().unwrap();
-        assert_eq!(inner.next_pn, 0);
-        assert!(inner.sent_packets.is_empty());
-        assert!(inner.queue.is_empty());
-    }
-
-    #[test]
-    fn sparse_reliable_packets_keep_exact_packet_numbers() {
-        let journal = ArcSentJournal::<u64>::with_capacity(4);
-        for pn in 0..6 {
-            let mut packet = journal.new_packet();
-            if pn == 1 || pn == 5 {
-                packet.record_frame(pn);
-                packet.build_with_time(Duration::from_secs(1), Duration::from_secs(2));
-            } else {
-                packet.record_trivial();
-                packet.build_trivial();
-            }
-        }
-
-        let mut rotate = journal.rotate();
-        let ack = AckFrame::new(5_u32.into(), 0_u32.into(), 5_u32.into(), vec![], None);
-        rotate.update_largest(&ack).unwrap();
-        assert_eq!(rotate.acked_packet_numbers(&ack), vec![5, 1]);
-        assert_eq!(
-            rotate.on_packets_acked(&ack).collect::<Vec<_>>(),
-            vec![5, 1]
+    fn pending_reliable_records_reuse_scratch_allocation() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(10)];
+        let allocation = scratch.as_ptr();
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        assert!(scratch.is_empty());
+        assert_eq!(scratch.as_ptr(), allocation);
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
         );
-        assert!(rotate.on_packet_acked(4).next().is_none());
+        assert_eq!(acknowledged_values(&records, 0), [10]);
     }
 
     #[test]
-    fn ack_for_unsent_packet_is_rejected() {
-        let journal = ArcSentJournal::<u64>::with_capacity(1);
-        let mut packet = journal.new_packet();
-        packet.record_trivial();
-        packet.build_trivial();
-        assert!(journal.rotate().update_largest(&ack_packet(1)).is_err());
-        assert!(journal.rotate().update_largest(&ack_packet(0)).is_ok());
+    fn recovery_keeps_data_headers_and_moves_tokens_without_copying() {
+        use qbase::frame::{CryptoFrame, NewTokenFrame, StreamFrame};
+        let records = ArcSentJournal::default();
+        let crypto = CryptoFrame::new(10u32.into(), 20u32.into());
+        let stream = StreamFrame::new(
+            qbase::sid::StreamId::new(qbase::role::Role::Client, qbase::sid::Dir::Uni, 0),
+            30,
+            40,
+        );
+        let token = NewTokenFrame::new(vec![5; 20]);
+        let allocation = token.token().as_ptr();
+        // Keep an earlier packet live so cancellation cannot drain the queue prefix.
+        assert_eq!(records.record_pending(0, &mut vec![frame(0)]).unwrap().0, 0);
+        let mut scratch = vec![
+            Frame::Crypto(crypto),
+            Frame::Stream(stream),
+            Frame::Reliable(ReliableFrame::NewToken(token)),
+        ];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        assert!(scratch.is_empty());
+        records.cancel_pending(1, &mut scratch);
+        assert!(matches!(scratch.as_slice(),
+            [Frame::Crypto(c), Frame::Stream(s), Frame::Reliable(ReliableFrame::NewToken(t))]
+            if *c == crypto && *s == stream && t.token().as_ptr() == allocation));
+        scratch.clear();
+        records.cancel_pending(0, &mut scratch);
+        assert!(records.0.lock().unwrap().frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reverse_submission_and_ack_order_preserve_frame_ranges() {
+        let records = ArcSentJournal::default();
+        let mut scratch = Vec::with_capacity(4);
+        let allocation = scratch.as_ptr();
+        scratch.extend([frame(110), frame(111)]);
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        assert!(scratch.is_empty());
+        assert_eq!(scratch.as_ptr(), allocation);
+        scratch.push(frame(100));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        {
+            let journal = records.0.lock().unwrap();
+            assert_eq!(journal.packets[&0].frame_range, 0..2);
+            assert_eq!(journal.packets[&1].frame_range, 2..3);
+        }
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        assert_eq!(acknowledged_values(&records, 1), [100]);
+        // The processed slots remain pinned by PN0 until the prefix can be removed.
+        assert_eq!(records.0.lock().unwrap().frames.len(), 3);
+        assert_eq!(acknowledged_values(&records, 0), [110, 111]);
+        assert!(records.0.lock().unwrap().frames.is_empty());
+        assert!(acknowledged_values(&records, 0).is_empty());
+        scratch.push(frame(120));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
+        records.cancel_pending(2, &mut scratch);
+        assert_eq!(scratch.as_ptr(), allocation);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 120)
+        );
+        assert!(records.0.lock().unwrap().frames.is_empty());
+        assert!(records.on_acked(&ack(2), |_| {}).is_err());
+    }
+
+    #[test]
+    fn batch_ack_reclaims_prefix_without_moving_pending_frame_indices() {
+        let records = ArcSentJournal::default();
+        let mut scratch = Vec::new();
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0); // Empty ranges do not pin frames.
+        scratch.push(frame(10));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        scratch.extend([frame(20), frame(21)]);
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
+        scratch.push(frame(30));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 3);
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.on_sent(2, true, Duration::from_secs(1), Duration::from_secs(3));
+        let ack = AckFrame::new(2u32.into(), 0u32.into(), 1u32.into(), vec![], None);
+        let mut values = Vec::new();
+        records
+            .on_acked(&ack, |frame| match frame {
+                GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) => {
+                    values.push(frame.max_data());
+                }
+                _ => panic!("unexpected recovery frame"),
+            })
+            .unwrap();
+        assert_eq!(values, [10, 20, 21]);
+        {
+            let journal = records.0.lock().unwrap();
+            assert_eq!(journal.frames.offset(), 3);
+            assert_eq!(journal.frames.len(), 1);
+            assert_eq!(journal.packets[&3].frame_range, 3..4);
+        }
+        records
+            .on_acked(&ack, |_| panic!("duplicate ACK delivered a frame"))
+            .unwrap();
+        records.cancel_pending(3, &mut scratch);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(frame))] if frame.max_data() == 30)
+        );
+        assert!(records.0.lock().unwrap().frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_batches_keep_each_packets_frames_together() {
+        let records = &ArcSentJournal::default();
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                scope.spawn(move || {
+                    let mut scratch = Vec::new();
+                    for i in 0..100 {
+                        let value = worker * 100 + i;
+                        scratch.extend([frame(value), frame(value + 1000)]);
+                        records.record_pending(0, &mut scratch).unwrap();
+                        assert!(scratch.is_empty());
+                    }
+                });
+            }
+        });
+        let mut values = BTreeSet::new();
+        let mut scratch = Vec::new();
+        for pn in (0..400).rev() {
+            records.cancel_pending(pn, &mut scratch);
+            let [
+                Frame::Reliable(ReliableFrame::MaxData(a)),
+                Frame::Reliable(ReliableFrame::MaxData(b)),
+            ] = scratch.as_slice()
+            else {
+                panic!()
+            };
+            assert_eq!(b.max_data(), a.max_data() + 1000);
+            assert!(values.insert(a.max_data()));
+            scratch.clear();
+        }
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unacknowledged_frame_remains_available_until_loss_is_reported() {
-        let journal = ArcSentJournal::<u64>::with_capacity(1);
-        let mut packet = journal.new_packet();
-        packet.record_frame(7);
-        packet.build_with_time(Duration::from_millis(10), Duration::from_millis(20));
+    async fn terminal_slots_are_reclaimed_only_when_the_live_prefix_finishes() {
+        let records = ArcSentJournal::default();
+        let mut scratch = Vec::new();
+        let now = Instant::now();
+        for pn in 0..5 {
+            scratch.push(frame(pn as u32));
+            assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, pn);
+        }
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.on_sent(3, true, Duration::from_secs(1), Duration::from_secs(3));
+        assert_eq!(acknowledged_values(&records, 1), [1]);
+        records.cancel_pending(2, &mut scratch);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
+        );
+        scratch.clear();
+        records.resend(&mut [3].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        );
+        scratch.clear();
+        assert!(records.0.lock().unwrap().frames[3].is_some());
+        records.on_tick(now + Duration::from_secs(3), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(scratch.is_empty());
+        {
+            let journal = records.0.lock().unwrap();
+            assert_eq!(journal.frames.offset(), 0);
+            assert_eq!(journal.frames.len(), 5);
+            assert!((1..4).all(|index| journal.frames[index].is_none()));
+        }
+        records.cancel_pending(0, &mut scratch);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 0)
+        );
+        scratch.clear();
+        {
+            let journal = records.0.lock().unwrap();
+            assert_eq!(journal.frames.offset(), 4);
+            assert_eq!(journal.frames.len(), 1);
+            assert_eq!(journal.packets[&4].frame_range, 4..5);
+        }
+        records.cancel_pending(4, &mut scratch);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 4)
+        );
+        assert!(records.0.lock().unwrap().frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pinned_empty_slots_are_bounded_and_failed_append_preserves_frames() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(0)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        scratch.resize(MAX_FRAMES - 1, frame(1));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        assert_eq!(acknowledged_values(&records, 1).len(), MAX_FRAMES - 1);
+        assert!(!records.has_capacity());
+        scratch.push(frame(2));
+        assert!(records.record_pending(0, &mut scratch).is_err());
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
+        );
+        assert_eq!(acknowledged_values(&records, 0), [0]);
+        assert!(records.has_capacity());
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
+        assert!(scratch.is_empty());
+        records.cancel_pending(2, &mut scratch);
+        assert!(records.0.lock().unwrap().frames.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loss_retains_frames_for_late_ack_and_expiration_reclaims_storage() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(10)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty());
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        // The new PN can itself be lost; the retained original must not requeue again.
+        records.resend(&mut [0, 1].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        scratch.clear();
+        assert_eq!(acknowledged_values(&records, 0), [10]);
+        assert_eq!(acknowledged_values(&records, 1), [10]);
+        assert!(records.0.lock().unwrap().frames.is_empty());
+
+        scratch.push(frame(20));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty(), "unsent packets have no loss feedback");
+        records.on_sent(2, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.resend(&mut [2].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        scratch.clear();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty());
+        assert!(records.0.lock().unwrap().frames.is_empty());
+        assert!(acknowledged_values(&records, 2).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_loss_never_requeues_retained_packets_or_extends_retention() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(10)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        scratch.push(frame(20));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.resend(&mut [0, 1, 0, 1].into_iter(), |frame| {
+            scratch.push(frame.clone())
+        });
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(a)), Frame::Reliable(ReliableFrame::MaxData(b))]
+            if a.max_data() == 10 && b.max_data() == 20)
+        );
+        scratch.clear();
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        records.resend(&mut [0, 1].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            scratch.is_empty(),
+            "retained packets must not be requeued twice"
+        );
+        assert_eq!(acknowledged_values(&records, 0), [10]);
+        assert!(acknowledged_values(&records, 0).is_empty());
+        assert!(records.0.lock().unwrap().packets.contains_key(&1));
 
         tokio::time::advance(Duration::from_secs(1)).await;
+        records.resend(&mut [1].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            scratch.is_empty(),
+            "expiration must not requeue the old packet"
+        );
+        let journal = records.0.lock().unwrap();
+        assert!(
+            journal.packets.is_empty(),
+            "repeat loss must not extend retention"
+        );
+        assert!(journal.frames.is_empty());
+    }
 
-        assert_eq!(
-            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
-            vec![7]
+    #[test]
+    fn late_ack_after_immediate_loss_notification_reclaims_original() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(10)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        scratch.clear();
+        assert_eq!(acknowledged_values(&records, 0), [10]);
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty());
+        assert!(acknowledged_values(&records, 0).is_empty());
+        assert!(records.0.lock().unwrap().frames.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retention_starts_at_submission_and_is_not_reset_by_loss() {
+        let records = ArcSentJournal::default();
+        let mut scratch = vec![frame(10)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        // Time spent waiting for the socket is not part of the sent packet's retention.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        assert!(records.0.lock().unwrap().packets.contains_key(&0));
+        scratch.clear();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty());
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loss_notification_delivers_data_even_after_retention_deadline() {
+        for delayed_loss in [false, true] {
+            let records = ArcSentJournal::default();
+            let mut scratch = vec![frame(10)];
+            assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+            records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+            if delayed_loss {
+                tokio::time::advance(Duration::from_secs(4)).await;
+            }
+            records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+            if !delayed_loss {
+                tokio::time::advance(Duration::from_secs(4)).await;
+            }
+            records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+            assert!(
+                matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+            );
+            scratch.clear();
+            records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
+            assert!(scratch.is_empty());
+            let journal = records.0.lock().unwrap();
+            assert!(journal.packets.is_empty());
+            assert!(journal.frames.is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_and_loss_feedback_schedule_each_packet_once() {
+        let records = ArcSentJournal::default();
+        let mut scratch = Vec::new();
+        let now = Instant::now();
+        for pn in 0..3 {
+            scratch.push(frame(pn as u32));
+            assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, pn);
+            records.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        }
+        scratch.push(frame(3));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 3);
+        assert_eq!(acknowledged_values(&records, 1), [1]);
+        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(now + Duration::from_millis(999), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 0)
+        );
+        scratch.clear();
+
+        records.on_tick(now + Duration::from_secs(1), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
+        );
+        scratch.clear();
+        records.resend(&mut [0, 2].into_iter(), |frame| scratch.push(frame.clone()));
+        records.on_tick(now + Duration::from_secs(1), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(scratch.is_empty());
+        assert_eq!(acknowledged_values(&records, 0), [0]);
+        records.on_tick(now + Duration::from_secs(3), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(scratch.is_empty());
+        assert!(acknowledged_values(&records, 2).is_empty());
+        // A never-submitted packet has no recovery deadline.
+        assert!(records.0.lock().unwrap().packets.contains_key(&3));
+        records.cancel_pending(3, &mut scratch);
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        );
+        scratch.clear();
+
+        scratch.push(frame(4));
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 4);
+        records.on_sent(4, true, Duration::from_secs(1), Duration::from_secs(3));
+        // Even a late tick must deliver the data before retiring its original record.
+        records.on_tick(now + Duration::from_secs(4), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 4)
+        );
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_handles_distinguish_cancelled_pending_and_sent_packets() {
+        let first = ArcSentJournal::default();
+        let second = first.clone();
+        let mut frames = vec![frame(10)];
+        let cancelled = first.record_pending(0, &mut frames).unwrap().0;
+        let sent = second.record_pending(0, &mut frames).unwrap().0;
+        let pending = first.record_pending(0, &mut frames).unwrap().0;
+        assert_eq!((cancelled, sent, pending), (0, 1, 2));
+        second.cancel_pending(cancelled, &mut frames);
+        assert!(
+            matches!(frames.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        frames.clear();
+        first.on_sent(sent, false, Duration::ZERO, Duration::ZERO);
+        assert!(second.on_acked(&ack(sent), |_| {}).unwrap().is_none());
+        assert!(second.on_acked(&ack(cancelled), |_| {}).is_err());
+        assert_eq!(first.on_acked(&ack(pending), |_| {}).unwrap(), Some(0));
+        second.on_sent(pending, false, Duration::ZERO, Duration::ZERO);
+        assert!(first.on_acked(&ack(pending), |_| {}).unwrap().is_none());
+        let spanning_gap = AckFrame::new(2u32.into(), 0u32.into(), 2u32.into(), vec![], None);
+        assert!(first.on_acked(&spanning_gap, |_| {}).is_err());
+        assert!(first.0.lock().unwrap().packets.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadlines_order_by_time_and_keep_packets_with_equal_times() {
+        let records = ArcSentJournal::default();
+        let now = Instant::now();
+        let mut scratch = Vec::new();
+        for (pn, retransmit, expire) in [(0, 3, 8), (1, 1, 5), (2, 1, 5), (3, 2, 6)] {
+            scratch.push(frame(pn as u32));
+            assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, pn);
+            records.on_sent(
+                pn,
+                true,
+                Duration::from_secs(retransmit),
+                Duration::from_secs(expire),
+            );
+        }
+        records.on_tick(now + Duration::from_millis(999), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(scratch.is_empty());
+        records.on_tick(now + Duration::from_secs(1), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(a)), Frame::Reliable(ReliableFrame::MaxData(b))]
+            if a.max_data() == 1 && b.max_data() == 2)
+        );
+        scratch.clear();
+        assert_eq!(acknowledged_values(&records, 1), [1]);
+        // ACK removes a future retransmission; CC loss notifies immediately.
+        assert_eq!(acknowledged_values(&records, 0), [0]);
+        records.resend(&mut [3, 3].into_iter(), |frame| scratch.push(frame.clone()));
+        {
+            let journal = records.0.lock().unwrap();
+            assert_eq!(
+                journal.deadlines,
+                BTreeSet::from([
+                    (now + Duration::from_secs(5), 2),
+                    (now + Duration::from_secs(6), 3),
+                ])
+            );
+        }
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        );
+        scratch.clear();
+        assert_eq!(acknowledged_values(&records, 3), [3]);
+        records.on_tick(now + Duration::from_secs(5), |frame| {
+            scratch.push(frame.clone())
+        });
+        assert!(scratch.is_empty());
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
+        assert!(journal.deadlines.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn equal_retransmission_and_retirement_deadlines_deliver_data_once() {
+        let records = ArcSentJournal::default();
+        let now = Instant::now();
+        let mut scratch = vec![frame(10)];
+        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+        records.on_sent(0, true, Duration::ZERO, Duration::ZERO);
+        records.on_tick(now, |frame| scratch.push(frame.clone()));
+        assert!(
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        );
+        scratch.clear();
+        records.on_tick(now, |frame| scratch.push(frame.clone()));
+        assert!(scratch.is_empty());
+        let journal = records.0.lock().unwrap();
+        assert!(journal.packets.is_empty());
+        assert!(journal.frames.is_empty());
+        assert!(journal.deadlines.is_empty());
+    }
+
+    #[test]
+    fn skipped_numbers_are_explicit_bounded_and_allow_reordered_submission() {
+        let journal = ArcSentJournal::default();
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            journal.record_pending(0, &mut frames).unwrap();
+        }
+        journal.on_sent(2, false, Duration::ZERO, Duration::ZERO);
+        assert!(journal.0.lock().unwrap().skipped_pns.is_empty());
+        journal.on_acked(&ack(0), |_| {}).unwrap();
+        journal.on_sent(0, false, Duration::ZERO, Duration::ZERO);
+        journal.on_acked(&ack(0), |_| {}).unwrap();
+        journal.cancel_pending(1, &mut frames);
+        assert!(journal.on_acked(&ack(1), |_| {}).is_err());
+        for _ in 0..MAX_SKIPPED_PNS {
+            let (pn, _) = journal.record_pending(0, &mut frames).unwrap();
+            journal.cancel_pending(pn, &mut frames);
+        }
+        let inner = journal.0.lock().unwrap();
+        assert_eq!(inner.skipped_pns.len(), MAX_SKIPPED_PNS);
+        assert_eq!(inner.skipped_pns.first(), Some(&3));
+        drop(inner);
+        // Old history is deliberately forgotten; retained skipped PNs are still rejected.
+        journal.on_acked(&ack(1), |_| {}).unwrap();
+        assert!(journal.on_acked(&ack(3), |_| {}).is_err());
+        assert!(
+            journal
+                .on_acked(&ack(3 + MAX_SKIPPED_PNS as u64), |_| {})
+                .is_err()
         );
     }
 
     #[test]
-    fn retransmitted_frame_can_be_resubmitted_until_acknowledged() {
-        let journal = ArcSentJournal::<u64>::with_capacity(1);
-        let mut packet = journal.new_packet();
-        packet.record_frame(7);
-        packet.build_with_time(Duration::from_secs(1), Duration::from_secs(2));
+    fn regression_invalid_ack_ranges_return_an_error_without_underflow() {
+        let records = ArcSentJournal::default();
+        let malformed = AckFrame::new(0u32.into(), 0u32.into(), 1u32.into(), vec![], None);
+        assert!(records.on_acked(&malformed, |_| {}).is_err());
+    }
 
+    #[test]
+    fn pn_encoding_tracks_valid_ack_even_after_recovery_records_are_removed() {
+        let records = ArcSentJournal::default();
         assert_eq!(
-            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
-            vec![7]
+            records.record_pending(0, &mut Vec::new()).unwrap(),
+            (0, PacketNumber::U16(0))
         );
-        assert_eq!(
-            journal.rotate().may_loss_packet(0).collect::<Vec<_>>(),
-            vec![7]
-        );
+        records.on_sent(0, false, Duration::ZERO, Duration::ZERO);
+        records.0.lock().unwrap().next_pn = 1 << 15;
+        let (pn, encoded) = records.record_pending(0, &mut Vec::new()).unwrap();
+        assert_eq!(encoded, PacketNumber::U24(pn as u32));
+        records.on_sent(pn, false, Duration::ZERO, Duration::ZERO);
+        assert!(records.0.lock().unwrap().packets.is_empty());
 
+        assert!(records.on_acked(&ack(pn + 1), |_| {}).is_err());
+        assert_eq!(records.0.lock().unwrap().largest_acked, 0);
+        records.on_acked(&ack(pn), |_| {}).unwrap();
+        records.on_acked(&ack(0), |_| {}).unwrap();
+        records.on_acked(&ack(pn), |_| {}).unwrap();
         assert_eq!(
-            journal.rotate().on_packet_acked(0).collect::<Vec<_>>(),
-            vec![7]
+            records.record_pending(0, &mut Vec::new()).unwrap(),
+            (pn + 1, PacketNumber::U16((pn + 1) as u16))
         );
-        assert!(
-            journal
-                .rotate()
-                .may_loss_packet(0)
+    }
+
+    #[test]
+    fn pn_encoding_selects_two_three_and_four_bytes_from_the_ack_gap() {
+        let records = ArcSentJournal::default();
+        let largest = 1 << 40;
+        records.0.lock().unwrap().largest_acked = largest;
+        for (gap, size) in [(32767, 2), (32768, 3), (8388607, 3), (8388608, 4)] {
+            records.0.lock().unwrap().next_pn = largest + gap;
+            let (pn, encoded) = records.record_pending(0, &mut Vec::new()).unwrap();
+            assert_eq!(pn, largest + gap);
+            assert_eq!(encoded.size(), size);
+            assert_eq!(encoded.decode(pn), pn);
+        }
+    }
+
+    #[test]
+    fn concurrent_packet_allocation_is_unique_and_exhaustion_never_wraps() {
+        let records = ArcSentJournal::default();
+        let numbers = std::thread::scope(|scope| {
+            (0..4)
+                .map(|_| {
+                    let records = records.clone();
+                    scope.spawn(move || {
+                        (0..1000)
+                            .map(|_| records.record_pending(0, &mut Vec::new()).unwrap().0)
+                            .collect::<Vec<_>>()
+                    })
+                })
                 .collect::<Vec<_>>()
-                .is_empty()
+                .into_iter()
+                .flat_map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let unique = numbers
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), 4000);
+        assert_eq!(records.record_pending(0, &mut Vec::new()).unwrap().0, 4000);
+        {
+            let mut journal = records.0.lock().unwrap();
+            journal.next_pn = VARINT_MAX;
+            journal.largest_acked = VARINT_MAX - 1;
+        }
+        assert_eq!(
+            records.record_pending(0, &mut Vec::new()).unwrap().0,
+            VARINT_MAX
         );
+        assert!(records.record_pending(0, &mut Vec::new()).is_err());
+        assert!(records.record_pending(0, &mut Vec::new()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use qbase::frame::{Frame, MaxDataFrame, ReliableFrame};
+
+    use super::*;
+    #[test]
+    fn reserving_recording_and_failed_submission_are_separate() {
+        let mut recovered = Vec::new();
+        let journal = ArcSentJournal::default();
+        let (pn, encoded) = journal.next_pn().unwrap();
+        assert_eq!(pn, 0);
+        assert_eq!(encoded.size(), 2);
+        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        let mut frames = Vec::with_capacity(8);
+        let frame = MaxDataFrame::new(42u32.into());
+        frames.push(Frame::MaxData(frame));
+        let capacity = frames.capacity();
+        journal.on_assembled(pn, None, frames.drain(..));
+        assert!(frames.is_empty());
+        assert_eq!(frames.capacity(), capacity);
+        journal.cancel(pn, |frame| recovered.push(frame));
+        assert_eq!(
+            recovered,
+            vec![GuaranteedFrame::Reliable(ReliableFrame::MaxData(frame))]
+        );
+        assert_eq!(journal.next_pn().unwrap().0, 1);
+        assert!(journal.on_acked(&ack, |_| {}).is_err());
     }
 }
