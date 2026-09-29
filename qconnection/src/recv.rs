@@ -19,10 +19,7 @@ use qtransport::{
 };
 use tokio::time::Instant;
 
-use crate::{
-    ArcParameters, CloseReason, MaturePhase, Paths,
-    terminate::{ArcTerminator, State},
-};
+use crate::{ArcParameters, CloseReason, MaturePhase, Paths, terminate::Terminator};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -30,25 +27,23 @@ pub(crate) async fn recv_client_ih_pkt_and_deliver_frames<H>(
     packets: PacketReceiver<H>,
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    terminator: ArcTerminator,
     closed: ArcReceiving<CloseReason>,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
 {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, terminator, closed, |_| true).await;
+    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, |_| true).await;
 }
 
 pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
     packets: PacketReceiver<H>,
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    terminator: ArcTerminator,
     closed: ArcReceiving<CloseReason>,
     scopes: Scopes,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
 {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, terminator, closed, move |pathway| {
+    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, move |pathway| {
         pathway.belongs_to(scopes)
     })
     .await;
@@ -58,11 +53,10 @@ pub(crate) async fn recv_pending_server_initial(
     packets: PacketReceiver<qbase::packet::InitialHeader>,
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    terminator: ArcTerminator,
     closed: ArcReceiving<CloseReason>,
     scopes: Arc<OnceLock<Scopes>>,
 ) {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, terminator, closed, move |pathway| {
+    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, move |pathway| {
         scopes
             .get()
             .is_none_or(|scopes| pathway.belongs_to(*scopes))
@@ -74,7 +68,6 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
     packets: PacketReceiver<H>,
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    terminator: ArcTerminator,
     closed: ArcReceiving<CloseReason>,
     belongs_to_scope: impl Fn(&Pathway) -> bool,
 ) where
@@ -115,7 +108,6 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
                 Ok(opened)
             }
         },
-        move || !matches!(&terminator.lock_guard().state, State::Normal),
         {
             let space = space.clone();
             move |_, epoch, frame, path| match frame {
@@ -181,7 +173,6 @@ pub(crate) async fn receive_client_data(
     closed: ArcReceiving<CloseReason>,
     on_handshake_done: impl Fn() + Send + Sync,
 ) {
-    let terminator = sender.terminator.clone();
     let close_paths = paths.clone();
     let processed_paths = paths.clone();
     receive_data(
@@ -195,7 +186,6 @@ pub(crate) async fn receive_client_data(
         parameters,
         cid_registry,
         tokens,
-        move || !matches!(&terminator.lock_guard().state, State::Normal),
         None,
         move |epoch, frame, path| close_paths.on_rcvd_close(epoch, path, frame),
         |_, path| {
@@ -220,7 +210,6 @@ pub(crate) async fn receive_server_data(
     closed: ArcReceiving<CloseReason>,
     scopes: Scopes,
 ) {
-    let terminator = sender.terminator.clone();
     let close_paths = paths.clone();
     let processed_paths = paths.clone();
     receive_data(
@@ -239,7 +228,6 @@ pub(crate) async fn receive_server_data(
         parameters,
         cid_registry,
         tokens,
-        move || !matches!(&terminator.lock_guard().state, State::Normal),
         None,
         move |epoch, frame, path| close_paths.on_rcvd_close(epoch, path, frame),
         |_, path| {
@@ -263,7 +251,6 @@ pub(crate) async fn receive_data(
     parameters: ArcParameters,
     cid_registry: crate::CidRegistry,
     tokens: ArcTokenRegistry,
-    is_closing: impl Fn() -> bool + Sync,
     ready: Option<ArcReceiving<bool>>,
     on_close: impl Fn(Epoch, ConnectionCloseFrame, &Arc<Path>) + Send + Sync,
     on_processed: impl Fn(Epoch, &Arc<Path>),
@@ -320,7 +307,6 @@ pub(crate) async fn receive_data(
                 pto,
             )
         },
-        is_closing,
         |keys, epoch, frame, path| {
             dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
         },
@@ -345,7 +331,7 @@ pub(crate) async fn tick(
     terminator: crate::terminate::ArcTerminator,
     closed: ArcReceiving<CloseReason>,
 ) {
-    while matches!(&terminator.lock_guard().state, State::Normal) {
+    while matches!(&*terminator.lock_guard(), Terminator::NoError(_)) {
         let now = Instant::now();
         let snapshot = phase.get();
         match &snapshot {
@@ -369,7 +355,7 @@ pub(crate) async fn tick(
             .map(|p| p.cc.pto_base(Epoch::Data))
             .max()
             .unwrap_or(std::time::Duration::from_secs(1));
-        if matches!(&terminator.lock_guard().state, State::Normal)
+        if matches!(&*terminator.lock_guard(), Terminator::NoError(_))
             && active_paths
                 .first()
                 .is_some_and(|path| path.activity.timed_out(now, pto))
@@ -511,14 +497,9 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames_if(
-                    rx,
-                    space,
-                    paths.clone(),
-                    paths.terminator(),
-                    paths.closed(),
-                    |_| true,
-                )
+                recv_ih_pkt_and_deliver_frames_if(rx, space, paths.clone(), paths.closed(), |_| {
+                    true
+                })
                 .await;
             }
             DataHeader::Long(long::DataHeader::Handshake(header)) => {
@@ -530,14 +511,9 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames_if(
-                    rx,
-                    space,
-                    paths.clone(),
-                    paths.terminator(),
-                    paths.closed(),
-                    |_| true,
-                )
+                recv_ih_pkt_and_deliver_frames_if(rx, space, paths.clone(), paths.closed(), |_| {
+                    true
+                })
                 .await;
             }
             _ => panic!(),
