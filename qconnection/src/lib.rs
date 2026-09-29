@@ -20,7 +20,7 @@ pub use phase::{ArcConnPhase, ConnPhase, HandshakePhase, InitialPhase, MaturePha
 pub use qbase::{
     error::Error,
     net::route::{Scope, Scopes},
-    param::fixed::ArcParameters,
+    param::ArcParameters,
 };
 pub use qtransport::{ArcConnection, ArcReliableFrames, CloseReason};
 pub use tls::TlsContext;

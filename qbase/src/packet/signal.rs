@@ -43,14 +43,6 @@ impl<const B: u8> Toggle<B> {
             Toggle::One => *byte |= B,
         }
     }
-
-    /// Treat Toggle as an index and get the index value it represents, i.e., 0 or 1
-    pub(crate) fn as_index(&self) -> usize {
-        match self {
-            Toggle::Zero => 0,
-            Toggle::One => 1,
-        }
-    }
 }
 
 impl<const B: u8> std::ops::Not for Toggle<B> {

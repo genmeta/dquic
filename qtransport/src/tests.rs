@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use futures::FutureExt;
 use qbase::{
     Epoch,
     cid::{ConnectionId, Registry},
@@ -35,7 +36,7 @@ use crate::{
     keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket, SealPacket},
     packet::channel,
     path::Path,
-    recv::{receive_packet, run_receive},
+    recv::run_receive,
     send::{
         constraints::Constraints,
         write::{Packet as SendingPacket, PacketError},
@@ -313,28 +314,32 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
     Ok(())
 }
 fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option<u64> {
-    let (pn, frames) = transport
-        .data
-        .keys
-        .get()
-        .unwrap()
-        .open(
-            parse(bytes),
-            |pn| transport.data.rcvd_journal.decode_pn(pn),
-            Duration::from_secs(1),
-        )
-        .unwrap()?;
-    receive_packet(
-        pn,
-        frames,
+    let (inbox, packets) = channel::new();
+    assert!(enqueue(&inbox, Packet::Data(parse(bytes))));
+    drop(inbox);
+    let mut received = None;
+    run_receive(
+        packets.one_rtt,
         Epoch::Data,
-        &transport.data.rcvd_journal,
-        path,
-        |_, frame, path| dispatch(transport, path, frame),
+        transport.data.keys.clone(),
+        transport.data.rcvd_journal.clone(),
+        |_, _| Some(path.clone()),
+        |keys, packet, _| {
+            let opened = keys.open_packet(
+                packet,
+                |pn| transport.data.rcvd_journal.decode_pn(pn),
+                Duration::from_secs(1),
+            )?;
+            received = opened.as_ref().map(|packet| packet.pn());
+            Ok(opened)
+        },
+        |_, _, frame, path| dispatch(transport, path, frame),
         |_, _| Ok(()),
+        |error| panic!("receive failed: {error}"),
     )
-    .unwrap();
-    Some(pn)
+    .now_or_never()
+    .expect("queued packet and closed inbox must complete immediately");
+    received
 }
 fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Result<(), Error> {
     let keys = keys(transport);
@@ -656,29 +661,19 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
 }
 
 #[tokio::test]
-async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_keep_close_receiving()
-{
+async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     use qbase::{
         ArcReceiving,
         frame::{NewConnectionIdFrame, NewTokenFrame, RetireConnectionIdFrame},
         net::route::Link,
     };
+    use qrecovery::crypto::CryptoStream;
     use tokio::io::AsyncReadExt;
 
-    use crate::{keys::ArcKeys, router::QuicRouter};
+    use crate::router::QuicRouter;
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
     let close = ArcReceiving::default();
     let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), close.clone());
-    let initial = Arc::new(Space::<ArcKeys>::new(
-        Epoch::Initial,
-        crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
-    ));
-    let handshake = Arc::new(Space::<ArcKeys>::new(
-        Epoch::Handshake,
-        ArcKeys::new(Arc::new(fixed_keys())),
-    ));
-    initial.retire();
-    handshake.retire();
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
     let cid_registry = Registry::new(
@@ -692,8 +687,8 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
         st.parameters.clone(),
         st.flow.clone(),
         [
-            initial.crypto.clone(),
-            handshake.crypto.clone(),
+            CryptoStream::new(),
+            CryptoStream::new(),
             st.data.crypto.clone(),
         ],
         cid_registry,
@@ -711,24 +706,21 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
     );
     let cid = ConnectionId::from_slice(b"original");
     let route = router.insert(cid.into(), inbox.clone());
-    router.receive(initial_datagram(cid, 1200), link.into(), link, 8);
-    // Packets in retired spaces do not block Data.
-    let mut packet = parse(&initial_datagram(cid, 1200));
-    packet.header = qbase::packet::DataHeader::Long(qbase::packet::long::DataHeader::Handshake(
-        qbase::packet::LongHeaderBuilder::with_cid(cid, cid).handshake(),
-    ));
-    router.deliver(Packet::Data(packet), link.into(), link);
-    let task = tokio::spawn(recv::run(
-        rcvd_pkt,
-        initial.clone(),
-        handshake.clone(),
-        st.data.clone(),
+    let journal = st.data.rcvd_journal.clone();
+    let task = tokio::spawn(run_receive(
+        rcvd_pkt.one_rtt,
+        Epoch::Data,
+        st.data.keys.clone(),
+        st.data.rcvd_journal.clone(),
         move |_, _| Some(sp.clone()),
-        move |epoch, frame, path, on_ack| {
+        move |keys: &OneRttKeys, packet, pto| {
+            keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
+        },
+        move |keys, epoch, frame, path| {
             if matches!(frame, Frame::Stream(_, _)) {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
-            dispatch(epoch, frame, path, on_ack)
+            dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
         },
         |_, _| Ok(()),
         |_| panic!("receive failed"),
@@ -767,8 +759,6 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
             .decode_pn(PacketNumber::encode(1, 0))
             .is_err()
     );
-    initial.retire();
-    handshake.retire();
     drop(route);
     drop(inbox);
     tokio::time::timeout(Duration::from_secs(2), task)
@@ -1512,35 +1502,8 @@ async fn receiving_starts_with_ready_keys() {
 #[tokio::test]
 async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() {
     let [(_client, ct, _), (_server, st, sp)] = pair(1);
-    let bytes = ping(&keys(&ct), 0);
-    let (pn, frames) = st
-        .data
-        .keys
-        .get()
-        .unwrap()
-        .open(
-            parse(&bytes),
-            |pn| st.data.rcvd_journal.decode_pn(pn),
-            Duration::from_secs(1),
-        )
-        .unwrap()
-        .unwrap();
-    assert!(
-        receive_packet(
-            pn,
-            frames,
-            Epoch::Data,
-            &st.data.rcvd_journal,
-            &sp,
-            |_, _, _| Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into()),
-            |_, _| Ok(())
-        )
-        .is_err()
-    );
-    assert_eq!(
-        st.data.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)),
-        Ok(pn)
-    );
+    let (inbox, packets) = channel::new();
+    assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
     let mut recorded = Vec::new();
     let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
@@ -1564,32 +1527,63 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    let bytes = seal_packet(packet, &keys(&ct), &ct.data.sent_journal, &mut recorded).unwrap();
-    let (pn, frames) = st
-        .data
-        .keys
-        .get()
-        .unwrap()
-        .open(
-            parse(bytes.bytes()),
-            |pn| st.data.rcvd_journal.decode_pn(pn),
-            Duration::from_secs(1),
-        )
-        .unwrap()
-        .unwrap();
-    receive_packet(
-        pn,
-        frames,
-        Epoch::Data,
-        &st.data.rcvd_journal,
-        &sp,
-        |_, frame, _| {
-            assert!(matches!(frame, Frame::Close(_)));
-            Ok(())
-        },
-        |_, _| Ok(()),
+    let bytes = seal_packet(
+        packet,
+        &keys(&ct),
+        &send::records::ArcSentJournal::starting_at(1),
+        &mut recorded,
     )
     .unwrap();
+    assert!(enqueue(&inbox, Packet::Data(parse(bytes.bytes()))));
+    assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 2)))));
+    drop(inbox);
+    let inspected = std::cell::Cell::new(0);
+    let mut dispatched = 0;
+    let mut errors = 0;
+    run_receive(
+        packets.one_rtt,
+        Epoch::Data,
+        st.data.keys.clone(),
+        st.data.rcvd_journal.clone(),
+        |_, _| Some(sp.clone()),
+        |keys, packet, pto| keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto),
+        |_, _, frame, _| {
+            dispatched += 1;
+            assert_eq!(inspected.get(), dispatched);
+            match dispatched {
+                1 => {
+                    assert!(matches!(frame, Frame::Ping(_)));
+                    return Err(
+                        QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into(),
+                    );
+                }
+                2 => assert!(matches!(frame, Frame::Close(_))),
+                3 => assert!(matches!(frame, Frame::Ping(_))),
+                _ => panic!("frames carried over from a previous packet"),
+            }
+            Ok(())
+        },
+        |_, _| {
+            inspected.set(inspected.get() + 1);
+            Ok(())
+        },
+        |_| errors += 1,
+    )
+    .await;
+    assert_eq!(dispatched, 3);
+    assert_eq!(errors, 1);
+    for pn in [0, 1] {
+        assert_eq!(
+            st.data.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)),
+            Ok(pn)
+        );
+    }
+    assert!(
+        st.data
+            .rcvd_journal
+            .decode_pn(PacketNumber::encode(2, 0))
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1956,7 +1950,6 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     let challenge = emit(&mut cs);
     assert_eq!(challenge.len(), 1200);
     assert_eq!(sp.amplification_credit(), 0);
-    sp.on_datagram_received(challenge.len());
     receive(&st, &sp, &challenge);
     let mut accepting = Box::pin(server.accept_uni_stream());
     assert!(futures::poll!(&mut accepting).is_pending());

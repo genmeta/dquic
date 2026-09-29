@@ -143,6 +143,7 @@ enum ClientWait {
     ServerParameters,
     OneRttKeys,
     HandshakeDone,
+    ServerCidMismatch,
 }
 
 async fn close_at_client_stage(wait: ClientWait) {
@@ -212,8 +213,13 @@ async fn close_at_client_stage(wait: ClientWait) {
         CryptoFrame::new(0u32.into(), (hello_len as u32).into()),
         bytes.as_slice(),
     );
+    let server_scid = if matches!(wait, ClientWait::ServerCidMismatch) {
+        b"wrongcid"
+    } else {
+        b"server00"
+    };
     let packet = common::seal(
-        LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"server00")).initial(vec![]),
+        LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(server_scid)).initial(vec![]),
         &initial_keys(true).sealing,
         &ArcSentJournal::default(),
         [&mut crypto],
@@ -246,14 +252,39 @@ async fn close_at_client_stage(wait: ClientWait) {
     ));
 
     if !matches!(wait, ClientWait::ServerParameters) {
+        let end = if matches!(wait, ClientWait::ServerCidMismatch) {
+            flight.len()
+        } else {
+            parameters_end
+        };
         handshake
             .crypto
             .incoming()
             .recv_frame((
-                CryptoFrame::new(0u32.into(), (parameters_end as u32).into()),
-                flight.slice(..parameters_end),
+                CryptoFrame::new(0u32.into(), (end as u32).into()),
+                flight.slice(..end),
             ))
             .unwrap();
+        if matches!(wait, ClientWait::ServerCidMismatch) {
+            let result = tokio::time::timeout(Duration::from_secs(1), delivery)
+                .await
+                .unwrap()
+                .unwrap();
+            let error = result
+                .err()
+                .expect("growing must reject a CID different from the Initial header");
+            assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
+            assert!(
+                matches!(growing.await.unwrap(), CloseReason::Internal(error)
+                if error.kind() == qbase::error::ErrorKind::TransportParameter)
+            );
+            assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
+            assert!(paths.snapshot().is_empty());
+            assert!(!route_exists(&router, cid).await);
+            QuicProtocol::global().unregister(local, &socket);
+            drop(route);
+            return;
+        }
         tokio::task::yield_now().await;
         assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
         assert!(matches!(
@@ -324,4 +355,9 @@ async fn client_closes_while_waiting_for_one_rtt_keys() {
 #[tokio::test(start_paused = true)]
 async fn client_keeps_finished_until_handshake_done_or_close() {
     close_at_client_stage(ClientWait::HandshakeDone).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn client_rejects_server_parameters_with_a_different_initial_scid() {
+    close_at_client_stage(ClientWait::ServerCidMismatch).await;
 }

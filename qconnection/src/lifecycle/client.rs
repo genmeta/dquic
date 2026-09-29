@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use qbase::{
     ArcReceiving, Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
-    param::{ClientParameters, ParameterId},
+    param::{ClientParameters, ParameterId, Requirements},
     role::Role,
     token::ArcTokenRegistry,
 };
@@ -15,7 +15,7 @@ use qtransport::{
 
 use super::{any, close_error};
 use crate::{
-    ArcParameters, CloseReason, ConnPhase, Connected, Error, MaturePhase, Paths, ArcReliableFrames,
+    ArcParameters, ArcReliableFrames, CloseReason, ConnPhase, Connected, Error, MaturePhase, Paths,
     TlsContext,
 };
 
@@ -37,6 +37,7 @@ pub async fn client_growing(
         unreachable!("client_growing starts with InitialPhase")
     };
 
+    let requirements = Arc::new(Mutex::new(Requirements::new_client(initial_phase.odcid)));
     let initial = &initial_phase.initial;
     let cid_registry = qbase::cid::Registry::new(
         Role::Client,
@@ -64,15 +65,13 @@ pub async fn client_growing(
         initial.clone(),
         paths.clone(),
         closed.clone(),
+        requirements.clone(),
     ));
 
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
-            let handshake = Arc::new(Space::new(
-                Epoch::Handshake,
-                ArcKeys::from(handshake_keys),
-            ));
+            let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
             phase.enter_handshake(handshake.clone());
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
@@ -94,6 +93,7 @@ pub async fn client_growing(
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
+                requirements.clone(),
             ));
 
             let parameters = ArcParameters::new(
@@ -101,8 +101,8 @@ pub async fn client_growing(
                 Arc::new(client_params),
                 Arc::new(tls_context.read_server_parameters().await?),
             );
-            let server_scid = parameters
-                .remote::<qbase::cid::ConnectionId>(ParameterId::InitialSourceConnectionId);
+            parameters.authenticate_cids(*requirements.lock().unwrap())?;
+            let server_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
             let initial_dcid = cid_registry.remote.apply_dcid();
             cid_registry
                 .remote
