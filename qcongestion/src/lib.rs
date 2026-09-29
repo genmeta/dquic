@@ -79,9 +79,9 @@ pub trait Transport {
 }
 
 /// The [`Feedback`] trait defines the interface for packet tracking
-pub trait Feedback: Send + Sync {
+pub trait Resend: Send + Sync {
     /// Indicates that a packet with the specified packet number may have been lost.
     /// # Parameters
     /// - `pn`: The packet number of the potentially lost packet.
-    fn may_loss(&self, trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>);
+    fn resend(&self, trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>);
 }

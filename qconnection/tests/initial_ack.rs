@@ -24,10 +24,8 @@ use qbase::{
 };
 use qconnection::{Scope, ServerRegistry, TlsContext};
 use qprotocol::{QuicProtocol, UdpSocket};
-use qtransport::{
-    journal::ArcSendJournal, packet::CipherPacket, path::Path, router::QuicRouter,
-    space::ArcFeedback,
-};
+use qrecovery::journal::ArcSentJournal;
+use qtransport::{packet::CipherPacket, path::Path, router::QuicRouter};
 
 #[tokio::test]
 async fn server_sends_initial_ack_before_client_hello_is_complete() {
@@ -61,7 +59,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         pathway,
         Role::Client,
         ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
-        std::array::from_fn(|_| Arc::new(ArcFeedback::default()) as Arc<dyn qcongestion::Feedback>),
+        Arc::default(),
     );
     path.client_handshaking();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.
@@ -70,7 +68,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let packet = common::seal(
         LongHeaderBuilder::with_cid(odcid, scid).initial(vec![]),
         &keys.sealing,
-        &ArcSendJournal::default(),
+        &ArcSentJournal::default(),
         [&mut crypto],
     )
     .unwrap();

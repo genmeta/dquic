@@ -1,14 +1,14 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     task::{Context, Poll},
 };
 
-use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers};
+use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, util::IndexDeque};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
 use crate::{
-    Algorithm, Feedback, MSS, TooManyPtos,
+    Algorithm, MSS, Resend, TooManyPtos,
     algorithm::{Control, new_reno::NewReno},
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
@@ -36,8 +36,8 @@ pub struct CongestionController {
     pacer: pacing::Pacer,
     // The waker to notify when the controller is ready to send.
     pending_burst: bool,
-    // epoch packet trackers
-    trackers: [Arc<dyn Feedback>; 3],
+    // Shared connection spaces, indexed by epoch even after early spaces retire.
+    trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
     path_status: PathStatus,
     tx_waker: ArcSendWakers,
@@ -48,7 +48,7 @@ impl CongestionController {
     fn init(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: [Arc<dyn Feedback>; 3],
+        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
         path_status: PathStatus,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -229,7 +229,10 @@ impl CongestionController {
 
         if loss_pns.peek().is_some() {
             self.rtt.try_backoff_rtt();
-            self.trackers[epoch].may_loss(PacketLostTrigger::TimeThreshold, &mut loss_pns);
+            let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+            if let Some(tracker) = tracker {
+                tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
+            }
         }
 
         if self.peer_completed_address_validation() {
@@ -316,7 +319,10 @@ impl CongestionController {
 
             if loss_pns.peek().is_some() {
                 self.rtt.try_backoff_rtt();
-                self.trackers[epoch].may_loss(PacketLostTrigger::TimeThreshold, &mut loss_pns);
+                let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+                if let Some(tracker) = tracker {
+                    tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
+                }
             }
             self.set_loss_detection_timer();
             return self.pto_count;
@@ -493,10 +499,13 @@ impl CongestionController {
         for &epoch in Epoch::iter() {
             let packet_numbers = self.packet_spaces[epoch].discard(&mut self.algorithm);
             if epoch == Epoch::Data && !packet_numbers.is_empty() {
-                self.trackers[epoch].may_loss(
-                    PacketLostTrigger::PtoExpired,
-                    &mut packet_numbers.into_iter(),
-                );
+                let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+                if let Some(tracker) = tracker {
+                    tracker.resend(
+                        PacketLostTrigger::PtoExpired,
+                        &mut packet_numbers.into_iter(),
+                    );
+                }
             }
         }
         self.loss_detection_timer = None;
@@ -526,7 +535,7 @@ impl ArcCC {
     pub fn new(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: [Arc<dyn Feedback>; 3],
+        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
         path_status: PathStatus,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -710,19 +719,19 @@ mod tests {
 
     struct NoopFeedback;
 
-    impl Feedback for NoopFeedback {
-        fn may_loss(&self, _trigger: PacketLostTrigger, _pns: &mut dyn Iterator<Item = u64>) {}
+    impl Resend for NoopFeedback {
+        fn resend(&self, _trigger: PacketLostTrigger, _pns: &mut dyn Iterator<Item = u64>) {}
     }
 
     struct RecordingFeedback(Arc<Mutex<Vec<u64>>>);
 
-    impl Feedback for RecordingFeedback {
-        fn may_loss(&self, _trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
+    impl Resend for RecordingFeedback {
+        fn resend(&self, _trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
             self.0.lock().unwrap().extend(pns);
         }
     }
 
-    fn controller_with_feedback(feedback: Arc<dyn Feedback>) -> CongestionController {
+    fn controller_with_feedback(feedback: Arc<dyn Resend>) -> CongestionController {
         let handshake = Arc::new(HandshakeStatus::new(false));
         handshake.handshake_confirmed();
         let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
@@ -731,15 +740,78 @@ mod tests {
         CongestionController::init(
             Algorithm::NewReno,
             Duration::from_millis(25),
-            [feedback.clone(), feedback.clone(), feedback],
+            {
+                let mut trackers = IndexDeque::with_capacity(3);
+                for tracker in [feedback.clone(), feedback.clone(), feedback] {
+                    trackers.push_back(tracker).unwrap();
+                }
+                Arc::new(RwLock::new(trackers))
+            },
             path_status,
             ArcSendWakers::default(),
         )
     }
 
     fn controller() -> CongestionController {
-        let feedback: Arc<dyn Feedback> = Arc::new(NoopFeedback);
+        let feedback: Arc<dyn Resend> = Arc::new(NoopFeedback);
         controller_with_feedback(feedback)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_trackers_follow_append_and_retirement() {
+        struct UnlockedFeedback {
+            trackers: std::sync::Weak<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+            recovered: Arc<Mutex<Vec<u64>>>,
+        }
+        impl Resend for UnlockedFeedback {
+            fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
+                let trackers = self.trackers.upgrade().unwrap();
+                assert!(
+                    trackers.try_write().is_ok(),
+                    "release the read lock before feedback"
+                );
+                self.recovered.lock().unwrap().extend(pns);
+            }
+        }
+
+        let mut entries = IndexDeque::<Arc<dyn Resend>, 2>::with_capacity(3);
+        entries.push_back(Arc::new(NoopFeedback)).unwrap();
+        let trackers = Arc::new(RwLock::new(entries));
+        let mut controllers = [controller(), controller()];
+        for controller in &mut controllers {
+            controller.trackers = trackers.clone();
+        }
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut entries = trackers.write().unwrap();
+            entries.push_back(Arc::new(NoopFeedback)).unwrap();
+            entries
+                .push_back(Arc::new(UnlockedFeedback {
+                    trackers: Arc::downgrade(&trackers),
+                    recovered: recovered.clone(),
+                }))
+                .unwrap();
+            // Removing both early spaces must preserve Data's epoch index.
+            entries.drain_to(Epoch::Data as u64).for_each(drop);
+        }
+        for controller in &mut controllers {
+            for pn in 0..4 {
+                controller.on_packet_sent(pn, Epoch::Data, true, true, MSS);
+            }
+            let ack = AckFrame::new(3u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+            controller.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        }
+        assert_eq!(*recovered.lock().unwrap(), [0, 0]);
+
+        // The same controllers observe retirement without any per-path update.
+        assert_eq!(
+            trackers.write().unwrap().pop_front().unwrap().0,
+            Epoch::Data as u64
+        );
+        for controller in &mut controllers {
+            controller.on_path_lost();
+        }
+        assert_eq!(*recovered.lock().unwrap(), [0, 0]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -763,7 +835,7 @@ mod tests {
     #[test]
     fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
         let recovered = Arc::new(Mutex::new(Vec::new()));
-        let feedback: Arc<dyn Feedback> = Arc::new(RecordingFeedback(recovered.clone()));
+        let feedback: Arc<dyn Resend> = Arc::new(RecordingFeedback(recovered.clone()));
         let mut controller = controller_with_feedback(feedback);
 
         controller.need_send_ack_eliciting_packets[Epoch::Initial] = 1;
@@ -787,14 +859,20 @@ mod tests {
     #[test]
     fn path_loss_does_not_recover_handshake_spaces_before_confirmation() {
         let recovered = Arc::new(Mutex::new(Vec::new()));
-        let feedback: Arc<dyn Feedback> = Arc::new(RecordingFeedback(recovered.clone()));
+        let feedback: Arc<dyn Resend> = Arc::new(RecordingFeedback(recovered.clone()));
         let handshake = Arc::new(HandshakeStatus::new(false));
         let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
         path_status.release_anti_amplification_limit();
         let mut controller = CongestionController::init(
             Algorithm::NewReno,
             Duration::from_millis(25),
-            [feedback.clone(), feedback.clone(), feedback],
+            {
+                let mut trackers = IndexDeque::with_capacity(3);
+                for tracker in [feedback.clone(), feedback.clone(), feedback] {
+                    trackers.push_back(tracker).unwrap();
+                }
+                Arc::new(RwLock::new(trackers))
+            },
             path_status,
             ArcSendWakers::default(),
         );

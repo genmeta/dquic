@@ -23,7 +23,12 @@ impl Sender {
         transport: Arc<Transport>,
         path: Arc<Path>,
     ) -> Result<Self, Error> {
-        let inner = PacketSender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone());
+        let inner = PacketSender::new(
+            path.pathway,
+            path.cc.clone(),
+            path.anti_amplifier.clone(),
+            Some(transport.data.clone()),
+        );
         Ok(Self {
             inner,
             keys,
@@ -134,8 +139,8 @@ pub(crate) fn assemble_data(
     let mut response = path.response();
     let mut challenge = path.challenge();
     let mut crypto = transport.data.crypto.outgoing();
-    let mut reliable = transport.reliable_frames.clone();
-    let mut streams = transport.streams.clone();
+    let mut reliable = transport.data.reliable_frames.clone();
+    let mut streams = transport.data.streams.clone();
     let mut credit = transport.flow.sender.credit(streams.fresh_bytes())?;
     constraints.flow_ctrl.set(credit.available());
     for packet in sender.pending() {
@@ -160,7 +165,7 @@ pub(crate) fn assemble_data(
         sender.assemble_1rtt_packet(
             keys,
             header,
-            &transport.data.send_journal,
+            &transport.data.sent_journal,
             constraints,
             [&mut ping],
         )
@@ -168,7 +173,7 @@ pub(crate) fn assemble_data(
         sender.assemble_1rtt_packet(
             keys,
             header,
-            &transport.data.send_journal,
+            &transport.data.sent_journal,
             constraints,
             [&mut ack, &mut response, &mut challenge, &mut ping],
         )
@@ -176,7 +181,7 @@ pub(crate) fn assemble_data(
         sender.assemble_1rtt_packet(
             keys,
             header,
-            &transport.data.send_journal,
+            &transport.data.sent_journal,
             constraints,
             [
                 &mut ack,

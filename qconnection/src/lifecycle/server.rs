@@ -134,7 +134,6 @@ pub async fn server_growing(
             let handshake = Arc::new(Space::new(
                 Epoch::Handshake,
                 ArcKeys::from(handshake_keys),
-                |_| {},
             ));
             initial.crypto.recver.retire();
 
@@ -243,8 +242,7 @@ pub async fn server_growing(
             phase.enter_mature(mature_phase.clone());
 
             let summary = tls_ctx.finished().await?;
-            initial.retire();
-            handshake.retire();
+            mature_phase.retire_handshake_spaces();
             mature_phase
                 .spaces
                 .data

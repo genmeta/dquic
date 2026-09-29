@@ -1,41 +1,34 @@
 use std::sync::Arc;
 
 use qbase::flow::FlowController;
-use qrecovery::streams::DataStreams;
 use tokio::time::Instant;
 
-use crate::{ArcParameters, Error, ArcReliableFrames, keys::ArcOneRttKeys, space::Space};
+use crate::{ArcParameters, ArcReliableFrames, Error, space::DataSpace};
 
 /// Fully constructed application-data components, shared with the original receive pipes.
 pub struct Transport {
-    pub data: Arc<Space<ArcOneRttKeys>>,
+    pub data: Arc<DataSpace>,
     pub parameters: ArcParameters,
-    pub streams: DataStreams<ArcReliableFrames>,
     pub flow: FlowController<ArcReliableFrames>,
-    pub reliable_frames: ArcReliableFrames,
 }
 
 impl Transport {
     pub fn new(
-        data: Arc<Space<ArcOneRttKeys>>,
+        data: Arc<DataSpace>,
         parameters: ArcParameters,
-        streams: DataStreams<ArcReliableFrames>,
         flow: FlowController<ArcReliableFrames>,
-        reliable_frames: ArcReliableFrames,
     ) -> Self {
         Self {
             data,
             parameters,
-            streams,
             flow,
-            reliable_frames,
         }
     }
 
     /// Terminate business use. The external driver retains the receive route and close keys.
     pub fn close(&self, error: Error) {
         self.data.crypto.on_error(&error);
-        self.streams.on_conn_error(&error);
+        self.data.streams.on_conn_error(&error);
         self.flow.on_conn_error(&error);
     }
 

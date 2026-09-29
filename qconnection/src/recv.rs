@@ -11,7 +11,6 @@ use qbase::{
     token::ArcTokenRegistry,
 };
 use qtransport::{
-    GuaranteedFrame,
     keys::{ArcKeys, OneRttKeys},
     path::Path,
     recv,
@@ -80,7 +79,9 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
     let processed_paths = paths.clone();
     recv::run_receive(
         packets,
-        space.clone(),
+        space.epoch,
+        space.keys.clone(),
+        space.rcvd_journal.clone(),
         {
             let paths = paths.clone();
             move |pathway, _| {
@@ -115,13 +116,7 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
                 Frame::Crypto(frame, bytes) => space.crypto.incoming().recv_frame((frame, bytes)),
                 Frame::Ack(frame) => {
                     let mut cc = path.cc.lock();
-                    let mut crypto_acked = false;
-                    space.send_journal.acknowledge(&frame, |frame| {
-                        if let GuaranteedFrame::Crypto(frame) = frame {
-                            crypto_acked |= frame.len() > 0;
-                            space.crypto.outgoing().on_data_acked(frame);
-                        }
-                    })?;
+                    let crypto_acked = space.on_acked(&frame)?;
                     cc.on_ack_rcvd(epoch, &frame, Instant::now());
                     drop(cc);
                     if role == Role::Server && epoch == Epoch::Initial && crypto_acked {
@@ -267,7 +262,6 @@ pub(crate) async fn receive_data(
     let dispatch = recv::frame_dispatcher(
         sender.spaces.data.clone(),
         parameters,
-        sender.streams.clone(),
         sender.flow.clone(),
         [
             spaces.initial.crypto.clone(),
@@ -298,7 +292,9 @@ pub(crate) async fn receive_data(
     );
     recv::run_receive(
         packets,
-        sender.spaces.data.clone(),
+        Epoch::Data,
+        sender.spaces.data.keys.clone(),
+        sender.spaces.data.rcvd_journal.clone(),
         path_for,
         |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(
@@ -315,7 +311,7 @@ pub(crate) async fn receive_data(
             Ok(())
         },
         |error| {
-            sender.streams.on_conn_error(&error);
+            sender.spaces.data.streams.on_conn_error(&error);
             sender.flow.on_conn_error(&error);
             on_error(error);
         },
@@ -381,7 +377,8 @@ mod tests {
         packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
         time::ArcConnIdle,
     };
-    use qtransport::{journal::ArcSendJournal, packet::CipherPacket};
+    use qrecovery::journal::ArcSentJournal;
+    use qtransport::packet::CipherPacket;
 
     use super::*;
     use crate::{ArcConnPhase, InitialPhase};
@@ -407,7 +404,7 @@ mod tests {
     fn seal<H, const N: usize>(
         header: H,
         keys: &qtls::DirectionalKeys,
-        journal: &ArcSendJournal,
+        journal: &ArcSentJournal,
         sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
     ) -> Result<BytesMut, crate::Error>
     where
@@ -437,7 +434,7 @@ mod tests {
             matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), Poll::Ready(Ok(n)) if n > 0)
         );
         packet.seal()?;
-        journal.on_sent(pn.0, frames.drain(..));
+        journal.on_assembled(pn.0, None, frames.drain(..));
         Ok(buffer)
     }
 
@@ -451,14 +448,13 @@ mod tests {
         let space = Arc::new(Space::<ArcKeys>::new(
             epoch,
             ArcKeys::new(Arc::new(keys(role == Role::Server))),
-            |_| {},
         ));
         let keys = keys(role != Role::Server);
         let header = LongHeaderBuilder::with_cid(
             ConnectionId::from_slice(b"localcid"),
             ConnectionId::from_slice(b"peercid0"),
         );
-        let journal = ArcSendJournal::default();
+        let journal = ArcSentJournal::default();
         let mut ping = PingFrame;
         let packet = if epoch == Epoch::Initial {
             seal(header.initial(vec![]), &keys.sealing, &journal, [&mut ping])
@@ -611,7 +607,6 @@ mod tests {
         let space = Arc::new(Space::<ArcKeys>::new(
             Epoch::Initial,
             ArcKeys::new(Arc::new(keys(true))),
-            |_| {},
         ));
         let server_keys = keys(true);
         first.validate();
@@ -631,7 +626,7 @@ mod tests {
         let packet = seal(
             header().initial(vec![]),
             &server_keys.sealing,
-            &space.send_journal,
+            &space.sent_journal,
             [&mut ping],
         )
         .unwrap();
@@ -640,18 +635,18 @@ mod tests {
         let packet = seal(
             header().initial(vec![]),
             &server_keys.sealing,
-            &space.send_journal,
+            &space.sent_journal,
             [&mut crypto],
         )
         .unwrap();
         drop(packet);
         for pn in [0, 1] {
             space
-                .send_journal
-                .mark_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+                .sent_journal
+                .on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
         }
         let client_keys = keys(false);
-        let journal = ArcSendJournal::default();
+        let journal = ArcSentJournal::default();
         for pn in [0u32, 1] {
             let mut ack = AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
             let packet = seal(

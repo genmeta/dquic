@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -25,8 +25,9 @@ use qbase::{
     },
     sid::{Dir, handy::DemandConcurrency},
     time::{ArcConnIdle, PathIdleTimer},
+    util::IndexDeque,
 };
-use qcongestion::Feedback;
+use qcongestion::Resend;
 use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
@@ -39,10 +40,31 @@ use crate::{
         constraints::Constraints,
         write::{Packet as SendingPacket, PacketError},
     },
-    space::Space,
+    space::{DataSpace, Space},
     transport::Transport,
     *,
 };
+
+pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
+    use qbase::packet::{ConstraintBuffer, Constraints, GetType};
+    let mut bytes = BytesMut::with_capacity(1200);
+    let mut frames = Vec::new();
+    let mut limits = Constraints {
+        flow_ctrl: 1200,
+        send_quota: 1200,
+        credit: 1200,
+        max_size: 1200,
+        ..Default::default()
+    };
+    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let result = source.poll_dump(
+        &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
+        &mut frames,
+    );
+    assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
+    frames
+}
 
 fn packet_way() -> (Pathway, Link) {
     let link = Link::new(
@@ -166,25 +188,14 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
             None,
         ),
     };
-    let data = Arc::new(Space::new(Epoch::Data, ArcOneRttKeys::from(keys), {
-        let streams = streams.clone();
-        let reliable = reliable.clone();
-        move |frame| match frame {
-            GuaranteedFrame::Stream(frame) => streams.may_loss_data(frame),
-            GuaranteedFrame::Reliable(frame) => {
-                use qbase::frame::io::SendFrame;
-                reliable.send_frame([frame.clone()]);
-            }
-            GuaranteedFrame::Crypto(_) => unreachable!("Space recovers CRYPTO internally"),
-        }
-    }));
-    data.keys.get().unwrap().allow_update();
     let flow = FlowController::new(
         params.remote(ParameterId::InitialMaxData),
         params.local(ParameterId::InitialMaxData),
         reliable.clone(),
     );
-    Arc::new(Transport::new(data, params, streams, flow, reliable))
+    let data = Arc::new(DataSpace::new(ArcOneRttKeys::from(keys), streams, reliable));
+    data.keys.get().unwrap().allow_update();
+    Arc::new(Transport::new(data, params, flow))
 }
 pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 2] {
     let (keys, summaries) = handshake();
@@ -209,6 +220,13 @@ pub(crate) fn keys(transport: &Transport) -> OneRttKeys {
     transport.data.keys.get().unwrap()
 }
 
+fn data_trackers(transport: &Transport) -> Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>> {
+    let mut trackers = IndexDeque::<Arc<dyn Resend>, 2>::with_capacity(1);
+    trackers.reset_offset(Epoch::Data as u64);
+    trackers.push_back(transport.data.clone()).unwrap();
+    Arc::new(RwLock::new(trackers))
+}
+
 fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     let (local, remote) = if transport.parameters.role() == Role::Client {
         (4400 + index, 5500 + index)
@@ -219,14 +237,11 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         EndpointAddr::direct(([127, 0, 0, 1], local).into()),
         EndpointAddr::direct(([127, 0, 0, 1], remote).into()),
     );
-    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
-        transport.data.send_journal.clone(),
-    ));
     let path = Arc::new(Path::new(
         pathway,
         transport.parameters.role(),
         path_idle(),
-        [feedback.clone(), feedback.clone(), feedback],
+        data_trackers(transport),
     ));
     path.handshake_confirmed();
     path.validate();
@@ -264,11 +279,11 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
     let kind = frame.frame_type();
     match frame {
         Frame::Stream(frame, bytes) => {
-            let fresh = transport.streams.recv_frame((frame, bytes))?;
+            let fresh = transport.data.streams.recv_frame((frame, bytes))?;
             transport.flow.recver.on_new_rcvd(kind, fresh)?;
         }
         Frame::StreamCtl(frame) => {
-            let fresh = transport.streams.recv_frame(frame)?;
+            let fresh = transport.data.streams.recv_frame(frame)?;
             transport.flow.recver.on_new_rcvd(kind, fresh)?;
         }
         Frame::Ack(frame) => acknowledge(transport, &frame, path)?,
@@ -312,7 +327,8 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     receive_packet(
         pn,
         frames,
-        &transport.data,
+        Epoch::Data,
+        &transport.data.rcvd_journal,
         path,
         |_, frame, path| dispatch(transport, path, frame),
         |_, _| Ok(()),
@@ -324,7 +340,6 @@ fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Resul
     let keys = keys(transport);
     send::acknowledge(
         &transport.data,
-        &transport.streams,
         &transport.parameters,
         ack,
         path,
@@ -343,11 +358,14 @@ fn ack(pn: u64) -> AckFrame {
 pub(crate) fn seal_packet(
     packet: SendingPacket,
     keys: &OneRttKeys,
-    journal: &send::records::ArcSendJournal,
+    journal: &send::records::ArcSentJournal,
     records: &mut Vec<GuaranteedFrame>,
 ) -> Result<send::write::PendingPacket, PacketError> {
-    let ((pn, encoded), key) =
-        keys.reserve(|generation| journal.record_pending(generation, records))?;
+    let ((pn, encoded), key) = keys.reserve(|generation| {
+        journal
+            .record_pending(generation, records)
+            .map_err(Into::into)
+    })?;
     send::finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
 }
 
@@ -374,7 +392,7 @@ fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
     seal_packet(
         packet,
         keys,
-        &send::records::ArcSendJournal::starting_at(pn),
+        &send::records::ArcSentJournal::starting_at(pn),
         &mut recorded,
     )
     .unwrap()
@@ -484,7 +502,7 @@ fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
     seal_packet(
         packet,
         keys,
-        &send::records::ArcSendJournal::starting_at(pn),
+        &send::records::ArcSentJournal::starting_at(pn),
         &mut recorded,
     )
     .unwrap()
@@ -531,7 +549,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 material.opening.packet.tag_len(),
             )
             .unwrap();
-        let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(material)), |_| {}));
+        let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(material))));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
         let (inbox, rcvd_pkt) = channel::new();
@@ -558,7 +576,9 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             let received_path = path.clone();
             run_receive(
                 rcvd_pkt.initial,
-                space.clone(),
+                space.epoch,
+                space.keys.clone(),
+                space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
                     packet
@@ -575,7 +595,9 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             let received_path = path.clone();
             run_receive(
                 rcvd_pkt.handshake,
-                space.clone(),
+                space.epoch,
+                space.keys.clone(),
+                space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
                     packet
@@ -635,7 +657,7 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
 
 #[tokio::test]
 async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_keep_close_receiving()
- {
+{
     use qbase::{
         ArcReceiving,
         frame::{NewConnectionIdFrame, NewTokenFrame, RetireConnectionIdFrame},
@@ -650,12 +672,10 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
     let initial = Arc::new(Space::<ArcKeys>::new(
         Epoch::Initial,
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
-        |_| {},
     ));
     let handshake = Arc::new(Space::<ArcKeys>::new(
         Epoch::Handshake,
         ArcKeys::new(Arc::new(fixed_keys())),
-        |_| {},
     ));
     initial.retire();
     handshake.retire();
@@ -670,7 +690,6 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
     let dispatch = recv::frame_dispatcher(
         st.data.clone(),
         st.parameters.clone(),
-        st.streams.clone(),
         st.flow.clone(),
         [
             initial.crypto.clone(),
@@ -779,7 +798,9 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     let mut processed = 0;
     run_receive(
         rcvd_pkt.one_rtt,
-        st.data.clone(),
+        Epoch::Data,
+        st.data.keys.clone(),
+        st.data.rcvd_journal.clone(),
         move |_, _| Some(sp.clone()),
         |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto)
@@ -841,7 +862,6 @@ async fn frame_dispatcher_connects_crypto_cids_tokens_and_peer_close_to_original
     let dispatch = recv::frame_dispatcher(
         ct.data.clone(),
         ct.parameters.clone(),
-        ct.streams.clone(),
         ct.flow.clone(),
         crypto.clone(),
         cid_registry,
@@ -1056,7 +1076,8 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
     tokio::time::advance(Duration::from_millis(100)).await;
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
     cp.recv_frame(PathChallengeFrame::random()).unwrap();
-    ct.reliable_frames
+    ct.data
+        .reliable_frames
         .send_frame([ReliableFrame::MaxData(MaxDataFrame::new(4096u32.into()))]);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write_all(b"stream").await.unwrap();
@@ -1150,6 +1171,7 @@ async fn cancelling_open_and_accept_does_not_consume_streams() {
     assert!(futures::poll!(&mut opening).is_pending());
     drop(opening);
     transport
+        .data
         .streams
         .recv_frame(StreamCtlFrame::MaxStreams(MaxStreamsFrame::Uni(
             VarInt::from_u32(1),
@@ -1224,7 +1246,7 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     let packet = seal_packet(
         packet,
         &keys(&transport),
-        &transport.data.send_journal,
+        &transport.data.sent_journal,
         &mut recorded,
     )
     .unwrap();
@@ -1314,7 +1336,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
         writer.write_all(&stream_data).await.unwrap();
         let mut crypto = ct.data.crypto.outgoing();
-        let mut streams = ct.streams.clone();
+        let mut streams = ct.data.streams.clone();
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
         let mut constraints = Constraints {
@@ -1350,7 +1372,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             let pending = seal_packet(
                 packet,
                 &sealing,
-                &send::records::ArcSendJournal::starting_at(pn),
+                &send::records::ArcSentJournal::starting_at(pn),
                 &mut recorded,
             )
             .unwrap();
@@ -1418,7 +1440,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     let bytes = emit(&mut slow);
     assert_eq!(receive(&st, &sp, &bytes), Some(0));
     acknowledge(&ct, &ack(0), &cp).unwrap();
-    let (_, mut reader) = st.streams.accept_uni().await.unwrap();
+    let (_, mut reader) = st.data.streams.accept_uni().await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut output = [0; 8];
     reader.read_exact(&mut output).await.unwrap();
@@ -1460,18 +1482,16 @@ async fn receiving_starts_with_ready_keys() {
     let [client, server] = materials;
     let ct = transport(Role::Client, client, 1);
     let cp = path(&ct, 0);
-    let space = Arc::new(Space::<ArcOneRttKeys>::new(
-        Epoch::Data,
-        ArcOneRttKeys::from(server),
-        |_| {},
-    ));
+    let data = transport(Role::Server, server, 1).data.clone();
     let (inbox, rcvd_pkt) = channel::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let journal = space.rcvd_journal.clone();
+    let journal = data.rcvd_journal.clone();
     let task = tokio::spawn(run_receive(
         rcvd_pkt.one_rtt,
-        space.clone(),
+        Epoch::Data,
+        data.keys.clone(),
+        data.rcvd_journal.clone(),
         move |_, _| Some(cp.clone()),
         move |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
@@ -1509,7 +1529,8 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         receive_packet(
             pn,
             frames,
-            &st.data,
+            Epoch::Data,
+            &st.data.rcvd_journal,
             &sp,
             |_, _, _| Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into()),
             |_, _| Ok(())
@@ -1543,7 +1564,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    let bytes = seal_packet(packet, &keys(&ct), &ct.data.send_journal, &mut recorded).unwrap();
+    let bytes = seal_packet(packet, &keys(&ct), &ct.data.sent_journal, &mut recorded).unwrap();
     let (pn, frames) = st
         .data
         .keys
@@ -1559,7 +1580,8 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     receive_packet(
         pn,
         frames,
-        &st.data,
+        Epoch::Data,
+        &st.data.rcvd_journal,
         &sp,
         |_, frame, _| {
             assert!(matches!(frame, Frame::Close(_)));
@@ -1579,13 +1601,14 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"stream")).unwrap();
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
-    ct.reliable_frames
+    ct.data
+        .reliable_frames
         .send_frame([MaxDataFrame::new(123u32.into())]);
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
     emit(&mut sender);
     drop(sender);
 
-    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
+    ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0, 0].into_iter(),
     );
@@ -1598,8 +1621,8 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     .unwrap();
     let mut frames = Vec::new();
     let mut crypto = ct.data.crypto.outgoing();
-    let mut reliable = ct.reliable_frames.clone();
-    let mut streams = ct.streams.clone();
+    let mut reliable = ct.data.reliable_frames.clone();
+    let mut streams = ct.data.streams.clone();
     packet
         .assemble(
             &Constraints {
@@ -1627,7 +1650,7 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     emit(&mut sender);
-    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
+    ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
@@ -1643,7 +1666,7 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     let dropped = emit(&mut sender);
     let credit = ct.flow.sender.credit(usize::MAX).unwrap().available();
-    crate::space::ArcFeedback::from(ct.data.send_journal.clone()).may_loss(
+    ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
@@ -1698,7 +1721,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     drop(sender);
     drop(original);
     // Path retirement alone must not make the stream range available again.
-    let mut streams = transport.streams.clone();
+    let mut streams = transport.data.streams.clone();
     let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
         OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
@@ -1847,14 +1870,11 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     let pathway = Pathway::new(local, EndpointAddr::direct(remote.local_addr().unwrap()));
     let protocol = QuicProtocol::new();
     protocol.register(local, &socket).unwrap();
-    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
-        ct.data.send_journal.clone(),
-    ));
     let path = Arc::new(Path::new(
         pathway,
         Role::Client,
         path_idle(),
-        [feedback.clone(), feedback.clone(), feedback],
+        data_trackers(&ct),
     ));
     path.handshake_confirmed();
     path.validate();
@@ -1917,14 +1937,11 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_validated() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
-        let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
-            transport.data.send_journal.clone(),
-        ));
         let path = Arc::new(Path::new(
             pathway,
             transport.parameters.role(),
             path_idle(),
-            [feedback.clone(), feedback.clone(), feedback],
+            data_trackers(transport),
         ));
         path.handshake_confirmed();
         path
@@ -1960,14 +1977,11 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
 async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     use qcongestion::Transport as _;
     let [(_client, transport, original), _] = pair(1);
-    let feedback: Arc<dyn Feedback> = Arc::new(crate::space::ArcFeedback::from(
-        transport.data.send_journal.clone(),
-    ));
     let path = Arc::new(Path::new(
         original.pathway,
         Role::Client,
         path_idle(),
-        [feedback.clone(), feedback.clone(), feedback],
+        data_trackers(&transport),
     ));
     path.handshake_confirmed();
     path.on_datagram_received(400);
@@ -2037,11 +2051,12 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     let space = Arc::new(Space::<crate::keys::ArcKeys>::new(
         Epoch::Initial,
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
-        |_| {},
     ));
     let mut task = tokio::spawn(run_receive(
         rcvd_pkt.initial,
-        space.clone(),
+        space.epoch,
+        space.keys.clone(),
+        space.rcvd_journal.clone(),
         |_, _| unreachable!(),
         |_: &Arc<qtls::BidirectionalKeys>, _, _| unreachable!(),
         |_, _, _, _| unreachable!(),
