@@ -314,7 +314,6 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
         frames,
         &transport.data,
         path,
-        || false,
         |_, frame, path| dispatch(transport, path, frame),
         |_, _| Ok(()),
     )
@@ -567,7 +566,6 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                || false,
                 dispatch,
                 |_, _| Ok(()),
                 |_| panic!("receive failed"),
@@ -585,7 +583,6 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                || false,
                 dispatch,
                 |_, _| Ok(()),
                 |_| panic!("receive failed"),
@@ -648,7 +645,6 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
 
     use crate::{keys::ArcKeys, router::QuicRouter};
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
-    let closing = Arc::new(AtomicBool::new(false));
     let close = ArcReceiving::default();
     let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), close.clone());
     let initial = Arc::new(Space::<ArcKeys>::new(
@@ -683,13 +679,7 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
         ],
         cid_registry,
         ArcReceiving::<NewTokenFrame>::default(),
-        {
-            let closing = closing.clone();
-            move |_, frame, _| {
-                closing.store(true, Ordering::Release);
-                close_sink.recv_frame(frame)
-            }
-        },
+        move |_, frame, _| close_sink.recv_frame(frame),
         |_, _, _| panic!("unexpected frame"),
     );
     let streams_seen = Arc::new(AtomicUsize::new(0));
@@ -714,10 +704,6 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
         initial.clone(),
         handshake.clone(),
         st.data.clone(),
-        {
-            let closing = closing.clone();
-            move || closing.load(Ordering::Acquire)
-        },
         move |_, _| Some(sp.clone()),
         move |epoch, frame, path, on_ack| {
             if matches!(frame, Frame::Stream(_, _)) {
@@ -740,13 +726,12 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
     let mut body = [0; 12];
     reader.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"wired stream");
-    // The lifecycle owner consumes the close reason and switches the existing engine.
+    // The lifecycle owner consumes the close reason; the receive engine keeps reporting packets.
     server.close(VarInt::from_u32(0), "done");
     assert!(matches!(
         close.await.unwrap(),
         Some(crate::CloseReason::App(_))
     ));
-    closing.store(true, Ordering::Release);
     router.receive(ping(&keys(&ct), 1), link.into(), link, 8);
     router.receive(close_packet(&keys(&ct), 2), link.into(), link, 8);
     assert!(
@@ -757,9 +742,11 @@ async fn router_and_receive_topology_deliver_streams_with_retired_spaces_and_kee
             .is_some()
     );
     assert_eq!(streams_seen.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)),
-        Ok(1)
+    assert!(
+        st.data
+            .rcvd_journal
+            .decode_pn(PacketNumber::encode(1, 0))
+            .is_err()
     );
     initial.retire();
     handshake.retire();
@@ -781,21 +768,21 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         &inbox,
         Packet::Data(parse(&close_packet(&keys(&ct), 2)))
     ));
+    assert!(enqueue(
+        &inbox,
+        Packet::Data(parse(&close_packet(&keys(&ct), 3)))
+    ));
     drop(inbox);
     let mut errors = 0;
     let mut ordinary = 0;
     let mut closes = 0;
-    let closing = Arc::new(AtomicBool::new(false));
+    let mut processed = 0;
     run_receive(
         rcvd_pkt.one_rtt,
         st.data.clone(),
         move |_, _| Some(sp.clone()),
         |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto)
-        },
-        {
-            let closing = closing.clone();
-            move || closing.load(Ordering::Acquire)
         },
         |_, _, frame, _| {
             if matches!(frame, Frame::Close(_)) {
@@ -806,15 +793,17 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
                 Err(QuicError::with_default_fty(ErrorKind::Internal, "component failed").into())
             }
         },
-        |_, _| Ok(()),
+        |_, _| {
+            processed += 1;
+            Ok(())
+        },
         |error| {
             errors += 1;
-            closing.store(true, Ordering::Release);
             st.close(error);
         },
     )
     .await;
-    assert_eq!((errors, ordinary, closes), (1, 1, 1));
+    assert_eq!((errors, ordinary, closes, processed), (2, 2, 2, 4));
     assert!(server.accept_uni_stream().await.is_err());
     assert_eq!(
         st.data.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
@@ -1487,7 +1476,6 @@ async fn receiving_starts_with_ready_keys() {
         move |keys: &OneRttKeys, packet, pto| {
             keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
         },
-        || false,
         move |_, _, _, _| {
             seen.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -1523,7 +1511,6 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             frames,
             &st.data,
             &sp,
-            || false,
             |_, _, _| Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into()),
             |_, _| Ok(())
         )
@@ -1574,7 +1561,6 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         frames,
         &st.data,
         &sp,
-        || false,
         |_, frame, _| {
             assert!(matches!(frame, Frame::Close(_)));
             Ok(())
@@ -2058,7 +2044,6 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         space.clone(),
         |_, _| unreachable!(),
         |_: &Arc<qtls::BidirectionalKeys>, _, _| unreachable!(),
-        || false,
         |_, _, _, _| unreachable!(),
         |_, _| unreachable!(),
         |_| unreachable!(),

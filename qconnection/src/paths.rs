@@ -164,7 +164,7 @@ impl Paths {
     ) {
         let duration = path.cc.pto_base(epoch) * 3;
         self.terminator
-            .on_rcvd_close_connection_frame(frame.clone(), duration);
+            .on_rcvd_connection_close_frame(frame.clone(), duration);
         self.closed.set(CloseReason::Peer(frame));
     }
 

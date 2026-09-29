@@ -63,7 +63,6 @@ pub async fn client_growing(
         rcvd_pkt.initial,
         initial.clone(),
         paths.clone(),
-        initial_phase.terminator.clone(),
         closed.clone(),
     ));
 
@@ -95,7 +94,6 @@ pub async fn client_growing(
                 rcvd_pkt.handshake,
                 handshake.clone(),
                 paths.clone(),
-                initial_phase.terminator.clone(),
                 closed.clone(),
             ));
 
