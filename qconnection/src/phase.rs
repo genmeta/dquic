@@ -19,7 +19,7 @@ use qtransport::{
 };
 
 use crate::{
-    ArcParameters, CidRegistry, DataStreams, Error, FlowController, ArcReliableFrames,
+    ArcParameters, ArcReliableFrames, CidRegistry, DataStreams, Error, FlowController,
     terminate::ArcTerminator,
 };
 
@@ -50,7 +50,7 @@ impl InitialPhase {
             ArcKeys::new(Arc::new(keys)),
             |_| {},
         ));
-        let terminator = ArcTerminator::normal();
+        let terminator = ArcTerminator::no_error();
         Self {
             initial,
             scid,

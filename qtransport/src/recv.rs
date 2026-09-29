@@ -91,7 +91,6 @@ pub async fn run(
     initial: Arc<Space<ArcKeys>>,
     handshake: Arc<Space<ArcKeys>>,
     data: Arc<Space<ArcOneRttKeys>>,
-    is_closing: impl Fn() -> bool + Sync,
     path_for: impl Fn(Pathway, Link) -> Option<Arc<Path>> + Sync,
     dispatch: impl Fn(Epoch, Frame<Bytes>, &Arc<Path>, &dyn Fn(u64)) -> Result<(), Error>,
     on_processed: impl Fn(Epoch, &Arc<Path>) -> Result<(), Error>,
@@ -114,7 +113,6 @@ pub async fn run(
                     .transpose()
                     .map_err(Into::into)
             },
-            &is_closing,
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
             &on_processed,
             &on_error
@@ -129,7 +127,6 @@ pub async fn run(
                     .transpose()
                     .map_err(Into::into)
             },
-            &is_closing,
             |_, epoch, frame, path| dispatch(epoch, frame, path, &|_| {}),
             &on_processed,
             &on_error
@@ -141,7 +138,6 @@ pub async fn run(
             |keys: &OneRttKeys, packet, pto| {
                 keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), pto)
             },
-            &is_closing,
             |keys, epoch, frame, path| {
                 dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
             },
@@ -153,29 +149,16 @@ pub async fn run(
 
 /// Dispatch must synchronously accept ownership or return a terminal error. A full
 /// reliable pipe is an error, never an ACK followed by silent frame loss.
-/// on_processed executes before CRYPTO can wake the TLS driver. In Closing it
-/// reports authenticated packets so the owner can schedule a rate-limited CLOSE reply.
+/// on_processed executes before CRYPTO can wake the TLS driver. Packet and CLOSE
+/// notifications are unconditional; the owner handles connection state.
 pub fn receive_packet<K>(
     pn: u64,
     frames: FrameReader,
     space: &Space<K>,
     path: &Arc<Path>,
-    is_closing: impl Fn() -> bool,
     mut dispatch: impl FnMut(Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
 ) -> Result<PacketContent, Error> {
-    if is_closing() {
-        on_processed(space.epoch, path)?;
-        for frame in frames {
-            let Ok((frame, _)) = frame else { break };
-            if matches!(frame, Frame::Close(_)) {
-                dispatch(space.epoch, frame, path)?;
-                break;
-            }
-        }
-        return Ok(PacketContent::default());
-    }
-
     // TODO: 创建啥 Vec，开销就大了，后面要整改
     let mut decoded = Vec::new();
     let mut content = PacketContent::default();
@@ -208,9 +191,6 @@ pub fn receive_packet<K>(
         return Ok(PacketContent::default());
     }
     for frame in decoded {
-        if is_closing() {
-            return Ok(PacketContent::default());
-        }
         dispatch(space.epoch, frame, path)?;
     }
     let pto = path.cc.get_pto(space.epoch);
@@ -232,7 +212,6 @@ pub async fn run_receive<H, M>(
     space: Arc<Space<ArcKeys<M>>>,
     mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
-    is_closing: impl Fn() -> bool,
     mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
     mut on_processed: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
@@ -258,16 +237,13 @@ pub async fn run_receive<H, M>(
                     frames,
                     &space,
                     &path,
-                    &is_closing,
                     |epoch, frame, path| dispatch(&keys, epoch, frame, path),
                     &mut on_processed,
                 )?;
             }
             Ok(())
         });
-        if let Err(error) = result
-            && !is_closing()
-        {
+        if let Err(error) = result {
             on_error(error);
         }
     }
