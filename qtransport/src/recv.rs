@@ -84,7 +84,7 @@ where
 }
 
 /// One coroutine drives all receive spaces. A pending Handshake key does not block Initial/Data.
-/// qconn owns spawning and queue closure, path creation, TLS progression and final route removal.
+/// qconnection owns spawning and queue closure, path creation, TLS progression and final route removal.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     rcvd_pkt: RcvdPacket,

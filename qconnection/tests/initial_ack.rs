@@ -22,7 +22,7 @@ use qbase::{
     role::Role,
     time::ArcConnIdle,
 };
-use qconn::{Scope, ServerRegistry, TlsContext};
+use qconnection::{Scope, ServerRegistry, TlsContext};
 use qprotocol::{QuicProtocol, UdpSocket};
 use qtransport::{
     journal::ArcSendJournal, packet::CipherPacket, path::Path, router::QuicRouter,

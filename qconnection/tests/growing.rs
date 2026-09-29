@@ -6,7 +6,7 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{CryptoFrame, io::ReceiveFrame},
 };
-use qconn::{CloseReason, TlsContext};
+use qconnection::{CloseReason, TlsContext};
 use qrecovery::crypto::CryptoStream;
 use qtls::{CryptoLevel, InstalledKeys};
 
@@ -126,7 +126,7 @@ async fn tls_io_exits_naturally_when_the_context_fails() {
     .into_iter()
     .zip(crypto.iter())
     .map(|(level, stream)| {
-        tokio::spawn(qconn::tls::read_crypto_stream_to_tls(
+        tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
             server.clone(),
             level,
             stream.clone(),
@@ -134,7 +134,7 @@ async fn tls_io_exits_naturally_when_the_context_fails() {
         ))
     })
     .collect::<Vec<_>>();
-    let write = tokio::spawn(qconn::tls::write_crypto(server.clone(), crypto, closed));
+    let write = tokio::spawn(qconnection::tls::write_crypto(server.clone(), crypto, closed));
     tokio::task::yield_now().await;
     server.on_error(QuicError::with_default_fty(ErrorKind::Internal, "connection ended").into());
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -152,7 +152,7 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
     let crypto = CryptoStream::new();
     let closed = ArcReceiving::default();
-    let reader = tokio::spawn(qconn::tls::read_crypto_stream_to_tls(
+    let reader = tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
         server.clone(),
         CryptoLevel::Initial,
         crypto.clone(),
@@ -197,7 +197,7 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
     .into_iter()
     .zip(crypto.iter())
     .map(|(level, stream)| {
-        tokio::spawn(qconn::tls::read_crypto_stream_to_tls(
+        tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
             client.clone(),
             level,
             stream.clone(),
@@ -205,7 +205,7 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
         ))
     })
     .collect::<Vec<_>>();
-    let writer = tokio::spawn(qconn::tls::write_crypto(
+    let writer = tokio::spawn(qconnection::tls::write_crypto(
         client.clone(),
         crypto,
         closed.clone(),

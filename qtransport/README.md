@@ -1,6 +1,6 @@
 # qtransport
 
-握手成功的 QUIC 连接 API 与数据传输组件。依赖 qtls、qprotocol、qbase、qrecovery、qcongestion；不依赖 qconn 或 qconnection。
+握手成功的 QUIC 连接 API 与数据传输组件。依赖 qtls、qprotocol、qbase、qrecovery、qcongestion；不依赖 qconnection。
 
 ## 应用 API
 
@@ -21,7 +21,7 @@
 
 ## 协议集成
 
-这些模块是 qconn 的构建接口，不是额外的应用连接 API：
+这些模块是 qconnection 的构建接口，不是额外的应用连接 API：
 
 | 模块 | 责任 |
 | --- | --- |
@@ -38,12 +38,12 @@
 
 建立连接的外部驱动按以下顺序工作：
 
-1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。将 `inbox` 注册到 Router，把 `(route, rcvd_pkt)` 传给 qconn。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
+1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。将 `inbox` 注册到 Router，把 `(route, rcvd_pkt)` 传给 qconnection。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
 2. growing 从 TLS 取得密钥后，创建 `ArcKeys::new(keys)` 或 `ArcOneRttKeys::from(material)`，再通过 `Space::new(epoch, keys, on_loss)` 构造空间。`try_get()` 返回 `Result<K, KeyRetired>`，密钥层不再维护 Pending 或 Waker，也不实现 Future。取得密钥后直接使用 opening/sealing；收包用具体解密函数接线。
 3. `rcvd_pkt.initial / handshake / zero_rtt / one_rtt` 分别具有对应 header 类型。每个空间把自己的 receiver 直接交给 `run_receive`，完成路径取得、记账、解密、去重和帧投递；不经过统一 Packet 队列和二次分流。
 4. 参数和 1-RTT 密钥就绪后构造 MaturePhase、streams/flow 和 Data 空间，再发布阶段并启动 Data 收包。同一批组件传给 Transport，选定 ALPN 和同一个 closing 开关传给 ArcConnection::new；构造函数不重复握手校验。
 5. 每路径创建 Sender，传入 QuicProtocol、Pathway、CC、共享 AntiAmplifier 和 send_waker。Sender 不持有 Path、Transport、flow 或 keys；STREAM 源从完整 Transport 取得发送流控，握手阶段无需预建零额度流控。外部闭包同步 try_get 密钥（Ok(keys) 可用，Err(KeyRetired) 禁止继续使用该层发送），向 assemble_initial_packet / assemble_handshake_packet / assemble_0rtt_packet / assemble_1rtt_packet 传入 header、journal、Constraints 和 Package 源；burst 收集批次，poll_send 提交，或用 run 驱动两者。
-6. 应用关闭、接收错误、对端 CLOSE 切换 Connection 共享的 closing；同一收包引擎继续解密，只投递 CLOSE。Closing/Draining 结束后 qconn 取消四级接收任务、清理 CID registry 并释放路由守卫；最后一个 `Inbox` sender 释放后 receiver 关闭。
+6. 应用关闭、接收错误、对端 CLOSE 切换 Connection 共享的 closing；同一收包引擎继续解密，只投递 CLOSE。Closing/Draining 结束后 qconnection 取消四级接收任务、清理 CID registry 并释放路由守卫；最后一个 `Inbox` sender 释放后 receiver 关闭。
 
 Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器、CID/token 管理实例由外部驱动持有；QuicRouter 实现在 qtransport，支持独立实例和显式取得的全局实例。
 
@@ -63,18 +63,18 @@ buffer 与布局。Data ACK 回调捕获本次解密的就绪材料；Space 的�
 `next_secret` 独立保存后续派生材料。主动更新直接派生一对入队；被动更新先临时派生，
 认证成功才入队并推进 secret，失败不改变正式状态。双方同时更新时使用已有队尾 opening，
 不重复入队。队列最多三对；收到新代认证包后，旧对按 3 PTO 淘汰。已领取包的密钥和相位固定，旧密文可以晚于新代包提交。
-主动更新仅用 `can_update` 表示许可：qconn 在握手确认时调用 `allow_update()`，实际更新
+主动更新仅用 `can_update` 表示许可：qconnection 在握手确认时调用 `allow_update()`，实际更新
 发送密钥后清零，当前非初始发送代次获 ACK 后重新开放。被动接收更新不受本地许可限制，
-也不会因解密成功而重新开放许可。qconn 的正式握手授权接线仍属于后续集成。
+也不会因解密成功而重新开放许可。qconnection 的正式握手授权接线仍属于后续集成。
 这不是 0-RTT 恢复材料；ticket/PSK 由 qtls 独立管理。
 
-每个空间只有一个接收者，单 Path 只有一个发送 owner。路由和空间 channel 都有界，满时丢弃未处理密文；可靠帧已经交给组件后发生错误则关闭连接。CRYPTO 缓冲预算及队列等待寿命由 qconn 的握手/TLS 驱动管理。发送侧已支持 0-RTT 包编码和 DATAGRAM 帧源；TLS 早期数据接受/拒绝及 DATAGRAM 的接收与应用 API 尚未接入，握手配置不得启用未接入能力。
+每个空间只有一个接收者，单 Path 只有一个发送 owner。路由和空间 channel 都有界，满时丢弃未处理密文；可靠帧已经交给组件后发生错误则关闭连接。CRYPTO 缓冲预算及队列等待寿命由 qconnection 的握手/TLS 驱动管理。发送侧已支持 0-RTT 包编码和 DATAGRAM 帧源；TLS 早期数据接受/拒绝及 DATAGRAM 的接收与应用 API 尚未接入，握手配置不得启用未接入能力。
 
-实际接线与客户端/服务端 Space 淘汰时机见 [logic.md](../design/qtransport/logic.md)。本轮没有迁移 qconn 的 Incoming/Connecting、Endpoint 交付及完整关闭流程，也没有修改 qconnection。
+实际接线与客户端/服务端 Space 淘汰时机见 [logic.md](../design/qtransport/logic.md)。本轮没有迁移 qconnection 的 Incoming/Connecting、Endpoint 交付及完整关闭流程，也没有修改旧版 qconnection。
 
 ## 与底层组件的兼容
 
-- qtransport 导出的 `ArcParameters` 位于 `qbase::param::fixed`，由完整双方参数构造，同步只读。旧 `qbase::param::ArcParameters` 保留给 qconnection；没有把异步参数或连接错误带入成熟 Transport。
+- qtransport 导出的 `ArcParameters` 位于 `qbase::param::fixed`，由完整双方参数构造，同步只读。旧 `qbase::param::ArcParameters` 保留用于旧版 qconnection 的兼容；没有把异步参数或连接错误带入成熟 Transport。
 - qrecovery 增加已知窗口的开流/接流入口。关闭通过原有 input/output/listener 传播；Listener 管理 accept 的唤醒，不额外增加 DataStreams 关闭订阅或登记已移除的流端点。
 - qprotocol 的 `poll_send` / `send` 接受一批 IoSlice，每项是一个 UDP datagram，返回成功提交的前缀数量。Sender 按累计 CC/反放大信用组包；部分成功保留原密文后缀，后续续发；Pending 不记账。每批上限复用 qudp::BATCH_SIZE。
 - 一次非阻塞提交先借用本路径 CC，再按 Epoch 顺序借用涉及的 journal；成功前缀的 journal/反放大/CC 记账完成后释放数据锁。ACK 同样先借用接收路径 CC，再访问 journal；不增加空锁或 pending ACK。组包、加密、等待可写和发送回调都不持这些 guard。Space/Path 停止只更新状态并唤醒任务，已通过本轮许可检查的批次允许完成，后续提交清理停止层的 pending。
@@ -92,4 +92,4 @@ buffer 与布局。Data ACK 回调捕获本次解密的就绪材料；Space 的�
 
 `cargo clippy -p qtransport --all-targets --offline --no-deps -- -D warnings`
 
-测试包含真实 qtls 密钥的流收发、本地 UDP 提交、关闭唤醒与终态端点、跳号/跨路径超越、重传流控记账、ACK/提交竞态、路径验证、去重认证、密钥更新与退役、组包容量及空闲任务让出。UDP 测试需要允许绑定本地 socket。完整 qconn 握手/Closing 的接线与端到端互操作验收属于后续集成。
+测试包含真实 qtls 密钥的流收发、本地 UDP 提交、关闭唤醒与终态端点、跳号/跨路径超越、重传流控记账、ACK/提交竞态、路径验证、去重认证、密钥更新与退役、组包容量及空闲任务让出。UDP 测试需要允许绑定本地 socket。完整 qconnection 握手/Closing 的接线与端到端互操作验收属于后续集成。
