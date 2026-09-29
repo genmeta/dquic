@@ -1,9 +1,3 @@
-mod async_deque;
-pub use async_deque::ArcAsyncDeque;
-
-mod bound_queue;
-pub use bound_queue::BoundQueue;
-
 mod data;
 pub use data::{Buffer, DataPair, NonData, WriteData};
 

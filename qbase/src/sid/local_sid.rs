@@ -243,17 +243,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use derive_more::Deref;
-
     use super::*;
-    use crate::util::ArcAsyncDeque;
 
-    #[derive(Clone, Deref, Default)]
-    struct StreamsBlockedFrameTx(ArcAsyncDeque<StreamsBlockedFrame>);
+    #[derive(Clone, Default)]
+    struct StreamsBlockedFrameTx(Arc<Mutex<Vec<StreamsBlockedFrame>>>);
 
     impl SendFrame<StreamsBlockedFrame> for StreamsBlockedFrameTx {
         fn send_frame<I: IntoIterator<Item = StreamsBlockedFrame>>(&self, iter: I) {
-            (&self.0).extend(iter);
+            self.0.lock().unwrap().extend(iter);
         }
     }
 

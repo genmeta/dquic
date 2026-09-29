@@ -56,8 +56,6 @@ jobs:
             qudp
             qcongestion
             qrecovery
-            qinterface
-            qtraversal
             qconnection
             dquic
           )
