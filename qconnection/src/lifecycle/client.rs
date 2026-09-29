@@ -72,7 +72,6 @@ pub async fn client_growing(
             let handshake = Arc::new(Space::new(
                 Epoch::Handshake,
                 ArcKeys::from(handshake_keys),
-                |_| {},
             ));
             phase.enter_handshake(handshake.clone());
             initial_phase.initial.crypto.recver.retire();
@@ -170,7 +169,6 @@ pub async fn client_growing(
                     ),
                 ),
                 handshake_done,
-                handshake,
                 mature_phase,
             ))
         };
@@ -179,7 +177,7 @@ pub async fn client_growing(
             .and_then(|result| result.map_err(CloseReason::from))
     };
 
-    let (connected, handshake_done, handshake, mature_phase) = match result {
+    let (connected, handshake_done, mature_phase) = match result {
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(close_error(&reason)));
@@ -192,8 +190,7 @@ pub async fn client_growing(
     let reason = tokio::select! {
         Ok(Some(reason)) = &mut close => reason,
         Ok(Some(true)) = handshake_done => {
-            initial_phase.initial.retire();
-            handshake.retire();
+            mature_phase.retire_handshake_spaces();
             mature_phase
                 .spaces
                 .data

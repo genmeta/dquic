@@ -8,31 +8,14 @@ use bytes::BytesMut;
 use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
-    frame::Frame,
-    packet::assemble::{Package, in_flight},
+    packet::assemble::Package,
 };
 use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
-use qtransport::{journal::ArcSendJournal, path::Path};
+use qtransport::path::Path;
 
 use super::{BurstPns, MAX_BURST_PACKETS, burst};
 use crate::{ConnPhase, Error, Paths};
-
-fn sending_journals(phase: &ConnPhase) -> [Option<ArcSendJournal>; 3] {
-    match phase {
-        ConnPhase::Initial(p) => [Some(p.initial.send_journal.clone()), None, None],
-        ConnPhase::Handshake(p) => [
-            Some(p.initial.send_journal.clone()),
-            Some(p.handshake.send_journal.clone()),
-            None,
-        ],
-        ConnPhase::Mature(p) => [
-            Some(p.spaces.initial.send_journal.clone()),
-            Some(p.spaces.handshake.send_journal.clone()),
-            Some(p.spaces.data.send_journal.clone()),
-        ],
-    }
-}
 
 pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut datagrams =
@@ -52,7 +35,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
             )
             .collect(&paths, &path, phase.get().dcid())
             .await?;
-            let journals = sending_journals(&phase.get());
+            let sending_phase = phase.get();
             let deadlines = Epoch::EPOCHS.map(|epoch| {
                 (
                     path.cc.retransmit_and_expire_time(epoch).0,
@@ -65,46 +48,37 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                 let sent = QuicProtocol::global()
                     .send_with(path.pathway, &packets[first..count], |submit| {
                         let mut cc = path.cc.lock();
-                        let mut records = journals
-                            .each_ref()
-                            .map(|journal| journal.as_ref().map(ArcSendJournal::lock_guard));
                         let result = submit();
                         if let Poll::Ready(Ok(sent)) = result {
                             for epoch in Epoch::EPOCHS {
-                                for &(index, pn) in
-                                    pns[epoch].iter().filter(|(index, _)| *index < first + sent)
-                                {
-                                    let journal = records[epoch].as_mut().unwrap();
-                                    let (mut content, mut inflight, mut ack) =
-                                        (qbase::packet::PacketContent::default(), false, None);
-                                    for frame in journal.frames(pn) {
-                                        content += qbase::packet::PacketContent::from(
-                                            qbase::frame::GetFrameType::frame_type(frame),
-                                        );
-                                        inflight |= in_flight(std::slice::from_ref(frame));
-                                        if let Frame::Ack(frame) = frame {
-                                            ack = Some(frame.largest());
-                                        }
-                                    }
-                                    let size = datagrams[index].len() + overhead;
-                                    journal.mark_sent(
-                                        pn,
-                                        inflight,
-                                        deadlines[epoch].0,
-                                        deadlines[epoch].1,
-                                    );
+                                if pns[epoch].is_empty() {
+                                    continue;
+                                }
+                                let submitted = pns[epoch]
+                                    .iter()
+                                    .filter(|packet| packet.index < first + sent);
+                                sending_phase.on_sent(
+                                    epoch,
+                                    submitted
+                                        .clone()
+                                        .map(|packet| (packet.pn, packet.in_flight)),
+                                    deadlines[epoch].0,
+                                    deadlines[epoch].1,
+                                );
+                                for packet in submitted {
+                                    let size = datagrams[packet.index].len() + overhead;
                                     path.anti_amplifier.on_sent(size);
                                     cc.on_pkt_sent(
                                         epoch,
-                                        pn,
-                                        content.is_ack_eliciting(),
+                                        packet.pn,
+                                        packet.content.is_ack_eliciting(),
                                         size,
-                                        inflight,
-                                        ack,
+                                        packet.in_flight,
+                                        packet.ack,
                                     );
-                                    path.activity.on_sent(content);
+                                    path.activity.on_sent(packet.content);
                                 }
-                                pns[epoch].retain(|(index, _)| *index >= first + sent);
+                                pns[epoch].retain(|packet| packet.index >= first + sent);
                             }
                         }
                         result
@@ -126,12 +100,10 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     }
     .await;
     cancel_waiters(&paths, &path);
-    let journals = sending_journals(&phase.get());
+    let phase = phase.get();
     for epoch in Epoch::EPOCHS {
-        if let Some(journal) = &journals[epoch] {
-            for (_, pn) in pns[epoch].drain(..) {
-                journal.cancel(pn);
-            }
+        for packet in pns[epoch].drain(..) {
+            phase.cancel(epoch, packet.pn);
         }
     }
     paths.remove(&path);
@@ -153,41 +125,56 @@ pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
         path.cc.cancel(waker);
         let mut terminator = &paths.terminator();
         <&crate::terminate::ArcTerminator as Package<BytesMut>>::cancel(&mut terminator, waker);
-        fn cancel_space<K>(space: &qtransport::space::Space<K>, waker: &Waker) {
+        fn cancel_space(
+            crypto: &qrecovery::crypto::CryptoStream,
+            journal: &qrecovery::journal::ArcRcvdJournal,
+            waker: &Waker,
+        ) {
             <qrecovery::crypto::CryptoStreamOutgoing as Package<BytesMut>>::cancel(
-                &mut space.crypto.outgoing(),
+                &mut crypto.outgoing(),
                 waker,
             );
             <qrecovery::journal::ArcRcvdJournal as Package<BytesMut>>::cancel(
-                &mut space.rcvd_journal.clone(),
+                &mut journal.clone(),
                 waker,
             );
         }
         match &*phase {
             ConnPhase::Initial(p) => {
-                cancel_space(&p.initial, waker);
+                cancel_space(&p.initial.crypto, &p.initial.rcvd_journal, waker);
                 <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
                     &mut p.reliable_frames.clone(),
                     waker,
                 );
             }
             ConnPhase::Handshake(p) => {
-                cancel_space(&p.initial, waker);
-                cancel_space(&p.handshake, waker);
+                cancel_space(&p.initial.crypto, &p.initial.rcvd_journal, waker);
+                cancel_space(&p.handshake.crypto, &p.handshake.rcvd_journal, waker);
                 <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
                     &mut p.reliable_frames.clone(),
                     waker,
                 );
             }
             ConnPhase::Mature(p) => {
-                cancel_space(&p.spaces.initial, waker);
-                cancel_space(&p.spaces.handshake, waker);
-                cancel_space(&p.spaces.data, waker);
-                <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
-                    &mut p.reliable_frames.clone(),
+                cancel_space(
+                    &p.spaces.initial.crypto,
+                    &p.spaces.initial.rcvd_journal,
                     waker,
                 );
-                <crate::DataStreams as Package<BytesMut>>::cancel(&mut p.streams.clone(), waker);
+                cancel_space(
+                    &p.spaces.handshake.crypto,
+                    &p.spaces.handshake.rcvd_journal,
+                    waker,
+                );
+                cancel_space(&p.spaces.data.crypto, &p.spaces.data.rcvd_journal, waker);
+                <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
+                    &mut p.spaces.data.reliable_frames.clone(),
+                    waker,
+                );
+                <crate::DataStreams as Package<BytesMut>>::cancel(
+                    &mut p.spaces.data.streams.clone(),
+                    waker,
+                );
                 p.flow.sender.cancel(waker);
             }
         }

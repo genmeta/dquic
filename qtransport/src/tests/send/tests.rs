@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
 
 use bytes::Bytes;
 use qbase::{
@@ -16,8 +13,13 @@ use qbase::{
 use super::{fixture::TestSender as Sender, *};
 use crate::{keys::OpenPacket, transport::Transport};
 
-fn sender(_transport: &Transport, path: &Path) -> Sender {
-    Sender::new(path.pathway, path.cc.clone(), path.anti_amplifier.clone())
+fn sender(transport: &Arc<Transport>, path: &Path) -> Sender {
+    Sender::new(
+        path.pathway,
+        path.cc.clone(),
+        path.anti_amplifier.clone(),
+        Some(transport.data.clone()),
+    )
 }
 fn header() -> OneRttHeader {
     OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"))
@@ -54,7 +56,13 @@ fn cx() -> Context<'static> {
 #[tokio::test]
 async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     let [(_client, transport, path), (_server, peer, _)] = crate::tests::pair(1);
-    let mut sender = sender(&transport, &path);
+    // Encoding-only sources are not owned by the transport's recovery components.
+    let mut sender = Sender::new(
+        path.pathway,
+        path.cc.clone(),
+        path.anti_amplifier.clone(),
+        None,
+    );
     let fixed = crate::tests::fixed_keys();
     let keys = transport.data.keys.get().unwrap();
     let limit = Constraints {
@@ -63,9 +71,9 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         congestion: 1200,
         anti_amplification: 1200,
     };
-    let initial = ArcSendJournal::default();
-    let handshake = ArcSendJournal::default();
-    let data = ArcSendJournal::default();
+    let initial = ArcSentJournal::default();
+    let handshake = ArcSentJournal::default();
+    let data = ArcSentJournal::default();
     let bytes = [Bytes::from_static(b"client hello")];
     let mut crypto = (
         CryptoFrame::new(0u32.into(), 12u32.into()),
@@ -151,27 +159,21 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     );
     // 0-RTT ACKs must not authorize a 1-RTT generation.
     let mut zero = zero;
-    data.mark_sent(
+    data.on_sent(
         zero.pn,
         zero.in_flight,
         Duration::from_secs(1),
         Duration::from_secs(3),
     );
     zero.journal = None;
-    assert!(data.acknowledge(&ack(0), |_| {}).unwrap().is_empty());
+    assert!(data.on_acked(&ack(0), |_| {}).unwrap().is_none());
 }
 
 #[tokio::test]
 async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
     let keys = transport.data.keys.get().unwrap();
-    let recovered = Arc::new(AtomicUsize::new(0));
-    let journal = ArcSendJournal::new({
-        let recovered = recovered.clone();
-        move |_| {
-            recovered.fetch_add(1, Ordering::Relaxed);
-        }
-    });
+    let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
     let mut remaining = 16;
     assert_eq!(
@@ -230,8 +232,8 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
         Poll::Ready(Ok(3))
     ));
     assert_eq!(committed, [0, 1, 2]);
-    journal.acknowledge(&ack(2), |_| {}).unwrap();
-    assert!(journal.acknowledge(&ack(3), |_| {}).is_err());
+    journal.on_acked(&ack(2), |_| {}).unwrap();
+    journal.on_acked(&ack(3), |_| {}).unwrap();
     assert_eq!(
         sender
             .burst(|_, _| panic!("pending suffix must be sent first"))
@@ -254,9 +256,12 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
         ),
         Poll::Ready(Err(_))
     ));
-    assert_eq!(recovered.load(Ordering::Relaxed), 5);
-    // The successful prefix is neither canceled nor put back into the sources.
-    journal.acknowledge(&ack(0), |_| {}).unwrap();
+    assert_eq!(
+        crate::tests::take_frames(&mut transport.data.reliable_frames.clone()).len(),
+        4
+    );
+    // The successful prefix and early-ACKed packet are not put back into the sources.
+    journal.on_acked(&ack(0), |_| {}).unwrap();
     assert!(sender.pending().next().is_none());
 }
 
@@ -284,7 +289,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
             let packet = sender.assemble_1rtt_packet(
                 &keys,
                 header(),
-                &transport.data.send_journal,
+                &transport.data.sent_journal,
                 limit,
                 [&mut crypto],
             )?;
@@ -308,13 +313,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
 async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data() {
     let [(_client, transport, path), _peer] = crate::tests::pair(1);
     let keys = transport.data.keys.get().unwrap();
-    let recovered = Arc::new(AtomicUsize::new(0));
-    let journal = ArcSendJournal::new({
-        let recovered = recovered.clone();
-        move |_| {
-            recovered.fetch_add(1, Ordering::Relaxed);
-        }
-    });
+    let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
     let challenge = PathChallengeFrame::random();
     let mut ack_source = Some(ack(99));
@@ -361,9 +360,12 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
     );
     assert_eq!(sender.pending().filter(|p| p.response.is_some()).count(), 1);
     drop(sender);
-    assert_eq!(recovered.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        crate::tests::take_frames(&mut transport.data.reliable_frames.clone()).len(),
+        3
+    );
     for pn in 0..3 {
-        assert!(journal.acknowledge(&ack(pn), |_| {}).is_err());
+        assert!(journal.on_acked(&ack(pn), |_| {}).is_err());
     }
 }
 
@@ -374,8 +376,8 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
     let keys = crate::tests::fixed_keys();
     let retired = crate::keys::ArcKeys::new(42u64);
     retired.retire();
-    let initial = ArcSendJournal::default();
-    let handshake = ArcSendJournal::default();
+    let initial = ArcSentJournal::default();
+    let handshake = ArcSentJournal::default();
     let mut index = 0;
     assert_eq!(
         sender
@@ -418,8 +420,8 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
         Poll::Ready(Ok(1))
     ));
     assert_eq!(sent, [Epoch::Handshake]);
-    assert!(initial.acknowledge(&ack(0), |_| {}).is_err());
-    handshake.acknowledge(&ack(0), |_| {}).unwrap();
+    assert!(initial.on_acked(&ack(0), |_| {}).is_err());
+    handshake.on_acked(&ack(0), |_| {}).unwrap();
 }
 
 #[tokio::test]
@@ -434,7 +436,7 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
                 sender.assemble_1rtt_packet(
                     &keys,
                     header(),
-                    &transport.data.send_journal,
+                    &transport.data.sent_journal,
                     constraints,
                     [&mut ping],
                 )
@@ -452,8 +454,8 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
                 // These operations acquire journal/CC/state locks themselves.
                 transport
                     .data
-                    .send_journal
-                    .acknowledge(&ack(packet.pn), |_| {})
+                    .sent_journal
+                    .on_acked(&ack(packet.pn), |_| {})
                     .unwrap();
                 path.validate();
                 path.retire();
@@ -478,7 +480,12 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
             "127.0.0.1:30003".parse().unwrap(),
         ),
     );
-    let mut sender = Sender::new(pathway, path.cc.clone(), path.anti_amplifier.clone());
+    let mut sender = Sender::new(
+        pathway,
+        path.cc.clone(),
+        path.anti_amplifier.clone(),
+        Some(transport.data.clone()),
+    );
     let keys = transport.data.keys.get().unwrap();
     let mut packets = Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS);
     let allocation = packets.as_ptr();
@@ -495,7 +502,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
                 sender.assemble_1rtt_packet(
                     &keys,
                     header(),
-                    &transport.data.send_journal,
+                    &transport.data.sent_journal,
                     constraints,
                     [&mut frame.clone()],
                 )
@@ -529,8 +536,8 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
         assert_eq!(sender.send_frames.as_ptr(), frames);
         transport
             .data
-            .send_journal
-            .acknowledge(&ack(pn), |_| {})
+            .sent_journal
+            .on_acked(&ack(pn), |_| {})
             .unwrap();
     }
 }

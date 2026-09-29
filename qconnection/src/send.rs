@@ -13,10 +13,10 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
-    frame::{Frame, PingFrame},
+    frame::{Frame, GetFrameType, PingFrame},
     packet::{
-        HeaderSize, LongHeaderBuilder, OneRttHeader,
-        assemble::{Assemble, Constraints, Limit, Package},
+        HeaderSize, LongHeaderBuilder, OneRttHeader, PacketContent,
+        assemble::{Assemble, Constraints, Limit, Package, in_flight},
         header::{GetType, io::WriteHeader},
     },
     param::ParameterId,
@@ -24,7 +24,6 @@ use qbase::{
 use qcongestion::{ArcCC, Transport as _};
 use qprotocol::QuicProtocol;
 use qtransport::{
-    journal::ArcSendJournal,
     keys::ArcKeys,
     path::{AntiAmplifier, Path},
     space::Space,
@@ -34,7 +33,17 @@ pub(crate) use task::sending;
 use crate::{ConnPhase, Error, MaturePhase, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
-pub type BurstPns = [Vec<(usize, u64)>; 3];
+/// Submission metadata retained independently of frames that an early ACK can release.
+#[derive(Clone, Copy)]
+pub struct PendingPacket {
+    pub index: usize,
+    pub pn: u64,
+    pub content: PacketContent,
+    pub in_flight: bool,
+    pub ack: Option<u64>,
+}
+
+pub type BurstPns = [Vec<PendingPacket>; 3];
 
 fn packet_error(error: qtransport::keys::PacketError) -> crate::Error {
     match error {
@@ -155,8 +164,7 @@ impl Future for Collector<'_> {
                         &mut limits,
                         &mut acked[Epoch::Initial],
                     )?;
-                    let header =
-                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).handshake();
+                    let header = LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).handshake();
                     count += this.collect_long(
                         cx,
                         &phase.handshake,
@@ -255,7 +263,7 @@ impl Collector<'_> {
             return Ok(0);
         };
         buffer.clear();
-        let pn = space.send_journal.next_pn().map_err(packet_error)?;
+        let pn = space.next_pn()?;
         let packet = Packet::new(header, pn, buffer)?;
         let mut packet = SendingPacket {
             packet,
@@ -272,11 +280,12 @@ impl Collector<'_> {
             }
             Poll::Ready(Err(error)) => return Err(error),
             _ => {
-                space.send_journal.cancel(pn.0);
+                space.cancel(pn.0);
                 return Ok(0);
             }
         }
-        self.record(space.epoch, pn.0, &space.send_journal, acked);
+        self.record(space.epoch, pn.0, acked);
+        space.on_assembled(pn.0, self.burst.frames.drain(..));
         Ok(1)
     }
 
@@ -291,7 +300,7 @@ impl Collector<'_> {
         let space = &phase.spaces.data;
         if index == self.burst.datagrams.len()
             || limits.credit == 0
-            || !space.send_journal.has_capacity()
+            || !space.sent_journal.has_capacity()
         {
             return Poll::Ready(Ok(0));
         }
@@ -325,15 +334,15 @@ impl Collector<'_> {
         ack.exponent = phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32;
         let mut validation = self.path.as_ref();
         let mut crypto = space.crypto.outgoing();
-        let mut reliable = phase.reliable_frames.clone();
-        let mut streams = phase.streams.clone();
+        let mut reliable = space.reliable_frames.clone();
+        let mut streams = space.streams.clone();
         let mut heartbeat = self.burst.pns[Epoch::Data]
             .is_empty()
             .then_some(&self.path.activity);
         let buffer = &mut self.burst.datagrams[index];
         buffer.clear();
         let (pn, key) = keys
-            .reserve(|_| space.send_journal.next_pn())
+            .reserve(|_| space.next_pn().map_err(Into::into))
             .map_err(packet_error)?;
         let packet = Packet::new(header, pn, buffer)?;
         let mut packet = SendingPacket {
@@ -344,21 +353,21 @@ impl Collector<'_> {
         match packet.assemble(cx, [&mut close], self.burst.frames) {
             Poll::Ready(Ok(n)) if n > 0 => {
                 let (generation, _) = packet.seal()?;
-                self.record(Epoch::Data, pn.0, &space.send_journal, acked);
-                space.send_journal.set_generation(pn.0, generation);
+                self.record(Epoch::Data, pn.0, acked);
+                space.on_assembled(pn.0, generation, self.burst.frames.drain(..));
                 return Poll::Ready(Ok(1));
             }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             _ => {}
         }
         if packet.limits.max_size() == 0 {
-            space.send_journal.cancel(pn.0);
+            space.cancel(pn.0);
             return Poll::Ready(Ok(0));
         }
         let mut flow = std::task::ready!(phase.flow.sender.poll_credit(
             cx,
             if packet.limits.send_quota() >= packet.limits.max_size() {
-                phase.streams.fresh_bytes().min(1200)
+                space.streams.fresh_bytes().min(1200)
             } else {
                 0
             }
@@ -380,27 +389,33 @@ impl Collector<'_> {
             Poll::Ready(Ok(n)) if n > 0 => {}
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             _ => {
-                space.send_journal.cancel(pn.0);
+                space.cancel(pn.0);
                 return Poll::Ready(Ok(0));
             }
         }
         let (generation, _) = packet.seal()?;
         flow.post_sent(flow.available() - limits.flow_ctrl);
-        self.record(Epoch::Data, pn.0, &space.send_journal, acked);
-        space.send_journal.set_generation(pn.0, generation);
+        self.record(Epoch::Data, pn.0, acked);
+        space.on_assembled(pn.0, generation, self.burst.frames.drain(..));
         Poll::Ready(Ok(1))
     }
 
-    fn record(&mut self, epoch: Epoch, pn: u64, journal: &ArcSendJournal, acked: &mut Option<u64>) {
-        let index = self.count();
+    fn record(&mut self, epoch: Epoch, pn: u64, acked: &mut Option<u64>) {
+        let mut packet = PendingPacket {
+            index: self.count(),
+            pn,
+            content: PacketContent::default(),
+            in_flight: in_flight(self.burst.frames),
+            ack: None,
+        };
         for frame in self.burst.frames.iter() {
-            match frame {
-                Frame::Ack(ack) => *acked = Some(ack.largest()),
-                _ => {}
+            packet.content += PacketContent::from(frame.frame_type());
+            if let Frame::Ack(ack) = frame {
+                packet.ack = Some(ack.largest());
+                *acked = packet.ack;
             }
         }
-        journal.on_sent(pn, self.burst.frames.drain(..));
-        self.burst.pns[epoch].push((index, pn));
+        self.burst.pns[epoch].push(packet);
     }
 }
 

@@ -612,7 +612,7 @@ mod tests {
         crate::tests::seal_packet(
             packet,
             keys,
-            &crate::send::records::ArcSendJournal::starting_at(pn),
+            &crate::send::records::ArcSentJournal::starting_at(pn),
             &mut frames,
         )
     }
@@ -758,13 +758,21 @@ mod tests {
                 .0
         };
         keys.allow_update();
-        let records = crate::send::records::ArcSendJournal::default();
+        let records = crate::send::records::ArcSentJournal::default();
         let ((earlier, _), old) = keys
-            .reserve(|generation| records.record_pending(generation, &mut Vec::new()))
+            .reserve(|generation| {
+                records
+                    .record_pending(generation, &mut Vec::new())
+                    .map_err(Into::into)
+            })
             .unwrap();
         keys.update().unwrap();
         let ((later, _), new) = keys
-            .reserve(|generation| records.record_pending(generation, &mut Vec::new()))
+            .reserve(|generation| {
+                records
+                    .record_pending(generation, &mut Vec::new())
+                    .map_err(Into::into)
+            })
             .unwrap();
         assert_eq!((earlier, later), (0, 1));
         let mut bytes = [0; 22];

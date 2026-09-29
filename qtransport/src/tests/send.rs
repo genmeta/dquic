@@ -30,10 +30,10 @@ use qbase::{
 };
 use qcongestion::{ArcCC, Transport as _};
 use qprotocol::protocol::quic::QuicProtocol;
-use records::ArcSendJournal;
+use records::ArcSentJournal;
 use write::{Packet, PacketError, PendingPacket};
 
-use crate::{Error, GuaranteedFrame, keys::OneRttKeys, path::Path};
+use crate::{Error, GuaranteedFrame, keys::OneRttKeys, path::Path, space::DataSpace};
 
 /// Maximum number of datagrams prepared in one sending iteration.
 pub const MAX_BURST_PACKETS: usize = 8;
@@ -50,7 +50,8 @@ pub fn assemble_long_packet<H: HeaderSize + GetType, const N: usize>(
     pns: &mut VecDeque<PendingPacket>,
     keys: &qtls::DirectionalKeys,
     header: H,
-    journal: &ArcSendJournal,
+    journal: &ArcSentJournal,
+    recovery: &Option<Arc<DataSpace>>,
     constraints: &Constraints,
     sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
 ) -> Result<Option<PendingPacket>, Error>
@@ -66,6 +67,7 @@ where
         header,
         keys.packet.tag_len(),
         journal,
+        recovery,
         constraints,
         sources,
         |packet, records| {
@@ -87,7 +89,8 @@ pub fn assemble_1rtt_packet<const N: usize>(
     pns: &mut VecDeque<PendingPacket>,
     keys: &OneRttKeys,
     header: OneRttHeader,
-    journal: &ArcSendJournal,
+    journal: &ArcSentJournal,
+    recovery: &Option<Arc<DataSpace>>,
     constraints: &Constraints,
     sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
 ) -> Result<Option<PendingPacket>, Error> {
@@ -100,11 +103,15 @@ pub fn assemble_1rtt_packet<const N: usize>(
         header,
         keys.tag_len(),
         journal,
+        recovery,
         constraints,
         sources,
         |packet, records| {
-            let ((pn, encoded), key) =
-                keys.reserve(|generation| journal.record_pending(generation, records))?;
+            let ((pn, encoded), key) = keys.reserve(|generation| {
+                journal
+                    .record_pending(generation, records)
+                    .map_err(Into::into)
+            })?;
             finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
         },
     )
@@ -122,7 +129,8 @@ fn assemble<H: HeaderSize + GetType, const N: usize>(
     pns: &mut VecDeque<PendingPacket>,
     header: H,
     tag_len: usize,
-    journal: &ArcSendJournal,
+    journal: &ArcSentJournal,
+    recovery: &Option<Arc<DataSpace>>,
     constraints: &Constraints,
     sources: [&mut dyn for<'a> Package<&'a mut [u8]>; N],
     seal: impl FnOnce(Packet, &mut Vec<GuaranteedFrame>) -> Result<PendingPacket, PacketError>,
@@ -175,7 +183,9 @@ where
     flow_ctrl.set(constraints.flow_ctrl.get());
     if let Err(error) = result {
         for frame in send_frames.drain(..) {
-            journal.recover(&frame);
+            if let Some(data) = recovery {
+                data.recover(&frame);
+            }
         }
         buffers.push(packet.into_buffer());
         return match error {
@@ -185,6 +195,7 @@ where
     }
     match seal(packet, send_frames) {
         Ok(mut packet) => {
+            packet.recovery = recovery.clone();
             if overhead != 0 {
                 let source = pathway.local();
                 let destination = pathway.remote();
@@ -207,7 +218,9 @@ where
         }
         Err(error) => {
             for frame in send_frames.drain(..) {
-                journal.recover(&frame);
+                if let Some(data) = recovery {
+                    data.recover(&frame);
+                }
             }
             match error {
                 PacketError::Blocked(_) => Ok(None),
@@ -295,7 +308,7 @@ pub fn poll_send_with(
         let mut congestion = congestion.lock();
         let mut records = journals
             .each_ref()
-            .map(|journal| journal.as_ref().map(ArcSendJournal::lock_guard));
+            .map(|journal| journal.as_ref().map(ArcSentJournal::lock_guard));
         let result = submit(cx, pathway, &datagrams);
         datagrams.clear();
         *packets = datagrams.into_iter().map(|_| unreachable!()).collect();
@@ -305,7 +318,7 @@ pub fn poll_send_with(
                 let epoch = packet.epoch();
                 let length = packet.bytes().len() + QuicProtocol::packet_overhead(pathway);
                 let (delay, retention) = deadlines[epoch];
-                records[epoch].as_mut().unwrap().mark_sent(
+                records[epoch].as_mut().unwrap().on_sent(
                     packet.pn,
                     packet.in_flight,
                     delay,
@@ -358,7 +371,7 @@ pub fn poll_send_with(
 pub(crate) fn finish_sealing(
     result: Result<PendingPacket, PacketError>,
     pn: u64,
-    journal: &ArcSendJournal,
+    journal: &ArcSentJournal,
     records: &mut Vec<GuaranteedFrame>,
 ) -> Result<PendingPacket, PacketError> {
     match result {

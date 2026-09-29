@@ -68,7 +68,14 @@ impl ArcConnection {
         let window = self
             .parameters()
             .remote::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
-        poll_fn(|cx| self.0.transport.streams.poll_open_bi_with_limit(cx, window)).await
+        poll_fn(|cx| {
+            self.0
+                .transport
+                .data
+                .streams
+                .poll_open_bi_with_limit(cx, window)
+        })
+        .await
     }
     pub async fn open_uni_stream(&self) -> Result<Option<(StreamId, StreamWriter)>, Error> {
         let window = self
@@ -77,6 +84,7 @@ impl ArcConnection {
         poll_fn(|cx| {
             self.0
                 .transport
+                .data
                 .streams
                 .poll_open_uni_with_limit(cx, window)
         })
@@ -92,13 +100,14 @@ impl ArcConnection {
         poll_fn(|cx| {
             self.0
                 .transport
+                .data
                 .streams
                 .poll_accept_bi_with_limit(cx, window)
         })
         .await
     }
     pub async fn accept_uni_stream(&self) -> Result<(StreamId, StreamReader), Error> {
-        self.0.transport.streams.accept_uni().await
+        self.0.transport.data.streams.accept_uni().await
     }
     /// Stop all clones and streams immediately; qconnection completes Closing/Draining.
     pub fn close(self, code: VarInt, reason: &str) {

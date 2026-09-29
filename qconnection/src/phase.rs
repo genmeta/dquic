@@ -1,20 +1,22 @@
 //! Shared sending material. Each path reads the current phase for every burst.
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    sync::{Arc, Mutex, MutexGuard, RwLock},
+    time::Duration,
+};
 
 use qbase::{
     Epoch,
     cid::{ArcCidCell, ConnectionId},
     error::{ErrorKind, QuicError},
-    frame::io::SendFrame,
     net::tx::ArcSendWakers,
     param::ParameterId,
     role::Role,
     sid::handy::ConsistentConcurrency,
+    util::IndexDeque,
 };
 use qtransport::{
-    GuaranteedFrame,
     keys::{ArcKeys, ArcOneRttKeys},
-    space::{Space, Spaces},
+    space::{DataSpace, Space, Spaces},
     transport::Transport,
 };
 
@@ -30,6 +32,7 @@ pub struct InitialPhase {
     pub odcid: ConnectionId,
     dcid: Mutex<ConnectionId>,
     pub reliable_frames: ArcReliableFrames,
+    trackers: Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>,
     pub(crate) terminator: ArcTerminator,
     upgrade_wakers: ArcSendWakers,
 }
@@ -49,8 +52,9 @@ impl InitialPhase {
         let initial = Arc::new(Space::new(
             Epoch::Initial,
             ArcKeys::new(Arc::new(keys)),
-            |_| {},
         ));
+        let mut trackers = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
+        trackers.push_back(initial.clone()).expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
         Self {
             initial,
@@ -58,6 +62,7 @@ impl InitialPhase {
             odcid,
             dcid: Mutex::new(odcid),
             reliable_frames,
+            trackers: Arc::new(RwLock::new(trackers)),
             terminator,
             upgrade_wakers: ArcSendWakers::default(),
         }
@@ -75,6 +80,7 @@ pub struct HandshakePhase {
     pub scid: ConnectionId,
     dcid: Mutex<ConnectionId>,
     pub reliable_frames: ArcReliableFrames,
+    trackers: Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>,
     pub(crate) terminator: ArcTerminator,
     upgrade_wakers: ArcSendWakers,
 }
@@ -89,17 +95,26 @@ impl HandshakePhase {
 pub struct MaturePhase {
     pub spaces: Spaces,
     pub scid: ConnectionId,
-    pub streams: DataStreams,
     pub flow: FlowController,
-    pub reliable_frames: ArcReliableFrames,
     pub cid_registry: CidRegistry,
     pub initial_dcid: ArcCidCell<ArcReliableFrames>,
     pub peer_cid: ConnectionId,
     pub parameters: ArcParameters,
+    trackers: Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>,
     pub(crate) terminator: ArcTerminator,
 }
 
 impl MaturePhase {
+    pub(crate) fn retire_handshake_spaces(&self) {
+        self.spaces.initial.retire();
+        self.spaces.handshake.retire();
+        self.trackers
+            .write()
+            .unwrap()
+            .drain_to(Epoch::Data as u64)
+            .for_each(drop);
+    }
+
     pub(crate) fn new(
         early: &InitialPhase,
         handshake: Arc<Space<ArcKeys>>,
@@ -157,17 +172,7 @@ impl MaturePhase {
             parameters.local(ParameterId::InitialMaxData),
             reliable_frames.clone(),
         );
-        let recover_streams = streams.clone();
-        let reliable = reliable_frames.clone();
-        let data = Arc::new(Space::<ArcOneRttKeys>::new(
-            Epoch::Data,
-            keys,
-            move |frame| match frame {
-                GuaranteedFrame::Stream(frame) => recover_streams.may_loss_data(frame),
-                GuaranteedFrame::Reliable(frame) => reliable.send_frame([frame.clone()]),
-                GuaranteedFrame::Crypto(_) => unreachable!("Space recovers CRYPTO internally"),
-            },
-        ));
+        let data = Arc::new(DataSpace::new(keys, streams, reliable_frames));
         let sender = Arc::new(Self {
             spaces: Spaces {
                 initial: early.initial.clone(),
@@ -175,22 +180,15 @@ impl MaturePhase {
                 data: data.clone(),
             },
             scid: early.scid,
-            streams: streams.clone(),
             flow: flow.clone(),
-            reliable_frames: reliable_frames.clone(),
             cid_registry,
             initial_dcid,
             peer_cid,
             parameters: parameters.clone(),
+            trackers: early.trackers.clone(),
             terminator: early.terminator.clone(),
         });
-        let transport = Arc::new(Transport::new(
-            data,
-            parameters,
-            streams,
-            flow,
-            reliable_frames,
-        ));
+        let transport = Arc::new(Transport::new(data, parameters, flow));
         Ok((sender, transport))
     }
 }
@@ -208,6 +206,59 @@ impl ConnPhase {
             Self::Initial(p) => Some(&p.upgrade_wakers),
             Self::Handshake(p) => Some(&p.upgrade_wakers),
             Self::Mature(_) => None,
+        }
+    }
+
+    pub(crate) fn trackers(&self) -> Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>> {
+        match self {
+            Self::Initial(phase) => phase.trackers.clone(),
+            Self::Handshake(phase) => phase.trackers.clone(),
+            Self::Mature(phase) => phase.trackers.clone(),
+        }
+    }
+
+    pub(crate) fn on_sent(
+        &self,
+        epoch: Epoch,
+        packets: impl IntoIterator<Item = (u64, bool)>,
+        retransmit_after: Duration,
+        retention: Duration,
+    ) {
+        let space = match self {
+            Self::Initial(phase) => &phase.initial,
+            Self::Handshake(phase) => match epoch {
+                Epoch::Initial => &phase.initial,
+                Epoch::Handshake => &phase.handshake,
+                Epoch::Data => unreachable!("Handshake has no Data space"),
+            },
+            Self::Mature(phase) => match epoch {
+                Epoch::Initial => &phase.spaces.initial,
+                Epoch::Handshake => &phase.spaces.handshake,
+                Epoch::Data => {
+                    phase
+                        .spaces
+                        .data
+                        .on_sent(packets, retransmit_after, retention);
+                    return;
+                }
+            },
+        };
+        space.on_sent(packets, retransmit_after, retention);
+    }
+
+    pub(crate) fn cancel(&self, epoch: Epoch, pn: u64) {
+        match self {
+            Self::Initial(phase) => phase.initial.cancel(pn),
+            Self::Handshake(phase) => match epoch {
+                Epoch::Initial => phase.initial.cancel(pn),
+                Epoch::Handshake => phase.handshake.cancel(pn),
+                Epoch::Data => unreachable!("Handshake has no Data space"),
+            },
+            Self::Mature(phase) => match epoch {
+                Epoch::Initial => phase.spaces.initial.cancel(pn),
+                Epoch::Handshake => phase.spaces.handshake.cancel(pn),
+                Epoch::Data => phase.spaces.data.cancel(pn),
+            },
         }
     }
 
@@ -281,12 +332,19 @@ impl ArcConnPhase {
             unreachable!("enter_handshake starts with InitialPhase")
         };
         let upgrade_wakers = initial.upgrade_wakers.clone();
+        initial
+            .trackers
+            .write()
+            .unwrap()
+            .push_back(handshake.clone())
+            .expect("Handshake epoch");
         *phase = ConnPhase::Handshake(Arc::new(HandshakePhase {
             initial: initial.initial.clone(),
             handshake,
             scid: initial.scid,
             dcid: Mutex::new(initial.dcid()),
             reliable_frames: initial.reliable_frames.clone(),
+            trackers: initial.trackers.clone(),
             terminator: initial.terminator.clone(),
             upgrade_wakers: upgrade_wakers.clone(),
         }));
@@ -295,7 +353,20 @@ impl ArcConnPhase {
     }
 
     pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
-        let previous = std::mem::replace(&mut *self.lock_guard(), ConnPhase::Mature(phase));
+        let mut current = self.lock_guard();
+        {
+            let mut trackers = phase.trackers.write().unwrap();
+            if matches!(*current, ConnPhase::Initial(_)) {
+                trackers
+                    .push_back(phase.spaces.handshake.clone())
+                    .expect("Handshake epoch");
+            }
+            trackers
+                .push_back(phase.spaces.data.clone())
+                .expect("Data epoch");
+        }
+        let previous = std::mem::replace(&mut *current, ConnPhase::Mature(phase));
+        drop(current);
         if let Some(wakers) = previous.upgrade_wakers() {
             for waker in wakers.drain() {
                 waker.wake();

@@ -133,7 +133,7 @@ pub fn parameters() -> (
 pub fn seal<H, const N: usize>(
     header: H,
     keys: &qtls::DirectionalKeys,
-    journal: &qtransport::journal::ArcSendJournal,
+    journal: &qrecovery::journal::ArcSentJournal,
     sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
 ) -> Result<BytesMut, qbase::error::Error>
 where
@@ -163,6 +163,6 @@ where
         matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), std::task::Poll::Ready(Ok(n)) if n > 0)
     );
     packet.seal()?;
-    journal.on_sent(pn.0, frames.drain(..));
+    journal.on_assembled(pn.0, None, frames.drain(..));
     Ok(buffer)
 }

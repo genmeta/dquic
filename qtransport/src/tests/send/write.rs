@@ -9,7 +9,7 @@ use qbase::{
     },
 };
 
-use super::{constraints::Constraints, records::ArcSendJournal};
+use super::{constraints::Constraints, records::ArcSentJournal};
 pub use crate::keys::PacketError;
 use crate::{GuaranteedFrame, keys::SealPacket};
 
@@ -25,7 +25,8 @@ pub struct PendingPacket {
     pub packet_type: Type,
     pub challenge: Option<PathChallengeFrame>,
     pub response: Option<PathResponseFrame>,
-    pub(super) journal: Option<ArcSendJournal>,
+    pub(super) journal: Option<ArcSentJournal>,
+    pub(super) recovery: Option<std::sync::Arc<crate::space::DataSpace>>,
     pub pn: u64,
     pub generation: Option<u64>,
     pub content: PacketContent,
@@ -50,7 +51,11 @@ impl PendingPacket {
 impl Drop for PendingPacket {
     fn drop(&mut self) {
         if let Some(journal) = &self.journal {
-            journal.cancel(self.pn);
+            journal.cancel(self.pn, |frame| {
+                if let Some(data) = &self.recovery {
+                    data.recover(&frame);
+                }
+            });
         }
     }
 }
@@ -281,6 +286,7 @@ impl Packet {
                 challenge: self.challenge,
                 response: self.response,
                 journal: None,
+                recovery: Default::default(),
                 pn,
                 generation: None,
                 content: self.content,
@@ -311,7 +317,7 @@ mod tests {
     fn failed_sealing_leaves_journal_cancellation_to_the_caller() {
         let [(_client, transport, _path), _peer] = crate::tests::pair(1);
         let keys = crate::tests::keys(&transport);
-        let journal = ArcSendJournal::default();
+        let journal = ArcSentJournal::default();
         let mut packet = Packet::new(
             BytesMut::zeroed(1200),
             OneRttHeader::new(Default::default(), Default::default()),
@@ -333,7 +339,11 @@ mod tests {
             )
             .unwrap();
         let ((pn, encoded), key) = keys
-            .reserve(|generation| journal.record_pending(generation, &mut frames))
+            .reserve(|generation| {
+                journal
+                    .record_pending(generation, &mut frames)
+                    .map_err(Into::into)
+            })
             .unwrap();
         let result = packet.seal(&key, pn, encoded);
         assert!(result.is_err());
@@ -346,7 +356,7 @@ mod tests {
         let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
         assert!(
             journal
-                .acknowledge(&ack, |_| panic!("failed packet acknowledged"))
+                .on_acked(&ack, |_| panic!("failed packet acknowledged"))
                 .is_err()
         );
         assert_eq!(journal.record_pending(0, &mut frames).unwrap().0, 1);

@@ -49,9 +49,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
         pathway,
         Role::Client,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|feedback| Arc::new(feedback) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     path.client_handshaking();
     let watchdog = std::thread::spawn({
@@ -87,9 +85,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
         ),
         Role::Client,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     path.client_handshaking();
     path.decide(true);
@@ -108,8 +104,12 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
     let header =
         LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
     let mut buffer = [0; 128];
-    let mut packet =
-        Packet::new(header, (2, qbase::packet::PacketNumber::U8(2)), &mut buffer[..]).unwrap();
+    let mut packet = Packet::new(
+        header,
+        (2, qbase::packet::PacketNumber::U8(2)),
+        &mut buffer[..],
+    )
+    .unwrap();
     let mut frames = Vec::new();
     assert!(matches!(
         packet.assemble(
@@ -141,7 +141,6 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let handshake = Arc::new(Space::new(
         Epoch::Handshake,
         ArcKeys::new(Arc::new(keys(false))),
-        |_| {},
     ));
     handshake
         .crypto
@@ -161,9 +160,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         pathway,
         Role::Client,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|feedback| Arc::new(feedback) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     path.client_handshaking();
     path.decide(true);
@@ -187,7 +184,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     assert_eq!(pns[Epoch::Handshake].len(), 1);
     assert!(frames.is_empty());
     let mut recovered = Vec::new();
-    for &(index, pn) in &pns[Epoch::Initial] {
+    for &PendingPacket { index, pn, .. } in &pns[Epoch::Initial] {
         let ParsedPacket::Data(parsed) = PacketReader::new(datagrams[index].clone(), 8)
             .next()
             .unwrap()
@@ -242,7 +239,6 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     phase.enter_handshake(Arc::new(Space::new(
                         Epoch::Handshake,
                         initial.initial.keys.clone(),
-                        |_| {},
                     )));
                 }
                 let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
@@ -254,9 +250,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     ),
                     role,
                     idle.timer(),
-                    paths
-                        .feedback()
-                        .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+                    paths.phase().get().trackers(),
                 ));
                 path.validate();
                 match selected {
@@ -338,7 +332,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
         );
         let space = initial.initial.clone();
         space.crypto.writer().write_all(b"hello").await.unwrap();
-        let handshake = Space::new(Epoch::Handshake, space.keys.clone(), |_| {});
+        let handshake = Space::new(Epoch::Handshake, space.keys.clone());
         handshake
             .crypto
             .writer()
@@ -358,9 +352,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
             ),
             Role::Client,
             idle.timer(),
-            paths
-                .feedback()
-                .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+            paths.phase().get().trackers(),
         ));
         let mut datagrams = std::array::from_fn::<_, 3, _>(|_| BytesMut::new());
         let mut frames = Vec::new();
@@ -435,10 +427,10 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
         assert!(collector.burst.frames.is_empty());
         assert_eq!(collector.burst.pns[Epoch::Initial].len(), 1);
         assert_eq!(collector.burst.pns[Epoch::Handshake].len(), 1);
-        let pn = collector.burst.pns[Epoch::Handshake][0].1;
+        let pn = collector.burst.pns[Epoch::Handshake][0].pn;
         assert!(
             handshake
-                .send_journal
+                .sent_journal
                 .lock_guard()
                 .frames(pn)
                 .any(|frame| matches!(frame, Frame::Crypto(_, ())))
@@ -583,9 +575,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
         pathway,
         Role::Server,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|feedback| Arc::new(feedback) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
 
     path.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
@@ -662,9 +652,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
             ),
             Role::Client,
             idle.timer(),
-            paths
-                .feedback()
-                .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+            paths.phase().get().trackers(),
         ));
 
         path.client_handshaking();
@@ -765,9 +753,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         ),
         Role::Server,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     path.validate();
     path.decide(true);
@@ -793,17 +779,17 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         Pin::new(&mut collector).poll(&mut cx),
         Poll::Ready(Ok(1))
     ));
-    let pn = collector.burst.pns[Epoch::Initial][0].1;
+    let pn = collector.burst.pns[Epoch::Initial][0].pn;
     assert!(
         space
-            .send_journal
+            .sent_journal
             .lock_guard()
             .frames(pn)
             .any(|frame| matches!(frame, Frame::Close(_)))
     );
     assert!(
         space
-            .send_journal
+            .sent_journal
             .lock_guard()
             .frames(pn)
             .all(|frame| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
@@ -929,7 +915,6 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
     let handshake = Arc::new(Space::new(
         Epoch::Handshake,
         ArcKeys::new(Arc::new(keys(true))),
-        |_| {},
     ));
     let (mature, _) = crate::MaturePhase::new(
         &initial,
@@ -1030,6 +1015,94 @@ fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"client00"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
+    let (initial, mature) = mature_server_phase();
+    let phase = crate::ArcConnPhase::initial(initial);
+    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let paths = Paths::new(Role::Server, phase.clone(), idle.clone());
+    let path = Arc::new(Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:34101".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:34102".parse().unwrap()),
+        ),
+        Role::Server,
+        idle.timer(),
+        phase.get().trackers(),
+    ));
+    path.validate();
+    path.decide(true);
+    let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
+    let mut frames = Vec::new();
+    let mut pns = std::array::from_fn(|_| Vec::new());
+
+    for epoch in [Epoch::Handshake, Epoch::Data] {
+        let (crypto, journal) = if epoch == Epoch::Handshake {
+            phase.enter_handshake(mature.spaces.handshake.clone());
+            (
+                &mature.spaces.handshake.crypto,
+                &mature.spaces.handshake.sent_journal,
+            )
+        } else {
+            phase.enter_mature(mature.clone());
+            mature.retire_handshake_spaces();
+            path.handshake_confirmed();
+            (&mature.spaces.data.crypto, &mature.spaces.data.sent_journal)
+        };
+        let mut sent = Vec::new();
+        for _ in 0..4 {
+            crypto.writer().write_all(b"crypto").await.unwrap();
+            burst(
+                &path.cc,
+                &path.anti_amplifier,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            )
+            .collect(&paths, &path, phase.get().dcid())
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+            assert_eq!(pns[epoch].len(), 1);
+            let PendingPacket { index, pn, .. } = pns[epoch][0];
+            journal.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+            path.cc
+                .on_pkt_sent(epoch, pn, true, datagrams[index].len(), true, None);
+            sent.push(pn);
+            for entries in &mut pns {
+                entries.clear();
+            }
+        }
+        // Three later packets prove the first one lost. CC must call the newly attached space.
+        let ack = qbase::frame::AckFrame::new(
+            sent[3].try_into().unwrap(),
+            0u32.into(),
+            0u32.into(),
+            vec![],
+            None,
+        );
+        path.cc.on_ack_rcvd(epoch, &ack);
+        burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        )
+        .collect(&paths, &path, phase.get().dcid())
+        .now_or_never()
+        .expect("loss must make the original CRYPTO range sendable")
+        .unwrap();
+        assert_eq!(pns[epoch].len(), 1);
+        let records = journal.lock_guard();
+        assert!(records.frames(pns[epoch][0].pn).any(|frame| {
+            matches!(frame, Frame::Crypto(frame, _) if frame.offset() == 0 && frame.len() == 6)
+        }));
+        for entries in &mut pns {
+            entries.clear();
+        }
+    }
+}
 #[tokio::test]
 async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let (initial, mature) = mature_server_phase();
@@ -1051,9 +1124,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         Role::Server,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     path.validate();
     path.decide(true);
@@ -1077,9 +1148,9 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     for epoch in Epoch::EPOCHS {
         assert_eq!(pns[epoch].len(), 1);
     }
-    assert_eq!(pns[Epoch::Initial][0].0, 0);
-    assert_eq!(pns[Epoch::Handshake][0].0, 1);
-    assert_eq!(pns[Epoch::Data][0].0, 2);
+    assert_eq!(pns[Epoch::Initial][0].index, 0);
+    assert_eq!(pns[Epoch::Handshake][0].index, 1);
+    assert_eq!(pns[Epoch::Data][0].index, 2);
     assert!(frames.is_empty());
     // Consume this burst's packet numbers before collecting the next burst.
     for entries in &mut pns {
@@ -1131,9 +1202,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         Role::Server,
         idle.timer(),
-        paths
-            .feedback()
-            .map(|f| Arc::new(f) as Arc<dyn qcongestion::Feedback>),
+        paths.phase().get().trackers(),
     ));
     waiting_path.validate();
     mature
@@ -1177,12 +1246,12 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     );
     assert!(pns[Epoch::Initial].is_empty());
     assert!(pns[Epoch::Handshake].is_empty());
-    let pn = pns[Epoch::Data][0].1;
+    let pn = pns[Epoch::Data][0].pn;
     assert!(
         mature
             .spaces
             .data
-            .send_journal
+            .sent_journal
             .lock_guard()
             .frames(pn)
             .any(|f| matches!(f, Frame::Close(_)))
