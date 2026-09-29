@@ -64,7 +64,7 @@ pub fn client_without_alpn() -> qtls::TlsClient {
     .unwrap()
 }
 
-pub fn quic_endpoint() -> qconn::QuicEndpoint {
+pub fn quic_endpoint() -> qconnection::QuicEndpoint {
     set_roots();
     let provider = qtls::default_provider();
     let identity = qbase::endpoint::Endpoint::new(
@@ -76,7 +76,7 @@ pub fn quic_endpoint() -> qconn::QuicEndpoint {
     )
     .unwrap();
     let (client_parameters, server_parameters) = parameters();
-    let mut endpoint = qconn::QuicEndpoint::new(identity);
+    let mut endpoint = qconnection::QuicEndpoint::new(identity);
     endpoint.client_parameters = client_parameters;
     endpoint.server_parameters = server_parameters;
     endpoint
@@ -143,7 +143,7 @@ where
     use qbase::packet::assemble::Assemble;
     let mut buffer = BytesMut::with_capacity(1200);
     let pn = journal.next_pn().unwrap();
-    let packet = qconn::send::Packet::new(header, pn, &mut buffer)?;
+    let packet = qconnection::send::Packet::new(header, pn, &mut buffer)?;
     let mut limits = qbase::packet::assemble::Constraints {
         flow_ctrl: usize::MAX,
         send_quota: 1200,
@@ -152,7 +152,7 @@ where
         max_size: 1200,
         ..Default::default()
     };
-    let mut packet = qconn::send::SendingPacket {
+    let mut packet = qconnection::send::SendingPacket {
         packet,
         keys,
         limits: &mut limits,

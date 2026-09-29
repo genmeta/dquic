@@ -1,712 +1,380 @@
-mod authority;
-mod client_auth;
+//! Async views of independent TLS outputs. No packet or connection state lives here.
+mod io;
 
 use std::{
-    future::Future,
-    sync::{Arc, Mutex, MutexGuard},
-    task::{Context, Poll, Waker},
+    collections::VecDeque,
+    future::poll_fn,
+    sync::{Arc, Mutex},
+    task::{Poll, Waker},
 };
 
-pub use authority::{LocalAuthority, RemoteAuthority, SignError, VerifyError};
-pub use client_auth::{
-    AcceptAllClientAuther, ArcSendLock, AuthClient, ClientAuthorityVerifyResult,
-    ClientNameVerifyResult,
-};
-use futures::{
-    TryFutureExt,
-    future::{poll_fn, try_join4},
-    never::Never,
-};
+use bytes::{Bytes, BytesMut};
+pub(crate) use io::read_tls_to_crypto_stream;
+pub use io::{read_crypto_stream_to_tls, write_crypto};
 use qbase::{
-    Epoch,
     error::{Error, ErrorKind, QuicError},
-    packet::keys::{ArcKeys, ArcOneRttKeys, ArcZeroRttKeys, DirectionalKeys},
-    param::{ArcParameters, ClientParameters, ParameterId, ServerParameters, WriteParameters},
+    param::{ClientParameters, ServerParameters, WriteParameters},
 };
-use qrecovery::crypto::CryptoStream;
-use rustls::{
-    ClientConfig, HandshakeKind, ServerConfig, SignatureScheme,
-    client::ResolvesClientCert,
-    quic::{ClientConnection, KeyChange, ServerConnection},
-    server::{ClientHello, ResolvesServerCert},
-    sign::CertifiedKey,
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use qtls::{CryptoLevel, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
 
-use crate::{Handshake, tls::client_auth::ClientNameAuther};
-
-pub enum TlsSession {
-    Client(ClientTlsSession),
-    Server(ServerTlsSession),
-}
-
-pub const QUIC_VERSION: rustls::quic::Version = rustls::quic::Version::V1;
-
-impl TlsSession {
-    fn poll_read_hs(&mut self, cx: &mut Context, buf: &mut Vec<u8>) -> Poll<Option<KeyChange>> {
-        match match self {
-            TlsSession::Client(session) => session.tls_conn.write_hs(buf),
-            TlsSession::Server(session) => session.tls_conn.write_hs(buf),
-        } {
-            None if buf.is_empty() => {
-                match self {
-                    TlsSession::Client(session) => session.read_waker = Some(cx.waker().clone()),
-                    TlsSession::Server(session) => session.read_waker = Some(cx.waker().clone()),
-                }
-                Poll::Pending
-            }
-            key_change => Poll::Ready(key_change),
-        }
-    }
-
-    fn write_hs(&mut self, buf: &[u8]) -> Result<(), rustls::Error> {
-        match self {
-            TlsSession::Client(ClientTlsSession { tls_conn, .. }) => tls_conn.read_hs(buf)?,
-            TlsSession::Server(ServerTlsSession { tls_conn, .. }) => tls_conn.read_hs(buf)?,
-        }
-        if let Some(waker) = match self {
-            TlsSession::Client(ClientTlsSession { read_waker, .. }) => read_waker.take(),
-            TlsSession::Server(ServerTlsSession { read_waker, .. }) => read_waker.take(),
-        } {
-            waker.wake();
-        }
-        Ok(())
-    }
-
-    fn alert(&self) -> Option<rustls::AlertDescription> {
-        match self {
-            TlsSession::Client(session) => session.tls_conn.alert(),
-            TlsSession::Server(session) => session.tls_conn.alert(),
-        }
-    }
-
-    fn is_handshaking(&self) -> bool {
-        match self {
-            TlsSession::Client(session) => session.tls_conn.is_handshaking(),
-            TlsSession::Server(session) => session.tls_conn.is_handshaking(),
-        }
-    }
-
-    fn handshake_kind(&self) -> Option<HandshakeKind> {
-        match self {
-            TlsSession::Client(session) => session.tls_conn.handshake_kind(),
-            TlsSession::Server(session) => session.tls_conn.handshake_kind(),
-        }
-    }
-
-    fn is_finished(&self) -> bool {
-        !self.is_handshaking() && self.handshake_kind().is_some()
-    }
-
-    fn r#yield(&self) -> TlsHandshakeInfo {
-        const INCOMPLETE: &str = "";
-        match self {
-            TlsSession::Client(tls_session) => TlsHandshakeInfo::Client {
-                zero_rtt_accepted: tls_session.zero_rtt_accepted.expect(INCOMPLETE),
-                local_authority: tls_session.local_authority().clone(),
-                remote_authority: tls_session.remote_authority.clone().expect(INCOMPLETE),
-            },
-            TlsSession::Server(tls_session) => TlsHandshakeInfo::Server {
-                local_authority: tls_session.local_authority().clone().expect(INCOMPLETE),
-                remote_authority: tls_session.remote_authority.clone(),
-            },
-        }
-    }
-}
-
-pub struct ClientTlsSession {
-    server_name: String,
-    tls_conn: ClientConnection,
-    read_waker: Option<Waker>,
-
-    // shared with ClientCertResolver
-    local_authority: Arc<Mutex<Option<LocalAuthority>>>,
-    zero_rtt_accepted: Option<bool>,
-    remote_authority: Option<RemoteAuthority>,
-}
-
-#[derive(Debug, Clone)]
-struct ClientCertResolver {
-    client_name: Arc<str>,
-    inner: Arc<dyn ResolvesClientCert>,
-    client_authority: Arc<Mutex<Option<LocalAuthority>>>,
-}
-
-impl ResolvesClientCert for ClientCertResolver {
-    fn resolve(
-        &self,
-        root_hint_subjects: &[&[u8]],
-        sigschemes: &[SignatureScheme],
-    ) -> Option<Arc<CertifiedKey>> {
-        self.inner
-            .resolve(root_hint_subjects, sigschemes)
-            .inspect(|resolved_cert| {
-                let client_authority =
-                    LocalAuthority::new(self.client_name.clone(), resolved_cert.clone());
-                let old = self
-                    .client_authority
-                    .lock()
-                    .unwrap()
-                    .replace(client_authority);
-                assert!(
-                    old.is_none(),
-                    "unreachable: qconnection::tls::ClientCertResolver resolve only once"
-                )
-            })
-    }
-
-    fn only_raw_public_keys(&self) -> bool {
-        self.inner.only_raw_public_keys()
-    }
-
-    fn has_certs(&self) -> bool {
-        self.inner.has_certs()
-    }
-}
-
-impl ClientTlsSession {
-    pub fn init(
-        server_name: String,
-        mut tls_config: Arc<ClientConfig>,
-        client_params: &ClientParameters,
-    ) -> Result<Self, rustls::Error> {
-        let mut params_buf = Vec::with_capacity(1024);
-        params_buf.put_parameters(client_params);
-
-        let local_authority = Arc::new(Mutex::new(None));
-        // 通过注入ServerCertResolver实现CertifiedKey向上传递
-        if let Some(client_name) = client_params.try_get::<String>(ParameterId::ClientName) {
-            let tls_config = Arc::make_mut(&mut tls_config);
-            tls_config.client_auth_cert_resolver = Arc::new(ClientCertResolver {
-                client_name: client_name.into(),
-                inner: tls_config.client_auth_cert_resolver.clone(),
-                client_authority: local_authority.clone(),
-            });
-        };
-
-        let name = rustls::pki_types::ServerName::try_from(server_name.clone())
-            .map_err(|e| rustls::Error::Other(rustls::OtherError(Arc::new(e))))?;
-        let tls_conn = ClientConnection::new(tls_config, QUIC_VERSION, name, params_buf)?;
-
-        let tls_session = Self {
-            local_authority,
-            server_name,
-            tls_conn,
-            read_waker: None,
-            zero_rtt_accepted: None,
-            remote_authority: None,
-        };
-        Ok(tls_session)
-    }
-
-    fn local_authority(&self) -> MutexGuard<'_, Option<LocalAuthority>> {
-        self.local_authority.lock().expect("Poison")
-    }
-
-    #[must_use]
-    pub fn load_zero_rtt(&self) -> Option<(ServerParameters, DirectionalKeys)> {
-        match (
-            self.tls_conn.quic_transport_parameters(),
-            self.tls_conn.zero_rtt_keys(),
-        ) {
-            (Some(raw_params), Some(keys)) => {
-                let params = ServerParameters::parse_from_bytes(raw_params).ok()?;
-                Some((params, keys.into()))
-            }
-            _ => None,
-        }
-    }
-
-    fn try_process_sh(&mut self) {
-        self.remote_authority = (self.tls_conn.peer_certificates())
-            .map(|cert| RemoteAuthority::new(self.server_name.as_str().into(), Arc::from(cert)))
-    }
-
-    fn try_process_ee(&mut self, parameters: &ArcParameters) -> Result<(), Error> {
-        let Some(handshake_kind) = self.tls_conn.handshake_kind() else {
-            return Ok(());
-        };
-        let raw_params = self
-            .tls_conn
-            .quic_transport_parameters()
-            .expect("Parameters must be known at this point");
-        let mut parameters = parameters.lock_guard()?;
-        let remebered = parameters.remembered().cloned();
-        let params = ServerParameters::parse_from_bytes(raw_params)?;
-        self.zero_rtt_accepted = Some(
-            matches!(remebered, Some(remembered) if remembered.is_0rtt_accepted(&params))
-                && matches!(handshake_kind, rustls::HandshakeKind::Resumed),
-        );
-        parameters.recv_remote_params(params)?;
-        Ok(())
-    }
-}
-
-impl Drop for ClientTlsSession {
-    fn drop(&mut self) {
-        if let Some(read_waker) = self.read_waker.take() {
-            read_waker.wake();
-        }
-    }
-}
-
-pub struct ServerTlsSession {
-    client_auther: Box<dyn AuthClient>,
-    tls_conn: ServerConnection,
-    read_waker: Option<Waker>,
-
-    // shared with ServerCertResolver
-    local_authority: Arc<Mutex<Option<LocalAuthority>>>,
-    client_name: Option<Arc<str>>,
-    send_lock: ArcSendLock,
-    remote_authority: Option<RemoteAuthority>,
-}
-
-#[derive(Debug, Clone)]
-struct ServerCertResolver {
-    inner: Arc<dyn ResolvesServerCert>,
-    server_authority: Arc<Mutex<Option<LocalAuthority>>>,
-}
-
-impl ResolvesServerCert for ServerCertResolver {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let server_name = client_hello.server_name()?.into();
-        self.inner.resolve(client_hello).inspect(|resolved_cert| {
-            let server_authority = LocalAuthority::new(server_name, resolved_cert.clone());
-            let old = self
-                .server_authority
-                .lock()
-                .unwrap()
-                .replace(server_authority);
-            assert!(
-                old.is_none(),
-                "unreachable: qconnection::tls::ServerCertResolver resolve only once"
-            )
-        })
-    }
-
-    fn only_raw_public_keys(&self) -> bool {
-        self.inner.only_raw_public_keys()
-    }
-}
-
-impl ServerTlsSession {
-    pub fn init(
-        mut tls_config: Arc<ServerConfig>,
-        server_params: &ServerParameters,
-        client_auther: Box<dyn AuthClient>,
-    ) -> Result<Self, rustls::Error> {
-        let mut params_buf = Vec::with_capacity(1024);
-        params_buf.put_parameters(server_params);
-
-        let local_authority = Arc::new(Mutex::new(None));
-        // 通过注入ServerCertResolver实现CertifiedKey向上传递
-        {
-            let tls_config = Arc::make_mut(&mut tls_config);
-            tls_config.cert_resolver = Arc::new(ServerCertResolver {
-                inner: tls_config.cert_resolver.clone(),
-                server_authority: local_authority.clone(),
-            });
-        };
-        let tls_conn = ServerConnection::new(tls_config, QUIC_VERSION, params_buf)?;
-
-        let tls_session = Self {
-            client_auther,
-            tls_conn,
-            read_waker: None,
-            local_authority,
-            client_name: None,
-            send_lock: ArcSendLock::new(),
-            remote_authority: None,
-        };
-        Ok(tls_session)
-    }
-
-    pub fn send_lock(&self) -> &ArcSendLock {
-        &self.send_lock
-    }
-
-    fn local_authority(&self) -> MutexGuard<'_, Option<LocalAuthority>> {
-        self.local_authority.lock().expect("Poison")
-    }
-
-    pub fn server_name(&self) -> Option<String> {
-        Some(self.local_authority().as_ref()?.name().to_owned())
-    }
-
-    fn try_process_ch(
-        &mut self,
-        parameters: &ArcParameters,
-        zero_rtt_keys: &ArcZeroRttKeys,
-    ) -> Result<(), Error> {
-        let client_params = ClientParameters::parse_from_bytes(
-            self.tls_conn
-                .quic_transport_parameters()
-                .expect("Client parameters must be present in ClientHello"),
-        )?;
-
-        let client_name = client_params.try_get::<String>(ParameterId::ClientName);
-
-        let server_authority = self.local_authority().clone().ok_or_else(|| {
-            QuicError::with_default_fty(ErrorKind::ConnectionRefused, "missing SNI in client hello")
-        })?;
-
-        match self
-            .client_auther
-            .verify_client_name(&server_authority, client_name.as_deref())
-        {
-            ClientNameVerifyResult::Accept => {
-                self.send_lock.grant_permit();
-                tracing::debug!(
-                    target: "dquic",
-                    client_name = ?client_name.as_deref(),
-                    "client name verification accepted"
-                );
-                self.client_name = client_name.map(Arc::from);
-                parameters.lock_guard()?.recv_remote_params(client_params)?;
-
-                match self.tls_conn.zero_rtt_keys() {
-                    Some(keys) => zero_rtt_keys.set_keys(keys.into()),
-                    None => _ = zero_rtt_keys.invalid(),
-                }
-
-                Ok(())
-            }
-            ClientNameVerifyResult::Refuse(reason) => {
-                self.send_lock.grant_permit();
-                tracing::debug!(
-                    target: "dquic",
-                    server_name = %server_authority.name(),
-                    client_name = ?client_name.as_deref(),
-                    ?reason,
-                    "client name verification failed, refusing connection"
-                );
-                Err(Error::Quic(QuicError::with_default_fty(
-                    ErrorKind::ConnectionRefused,
-                    reason,
-                )))
-            }
-            ClientNameVerifyResult::SilentRefuse(reason) => {
-                tracing::debug!(
-                    target: "dquic",
-                    server_name = %server_authority.name(),
-                    client_name = ?client_name.as_deref(),
-                    ?reason,
-                    "client name verification failed, refusing connection silently"
-                );
-                Err(Error::Quic(QuicError::with_default_fty(
-                    ErrorKind::ConnectionRefused,
-                    "",
-                )))
-            }
-        }
-    }
-
-    fn try_process_cert(&mut self) -> Result<(), Error> {
-        let Some(client_name) = self.client_name.as_ref() else {
-            return Ok(());
-        };
-        let Some(client_cert) = self.tls_conn.peer_certificates().map(Arc::from) else {
-            return Ok(());
-        };
-
-        let client_authority = RemoteAuthority::new(client_name.clone(), client_cert);
-
-        let server_authority = self
-            .local_authority()
-            .clone()
-            .expect("Server name must be known at this point");
-
-        match (ClientNameAuther, &self.client_auther)
-            .verify_client_authority(&server_authority, &client_authority)
-        {
-            ClientAuthorityVerifyResult::Accept => {
-                self.remote_authority = Some(client_authority);
-                Ok(())
-            }
-            ClientAuthorityVerifyResult::Refuse(reason) => {
-                tracing::debug!(
-                    target: "dquic",
-                    server_name = %server_authority.name(),
-                    ?self.client_name,
-                    ?reason,
-                    "client certificate verification failed, refusing connection"
-                );
-                Err(Error::Quic(QuicError::with_default_fty(
-                    ErrorKind::ConnectionRefused,
-                    reason,
-                )))
-            }
-        }
-    }
-}
-
-impl Drop for ServerTlsSession {
-    fn drop(&mut self) {
-        if let Some(read_waker) = self.read_waker.take() {
-            read_waker.wake();
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum TlsHandshakeInfo {
-    Client {
-        local_authority: Option<LocalAuthority>,
-        remote_authority: RemoteAuthority,
-        zero_rtt_accepted: bool,
-    },
-    Server {
-        local_authority: LocalAuthority,
-        remote_authority: Option<RemoteAuthority>,
-    },
-}
-
-impl TlsHandshakeInfo {
-    pub fn zero_rtt_accepted(&self) -> Option<bool> {
-        match self {
-            TlsHandshakeInfo::Client {
-                zero_rtt_accepted, ..
-            } => Some(*zero_rtt_accepted),
-            TlsHandshakeInfo::Server { .. } => None,
-        }
-    }
-}
-
-enum InfoState {
-    Demand(Vec<Waker>),
-    Ready(Arc<TlsHandshakeInfo>),
-}
-
-impl InfoState {
-    fn set(&mut self, info: Arc<TlsHandshakeInfo>) {
-        // wakers woken in drop
-        *self = Self::Ready(info);
-    }
-
-    fn poll_get(&mut self, cx: &mut Context) -> Poll<Arc<TlsHandshakeInfo>> {
-        match self {
-            InfoState::Demand(wakers) => {
-                wakers.push(cx.waker().clone());
-                Poll::Pending
-            }
-            InfoState::Ready(tls_handshake_info) => Poll::Ready(tls_handshake_info.clone()),
-        }
-    }
-
-    fn get(&self) -> Option<&Arc<TlsHandshakeInfo>> {
-        match self {
-            InfoState::Demand(..) => None,
-            InfoState::Ready(tls_handshake_info) => Some(tls_handshake_info),
-        }
-    }
-}
-
-impl Default for InfoState {
-    fn default() -> Self {
-        Self::Demand(vec![])
-    }
-}
-
-impl Drop for InfoState {
-    fn drop(&mut self) {
-        if let Self::Demand(wakers) = self {
-            for waker in wakers.drain(..) {
-                waker.wake();
-            }
-        }
-    }
-}
-
-pub struct TlsHandshake {
-    session: TlsSession,
-    info: InfoState,
-}
-
+/// One reader for CRYPTO output, and one growing coroutine for handshake results.
 #[derive(Clone)]
-pub struct ArcTlsHandshake(Arc<Mutex<Result<TlsHandshake, Error>>>);
+pub struct TlsContext(Arc<Mutex<Result<Tls, Error>>>);
 
-impl ArcTlsHandshake {
-    pub fn new(session: TlsSession) -> ArcTlsHandshake {
-        Self(Arc::new(Mutex::new(Ok(TlsHandshake {
-            session,
-            info: Default::default(),
-        }))))
+enum Backend {
+    Handshake(Box<TlsHandshake>),
+    Established(Box<qtls::EstablishedTls>),
+    // Used only while moving the completed handshake into Established under the lock.
+    Closed,
+}
+
+struct Tls {
+    backend: Backend,
+    messages: VecDeque<(CryptoLevel, Bytes)>,
+    keys: VecDeque<InstalledKeys>,
+    client_hello: Option<(Option<Arc<str>>, Bytes)>,
+    server_parameters: Option<Bytes>,
+    summary: Option<HandshakeSummary>,
+    pending_bytes: usize,
+    max_pending_bytes: usize,
+    message_waker: Option<Waker>,
+    level_wakers: [Option<Waker>; 3],
+    key_waker: Option<Waker>,
+    client_hello_waker: Option<Waker>,
+    server_parameters_waker: Option<Waker>,
+    finished_waker: Option<Waker>,
+}
+
+impl TlsContext {
+    pub fn client(
+        endpoint: &qtls::TlsClient,
+        server_name: qtls::ServerName<'static>,
+        parameters: &ClientParameters,
+    ) -> Result<Self, Error> {
+        let max_pending_bytes = endpoint.max_flight_bytes();
+        let mut encoded = BytesMut::new();
+        encoded.put_parameters(parameters);
+        let tls = endpoint
+            .start(qtls::ClientStart {
+                server_name,
+                quic_version: qtls::QuicVersion::V1,
+                local_transport_parameters: encoded.freeze(),
+            })
+            .map_err(tls_error)?;
+        Self::new(tls, max_pending_bytes)
     }
 
-    fn state(&self) -> MutexGuard<'_, Result<TlsHandshake, Error>> {
-        self.0.lock().unwrap()
+    pub fn server(
+        endpoint: &qtls::TlsServer,
+        version: qtls::QuicVersion,
+        parameters: Bytes,
+        hello: qtls::incoming::ClientHello,
+    ) -> Result<(Self, Arc<ClientParameters>), Error> {
+        let client_parameters = Arc::new(ClientParameters::parse_from_bytes(
+            hello.transport_parameters(),
+        )?);
+        let tls = endpoint.start(version, parameters).map_err(tls_error)?;
+        let context = Self::new(tls, endpoint.max_flight_bytes())?;
+        context.write_msg(CryptoLevel::Initial, hello.encoded())?;
+        if let Ok(tls) = context.0.lock().unwrap().as_mut() {
+            tls.client_hello = None;
+        }
+        Ok((context, client_parameters))
     }
 
-    async fn read_hs(&self, buf: &mut Vec<u8>) -> Result<Option<KeyChange>, Error> {
+    /// Wrap a configured client or server backend. Server endpoint selection is external.
+    /// The byte limit bounds TLS output waiting for the CRYPTO writer, independently of
+    /// the backend's limits on received handshake messages and individual output flights.
+    pub fn new(tls: TlsHandshake, max_pending_bytes: usize) -> Result<Self, Error> {
+        let mut tls = Tls {
+            backend: Backend::Handshake(Box::new(tls)),
+            messages: VecDeque::new(),
+            keys: VecDeque::new(),
+            client_hello: None,
+            server_parameters: None,
+            summary: None,
+            pending_bytes: 0,
+            max_pending_bytes,
+            message_waker: None,
+            level_wakers: [None, None, None],
+            key_waker: None,
+            client_hello_waker: None,
+            server_parameters_waker: None,
+            finished_waker: None,
+        };
+        tls.collect()?;
+        Ok(Self(Arc::new(Mutex::new(Ok(tls)))))
+    }
+
+    /// Read output bytes, not necessarily one complete TLS message. Cancellation is safe.
+    pub async fn read_msg(&self) -> Result<(CryptoLevel, Bytes), Error> {
         poll_fn(|cx| {
-            let mut tls_handshake = self.state();
-            match tls_handshake.as_mut() {
-                Ok(state) => state.session.poll_read_hs(cx, buf).map(Ok),
-                Err(e) => Poll::Ready(Err(e.clone())),
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some((level, bytes)) = tls.messages.pop_front() {
+                tls.pending_bytes -= bytes.len();
+                Poll::Ready(Ok((level, bytes)))
+            } else {
+                tls.message_waker = Some(cx.waker().clone());
+                Poll::Pending
             }
         })
         .await
     }
 
-    fn write_hs(&self, buf: &[u8]) -> Result<(), Error> {
-        let mut tls_handshake = self.state();
-        let tls_handshake = tls_handshake.as_mut().map_err(|e| e.clone())?;
-        match tls_handshake.session.write_hs(buf) {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let error_kind = match tls_handshake.session.alert() {
-                    Some(alert) => ErrorKind::Crypto(alert.into()),
-                    None => ErrorKind::ProtocolViolation,
-                };
-                Err(Error::Quic(QuicError::with_default_fty(
-                    error_kind,
-                    format!("tls error: {error}"),
-                )))
-            }
-        }
-    }
-
-    pub fn info(
-        &self,
-    ) -> impl Future<Output = Result<Arc<TlsHandshakeInfo>, Error>> + Unpin + use<'_> {
+    pub(crate) async fn read_msg_at(&self, level: CryptoLevel) -> Result<Bytes, Error> {
         poll_fn(|cx| {
-            let mut tls_handshake = self.state();
-            match tls_handshake.as_mut() {
-                Ok(state) => state.info.poll_get(cx).map(Ok),
-                Err(e) => Poll::Ready(Err(e.clone())),
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(index) = tls
+                .messages
+                .iter()
+                .position(|(message_level, _)| *message_level == level)
+            {
+                let (_, bytes) = tls.messages.remove(index).unwrap();
+                tls.pending_bytes -= bytes.len();
+                Poll::Ready(Ok(bytes))
+            } else {
+                tls.level_wakers[level_index(level)] = Some(cx.waker().clone());
+                Poll::Pending
             }
         })
+        .await
     }
 
-    pub fn is_finished(&self) -> Result<bool, Error> {
-        let tls_handshake = self.state();
-        match tls_handshake.as_ref() {
-            Ok(state) => Ok(state.session.is_finished()),
-            Err(e) => Err(e.clone()),
+    pub(crate) fn try_read_msg_at(&self, level: CryptoLevel) -> Result<Option<Bytes>, Error> {
+        let mut guard = self.0.lock().unwrap();
+        let tls = guard.as_mut().map_err(|error| error.clone())?;
+        let Some(index) = tls
+            .messages
+            .iter()
+            .position(|(message_level, _)| *message_level == level)
+        else {
+            return Ok(None);
+        };
+        let (_, bytes) = tls.messages.remove(index).unwrap();
+        tls.pending_bytes -= bytes.len();
+        Ok(Some(bytes))
+    }
+
+    /// Feed contiguous CRYPTO input and publish all resulting facts without awaiting consumers.
+    pub fn write_msg(&self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+        let mut guard = self.0.lock().unwrap();
+        let tls = guard.as_mut().map_err(|error| error.clone())?;
+        let result = tls.write(level, bytes);
+        if let Err(error) = &result {
+            tls.wake_all();
+            *guard = Err(error.clone());
         }
+        result
     }
 
-    pub fn server_name(&self) -> Result<Option<String>, Error> {
-        let tls_handshake = self.state();
-        let tls_handshake = tls_handshake.as_ref().map_err(|error| error.clone())?;
-        Ok(match &tls_handshake.session {
-            TlsSession::Client(session) => Some(session.server_name.clone()),
-            TlsSession::Server(session) => session.server_name(),
+    /// Wait for server parameters in EncryptedExtensions, after installing Handshake keys.
+    pub async fn read_server_parameters(&self) -> Result<ServerParameters, Error> {
+        let bytes = poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(parameters) = tls.server_parameters.take() {
+                Poll::Ready(Ok(parameters))
+            } else {
+                tls.server_parameters_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
         })
+        .await?;
+        Ok(ServerParameters::parse_from_bytes(&bytes)?)
     }
 
-    pub fn on_conn_error(&self, error: &Error) {
-        *self.state() = Err(error.clone())
-    }
-
-    fn try_process_tls_message(
-        &self,
-        parameters: &ArcParameters,
-        zero_rtt_keys: &ArcZeroRttKeys,
-    ) -> Result<Option<Arc<TlsHandshakeInfo>>, Error> {
-        let mut state = self.state();
-        let tls_handshake = state.as_mut().map_err(|e| e.clone())?;
-
-        match &mut tls_handshake.session {
-            TlsSession::Client(session) => {
-                if session.remote_authority.is_none() {
-                    session.try_process_sh();
-                }
-                if !parameters.lock_guard()?.is_remote_params_received() {
-                    session.try_process_ee(parameters)?;
-                }
+    /// The caller has already selected/configured the server TLS endpoint.
+    /// A missing SNI is preserved for the caller's endpoint policy to decide.
+    pub async fn read_client_hello(&self) -> Result<(Option<Arc<str>>, ClientParameters), Error> {
+        let (name, bytes) = poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(hello) = tls.client_hello.take() {
+                Poll::Ready(Ok(hello))
+            } else {
+                tls.client_hello_waker = Some(cx.waker().clone());
+                Poll::Pending
             }
-            TlsSession::Server(session) => {
-                if !parameters.lock_guard()?.is_remote_params_received() {
-                    session.try_process_ch(parameters, zero_rtt_keys)?;
+        })
+        .await?;
+        Ok((name, ClientParameters::parse_from_bytes(&bytes)?))
+    }
+
+    /// Consume the next key installation; cancelling a pending wait consumes nothing.
+    pub async fn read_keys(&self) -> Result<InstalledKeys, Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(keys) = tls.keys.pop_front() {
+                Poll::Ready(Ok(keys))
+            } else {
+                tls.key_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Consume the authenticated result. This does not wait for QUIC HANDSHAKE_DONE.
+    pub async fn finished(&self) -> Result<HandshakeSummary, Error> {
+        poll_fn(|cx| {
+            let mut guard = self.0.lock().unwrap();
+            let tls = match guard.as_mut() {
+                Ok(tls) => tls,
+                Err(error) => return Poll::Ready(Err(error.clone())),
+            };
+            if let Some(summary) = tls.summary.take() {
+                Poll::Ready(Ok(summary))
+            } else {
+                tls.finished_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Wake every TLS consumer and release queued bytes and key material.
+    pub fn on_error(&self, error: Error) {
+        let mut guard = self.0.lock().unwrap();
+        if let Ok(tls) = guard.as_mut() {
+            tls.wake_all();
+            *guard = Err(error);
+        }
+    }
+}
+
+impl Tls {
+    fn write(&mut self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+        match &mut self.backend {
+            Backend::Handshake(tls) => tls.receive_crypto(level, bytes).map_err(tls_error)?,
+            Backend::Established(tls) => {
+                if level != CryptoLevel::OneRtt {
+                    return Err(QuicError::with_default_fty(
+                        ErrorKind::ProtocolViolation,
+                        "post-handshake CRYPTO at an earlier encryption level",
+                    )
+                    .into());
                 }
-                if session.remote_authority.is_none() {
-                    session.try_process_cert()?;
+                return tls.receive_post_handshake(bytes).map_err(tls_error);
+            }
+            Backend::Closed => unreachable!("backend is moved under the context lock"),
+        }
+        self.collect()
+    }
+
+    fn collect(&mut self) -> Result<(), Error> {
+        while let Backend::Handshake(tls) = &mut self.backend {
+            let Some(event) = tls.next_event() else { break };
+            match event {
+                TlsEvent::WriteCrypto { level, bytes } => {
+                    if bytes.len() > self.max_pending_bytes - self.pending_bytes {
+                        return Err(QuicError::with_default_fty(
+                            ErrorKind::CryptoBufferExceeded,
+                            "pending TLS output exceeds its byte limit",
+                        )
+                        .into());
+                    }
+                    self.pending_bytes += bytes.len();
+                    self.messages.push_back((level, bytes));
+                    if let Some(waker) = self.message_waker.take() {
+                        waker.wake();
+                    }
+                    if let Some(waker) = self.level_wakers[level_index(level)].take() {
+                        waker.wake();
+                    }
                 }
+                TlsEvent::InstallKeys(keys) => {
+                    self.keys.push_back(keys);
+                    if let Some(waker) = self.key_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::ClientHello {
+                    server_name,
+                    transport_parameters,
+                } => {
+                    self.client_hello = Some((server_name, transport_parameters));
+                    if let Some(waker) = self.client_hello_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::ServerTransportParameters(parameters) => {
+                    self.server_parameters = Some(parameters);
+                    if let Some(waker) = self.server_parameters_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::HandshakeComplete(summary) => {
+                    self.summary = Some(summary);
+                    if let Some(waker) = self.finished_waker.take() {
+                        waker.wake();
+                    }
+                }
+                TlsEvent::Alert(alert) => return Err(tls_error(qtls::TlsError::Alert(alert))),
             }
         }
-
-        if tls_handshake.session.is_finished() && tls_handshake.info.get().is_none() {
-            let info = Arc::new(tls_handshake.session.r#yield());
-            tracing::debug!(target: "dquic", "tls handshake finished");
-            tls_handshake.info.set(info.clone());
-            return Ok(Some(info));
+        if matches!(&self.backend, Backend::Handshake(tls) if tls.is_complete()) {
+            let Backend::Handshake(tls) = std::mem::replace(&mut self.backend, Backend::Closed)
+            else {
+                unreachable!()
+            };
+            self.backend = Backend::Established(Box::new(tls.finish().expect("completed TLS")));
         }
-
-        Ok(None)
+        Ok(())
     }
 
-    pub fn start(
-        self,
-        parameters: ArcParameters,
-        quic_handshake: Handshake,
-        crypto_streams: [CryptoStream; 3],
-        (handshake_keys, zero_rtt_keys, one_rtt_keys): (ArcKeys, ArcZeroRttKeys, ArcOneRttKeys),
-        on_handshake_conmplete: impl FnOnce(&TlsHandshakeInfo) -> Result<(), Error> + Send + 'static,
-    ) -> impl futures::Future<Output = Result<Never, Error>> + Send + 'static {
-        let mut on_handshake_conmplete = Some(on_handshake_conmplete);
-
-        let crypto_read_task = |epoch: Epoch| {
-            let tls_handshake = self.clone();
-            let mut stream_reader = crypto_streams[epoch].reader();
-            async move {
-                let mut buf = [0; 2048];
-                while let Ok(read) = stream_reader.read(&mut buf).await {
-                    tls_handshake.write_hs(&buf[..read])?;
-                }
-                Result::<_, Error>::Ok(())
-            }
-        };
-
-        let [initial_read_task, handshake_read_task, data_read_task] =
-            Epoch::EPOCHS.map(|epoch: Epoch| crypto_read_task(epoch));
-
-        let mut crypto_writers =
-            Epoch::EPOCHS.map(|epoch: Epoch| crypto_streams[epoch].writer().clone());
-
-        let crypto_write_task = async move {
-            let mut buf = Vec::with_capacity(2048);
-            let mut cur_epoch = Epoch::Initial;
-            loop {
-                let key_change = self.read_hs(&mut buf).await?;
-                if !buf.is_empty() {
-                    // error: crypto buffer offset overflow
-                    (crypto_writers[cur_epoch].write_all(&buf).await).map_err(|e| {
-                        QuicError::with_default_fty(ErrorKind::Internal, format!("{e:?}"))
-                    })?;
-                    buf.clear();
-                }
-                match key_change {
-                    Some(KeyChange::Handshake { keys }) => {
-                        handshake_keys.set_keys(keys.into());
-                        quic_handshake.got_handshake_key();
-                        cur_epoch = Epoch::Handshake;
-                    }
-                    Some(KeyChange::OneRtt { keys, next }) => {
-                        one_rtt_keys.set_keys(keys, next);
-                        cur_epoch = Epoch::Data;
-                    }
-                    None => {}
-                };
-                if let Some(info) = self.try_process_tls_message(&parameters, &zero_rtt_keys)? {
-                    (on_handshake_conmplete.take().expect("TLS complete twice"))(&info)?;
-                }
-            }
-        };
-
-        // rustc: error[E0282]: type annotations needed
-        let crypto_write_task = async move {
-            let result: Result<Never, Error> = crypto_write_task.await;
-            result
-        };
-
-        try_join4(
-            initial_read_task,
-            handshake_read_task,
-            data_read_task,
-            crypto_write_task,
-        )
-        .map_ok(|(_, _, _, never)| never)
+    fn wake_all(&mut self) {
+        for waker in [
+            self.message_waker.take(),
+            self.key_waker.take(),
+            self.client_hello_waker.take(),
+            self.server_parameters_waker.take(),
+            self.finished_waker.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            waker.wake();
+        }
+        for waker in self.level_wakers.iter_mut().filter_map(Option::take) {
+            waker.wake();
+        }
     }
+}
+
+fn level_index(level: CryptoLevel) -> usize {
+    match level {
+        CryptoLevel::Initial => 0,
+        CryptoLevel::Handshake => 1,
+        CryptoLevel::OneRtt => 2,
+    }
+}
+
+pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
+    let kind = match &error {
+        qtls::TlsError::Alert(alert) => ErrorKind::Crypto(alert.description()),
+        qtls::TlsError::Peer(qtls::PeerTlsError::ResourceLimit { .. }) => {
+            ErrorKind::CryptoBufferExceeded
+        }
+        qtls::TlsError::Peer(_) => ErrorKind::Crypto(40),
+        _ => ErrorKind::Internal,
+    };
+    QuicError::with_default_fty(kind, error.to_string()).into()
 }

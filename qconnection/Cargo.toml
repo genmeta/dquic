@@ -1,56 +1,24 @@
 [package]
 name = "qconnection"
-version = "0.8.2"
+version.workspace = true
 edition.workspace = true
-description = "Encapsulation of QUIC connections, a part of dquic"
-readme.workspace = true
-repository.workspace = true
-license.workspace = true
-keywords.workspace = true
-categories.workspace = true
 rust-version.workspace = true
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license.workspace = true
+repository.workspace = true
+description = "Sequential QUIC handshake growth on qtls and qtransport"
 
 [dependencies]
-bytes = { workspace = true }
-dashmap = { workspace = true }
-derive_more = { workspace = true, features = [
-    "as_ref",
-    "deref",
-    "display",
-    "from",
-] }
-enum_dispatch = { workspace = true }
-futures = { workspace = true }
-qbase = { workspace = true }
-qcongestion = { workspace = true }
-qresolve = { workspace = true }
-qevent = { workspace = true }
-qrecovery = { workspace = true }
-ring = { workspace = true }
-qtraversal = { workspace = true }
-rustls = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
-tokio-util = { workspace = true, features = ["rt"] }
-tracing = { workspace = true }
-qinterface = { workspace = true }
-rand = { workspace = true }
-x509-parser = { workspace = true }
-
-[target.'cfg(any(unix, windows))'.dependencies]
-qinterface = { workspace = true, features = ["qudp"] }
-
-# features: datagram
-qdatagram = { workspace = true, optional = true }
-
-[features]
-default = ["datagram"]
-datagram = ["dep:qdatagram"]
-netwatcher = ["qinterface/netwatcher"]
-telemetry = ["qevent/telemetry"]
+bytes.workspace = true
+qbase.workspace = true
+qcongestion.workspace = true
+qprotocol = { path = "../qprotocol" }
+qrecovery.workspace = true
+qtls.workspace = true
+qtransport = { path = "../qtransport" }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]
-rustls = { workspace = true, features = ["ring"] }
-tokio = { workspace = true, features = ["test-util"] }
+qudp.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tls-backend = { package = "rustls", git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std", "ring"] }

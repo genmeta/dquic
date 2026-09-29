@@ -15,7 +15,7 @@ use qbase::{
     time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qconn::{
+use qconnection::{
     ArcConnPhase, CloseReason, ConnPhase, InitialPhase, Paths, TlsContext, client_growing,
 };
 use qprotocol::QuicProtocol;

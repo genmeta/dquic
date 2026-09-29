@@ -307,7 +307,7 @@ impl OneRttKeys {
         )
     }
 
-    /// Allow the first local update when qconn confirms the handshake.
+    /// Allow the first local update when qconnection confirms the handshake.
     /// Later updates are authorized by ACKs for the current sending generation.
     pub fn allow_update(&self) {
         self.packets.lock().unwrap().can_update = true;

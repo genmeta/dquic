@@ -6,7 +6,7 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     error::Error as QuicError,
-    frame::{Frame, FrameType, PaddingFrame, ResetStreamError, StreamFrame},
+    frame::{Fin, Frame, FrameType, Len, Offset, PaddingFrame, ResetStreamError, StreamFrame},
     packet::{ConstraintBuffer, Package},
     sid::StreamId,
     varint::VarInt,
@@ -46,11 +46,7 @@ impl<TX: Clone> Sender<TX> {
             return Poll::Pending;
         };
         buffer.for_frame(
-            FrameType::Stream(
-                qbase::frame::Offset::Zero,
-                qbase::frame::Len::Explicit,
-                qbase::frame::Fin::No,
-            ),
+            FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No),
             frames,
         );
         let capacity = buffer.remaining_mut();

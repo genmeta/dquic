@@ -1,4 +1,4 @@
-# qconn
+# qconnection
 
 顺序 TLS 成长与收发接线。`InitialPhase`、`MaturePhase` 只提供发送材料，连接级组件由角色各自的 growing 协程及任务闭包持有。
 
@@ -21,7 +21,7 @@
 
 路由表由 `Signpost` 索引，非空 CID 按 CID 查找，空 CID 按对端地址查找。`packet::channel::new()` 返回 `Inbox` 和 `RcvdPacket`：前者包含四级 sender，后者暴露 `initial / handshake / zero_rtt / one_rtt` 四个 typed receiver。`QuicRouterEntry` 释放时撤销对应路由，旧 entry 不会删除指向另一组 channel 的新路由。`Way` 为 `(Pathway, Link)`；`ReceivedPacket` 用 `Option<usize>` 表示该包是否承担整个 datagram 的收包记账。
 
-`qtransport::router::QuicRouterRegistry` 为 ArcLocalCids 提供 CID 占位注册、撤销和 NEW_CONNECTION_ID 可靠帧投递。growing 从传入的路由守卫取得所属 router，不在 qconn 中另写 registry，也不把独立 router 的 CID 注册到全局实例。
+`qtransport::router::QuicRouterRegistry` 为 ArcLocalCids 提供 CID 占位注册、撤销和 NEW_CONNECTION_ID 可靠帧投递。growing 从传入的路由守卫取得所属 router，不在 qconnection 中另写 registry，也不把独立 router 的 CID 注册到全局实例。
 
 ## 使用
 
@@ -29,12 +29,12 @@
 
 ```rust,ignore
 let phase = ArcConnPhase::new(InitialPhase::new(scid, original_dcid, initial_keys));
-let paths = qconn::Paths::new(Role::Client, phase, idle);
+let paths = qconnection::Paths::new(Role::Client, phase, idle);
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
 let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
 
 paths.add_path(pathway, original_dcid)?;
-qconn::client_growing(
+qconnection::client_growing(
     paths,
     tls,
     local,
