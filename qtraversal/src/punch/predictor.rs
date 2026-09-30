@@ -8,10 +8,7 @@ use std::{
     time::Duration,
 };
 
-use qbase::{
-    frame::PunchHelloFrame,
-    net::{addr::EndpointAddr, route::Link},
-};
+use qbase::{frame::PunchHelloFrame, net::route::Link};
 use qprotocol::{BindUri, Dock, EphemeralSocket, UdpSocket, bind_uri::Scheme};
 
 use super::{
@@ -136,11 +133,7 @@ impl PortPredictor {
     fn create_socket(&self) -> io::Result<EphemeralSocket> {
         let port = MIN_PORT + rand::random::<u16>() % (u16::MAX - MIN_PORT);
         let bind = self.port_to_bind_uri(port);
-        let mut socket =
-            EphemeralSocket::bind_resolved(Dock::global().clone(), bind.resolve_binding()?)?;
-        let endpoint = EndpointAddr::direct(socket.udp_socket().local_addr()?);
-        socket.register_quic(endpoint)?;
-        Ok(socket)
+        EphemeralSocket::bind(Dock::global().clone(), bind.resolve_binding()?)
     }
 
     fn take_matching_done(&mut self, tx: &Transaction) -> Option<EphemeralSocket> {

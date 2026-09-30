@@ -415,10 +415,8 @@ where
             _ => return Err(io::ErrorKind::Unsupported.into()),
         };
         let uri = BindUri::from_str(&uri).map_err(io::Error::other)?;
-        let mut socket =
-            EphemeralSocket::bind_resolved(Dock::global().clone(), uri.resolve_binding()?)?;
+        let socket = EphemeralSocket::bind(Dock::global().clone(), uri.resolve_binding()?)?;
         let local = socket.udp_socket().local_addr()?;
-        socket.register_quic(EndpointAddr::direct(local))?;
         let server = self
             .0
             .stun_servers
