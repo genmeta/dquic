@@ -5,7 +5,7 @@ use std::{
 
 use qbase::net::{addr::EndpointAddr, route::Pathway};
 use qprotocol::{
-    AddressBook, Dock, UdpSocket,
+    AddressBook, BindUri, Dock, UdpSocket,
     addr_book::AddressBookError,
     protocol::{
         forward::ForwardProtocol,
@@ -100,15 +100,16 @@ async fn main() -> Result<(), Error> {
     println!("DDNS: {:?}", addresses.ddns_endpoints());
 
     // Ephemeral sockets join the same Dock/Topology, but never enter AddressBook.
-    let ephemeral = EphemeralSocket::bind(dock.clone(), "127.0.0.1:0".parse().unwrap())?;
+    let ephemeral = EphemeralSocket::bind(
+        dock.clone(),
+        BindUri::from("127.0.0.1:0").resolve_binding()?,
+    )?;
     let ephemeral_bound = ephemeral.udp_socket().local_addr()?;
     let punched_endpoint = EndpointAddr::direct(ephemeral_bound);
-    let punched = ephemeral.into_udp_socket();
-    quic.register(punched_endpoint, &punched)?;
+    let punched = ephemeral;
     println!("punched Direct endpoint: {punched_endpoint}");
 
-    quic.unregister(punched_endpoint, &punched);
-    dock.remove(&punched);
+    drop(punched);
     quic.unregister(peer, &peer_raw);
     dock.remove(&peer_raw);
     dock.shutdown();
