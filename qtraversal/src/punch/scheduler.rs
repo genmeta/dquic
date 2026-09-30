@@ -191,8 +191,6 @@ impl DeviceLedger {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use futures::task::noop_waker_ref;
-
     use super::*;
 
     fn test_addr() -> SocketAddr {
@@ -200,7 +198,7 @@ mod tests {
     }
 
     fn test_cx() -> Context<'static> {
-        Context::from_waker(noop_waker_ref())
+        Context::from_waker(Waker::noop())
     }
 
     #[test]
