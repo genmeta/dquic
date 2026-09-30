@@ -1,2143 +1,845 @@
 use std::{
     collections::HashSet,
-    io,
+    io::{self, IoSlice},
     net::SocketAddr,
-    ops::Deref,
     str::FromStr,
     sync::{Arc, Mutex},
-    task::Poll,
     time::Duration,
 };
 
-use dashmap::{DashMap, Entry};
+use bytes::BytesMut;
+use dashmap::{DashMap, mapref::entry::Entry};
 use qbase::{
     frame::{
         AddAddressFrame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame,
-        RemoveAddressFrame,
         io::{ReceiveFrame, SendFrame},
     },
     net::{
         NatType,
         addr::EndpointAddr,
-        route::{Line, Link, Pathway, Route},
+        route::{Line, Link, Pathway},
     },
-    packet::{
-        Assemble, Package, PacketSpace, ProductHeader, header::short::OneRttHeader,
-        io::AssemblePacket,
-    },
+    packet::assemble::Package,
 };
-use qevent::telemetry::Instrument;
-use qinterface::{
-    Interface, WeakInterface,
-    bind_uri::BindUri,
-    component::{
-        local_endpoint::InterfaceEndpointKey,
-        route::{InvalidWay, QuicRouter, QuicRouterComponent, Way, validate_outbound_candidate},
-    },
-    io::{IO, IoExt, ProductIO},
-    manager::InterfaceManager,
+use qprotocol::{BindUri, Dock, EphemeralSocket, QuicProtocol, UdpSocket, bind_uri::Scheme};
+use tokio::task::AbortHandle;
+
+use super::{
+    predictor::PortPredictor,
+    tx::{AsPunchId, PunchId, Transaction},
 };
-use tokio::{task::AbortHandle, time::timeout};
-use tracing::Instrument as _;
+use crate::addr::{LocalAddress, PunchAddresses};
 
-use crate::{
-    addr::AddressBook,
-    nat::{client::StunClientComponent, router::StunRouterComponent},
-    punch::{
-        predictor::{PacketSendFn, PortPredictor},
-        tx::{AsPunchId, PunchId, Transaction},
-    },
-    route::ReceiveAndDeliverPacket,
-};
-
-type StunClient<I = WeakInterface> = crate::nat::client::StunClient<I>;
-
-fn interface_endpoint_key(endpoint: EndpointAddr) -> InterfaceEndpointKey {
-    match endpoint {
-        EndpointAddr::Direct { .. } => InterfaceEndpointKey::Direct,
-        EndpointAddr::Mediate { agent, .. } => InterfaceEndpointKey::Agent(agent),
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ResolvePathError {
-    #[error(transparent)]
-    InvalidWay(#[from] InvalidWay),
-    #[error("bind URI does not match resolver source constraint")]
-    SourceConstraint,
-    #[error("unsupported endpoint type combination for punching")]
-    UnsupportedEndpointPair,
-    #[error(transparent)]
-    Io(#[from] io::Error),
-}
-
-fn validate_endpoint_pair(
-    local: EndpointAddr,
-    remote: EndpointAddr,
-) -> Result<(), ResolvePathError> {
-    match (local, remote) {
-        (EndpointAddr::Direct { .. }, EndpointAddr::Direct { .. })
-        | (EndpointAddr::Mediate { .. }, EndpointAddr::Mediate { .. }) => Ok(()),
-        _ => Err(ResolvePathError::UnsupportedEndpointPair),
-    }
-}
-
-fn build_validated_way(
-    bind: &BindUri,
-    local: EndpointAddr,
-    remote: EndpointAddr,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-) -> Result<(BindUri, Link, Pathway), InvalidWay> {
-    let link = Link::new(local_addr, remote_addr);
-    let pathway = Pathway::new(local, remote);
-    let way = (bind.clone(), pathway, link);
-    validate_outbound_candidate(&way)?;
-    Ok((way.0, way.2, way.1))
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct LocalEndpointAdvertisementResource {
-    bind_uri: BindUri,
-    key: InterfaceEndpointKey,
-    endpoint: EndpointAddr,
-    seq_num: u32,
-    advertised_bind: BindUri,
-    advertised_addr: SocketAddr,
-    temporary_iface: Option<Interface>,
-}
-
-impl LocalEndpointAdvertisementResource {
-    fn new(
-        bind_uri: BindUri,
-        key: InterfaceEndpointKey,
-        endpoint: EndpointAddr,
-        frame: &AddAddressFrame,
-        advertised_bind: BindUri,
-        temporary_iface: Option<Interface>,
-    ) -> Self {
-        Self {
-            bind_uri,
-            key,
-            endpoint,
-            seq_num: frame.seq_num(),
-            advertised_bind,
-            advertised_addr: *frame.deref(),
-            temporary_iface,
-        }
-    }
-
-    #[cfg(test)]
-    fn new_for_test(
-        bind_uri: BindUri,
-        key: InterfaceEndpointKey,
-        endpoint: EndpointAddr,
-        seq_num: u32,
-        advertised_bind: BindUri,
-        advertised_addr: SocketAddr,
-    ) -> Self {
-        Self {
-            bind_uri,
-            key,
-            endpoint,
-            seq_num,
-            advertised_bind,
-            advertised_addr,
-            temporary_iface: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn bind_uri(&self) -> &BindUri {
-        &self.bind_uri
-    }
-
-    #[cfg(test)]
-    fn key(&self) -> InterfaceEndpointKey {
-        self.key
-    }
-
-    #[cfg(test)]
-    fn endpoint(&self) -> EndpointAddr {
-        self.endpoint
-    }
-
-    #[cfg(test)]
-    fn seq_num(&self) -> u32 {
-        self.seq_num
-    }
-
-    fn advertised_addr(&self) -> SocketAddr {
-        self.advertised_addr
-    }
-}
-// type StunProtocol<IO = WeakQuicInterface> = crate::nat::protocol::StunProtocol<I>;
-
-// TTL
 const HELLO_TTL: u8 = 64;
-const DEFAULT_PROBE_ID: u32 = 0;
 #[cfg(any(test, feature = "test-ttl"))]
-pub const KNOCK_TTL: u8 = 1;
+const KNOCK_TTL: u8 = 1;
 #[cfg(not(any(test, feature = "test-ttl")))]
-pub const KNOCK_TTL: u8 = 5;
-
-// Timeout
-const KNOCK_TIMEOUT: Duration = Duration::from_millis(100);
-const PUNCH_TIMEOUT: Duration = Duration::from_secs(3);
-const PUNCH_ME_NOW_TIMEOUT: Duration = Duration::from_secs(1);
-const COLLISION_TIMEOUT: Duration = Duration::from_secs(3);
-const PUNCH_DONE_CONFIRM_INTERVAL: Duration = Duration::from_millis(30);
-// Birthday attack timeout: must exceed PortPredictor's full run time (~6s for 300 probes × 20ms)
-const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(8);
-
-// Quantity
+const KNOCK_TTL: u8 = 5;
+const DEFAULT_PROBE_ID: u32 = 0;
 const MAX_RETRIES: usize = 5;
+const COLLISION_PORTS: usize = 800;
+const PUNCH_TIMEOUT: Duration = Duration::from_secs(3);
+const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(8);
+const COLLISION_TIMEOUT: Duration = Duration::from_secs(3);
+const PUNCH_ME_NOW_TIMEOUT: Duration = Duration::from_secs(1);
 const PUNCH_DONE_CONFIRM_RETRIES: usize = 3;
-const COLLISION_PORTS: u32 = 800;
-const PUNCHER_LOCAL_SHARDS: usize = 2;
+const PUNCH_DONE_CONFIRM_INTERVAL: Duration = Duration::from_millis(30);
 
-fn direct_punch_done_response(link: Link, hello: &PunchHelloFrame) -> (Link, PunchDoneFrame) {
-    (link, PunchDoneFrame::respond_to(hello))
+/// Encodes one pathless 1-RTT packet using the connection's key and packet-number space.
+pub trait PunchPacketEncoder: Clone + Send + Sync + 'static {
+    fn encode_probe<P>(&self, frame: P) -> io::Result<BytesMut>
+    where
+        P: for<'b> Package<&'b mut BytesMut>;
 }
 
-pub struct ArcPuncher<TX, PH, S>(Arc<Puncher<TX, PH, S>>);
+pub struct ArcPuncher<TX, PE>(Arc<Puncher<TX, PE>>);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum LocalEndpointPathChange {
-    AddPath(Way),
-}
-
-#[derive(Debug, Default)]
-pub struct LocalEndpointPathChanges {
-    changes: Vec<LocalEndpointPathChange>,
-}
-
-impl LocalEndpointPathChanges {
-    pub fn new(changes: Vec<LocalEndpointPathChange>) -> Self {
-        Self { changes }
-    }
-}
-
-impl IntoIterator for LocalEndpointPathChanges {
-    type Item = LocalEndpointPathChange;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.changes.into_iter()
-    }
-}
-
-impl<TX, PH, S> Clone for ArcPuncher<TX, PH, S> {
+impl<TX, PE> Clone for ArcPuncher<TX, PE> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<TX, PH, S> ArcPuncher<TX, PH, S>
-where
-    TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
-    PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
-    S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-{
-    pub fn new(
-        broker: TX,
-        product_header: PH,
-        packet_space: Arc<S>,
-        ifaces: Arc<InterfaceManager>,
-        iface_factory: Arc<dyn ProductIO>,
-        quic_router: Arc<QuicRouter>,
-        stun_servers: Arc<[SocketAddr]>,
-    ) -> Self {
-        Self(Arc::new(Puncher::new(
-            broker,
-            product_header,
-            packet_space,
-            ifaces,
-            iface_factory,
-            quic_router,
-            stun_servers,
-        )))
-    }
-}
-
-pub struct Puncher<TX, PH, S> {
+struct Puncher<TX, PE> {
+    addresses: Mutex<PunchAddresses>,
     transaction: DashMap<PunchId, (AbortHandle, Arc<Transaction>)>,
     punch_history: DashMap<PunchId, ()>,
-    product_header: PH,
-    packet_space: Arc<S>,
-    ifaces: Arc<InterfaceManager>,
-    iface_factory: Arc<dyn ProductIO>,
-    quic_router: Arc<QuicRouter>,
+    reliable_frames: TX,
+    packet_encoder: PE,
     stun_servers: Arc<[SocketAddr]>,
-    address_book: Mutex<AddressBook>,
-    local_endpoint_advertisements:
-        DashMap<(BindUri, InterfaceEndpointKey), LocalEndpointAdvertisementResource>,
-    punch_ifaces: DashMap<BindUri, Interface>,
-    broker: TX,
+    temporary_sockets: DashMap<EndpointAddr, EphemeralSocket>,
 }
 
-impl<TX, PH, S> Puncher<TX, PH, S>
+impl<TX, PE> ArcPuncher<TX, PE>
 where
-    TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
-    PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
-    S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
+    TX: SendFrame<ReliableFrame> + Clone + Send + Sync + 'static,
+    PE: PunchPacketEncoder,
 {
-    pub fn new(
-        broker: TX,
-        product_header: PH,
-        packet_space: Arc<S>,
-        ifaces: Arc<InterfaceManager>,
-        iface_factory: Arc<dyn ProductIO>,
-        quic_router: Arc<QuicRouter>,
-        stun_servers: Arc<[SocketAddr]>,
-    ) -> Self {
-        Self {
-            transaction: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
-            punch_history: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
-            product_header,
-            packet_space,
-            ifaces,
-            iface_factory,
-            quic_router,
+    pub fn new(reliable_frames: TX, packet_encoder: PE, stun_servers: Arc<[SocketAddr]>) -> Self {
+        Self(Arc::new(Puncher {
+            addresses: Mutex::new(PunchAddresses::default()),
+            transaction: DashMap::new(),
+            punch_history: DashMap::new(),
+            reliable_frames,
+            packet_encoder,
             stun_servers,
-            address_book: Mutex::new(AddressBook::default()),
-            local_endpoint_advertisements: DashMap::new(),
-            punch_ifaces: DashMap::with_shard_amount(PUNCHER_LOCAL_SHARDS),
-            broker,
+            temporary_sockets: DashMap::new(),
+        }))
+    }
+
+    pub fn on_local_added(
+        &self,
+        bind: BindUri,
+        endpoint: EndpointAddr,
+        outer: SocketAddr,
+        tire: u32,
+        nat: NatType,
+    ) {
+        let (local, remotes) = {
+            let mut addresses = self.0.addresses.lock().unwrap();
+            let frame = addresses.add_local(bind, endpoint, outer, tire, nat);
+            self.0
+                .reliable_frames
+                .send_frame([ReliableFrame::AddAddress(frame)]);
+            (
+                addresses.local_for_seq(frame.seq_num()).unwrap(),
+                addresses.remote_frames(),
+            )
+        };
+        for remote in remotes {
+            self.try_start_active(local.clone(), remote);
         }
+    }
+
+    pub fn on_local_removed(&self, endpoint: EndpointAddr) {
+        let removed = {
+            let mut addresses = self.0.addresses.lock().unwrap();
+            let removed = addresses.remove_local_endpoint(endpoint);
+            for frame in &removed {
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::RemoveAddress(*frame)]);
+            }
+            removed
+        };
+        for frame in removed {
+            self.cancel_transactions_using_local(frame.seq_num.into_u64() as u32);
+        }
+    }
+
+    pub fn recv_add_address(&self, frame: AddAddressFrame) {
+        let added = self.0.addresses.lock().unwrap().add_remote(frame);
+        if added {
+            let local = self.0.addresses.lock().unwrap().pick_local(frame);
+            if let Some(local) = local {
+                self.try_start_active(local, frame);
+            }
+        }
+    }
+
+    pub fn recv_remove_address(&self, seq: u32) {
+        if self
+            .0
+            .addresses
+            .lock()
+            .unwrap()
+            .remove_remote(seq)
+            .is_some()
+        {
+            self.cancel_transactions_using_remote(seq);
+        }
+    }
+
+    fn try_start_active(&self, local: LocalAddress, remote: AddAddressFrame) {
+        if local.frame.tire() != remote.tire()
+            || local.frame.is_ipv4() != remote.is_ipv4()
+            || *local.frame == *remote
+        {
+            return;
+        }
+        let id = (&local.frame, &remote).punch_id();
+        if self.0.punch_history.contains_key(&id) {
+            return;
+        }
+        if let Entry::Vacant(entry) = self.0.transaction.entry(id) {
+            let tx = Arc::new(Transaction::new());
+            let puncher = self.clone();
+            let task_tx = tx.clone();
+            let task = tokio::spawn(async move {
+                let result = puncher.punch_actively(local, remote, task_tx).await;
+                puncher.0.punch_history.insert(id, ());
+                puncher.0.transaction.remove(&id);
+                if let Err(error) = result {
+                    tracing::debug!(target: "punch", %id, %error, "active punch ended");
+                }
+            });
+            entry.insert((task.abort_handle(), tx));
+        }
+    }
+
+    pub fn recv_punch_me_now(&self, pathway: Pathway, frame: PunchMeNowFrame) {
+        let id = frame.punch_id().flip();
+        if self.0.punch_history.contains_key(&id) {
+            return;
+        }
+        let Some(local) = self
+            .0
+            .addresses
+            .lock()
+            .unwrap()
+            .local_for_seq(frame.remote_seq())
+        else {
+            return;
+        };
+        match self.0.transaction.entry(id) {
+            Entry::Occupied(mut entry) if pathway.local() < pathway.remote() => {
+                entry.get().0.abort();
+                let (abort, tx) = self.spawn_passive(id, local, frame);
+                entry.insert((abort, tx));
+            }
+            Entry::Occupied(entry) => entry.get().1.store_punch_me_now(frame),
+            Entry::Vacant(entry) => {
+                let (abort, tx) = self.spawn_passive(id, local, frame);
+                entry.insert((abort, tx));
+            }
+        }
+    }
+
+    fn spawn_passive(
+        &self,
+        id: PunchId,
+        local: LocalAddress,
+        frame: PunchMeNowFrame,
+    ) -> (AbortHandle, Arc<Transaction>) {
+        let tx = Arc::new(Transaction::new());
+        tx.store_punch_me_now(frame);
+        let puncher = self.clone();
+        let task_tx = tx.clone();
+        let task = tokio::spawn(async move {
+            let result = puncher.punch_passively(local, frame, task_tx).await;
+            puncher.0.punch_history.insert(id, ());
+            puncher.0.transaction.remove(&id);
+            if let Err(error) = result {
+                tracing::debug!(target: "punch", %id, %error, "passive punch ended");
+            }
+        });
+        (task.abort_handle(), tx)
+    }
+
+    pub fn recv_punch_hello(&self, pathway: Pathway, link: Link, frame: PunchHelloFrame) {
+        let id = frame.punch_id().flip();
+        if let Some(entry) = self.0.transaction.get(&id) {
+            let tx = entry.value().1.clone();
+            drop(entry);
+            let _ = tx.recv_frame((link, frame));
+        } else {
+            self.0
+                .reliable_frames
+                .send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&frame))]);
+        }
+        let local = pathway.local();
+        let puncher = self.clone();
+        tokio::spawn(async move {
+            let Some(socket) = QuicProtocol::global().find_socket(local) else {
+                return;
+            };
+            let done = PunchDoneFrame::respond_to(&frame);
+            for attempt in 0..PUNCH_DONE_CONFIRM_RETRIES {
+                if let Err(error) = puncher.send_packet(&socket, link, HELLO_TTL, done).await {
+                    tracing::debug!(target: "punch", %link, %error, "direct PunchDone failed");
+                }
+                if attempt + 1 < PUNCH_DONE_CONFIRM_RETRIES {
+                    tokio::time::sleep(PUNCH_DONE_CONFIRM_INTERVAL).await;
+                }
+            }
+        });
+    }
+
+    pub fn recv_punch_done(&self, link: Link, frame: PunchDoneFrame) {
+        if let Some(entry) = self.0.transaction.get(&frame.punch_id().flip()) {
+            let tx = entry.value().1.clone();
+            drop(entry);
+            let _ = tx.recv_frame((link, frame));
+        }
+    }
+
+    fn cancel_transactions_using_local(&self, seq: u32) {
+        let ids = self
+            .0
+            .transaction
+            .iter()
+            .filter_map(|entry| (entry.key().local_seq == seq).then_some(*entry.key()))
+            .collect::<Vec<_>>();
+        for id in ids {
+            if let Some((_, (abort, _))) = self.0.transaction.remove(&id) {
+                abort.abort();
+            }
+            self.0.punch_history.remove(&id);
+        }
+    }
+
+    fn cancel_transactions_using_remote(&self, seq: u32) {
+        let ids = self
+            .0
+            .transaction
+            .iter()
+            .filter_map(|entry| (entry.key().remote_seq == seq).then_some(*entry.key()))
+            .collect::<Vec<_>>();
+        for id in ids {
+            if let Some((_, (abort, _))) = self.0.transaction.remove(&id) {
+                abort.abort();
+            }
+            self.0.punch_history.remove(&id);
+        }
+    }
+
+    pub fn abort_transactions(&self) {
+        for entry in self.0.transaction.iter() {
+            entry.value().0.abort();
+        }
+        self.0.transaction.clear();
+    }
+
+    pub fn release_temporary_sockets(&self) {
+        self.0.temporary_sockets.clear();
     }
 
     pub async fn send_packet<P>(
         &self,
-        iface: &(impl IO + ?Sized),
+        socket: &UdpSocket,
         link: Link,
         ttl: u8,
-        mut packages: P,
+        frame: P,
     ) -> io::Result<()>
     where
-        P: for<'b> Package<<S::PacketAssembler<'b> as Assemble<1>>::Buffer>,
+        P: for<'b> Package<&'b mut BytesMut>,
     {
-        let mut buffer = [0; 128];
-        let sent_bytes = {
-            let mut packet = self
-                .packet_space
-                .new_packet(
-                    self.product_header
-                        .new_header()
-                        .map_err(|s| io::Error::other(format!("header unavailable: {s:?}")))?,
-                    &mut buffer,
-                )
-                .map_err(|s| io::Error::other(format!("packet unavailable: {s:?}")))?;
-            let mut frames = Vec::new();
-            match packet.assemble(
-                &mut std::task::Context::from_waker(std::task::Waker::noop()),
-                [&mut packages],
-                &mut frames,
-            ) {
-                Poll::Ready(Ok(n)) if n > 0 => {}
-                Poll::Ready(Err(error)) => return Err(io::Error::other(error)),
-                _ => return Err(io::Error::other("punch frame did not fit")),
-            }
-            packet.encrypt_and_protect_packet().0
-        };
-
-        let line = Line::new(link, ttl, None, sent_bytes as u16);
-        let route = Route::new(link.into(), line);
-        iface
-            .sendmmsg(&[io::IoSlice::new(&buffer[..sent_bytes])], route)
-            .await
+        let bytes = self.0.packet_encoder.encode_probe(frame)?;
+        socket
+            .send(
+                &[IoSlice::new(&bytes)],
+                Line::new(link, ttl, None, bytes.len() as u16),
+            )
+            .await?;
+        Ok(())
     }
 
-    async fn send_direct_punch_done_with_retry(
-        &self,
-        iface: &(impl IO + ?Sized),
-        link: Link,
-        frame: PunchDoneFrame,
-    ) {
-        for attempt in 0..PUNCH_DONE_CONFIRM_RETRIES {
-            if let Err(error) = self.send_packet(iface, link, HELLO_TTL, frame).await {
-                tracing::debug!(target: "punch", %link, ?error, "failed to send direct PunchDone confirmation");
+    fn send_reliable_done(&self, hello: &PunchHelloFrame) {
+        self.0
+            .reliable_frames
+            .send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(hello))]);
+    }
+
+    async fn wait_hello_or_done(&self, tx: &Transaction, delay: Duration) -> io::Result<()> {
+        tokio::select! {
+            (_, hello) = tx.wait_punch_hello() => {
+                self.send_reliable_done(&hello);
+                Ok(())
             }
-            if attempt + 1 < PUNCH_DONE_CONFIRM_RETRIES {
-                tokio::time::sleep(PUNCH_DONE_CONFIRM_INTERVAL).await;
+            _ = tx.wait_punch_done() => Ok(()),
+            _ = tokio::time::sleep(delay) => Err(timed_out()),
+        }
+    }
+
+    async fn retry_hello(
+        &self,
+        socket: &UdpSocket,
+        link: Link,
+        id: PunchId,
+        tx: &Transaction,
+        hello_or_done: bool,
+    ) -> io::Result<()> {
+        let time = Duration::from_millis(100);
+        for attempt in 0..MAX_RETRIES {
+            self.send_packet(
+                socket,
+                link,
+                HELLO_TTL,
+                PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
+            )
+            .await?;
+            let delay = time * (1 << attempt);
+            if hello_or_done {
+                if self.wait_hello_or_done(tx, delay).await.is_ok() {
+                    return Ok(());
+                }
+            } else if tokio::time::timeout(delay, tx.wait_punch_done())
+                .await
+                .is_ok()
+            {
+                return Ok(());
             }
         }
+        Err(timed_out())
     }
 
     async fn collision(
         &self,
-        iface: &Interface,
+        socket: &UdpSocket,
         link: Link,
-        punch_id: PunchId,
+        id: PunchId,
         ttl: u8,
     ) -> io::Result<()> {
-        tracing::debug!(target: "punch", %punch_id, %link, ttl, "starting collision attack");
-        let mut random_ports = HashSet::new();
-        let dst = link.dst;
-        let ip = dst.ip();
-        while random_ports.len() < COLLISION_PORTS as usize {
-            let port = rand::random::<u16>() % (u16::MAX - 1024) + 1024;
-            let dst = SocketAddr::new(ip, port);
-            if !random_ports.insert(port) {
+        let mut ports = HashSet::new();
+        while ports.len() < COLLISION_PORTS {
+            let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
+            if !ports.insert(port) {
                 continue;
             }
-            let link = Link::new(link.src, dst);
-            let frame =
-                PunchHelloFrame::new(punch_id.local_seq, punch_id.remote_seq, DEFAULT_PROBE_ID);
-            self.send_packet(iface, link, ttl, frame).await?;
-        }
-        Ok(())
-    }
-}
-
-impl<TX, PH, S> Drop for Puncher<TX, PH, S> {
-    fn drop(&mut self) {
-        for entry in self.transaction.iter() {
-            entry.value().0.abort();
-        }
-        self.transaction.clear();
-        self.punch_history.clear();
-        let futures: Vec<_> = self
-            .punch_ifaces
-            .iter()
-            .map(|entry| self.ifaces.unbind(entry.key().clone()))
-            .collect();
-        if !futures.is_empty() {
-            // Inherent termination: this task owns a finite set of unbind futures
-            // and exits once they all complete.
-            tokio::spawn(
-                async move {
-                    futures::future::join_all(futures).await;
-                }
-                .instrument_in_current()
-                .in_current_span(),
-            );
-        }
-        self.punch_ifaces.clear();
-    }
-}
-
-fn agent_endpoint_is_current(
-    address_book: &AddressBook,
-    bind_uri: &BindUri,
-    key: InterfaceEndpointKey,
-    endpoint: EndpointAddr,
-) -> bool {
-    address_book.has_local_endpoint(bind_uri, key, endpoint)
-}
-
-struct LocalEndpointGuard<'a> {
-    bind_uri: &'a BindUri,
-    key: InterfaceEndpointKey,
-    endpoint: EndpointAddr,
-}
-
-struct LocalAddressAdvertisement {
-    bind_uri: BindUri,
-    addr: SocketAddr,
-    nat_type: NatType,
-    tire: u32,
-}
-
-fn add_local_address_when_endpoint_present_locked(
-    address_book: &mut AddressBook,
-    guard: LocalEndpointGuard<'_>,
-    advertisement: LocalAddressAdvertisement,
-) -> io::Result<AddAddressFrame> {
-    if !agent_endpoint_is_current(address_book, guard.bind_uri, guard.key, guard.endpoint) {
-        tracing::trace!(
-            target: "punch",
-            bind_uri = %guard.bind_uri,
-            endpoint_addr = %guard.endpoint,
-            advertise_bind_uri = %advertisement.bind_uri,
-            local_addr = %advertisement.addr,
-            nat_type = ?advertisement.nat_type,
-            "skipping local address advertisement for removed endpoint"
-        );
-        return Err(io::Error::other("local endpoint removed"));
-    }
-
-    address_book.add_local_address(
-        advertisement.bind_uri,
-        advertisement.addr,
-        advertisement.tire,
-        advertisement.nat_type,
-    )
-}
-
-fn add_guarded_dynamic_local_address_locked(
-    address_book: &mut AddressBook,
-    guard: LocalEndpointGuard<'_>,
-    advertisement: LocalAddressAdvertisement,
-) -> (io::Result<AddAddressFrame>, bool) {
-    let result = add_local_address_when_endpoint_present_locked(address_book, guard, advertisement);
-    let retain_dynamic_iface = result.is_ok();
-    (result, retain_dynamic_iface)
-}
-
-impl<TX, PH, S> ArcPuncher<TX, PH, S>
-where
-    TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
-    PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
-    S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-{
-    pub fn add_local_address(
-        &self,
-        bind_uri: BindUri,
-        local_addr: SocketAddr,
-        nat_type: NatType,
-        tire: u32,
-    ) -> io::Result<()> {
-        if nat_type == NatType::Dynamic {
-            self.spawn_dynamic_local_address(bind_uri, nat_type, tire, None);
-            return Ok(());
-        }
-        let mut address_book = self.0.address_book.lock().unwrap();
-        let frame = address_book.add_local_address(bind_uri.clone(), local_addr, tire, nat_type)?;
-        tracing::trace!(target: "punch", bind_uri = %bind_uri, %local_addr, nat_type = ?nat_type, "sending AddAddress frame");
-        self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
-        Ok(())
-    }
-
-    pub fn add_local_address_if_endpoint_present(
-        &self,
-        bind_uri: BindUri,
-        endpoint_addr: EndpointAddr,
-        local_addr: SocketAddr,
-        nat_type: NatType,
-        tire: u32,
-    ) -> io::Result<()> {
-        if nat_type == NatType::Dynamic {
-            {
-                let address_book = self.0.address_book.lock().unwrap();
-                if !address_book.has_local_endpoint(
-                    &bind_uri,
-                    interface_endpoint_key(endpoint_addr),
-                    endpoint_addr,
-                ) {
-                    tracing::trace!(
-                        target: "punch",
-                        %bind_uri,
-                        %endpoint_addr,
-                        %local_addr,
-                        ?nat_type,
-                        "skipping dynamic local address advertisement for removed endpoint"
-                    );
-                    return Err(io::Error::other("local endpoint removed"));
-                }
-            }
-
-            self.spawn_dynamic_local_address(bind_uri, nat_type, tire, Some(endpoint_addr));
-            return Ok(());
-        }
-
-        let mut address_book = self.0.address_book.lock().unwrap();
-        let frame = add_local_address_when_endpoint_present_locked(
-            &mut address_book,
-            LocalEndpointGuard {
-                bind_uri: &bind_uri,
-                key: interface_endpoint_key(endpoint_addr),
-                endpoint: endpoint_addr,
-            },
-            LocalAddressAdvertisement {
-                bind_uri: bind_uri.clone(),
-                addr: local_addr,
-                nat_type,
-                tire,
-            },
-        )?;
-        tracing::trace!(
-            target: "punch",
-            bind_uri = %bind_uri,
-            %local_addr,
-            nat_type = ?nat_type,
-            "sending AddAddress frame"
-        );
-        self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
-        Ok(())
-    }
-
-    fn spawn_dynamic_local_address(
-        &self,
-        bind_uri: BindUri,
-        nat_type: NatType,
-        tire: u32,
-        endpoint_guard: Option<EndpointAddr>,
-    ) {
-        let puncher = self.clone();
-        let ifaces = self.0.ifaces.clone();
-        let iface_factory = self.0.iface_factory.clone();
-        let stun_servers = self.0.stun_servers.clone();
-        let quic_router = self.0.quic_router.clone();
-
-        // Inherent termination: dynamic address publication performs one probe
-        // and sends at most one AddAddress frame before returning.
-        tokio::spawn(
-            async move {
-                let (iface, stun_client) = dynamic_iface(
-                    &bind_uri,
-                    &ifaces,
-                    &iface_factory,
-                    &quic_router,
-                    &stun_servers,
-                )
-                .await?;
-                let dynamic_bind = iface.bind_uri();
-                let outer = stun_client.outer_addr().await.inspect_err(|error| {
-                    tracing::warn!(
-                        target: "punch",
-                        error = %snafu::Report::from_error(error),
-                        bind_uri = %dynamic_bind,
-                        "failed to detect outer address for dynamic interface, unbinding"
-                    );
-                    let ifaces = ifaces.clone();
-                    let dynamic_bind = dynamic_bind.clone();
-                    // Inherent termination: this task owns one interface bind
-                    // and exits once the unbind future completes.
-                    tokio::spawn(async move { ifaces.unbind(dynamic_bind).await }.in_current_span());
-                })?;
-
-                let frame = match endpoint_guard {
-                    Some(endpoint_addr) => {
-                        let (result, retain_dynamic_iface) = {
-                            let mut address_book = puncher.0.address_book.lock().unwrap();
-                            add_guarded_dynamic_local_address_locked(
-                                &mut address_book,
-                                LocalEndpointGuard {
-                                    bind_uri: &bind_uri,
-                                    key: interface_endpoint_key(endpoint_addr),
-                                    endpoint: endpoint_addr,
-                                },
-                                LocalAddressAdvertisement {
-                                    bind_uri: dynamic_bind.clone(),
-                                    addr: outer,
-                                    nat_type,
-                                    tire,
-                                },
-                            )
-                        };
-
-                        match result {
-                            Ok(frame) => {
-                                puncher
-                                    .0
-                                    .punch_ifaces
-                                    .insert(dynamic_bind.clone(), iface.clone());
-                                frame
-                            }
-                            Err(error) => {
-                                if !retain_dynamic_iface {
-                                    ifaces.unbind(dynamic_bind.clone()).await;
-                                }
-                                return Err(error);
-                            }
-                        }
-                    }
-                    None => {
-                        puncher
-                            .0
-                            .punch_ifaces
-                            .insert(dynamic_bind.clone(), iface.clone());
-                        let mut address_book = puncher.0.address_book.lock().unwrap();
-                        address_book.add_local_address(
-                            dynamic_bind.clone(),
-                            outer,
-                            tire,
-                            nat_type,
-                        )?
-                    }
-                };
-                tracing::trace!(target: "punch", bind_uri = %dynamic_bind, %outer, nat_type = ?nat_type, "sending AddAddress frame for dynamic");
-                puncher
-                    .0
-                    .broker
-                    .send_frame([ReliableFrame::AddAddress(frame)]);
-                Ok::<_, io::Error>(())
-            }
-            .instrument_in_current()
-            .in_current_span(),
-        );
-    }
-
-    fn endpoint_path_changes(
-        &self,
-        added: Option<(BindUri, EndpointAddr)>,
-        remote_endpoints: Vec<(EndpointAddr, qresolve::Source)>,
-    ) -> LocalEndpointPathChanges {
-        let Some((bind_uri, local_endpoint)) = added else {
-            return LocalEndpointPathChanges::default();
-        };
-        let changes = remote_endpoints
-            .into_iter()
-            .filter_map(|(remote_endpoint, source)| {
-                match self.resolve_punch_connection(
-                    &bind_uri,
-                    &local_endpoint,
-                    &remote_endpoint,
-                    &source,
-                ) {
-                    Ok((bind_uri, link, pathway)) => {
-                        Some(LocalEndpointPathChange::AddPath((bind_uri, pathway, link)))
-                    }
-                    Err(error) => {
-                        tracing::trace!(
-                            target: "dquic",
-                            %bind_uri,
-                            %local_endpoint,
-                            %remote_endpoint,
-                            ?source,
-                            %error,
-                            "skipping incompatible peer endpoint candidate"
-                        );
-                        None
-                    }
-                }
-            })
-            .collect();
-        LocalEndpointPathChanges::new(changes)
-    }
-
-    fn update_agent_advertisement_after_upsert(
-        &self,
-        bind_uri: BindUri,
-        key: InterfaceEndpointKey,
-        endpoint: EndpointAddr,
-    ) {
-        let InterfaceEndpointKey::Agent(agent) = key else {
-            return;
-        };
-        let EndpointAddr::Mediate { .. } = endpoint else {
-            return;
-        };
-
-        self.remove_agent_advertisement(&bind_uri, key);
-
-        let Some(iface) = self.0.ifaces.borrow(&bind_uri) else {
-            tracing::debug!(target: "punch", %bind_uri, ?key, "cannot advertise agent endpoint without interface");
-            return;
-        };
-
-        let client = iface.with_component(|component: &StunClientComponent| {
-            component.with_client(|client| {
-                client
-                    .filter(|client| client.agent_addr() == agent)
-                    .cloned()
-            })
-        });
-        let Some(client) = client.ok().flatten().flatten() else {
-            tracing::debug!(target: "punch", %bind_uri, %agent, "cannot advertise agent endpoint without matching STUN client");
-            return;
-        };
-
-        let puncher = self.clone();
-        tokio::spawn(
-            async move {
-                let Ok(nat_type) = client.nat_type().await else {
-                    tracing::debug!(target: "punch", %bind_uri, %agent, "cannot advertise agent endpoint without NAT type");
-                    return;
-                };
-                if let Err(error) = puncher
-                    .publish_agent_advertisement_if_current(bind_uri, key, endpoint, nat_type, 0)
-                    .await
-                {
-                    tracing::debug!(target: "punch", ?error, %agent, "failed to advertise agent endpoint");
-                }
-            }
-            .instrument_in_current()
-            .in_current_span(),
-        );
-    }
-
-    fn remove_agent_advertisement(&self, bind_uri: &BindUri, key: InterfaceEndpointKey) {
-        let Some((_, resource)) = self
-            .0
-            .local_endpoint_advertisements
-            .remove(&(bind_uri.clone(), key))
-        else {
-            return;
-        };
-
-        if let Err(error) = self.remove_local_address(resource.advertised_addr()) {
-            tracing::debug!(
-                target: "punch",
-                ?error,
-                advertised_addr = %resource.advertised_addr(),
-                "failed to remove advertised local address"
-            );
-        }
-
-        if let Some(iface) = resource.temporary_iface {
-            let ifaces = self.0.ifaces.clone();
-            let advertised_bind = resource.advertised_bind.clone();
-            tokio::spawn(
-                async move {
-                    ifaces.unbind(advertised_bind).await;
-                    drop(iface);
-                }
-                .instrument_in_current()
-                .in_current_span(),
-            );
-        }
-    }
-
-    async fn publish_agent_advertisement_if_current(
-        &self,
-        bind_uri: BindUri,
-        key: InterfaceEndpointKey,
-        endpoint: EndpointAddr,
-        nat_type: NatType,
-        tire: u32,
-    ) -> io::Result<()> {
-        let local_addr = endpoint.addr();
-        if nat_type == NatType::Dynamic {
-            let (iface, stun_client) = dynamic_iface(
-                &bind_uri,
-                &self.0.ifaces,
-                &self.0.iface_factory,
-                &self.0.quic_router,
-                &self.0.stun_servers,
+            let target = Link::new(link.src, SocketAddr::new(link.dst.ip(), port));
+            self.send_packet(
+                socket,
+                target,
+                ttl,
+                PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
             )
             .await?;
-            let advertised_bind = iface.bind_uri();
-            let advertised_addr = match stun_client.outer_addr().await {
-                Ok(outer) => outer,
-                Err(error) => {
-                    self.0.ifaces.unbind(advertised_bind.clone()).await;
-                    return Err(io::Error::other(error));
-                }
-            };
-            let frame = {
-                let mut address_book = self.0.address_book.lock().unwrap();
-                add_local_address_when_endpoint_present_locked(
-                    &mut address_book,
-                    LocalEndpointGuard {
-                        bind_uri: &bind_uri,
-                        key,
-                        endpoint,
-                    },
-                    LocalAddressAdvertisement {
-                        bind_uri: advertised_bind.clone(),
-                        addr: advertised_addr,
-                        nat_type,
-                        tire,
-                    },
-                )?
-            };
-            self.0
-                .punch_ifaces
-                .insert(advertised_bind.clone(), iface.clone());
-            self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
-            let resource = LocalEndpointAdvertisementResource::new(
-                bind_uri.clone(),
-                key,
-                endpoint,
-                &frame,
-                advertised_bind,
-                Some(iface),
-            );
-            self.0
-                .local_endpoint_advertisements
-                .insert((bind_uri, key), resource);
-            return Ok(());
         }
-
-        let frame = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            add_local_address_when_endpoint_present_locked(
-                &mut address_book,
-                LocalEndpointGuard {
-                    bind_uri: &bind_uri,
-                    key,
-                    endpoint,
-                },
-                LocalAddressAdvertisement {
-                    bind_uri: bind_uri.clone(),
-                    addr: local_addr,
-                    nat_type,
-                    tire,
-                },
-            )?
-        };
-        self.0.broker.send_frame([ReliableFrame::AddAddress(frame)]);
-        let resource = LocalEndpointAdvertisementResource::new(
-            bind_uri.clone(),
-            key,
-            endpoint,
-            &frame,
-            bind_uri.clone(),
-            None,
-        );
-        self.0
-            .local_endpoint_advertisements
-            .insert((bind_uri, key), resource);
         Ok(())
     }
 
-    pub fn upsert_local_endpoint(
+    async fn dynamic_socket(&self, bind: &BindUri) -> io::Result<(EphemeralSocket, SocketAddr)> {
+        let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
+        let uri = match bind.scheme() {
+            Scheme::Iface => {
+                let (family, device, _) = bind.as_iface_bind_uri().unwrap();
+                format!(
+                    "iface://{family}.{device}:{port}?{}=true",
+                    BindUri::TEMPORARY_PROP
+                )
+            }
+            Scheme::Inet => {
+                let ip = bind.as_inet_bind_uri().unwrap().ip();
+                format!("inet://{ip}:{port}?{}=true", BindUri::TEMPORARY_PROP)
+            }
+            _ => return Err(io::ErrorKind::Unsupported.into()),
+        };
+        let uri = BindUri::from_str(&uri).map_err(io::Error::other)?;
+        let mut socket =
+            EphemeralSocket::bind_resolved(Dock::global().clone(), uri.resolve_binding()?)?;
+        let local = socket.udp_socket().local_addr()?;
+        socket.register_quic(EndpointAddr::direct(local))?;
+        let server = self
+            .0
+            .stun_servers
+            .iter()
+            .copied()
+            .find(|server| server.is_ipv4() == local.is_ipv4())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no STUN server for address family")
+            })?;
+        let outer = socket
+            .outer_addr(Dock::global().topology().stun(), server)
+            .await
+            .map_err(io::Error::other)?;
+        Ok((socket, outer))
+    }
+
+    fn retain_temporary(&self, socket: EphemeralSocket) -> io::Result<()> {
+        let local = socket.udp_socket().local_addr()?;
+        self.0
+            .temporary_sockets
+            .insert(EndpointAddr::direct(local), socket);
+        Ok(())
+    }
+
+    async fn predict(
         &self,
         bind: BindUri,
-        key: InterfaceEndpointKey,
-        endpoint: EndpointAddr,
-    ) -> LocalEndpointPathChanges {
-        let (delta, remote_endpoints) = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            let delta = address_book.upsert_local_endpoint(bind.clone(), key, endpoint);
-            let remote_endpoints = address_book.remote_endpoint().collect();
-            (delta, remote_endpoints)
-        };
-
-        if delta.removed_endpoint().is_some() && matches!(key, InterfaceEndpointKey::Agent(_)) {
-            self.remove_agent_advertisement(&bind, key);
-        }
-        if delta.added_endpoint().is_some() {
-            self.update_agent_advertisement_after_upsert(bind, key, endpoint);
-        }
-        self.endpoint_path_changes(delta.added_endpoint(), remote_endpoints)
-    }
-
-    pub fn remove_local_endpoint(
-        &self,
-        bind: &BindUri,
-        key: &InterfaceEndpointKey,
-    ) -> LocalEndpointPathChanges {
-        let delta = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.remove_local_endpoint(bind, key)
-        };
-        if delta.removed_endpoint().is_some() && matches!(key, InterfaceEndpointKey::Agent(_)) {
-            self.remove_agent_advertisement(bind, *key);
-        }
-        LocalEndpointPathChanges::default()
-    }
-
-    pub fn close_local_endpoints(&self, bind: &BindUri) -> LocalEndpointPathChanges {
-        let removed = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.close_local_endpoints(bind)
-        };
-        for (key, _) in removed {
-            if matches!(key, InterfaceEndpointKey::Agent(_)) {
-                self.remove_agent_advertisement(bind, key);
-            }
-        }
-        LocalEndpointPathChanges::default()
-    }
-
-    pub fn add_peer_endpoint(
-        &self,
-        endpoint: EndpointAddr,
-        source: qresolve::Source,
-    ) -> io::Result<Vec<(BindUri, Link, Pathway)>> {
-        let local_endpoints = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.add_peer_endpoint(endpoint, source.clone())?;
-            address_book.local_endpoint().collect::<Vec<_>>()
-        };
-        let mut ways = Vec::new();
-        for (bind, local_ep) in local_endpoints {
-            match self.resolve_punch_connection(&bind, &local_ep, &endpoint, &source) {
-                Ok(way) => ways.push(way),
-                Err(error) => {
-                    tracing::trace!(
-                        target: "dquic",
-                        %bind,
-                        %local_ep,
-                        remote_endpoint = %endpoint,
-                        ?source,
-                        %error,
-                        "skipping incompatible peer endpoint candidate"
-                    );
-                }
-            }
-        }
-        Ok(ways)
-    }
-
-    pub fn remove_local_address(&self, addr: SocketAddr) -> io::Result<()> {
-        let mut address_book = self.0.address_book.lock().unwrap();
-        let frame = address_book.remove_local_address(addr)?;
-        self.0
-            .broker
-            .send_frame([ReliableFrame::RemoveAddress(frame)]);
-        Ok(())
-    }
-
-    fn recv_remove_address_frame(&self, remove_address_frame: RemoveAddressFrame) {
-        let mut address_book = self.0.address_book.lock().unwrap();
-        address_book.remove_remote_address(remove_address_frame.deref().into_u64() as u32);
-    }
-
-    fn recv_add_address_frame(&self, add_address_frame: AddAddressFrame) -> io::Result<()> {
-        // The lock on address_book must be released before accessing the transaction map
-        // to avoid a deadlock with recv_punch_me_now, which holds the transaction lock
-        // while trying to acquire the address_book lock.
-        let (bind, local) = {
-            let mut address_book = self.0.address_book.lock().unwrap();
-            address_book.add_remote_address(add_address_frame)?;
-            let (bind, local) = address_book.pick_local_address(&add_address_frame)?;
-            (bind.clone(), local)
-        };
-
-        let punch_id = (&local, &add_address_frame).punch_id();
-        if self.0.punch_history.contains_key(&punch_id) {
-            tracing::debug!(target: "punch", %punch_id, local_nat = ?local.nat_type(), remote_nat = ?add_address_frame.nat_type(), "punch already completed, skipping");
-            return Ok(());
-        }
-        match self.0.transaction.entry(punch_id) {
-            Entry::Occupied(_) => {
-                tracing::debug!(target: "punch", %punch_id, local_nat = ?local.nat_type(), remote_nat = ?add_address_frame.nat_type(), "dup transaction for punch");
-                return Ok(());
-            }
-            Entry::Vacant(entry) => {
-                let tx = Arc::new(Transaction::new());
-                let task = tokio::spawn(
-                    {
-                        let puncher = self.clone();
-                        let tx = tx.clone();
-                        async move {
-                            let result = puncher
-                                .punch_actively(bind, &local, &add_address_frame, tx)
-                                .await;
-                            puncher.0.punch_history.insert(punch_id, ());
-                            puncher.0.transaction.remove(&punch_id);
-                            result
-                        }
-                    }
-                    .instrument_in_current()
-                    .in_current_span(),
-                )
-                .abort_handle();
-                entry.insert((task, tx.clone()));
-            }
-        };
-        Ok(())
-    }
-
-    fn recv_punch_me_now(
-        &self,
-        pathway: Pathway,
-        punch_me_now_frame: PunchMeNowFrame,
-    ) -> io::Result<()> {
-        let punch_id = punch_me_now_frame.punch_id().flip();
-        if self.0.punch_history.contains_key(&punch_id) {
-            tracing::debug!(target: "punch", %punch_id, "punch already completed, skipping");
-            return Ok(());
-        }
-
-        let crate_punch_task = || {
-            let tx = Arc::new(Transaction::new());
-            let task = tokio::spawn({
-                let puncher = self.clone();
-                let tx = tx.clone();
-                let address_book = self.0.address_book.lock().unwrap();
-                let (bind, local_address) = address_book
-                    .get_local_address(&punch_me_now_frame.remote_seq())
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "local address not matched")
-                    })?;
-                tracing::debug!(target: "punch", %punch_id, local_nat = ?local_address.nat_type(), remote_nat = ?punch_me_now_frame.nat_type(), "received punch me now frame, start passive punch");
-                async move {
-                    let result = puncher
-                        .punch_passively(bind, &local_address, &punch_me_now_frame, tx)
-                        .await;
-                    puncher.0.punch_history.insert(punch_id, ());
-                    puncher.0.transaction.remove(&punch_id);
-                    result
-                }
-                .instrument_in_current()
-                .in_current_span()
+        dst: SocketAddr,
+        id: PunchId,
+        tx: Arc<Transaction>,
+    ) -> io::Result<EphemeralSocket> {
+        let mut predictor = PortPredictor::new(bind, dst)?;
+        let puncher = self.clone();
+        predictor
+            .predict(id, tx, move |socket, link, ttl, frame| {
+                let puncher = puncher.clone();
+                async move { puncher.send_packet(&socket, link, ttl, frame).await }
             })
-            .abort_handle();
-            Ok::<_, io::Error>((task, tx.clone()))
-        };
-
-        match self.0.transaction.entry(punch_id) {
-            Entry::Occupied(mut entry) => {
-                if pathway.local() < pathway.remote() {
-                    let (task, tx) = crate_punch_task()?;
-                    tx.store_punch_me_now(punch_me_now_frame);
-                    let old_task = entry.get().0.clone();
-                    old_task.abort();
-                    entry.insert((task, tx.clone()));
-                    tracing::trace!(target: "punch", %punch_id, "new passive transaction for punch");
-                } else {
-                    let tx = entry.get().1.clone();
-                    tracing::trace!(target: "punch", %punch_id, "using existing active transaction to respond to PunchMeNow");
-                    tx.store_punch_me_now(punch_me_now_frame);
-                }
-            }
-            Entry::Vacant(entry) => {
-                let (task, tx) = crate_punch_task()?;
-                entry.insert((task, tx.clone()));
-                tracing::trace!(target: "punch", %punch_id, "new passive transaction");
-            }
-        };
-
-        Ok(())
+            .await?
+            .ok_or_else(timed_out)
     }
 
     async fn punch_actively(
         &self,
-        bind_uri: BindUri,
-        local: &AddAddressFrame,
-        remote: &AddAddressFrame,
+        local: LocalAddress,
+        remote: AddAddressFrame,
         tx: Arc<Transaction>,
     ) -> io::Result<()> {
-        let local_nat = local.nat_type();
+        use NatType::*;
+        let id = (&local.frame, &remote).punch_id();
+        let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
-        let bind_addr = SocketAddr::try_from(bind_uri.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let link = Link::new(bind_addr, *remote.deref());
-        let punch_id = (local, remote).punch_id();
-        tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "starting active punch");
-
-        let mut punch_me_now = PunchMeNowFrame::new(
-            local.seq_num(),
-            remote.seq_num(),
-            *local.deref(),
-            local.tire(),
+        let dst = *remote;
+        let local_addr = local.endpoint.addr();
+        let link = Link::new(local_addr, dst);
+        let socket = QuicProtocol::global()
+            .find_socket(local.endpoint)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
+            })?;
+        let mut now = PunchMeNowFrame::new(
+            id.local_seq,
+            id.remote_seq,
+            *local.frame,
+            local.frame.tire(),
             local_nat,
         );
-        let ifaces = self.0.ifaces.clone();
-        let dynamic_iface = {
-            let ifaces = self.0.ifaces.clone();
-            let iface_factory = self.0.iface_factory.clone();
-            let quic_router = self.0.quic_router.clone();
-            let stun_servers = self.0.stun_servers.clone();
-            async move |bind_uri: &BindUri| {
-                dynamic_iface(
-                    bind_uri,
-                    &ifaces,
-                    &iface_factory,
-                    &quic_router,
-                    &stun_servers,
-                )
-                .await
-            }
-        };
 
-        let broker = self.0.broker.clone();
-        let punch_ifaces = &self.0.punch_ifaces;
-
-        // local \ remote  ·FullCone    RestrictedCone    RestrictedPort  Symmetric    Dynamic
-        // FullCone         1               6                 6              6          6
-        // RestrictedCone   1               6                 6              6          6
-        // RestrictedPort   1               6                 6              7          6
-        // Symmetric        1               4                 3              /          8
-        // Dynamic          1               5                 5              2          5
-
-        // 1: Remote is FullCone
-        // Send direct Hello to remote, expecting Hello(Done).
-        // 2: Local Dynamic, Remote Symmetric -> New Interface & Birthday Attack
-        // Send PunchMeNow, expect PunchMeNow. After receiving, start collision, expect Hello(Done).
-        // 3: Local Symmetric, Remote RestrictedPort -> Birthday Attack
-        // Send PunchMeNow, expect PunchMeNow. Use random socket collision, expect Hello(Done).
-        // 4: Local Symmetric, Remote RestrictedCone -> Reverse Punching
-        // Send PunchMeNow, expect remote to open hole and respond PunchMeNow. Then send direct Hello, expect Hello(Done).
-        // 5: Local Dynamic
-        // New Interface, detect external address. Then send PunchMeNow and Hello, expect Hello(Done).
-        // 6: General Punching
-        // Send Hello with TTL and PunchMeNow. Expect Hello, then respond Hello(Done).
-        // 7: Local RestrictedPort, Remote Symmetric -> Birthday Attack (Hold Hole)
-        // Send packets to 300 random ports, then notify with PunchMeNow. Expect Hello, then respond Hello(Done).
-        // 8: Local Symmetric, Remote Dynamic
-        // Hold holes on 30 random ports, send PunchMeNow. Expect Collision, then respond PunchMeNow.
-        // Repeat until 300 sockets used.
-        use NatType::*;
-        let result: io::Result<()> = match (local_nat, remote_nat) {
+        match (local_nat, remote_nat) {
             (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric) => {
-                return Err(io::Error::other("Unsupported nat type"));
+                Err(io::Error::other("unsupported NAT pair"))
             }
-            // 1: Remote is FullCone
-            // Send direct Hello to remote, expecting Hello(Done).
-            (_, FullCone) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Remote FullCone, sending direct Hello");
-                let iface = ifaces
-                    .borrow(&bind_uri)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                let time = Duration::from_millis(100);
-                for i in 0..5 {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending Hello expecting Hello(Done) or receiving Hello");
-                    self.0
-                        .send_packet(
-                            &iface,
-                            link,
-                            HELLO_TTL,
-                            PunchHelloFrame::new(
-                                punch_id.local_seq,
-                                punch_id.remote_seq,
-                                DEFAULT_PROBE_ID,
-                            ),
-                        )
-                        .await?;
-                    let timeout_duration = time * (1 << i);
-                    tokio::select! {
-                        _ = tokio::time::sleep(timeout_duration) => {
-                            // continue loop
-                        }
-                        Ok((_, punch_hello)) = async { Ok::<_, io::Error>(tx.wait_punch_hello().await) } => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "received Hello, sending broker PunchDone confirmation");
-                            broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&punch_hello))]);
-                            return Ok(());
-                        }
-                        _ = tx.wait_punch_done() => {
-                            tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch success");
-                            return Ok(());
-                        }
-                    }
-                }
-                tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch failed");
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
-            }
-            // 2. Local Dynamic, Remote Symmetric -> New Interface & Birthday Attack
-            // Send PunchMeNow, expect PunchMeNow. After receiving, start collision, expect Hello(Done).
+            (_, FullCone) => self.retry_hello(&socket, link, id, &tx, true).await,
             (Dynamic, Symmetric) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Local Dynamic, Remote Symmetric, new interface & birthday attack");
-                // TODO: Creating a new iface is not strictly necessary; could reuse an available temporary address.
-                let (iface, stun_client) = dynamic_iface(&bind_uri).await?;
-
-                let bind_uri = iface.bind_uri();
-                punch_ifaces.insert(bind_uri.clone(), iface.clone());
-                let outer_addr = stun_client.outer_addr().await?;
-                punch_me_now.set_addr(outer_addr);
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow expecting PunchMeNow then collision");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-
-                let link = Link::new(iface.bound_addr()?, link.dst);
-                let mut collided = false;
-                let result: io::Result<()> = loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep(BIRTHDAY_TIMEOUT)=>
-                            break Err(io::Error::new(io::ErrorKind::TimedOut, "Punch timeout")),
-                        _ = tx.wait_punch_me_now(), if !collided => {
-                            collided = true;
-                            self.0.collision(&iface, link, punch_id, KNOCK_TTL).await?;
-                        }
-                        Ok((link, punch_hello)) = async { Ok::<_, io::Error>(tx.wait_punch_hello().await) } => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "received Hello, sending broker PunchDone confirmation");
-                            broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&punch_hello))]);
-                            break Ok(());
-                        }
-                        _ = tx.wait_punch_done() =>
-                            break Ok(()),
-                    };
-                };
-                // If punch failed, clean up the interface
+                let (temporary, outer) = self.dynamic_socket(&local.bind).await?;
+                let temp_addr = temporary.udp_socket().local_addr()?;
+                let temp_socket = temporary.udp_socket().clone();
+                let temp_endpoint = EndpointAddr::direct(temp_addr);
+                self.retain_temporary(temporary)?;
+                now.set_addr(outer);
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let temp_link = Link::new(temp_addr, dst);
+                let result = async {
+                    tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now())
+                        .await
+                        .map_err(|_| timed_out())?;
+                    self.collision(&temp_socket, temp_link, id, KNOCK_TTL)
+                        .await?;
+                    self.wait_hello_or_done(&tx, BIRTHDAY_TIMEOUT).await
+                }
+                .await;
                 if result.is_err() {
-                    punch_ifaces.remove(&bind_uri);
-                    ifaces.unbind(bind_uri).await;
+                    self.0.temporary_sockets.remove(&temp_endpoint);
                 }
                 result
             }
-            // 3. Local Symmetric, Remote RestrictedPort -> Birthday Attack
-            // Send PunchMeNow, expect PunchMeNow. Use random socket collision, expect Hello(Done).
             (Symmetric, RestrictedPort) => {
-                // Send PunchMeNow first
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow expecting PunchMeNow then rush");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-
-                if timeout(COLLISION_TIMEOUT, tx.wait_punch_me_now())
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                tokio::time::timeout(COLLISION_TIMEOUT, tx.wait_punch_me_now())
                     .await
-                    .is_ok()
-                {
-                    // Use new consolidated PortPredictor birthday attack
-                    let mut predictor = PortPredictor::new(
-                        ifaces.clone(),
-                        self.0.iface_factory.clone(),
-                        self.0.quic_router.clone(),
-                        bind_uri.clone(),
-                        link.dst,
-                    )?;
-
-                    // Create packet send function
-                    let puncher_ref = self.0.clone();
-                    let packet_send_fn: PacketSendFn = Arc::new(move |iface, link, ttl, frame| {
-                        let puncher = puncher_ref.clone();
-                        Box::pin(async move { puncher.send_packet(iface, link, ttl, frame).await })
-                    });
-
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "starting consolidated birthday attack");
-                    match predictor
-                        .predict(punch_id, tx.clone(), packet_send_fn)
-                        .await
-                    {
-                        Ok(Some((bind_uri, iface))) => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %bind_uri, "birthday attack succeeded");
-                            self.0.punch_ifaces.insert(bind_uri.clone(), iface);
-                            return Ok(());
-                        }
-                        Ok(None) => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "birthday attack completed without success");
-                        }
-                        Err(e) => {
-                            tracing::warn!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %e, "birthday attack failed");
-                        }
-                    }
-                }
-
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
+                    .map_err(|_| timed_out())?;
+                let won = self.predict(local.bind, dst, id, tx).await?;
+                self.retain_temporary(won)
             }
-            // 4. Local Symmetric, Remote RestrictedCone -> Reverse Punching
-            // Send PunchMeNow, expect remote to open hole and respond PunchMeNow. Then send direct Hello, expect Hello(Done).
             (Symmetric, RestrictedCone) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Local Symmetric, Remote RestrictedCone, reverse punching");
-                tracing::trace!(target: "punch", %punch_id, "sending PunchMeNow expecting PunchMeNow then Hello");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                if timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now())
-                    .await
-                    .is_err()
-                {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "wait for PunchMeNow timeout, try to connect blindly");
-                }
-
-                let iface = ifaces
-                    .borrow(&bind_uri)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                for i in 0..5 {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending Hello expecting Hello(Done)");
-                    self.0
-                        .send_packet(
-                            &iface,
-                            link,
-                            HELLO_TTL,
-                            PunchHelloFrame::new(
-                                punch_id.local_seq,
-                                punch_id.remote_seq,
-                                DEFAULT_PROBE_ID,
-                            ),
-                        )
-                        .await?;
-                    if (timeout(KNOCK_TIMEOUT * (1 << i), tx.wait_punch_done()).await).is_ok() {
-                        tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch success");
-                        return Ok(());
-                    }
-                }
-
-                tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch failed");
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let _ = tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now()).await;
+                self.retry_hello(&socket, link, id, &tx, false).await
             }
-            // 5. Local Dynamic
-            // New Interface, detect external address. Then send PunchMeNow and Hello, expect Hello(Done).
             (Dynamic, _) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Local Dynamic, new interface & send PunchMeNow + Hello");
-                // Use new iface, update PunchMeNow address.
-                // TODO: Creating a new iface is not strictly necessary; could reuse an available temporary address.
-                let (iface, stun_client) = dynamic_iface(&bind_uri).await?;
-                let outer_addr = stun_client.outer_addr().await?;
-                let bind_uri = iface.bind_uri();
-                punch_ifaces.insert(bind_uri.clone(), iface.clone());
-                punch_me_now.set_addr(outer_addr);
-                tracing::trace!(target: "punch", %punch_id, "sending PunchMeNow + Hello expecting Hello(Done)");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                let link = Link::new(iface.bound_addr()?, link.dst);
-                let time = Duration::from_millis(100);
-                for i in 0..MAX_RETRIES {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending Hello expecting Hello(Done)");
-                    self.0
-                        .send_packet(
-                            &iface,
-                            link,
-                            HELLO_TTL,
-                            PunchHelloFrame::new(
-                                punch_id.local_seq,
-                                punch_id.remote_seq,
-                                DEFAULT_PROBE_ID,
-                            ),
-                        )
-                        .await?;
-                    let timeout_duration = time * (1 << i);
-                    tokio::select! {
-                        _ = tokio::time::sleep(timeout_duration) => {
-                            // continue loop
-                        }
-                        Ok((_, punch_hello)) = async { Ok::<_, io::Error>(tx.wait_punch_hello().await) } => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "received Hello, sending broker PunchDone confirmation");
-                            broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&punch_hello))]);
-                            return Ok(());
-                        }
-                        _ = tx.wait_punch_done() => {
-                            tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch success");
-                            return Ok(());
-                        }
-                    }
+                let (temporary, outer) = self.dynamic_socket(&local.bind).await?;
+                let temp_addr = temporary.udp_socket().local_addr()?;
+                let temp_socket = temporary.udp_socket().clone();
+                let temp_endpoint = EndpointAddr::direct(temp_addr);
+                self.retain_temporary(temporary)?;
+                now.set_addr(outer);
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let temp_link = Link::new(temp_addr, dst);
+                let result = self
+                    .retry_hello(&temp_socket, temp_link, id, &tx, true)
+                    .await;
+                if result.is_err() {
+                    self.0.temporary_sockets.remove(&temp_endpoint);
                 }
-                // Punch failed, remove the interface
-                punch_ifaces.remove(&bind_uri);
-                ifaces.unbind(bind_uri).await;
-                Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"))
+                result
             }
-            // 6. General Punching
-            // Send Hello with TTL and PunchMeNow. Expect Hello, then respond Hello(Done).
             (FullCone | RestrictedCone, Symmetric)
             | (FullCone | RestrictedCone | RestrictedPort, Dynamic)
             | (_, RestrictedCone | RestrictedPort) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: General punching, send Hello with TTL & PunchMeNow");
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow + Hello expecting Hello then Hello(Done)");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                let iface = ifaces
-                    .borrow(&bind_uri)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending Hello expecting Hello");
                 self.0
-                    .send_packet(
-                        &iface,
-                        link,
-                        HELLO_TTL,
-                        PunchHelloFrame::new(
-                            punch_id.local_seq,
-                            punch_id.remote_seq,
-                            DEFAULT_PROBE_ID,
-                        ),
-                    )
-                    .await?;
-                if let Ok((_, punch_hello)) = timeout(PUNCH_TIMEOUT, tx.wait_punch_hello()).await {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending broker PunchDone confirmation");
-                    broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(
-                        &punch_hello,
-                    ))]);
-                    tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "actively punch success");
-                    return Ok(());
-                }
-                tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch failed");
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
-            }
-            // 7. Local RestrictedPort, Remote Symmetric -> Birthday Attack (Hold Hole)
-            // Send packets to 300 random ports, then notify with PunchMeNow. Expect Hello, then respond Hello(Done).
-            (RestrictedPort, Symmetric) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Local RestrictedPort, Remote Symmetric, birthday attack hold hole");
-                let iface = ifaces
-                    .borrow(&bind_uri)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                self.0.collision(&iface, link, punch_id, KNOCK_TTL).await?;
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow expecting Hello then Hello(Done)");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                if let Ok((link, punch_hello)) =
-                    timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello()).await
-                {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending broker PunchDone confirmation");
-                    broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(
-                        &punch_hello,
-                    ))]);
-                    tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "punch success with collision");
-                    return Ok(());
-                }
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
-            }
-            // 8. Local Symmetric, Remote Dynamic
-            // Hold holes on 30 random ports, send PunchMeNow. Expect Collision, then respond PunchMeNow.
-            // Repeat until 300 sockets used.
-            (Symmetric, Dynamic) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "strategy: Local Symmetric, Remote Dynamic, hold holes & send PunchMeNow");
-
-                // Use new consolidated PortPredictor birthday attack
-                let mut predictor = PortPredictor::new(
-                    ifaces.clone(),
-                    self.0.iface_factory.clone(),
-                    self.0.quic_router.clone(),
-                    bind_uri.clone(),
-                    link.dst,
-                )?;
-                // Create packet send function
-                let puncher_ref = self.0.clone();
-                let packet_send_fn: PacketSendFn = Arc::new(move |iface, link, ttl, frame| {
-                    let puncher = puncher_ref.clone();
-                    Box::pin(async move { puncher.send_packet(iface, link, ttl, frame).await })
-                });
-
-                // Send initial PunchMeNow to notify peer
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending initial PunchMeNow for Dynamic strategy");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "starting consolidated birthday attack for Dynamic strategy");
-                match predictor
-                    .predict(punch_id, tx.clone(), packet_send_fn)
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.send_packet(
+                    &socket,
+                    link,
+                    HELLO_TTL,
+                    PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
+                )
+                .await?;
+                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello())
                     .await
-                {
-                    Ok(Some((bind_uri, iface))) => {
-                        tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %bind_uri, "birthday attack succeeded for Dynamic strategy");
-                        self.0.punch_ifaces.insert(bind_uri.clone(), iface);
-                        return Ok(());
-                    }
-                    Ok(None) => {
-                        tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "birthday attack completed without success for Dynamic strategy");
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %e, "birthday attack failed for Dynamic strategy");
-                    }
-                }
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"));
+                    .map_err(|_| timed_out())?;
+                self.send_reliable_done(&hello);
+                Ok(())
             }
-        };
-        result
+            (RestrictedPort, Symmetric) => {
+                self.collision(&socket, link, id, KNOCK_TTL).await?;
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello())
+                    .await
+                    .map_err(|_| timed_out())?;
+                self.send_reliable_done(&hello);
+                Ok(())
+            }
+            (Symmetric, Dynamic) => {
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let won = self.predict(local.bind, dst, id, tx).await?;
+                self.retain_temporary(won)
+            }
+        }
     }
 
     async fn punch_passively(
         &self,
-        bind: BindUri,
-        local_address: &AddAddressFrame,
-        remote_address: &PunchMeNowFrame,
+        local: LocalAddress,
+        remote: PunchMeNowFrame,
         tx: Arc<Transaction>,
     ) -> io::Result<()> {
         use NatType::*;
-        let remote_nat = remote_address.nat_type();
-        let local_nat = local_address.nat_type();
-        let punch_id = PunchId::new(local_address.seq_num(), remote_address.local_seq());
-        tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "starting passive punch");
-        let socket_addr = SocketAddr::try_from(bind.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        if local_nat == Blocked
-            || remote_nat == Blocked
-            || (local_nat == Symmetric && remote_nat == Symmetric)
-        {
-            return Err(io::Error::other("Unsupported nat type"));
+        let id = PunchId::new(local.frame.seq_num(), remote.local_seq());
+        let local_nat = local.frame.nat_type();
+        let remote_nat = remote.nat_type();
+        let link = Link::new(local.endpoint.addr(), remote.address());
+        let socket = QuicProtocol::global()
+            .find_socket(local.endpoint)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
+            })?;
+        let now = PunchMeNowFrame::new(
+            id.local_seq,
+            id.remote_seq,
+            *local.frame,
+            local.frame.tire(),
+            local_nat,
+        );
+        if matches!(
+            (local_nat, remote_nat),
+            (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric)
+        ) {
+            return Err(io::Error::other("unsupported NAT pair"));
         }
-        let link = Link::new(socket_addr, remote_address.address());
-
-        let ifaces = self.0.ifaces.clone();
-        let broker = self.0.broker.clone();
-        // Note: Receiving PunchMeNow implies we sent an AddAddress frame.
-        // For Dynamic NAT, we don't need to create a new interface here;
-        // it should have been created before sending AddAddress.
-        // 1. Local Dynamic, Remote Symmetric
-        // Remote has opened hole. We use new interface to collide, expecting Hello(Done).
-        // 2. Local RestrictedPort, Remote Symmetric
-        // We open holes on 300 random ports, send PunchMeNow. Expect Hello collision, then respond Hello(Done).
-        // 3. Local Symmetric, Remote RestrictedPort | Dynamic
-        // We use random socket collision to open hole, expecting Hello(Done).
-        // 4. Local RestrictedCone, Remote Symmetric
-        // Reflect, hello then Send PunchmeNow, wait for hello, send Hello(Done).
-        // 5. General Punching
-        // Received PunchMeNow implies remote has opened hole. We send direct Hello, expecting Hello(Done).
-
         match (local_nat, remote_nat) {
-            // 1. Local Dynamic, Remote Symmetric
-            // Remote has opened hole. We use new interface to collide, expecting Hello(Done).
             (Dynamic, Symmetric) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "passive strategy: Local Dynamic, Remote Symmetric, use new interface to collide");
-                let iface = ifaces
-                    .borrow(&bind)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                let mut collided = false;
-                loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep(BIRTHDAY_TIMEOUT)=>
-                            return Err(io::Error::new(io::ErrorKind::TimedOut, "Punch timeout")),
-                        _ = tx.wait_punch_me_now(), if !collided => {
-                            collided = true;
-                            self.0.collision(&iface, link, punch_id, KNOCK_TTL).await?;
-                        }
-                        Ok((link, punch_hello)) = async { Ok::<_, io::Error>(tx.wait_punch_hello().await) } => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "received Hello, sending broker PunchDone confirmation");
-                            broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&punch_hello))]);
-                            return Ok(());
-                        }
-                        _ = tx.wait_punch_done() =>
-                                return Ok::<(), io::Error>(()),
-                    };
-                }
-            }
-            // 2. Local RestrictedPort, Remote Symmetric
-            // We open holes on 300 random ports, send PunchMeNow. Expect Hello collision, then respond Hello(Done).
-            (RestrictedPort, Symmetric) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "passive strategy: Local RestrictedPort, Remote Symmetric, open holes & send PunchMeNow");
-                let iface = ifaces
-                    .borrow(&bind)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                self.0.collision(&iface, link, punch_id, KNOCK_TTL).await?;
-                let punch_me_now = PunchMeNowFrame::new(
-                    punch_id.local_seq,
-                    punch_id.remote_seq,
-                    *local_address.deref(),
-                    local_address.tire(),
-                    local_nat,
-                );
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow expecting Hello then Hello(Done)");
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                if let Ok((link, punch_hello)) =
-                    tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello()).await
-                {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending broker PunchDone confirmation");
-                    broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(
-                        &punch_hello,
-                    ))]);
-                    return Ok(());
-                }
-            }
-            // 3. Local Symmetric, Remote RestrictedPort
-            // Use new consolidated PortPredictor birthday attack. Expect Hello(Done).
-            (Symmetric, RestrictedPort | Dynamic) => {
-                let mut predictor = PortPredictor::new(
-                    ifaces.clone(),
-                    self.0.iface_factory.clone(),
-                    self.0.quic_router.clone(),
-                    bind.clone(),
-                    link.dst,
-                )?;
-
-                // Create packet send function
-                let puncher_ref = self.0.clone();
-                let packet_send_fn: PacketSendFn = Arc::new(move |iface, link, ttl, frame| {
-                    let puncher = puncher_ref.clone();
-                    Box::pin(async move { puncher.send_packet(iface, link, ttl, frame).await })
-                });
-
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "starting consolidated birthday attack");
-                match predictor
-                    .predict(punch_id, tx.clone(), packet_send_fn)
+                tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now())
                     .await
-                {
-                    Ok(Some((bind_uri, iface))) => {
-                        tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %bind_uri, "birthday attack succeeded");
-                        self.0.punch_ifaces.insert(bind_uri.clone(), iface);
-                        return Ok(());
-                    }
-                    Ok(None) => {
-                        tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "birthday attack completed without success");
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %e, "birthday attack failed");
-                    }
-                }
+                    .map_err(|_| timed_out())?;
+                self.collision(&socket, link, id, KNOCK_TTL).await?;
+                self.wait_hello_or_done(&tx, BIRTHDAY_TIMEOUT).await
             }
-            // 4. Local RestrictedCone, Remote Symmetric
-            // Reflect, Hello and  PunchmeNow, wait for hello, send Hello(Done)
+            (RestrictedPort, Symmetric) => {
+                self.collision(&socket, link, id, KNOCK_TTL).await?;
+                self.0
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello())
+                    .await
+                    .map_err(|_| timed_out())?;
+                self.send_reliable_done(&hello);
+                Ok(())
+            }
+            (Symmetric, RestrictedPort | Dynamic) => {
+                let won = self.predict(local.bind, link.dst, id, tx).await?;
+                self.retain_temporary(won)
+            }
             (RestrictedCone, Symmetric) => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "passive strategy: Local RestrictedCone, Remote Symmetric, reflect & send PunchMeNow");
-                let iface = ifaces
-                    .borrow(&bind)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                let punch_me_now = PunchMeNowFrame::new(
-                    punch_id.local_seq,
-                    punch_id.remote_seq,
-                    *local_address.deref(),
-                    local_address.tire(),
-                    local_nat,
-                );
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "sending PunchMeNow expecting Hello then Hello(Done)");
-                let punch_hello_frame =
-                    PunchHelloFrame::new(punch_id.local_seq, punch_id.remote_seq, DEFAULT_PROBE_ID);
+                self.send_packet(
+                    &socket,
+                    link,
+                    HELLO_TTL,
+                    PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
+                )
+                .await?;
                 self.0
-                    .send_packet(&iface, link, HELLO_TTL, punch_hello_frame)
-                    .await?;
-                broker.send_frame([ReliableFrame::PunchMeNow(punch_me_now)]);
-                if let Ok((link, punch_hello)) =
-                    tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello()).await
-                {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending broker PunchDone confirmation");
-                    broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(
-                        &punch_hello,
-                    ))]);
-                    return Ok(());
-                }
+                    .reliable_frames
+                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello())
+                    .await
+                    .map_err(|_| timed_out())?;
+                self.send_reliable_done(&hello);
+                Ok(())
             }
-            // 5. General Punching
-            // Received PunchMeNow implies remote has opened hole. We send direct Hello, expecting Hello(Done).
-            _ => {
-                tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "passive strategy: General punching, send direct Hello");
-                let iface = ifaces
-                    .borrow(&bind)
-                    .ok_or_else(|| io::Error::other("No interface found"))?;
-                let time = Duration::from_millis(100);
-                for i in 0..MAX_RETRIES {
-                    tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, %link, "sending Hello expecting Hello(Done)");
-                    self.0
-                        .send_packet(
-                            &iface,
-                            link,
-                            HELLO_TTL,
-                            PunchHelloFrame::new(
-                                punch_id.local_seq,
-                                punch_id.remote_seq,
-                                DEFAULT_PROBE_ID,
-                            ),
-                        )
-                        .await?;
-                    let timeout_duration = time * (1 << i);
-                    tokio::select! {
-                        _ = tokio::time::sleep(timeout_duration) => {
-                            // continue loop
-                        }
-                        Ok((_, punch_hello)) = async { Ok::<_, io::Error>(tx.wait_punch_hello().await) } => {
-                            tracing::trace!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "received Hello, sending broker PunchDone confirmation");
-                            broker.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&punch_hello))]);
-                            return Ok(());
-                        }
-                        _ = tx.wait_punch_done() => {
-                            tracing::debug!(target: "punch", %punch_id, local_nat = ?local_nat, remote_nat = ?remote_nat, "passively punch success");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        };
-        Err(io::Error::new(io::ErrorKind::TimedOut, "punch timeout"))
-    }
-
-    fn resolve_punch_connection(
-        &self,
-        bind: &BindUri,
-        local: &EndpointAddr,
-        remote: &EndpointAddr,
-        source: &qresolve::Source,
-    ) -> Result<(BindUri, Link, Pathway), ResolvePathError> {
-        if let qresolve::Source::Mdns { nic, family } = source {
-            let matches_iface = bind
-                .as_iface_bind_uri()
-                .is_some_and(|(lf, ln, _)| lf == *family && ln == nic.as_ref());
-            if !matches_iface {
-                return Err(ResolvePathError::SourceConstraint);
-            }
-        }
-        validate_endpoint_pair(*local, *remote)?;
-
-        let (local_addr, remote_addr) = self.extract_addresses(bind, local, remote)?;
-        Ok(build_validated_way(
-            bind,
-            *local,
-            *remote,
-            local_addr,
-            remote_addr,
-        )?)
-    }
-
-    fn extract_addresses(
-        &self,
-        bind: &BindUri,
-        local: &EndpointAddr,
-        remote: &EndpointAddr,
-    ) -> io::Result<(SocketAddr, SocketAddr)> {
-        use EndpointAddr::*;
-        match (local, remote) {
-            (Direct { addr: local_addr }, Direct { addr: remote_addr }) => {
-                Ok((*local_addr, *remote_addr))
-            }
-            (Mediate { .. }, Mediate { agent, .. }) => {
-                let iface = self.0.ifaces.borrow(bind).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Interface not found for bind URI: {:?}", bind),
-                    )
-                })?;
-                Ok((iface.bound_addr()?, *agent))
-            }
-            _ => unreachable!("endpoint kinds were validated before address extraction"),
+            _ => self.retry_hello(&socket, link, id, &tx, true).await,
         }
     }
 }
 
-impl<TX, PH, S> ReceiveFrame<(BindUri, Pathway, Link, ReliableFrame)> for ArcPuncher<TX, PH, S>
-where
-    TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
-    PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
-    S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-{
-    type Output = ();
-
-    fn recv_frame(
-        &self,
-        (_bind, pathway, link, frame): (BindUri, Pathway, Link, ReliableFrame),
-    ) -> Result<Self::Output, qbase::error::Error> {
-        tracing::debug!(target: "punch", %pathway, %link, frame = ?frame, "received reliable punch frame");
-        match frame {
-            ReliableFrame::AddAddress(add_address_frame) => {
-                _ = self.recv_add_address_frame(add_address_frame);
-            }
-            ReliableFrame::PunchMeNow(punch_me_now_frame) => {
-                _ = self.recv_punch_me_now(pathway, punch_me_now_frame);
-            }
-            ReliableFrame::RemoveAddress(remove_address_frame) => {
-                self.recv_remove_address_frame(remove_address_frame);
-            }
-            ReliableFrame::PunchDone(frame) => {
-                let punch_id = frame.punch_id().flip();
-                match self.0.transaction.entry(punch_id) {
-                    Entry::Occupied(mut entry) => {
-                        let tx = entry.get_mut().1.clone();
-                        _ = tx.recv_frame((link, frame));
-                    }
-                    Entry::Vacant(_) => {
-                        tracing::debug!(target: "punch", %punch_id, frame = ?frame, %link, "received unexpected punch done frame");
-                    }
-                }
-            }
-            frame => {
-                tracing::debug!(target: "punch", frame = ?frame, "received unexpected reliable punch frame");
-            }
-        };
-
-        Ok(())
+impl<TX, PE> Drop for Puncher<TX, PE> {
+    fn drop(&mut self) {
+        for entry in self.transaction.iter() {
+            entry.value().0.abort();
+        }
     }
 }
 
-impl<TX, PH, S> ReceiveFrame<(BindUri, Pathway, Link, PunchHelloFrame)> for ArcPuncher<TX, PH, S>
-where
-    TX: SendFrame<ReliableFrame> + Send + Sync + Clone + 'static,
-    PH: ProductHeader<OneRttHeader> + Send + Sync + 'static,
-    S: PacketSpace<OneRttHeader> + Send + Sync + 'static,
-{
-    type Output = ();
-
-    fn recv_frame(
-        &self,
-        (bind, pathway, link, frame): (BindUri, Pathway, Link, PunchHelloFrame),
-    ) -> Result<Self::Output, qbase::error::Error> {
-        tracing::debug!(target: "punch", %pathway, %link, frame = ?frame, "received punch hello frame");
-        let punch_id = frame.punch_id().flip();
-
-        // A broker confirmation alone does not prove that the peer can receive on this path.
-        // Reply on the observed link so simultaneous active punches establish path evidence at
-        // both endpoints even if one side's first Hello arrived before the NAT hole was open.
-        if let Some(iface) = self.0.ifaces.borrow(&bind) {
-            let puncher = self.0.clone();
-            let (response_link, response_frame) = direct_punch_done_response(link, &frame);
-            tokio::spawn(
-                async move {
-                    puncher
-                        .send_direct_punch_done_with_retry(&iface, response_link, response_frame)
-                        .await;
-                }
-                .instrument_in_current()
-                .in_current_span(),
-            );
-        } else {
-            tracing::debug!(target: "punch", %bind, %link, %punch_id, "cannot send direct PunchDone without interface");
-        }
-
-        match self.0.transaction.entry(punch_id) {
-            Entry::Occupied(mut entry) => {
-                let tx = entry.get_mut().1.clone();
-                _ = tx.recv_frame((link, frame));
-            }
-            Entry::Vacant(_) => {
-                tracing::trace!(target: "punch", %punch_id, frame = ?frame, %link, "received unsolicited punch hello, replying with broker PunchDone");
-                self.0
-                    .broker
-                    .send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&frame))]);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[inline]
-async fn dynamic_iface(
-    bind_uri: &BindUri,
-    ifaces: &Arc<InterfaceManager>,
-    iface_factory: &Arc<dyn ProductIO>,
-    quic_router: &Arc<QuicRouter>,
-    stun_servers: &[SocketAddr],
-) -> io::Result<(Interface, StunClient)> {
-    const MIN_PORT: u16 = 1024;
-    const MAX_PORT: u16 = u16::MAX;
-    let (ip_family, device, _port) = bind_uri.as_iface_bind_uri().ok_or_else(|| {
-        let error = "Invalid bind uri, expected bind uri with iface schema";
-        io::Error::new(io::ErrorKind::InvalidInput, error)
-    })?;
-    let port = rand::random::<u16>() % (MAX_PORT - MIN_PORT) + MIN_PORT;
-    let bind_uri = format!(
-        "iface://{ip_family}.{device}:{port}?{}=true",
-        BindUri::TEMPORARY_PROP
-    );
-    let bind_uri = BindUri::from_str(bind_uri.as_str())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    ifaces
-        .bind(bind_uri, iface_factory.clone())
-        .await
-        .with_components_mut(|components, iface| {
-            // Ensure this temporary iface can receive+deliver QUIC packets to the connection.
-            // Must use the connection-owned router.
-            components.init_with(|| QuicRouterComponent::new(quic_router.clone()));
-
-            let local_addr = iface.bound_addr()?;
-            let stun_server = *stun_servers
-                .iter()
-                .find(|addr| addr.is_ipv4() == local_addr.is_ipv4())
-                .ok_or_else(|| io::Error::other("No STUN server matches local address family"))?;
-            let stun_router = components
-                .init_with(|| {
-                    let ref_iface = iface.downgrade();
-                    StunRouterComponent::new(ref_iface)
-                })
-                .router();
-            let stun_client = components
-                .init_with(|| {
-                    StunClient::new(iface.downgrade(), stun_router.clone(), stun_server, None)
-                })
-                .clone();
-            components.init_with(|| {
-                ReceiveAndDeliverPacket::builder(iface.downgrade())
-                    .quic_router(quic_router.clone())
-                    .stun_router(stun_router)
-                    .init()
-            });
-            Ok((iface.to_owned(), stun_client))
-        })
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "punch timed out")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn simultaneous_active_punch_confirms_on_the_observed_link() {
-        let link = Link::new(
-            "192.0.2.10:50000".parse().unwrap(),
-            "198.51.100.20:60000".parse().unwrap(),
-        );
-        let hello = PunchHelloFrame::new(7, 11, 13);
+    #[derive(Clone, Default)]
+    struct RecordedFrames(Arc<Mutex<Vec<ReliableFrame>>>);
 
-        let (response_link, response) = direct_punch_done_response(link, &hello);
+    impl SendFrame<ReliableFrame> for RecordedFrames {
+        fn send_frame<I: IntoIterator<Item = ReliableFrame>>(&self, iter: I) {
+            self.0.lock().unwrap().extend(iter);
+        }
+    }
 
-        assert_eq!(response_link, link);
-        assert_eq!(response.local_seq(), 11);
-        assert_eq!(response.remote_seq(), 7);
-        assert_eq!(response.probe_id(), 13);
+    #[derive(Clone)]
+    struct UnusedEncoder;
+
+    impl PunchPacketEncoder for UnusedEncoder {
+        fn encode_probe<P>(&self, _: P) -> io::Result<BytesMut>
+        where
+            P: for<'b> Package<&'b mut BytesMut>,
+        {
+            unreachable!("this test only sends reliable address frames")
+        }
     }
 
     #[test]
-    fn direct_pairing_rejects_loopback_to_non_loopback() {
-        let bind: BindUri = "inet://127.0.0.1:50000".parse().unwrap();
-        let local_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
-        let remote_addr: SocketAddr = "203.0.113.10:4433".parse().unwrap();
-        let local = EndpointAddr::direct(local_addr);
-        let remote = EndpointAddr::direct(remote_addr);
-
-        let error = build_validated_way(&bind, local, remote, local_addr, remote_addr)
-            .expect_err("mixed loopback scope must be rejected");
-        assert_eq!(
-            error,
-            qinterface::component::route::InvalidWay::LoopbackScopeMismatch
-        );
-    }
-
-    #[test]
-    fn direct_pairing_accepts_loopback_to_loopback() {
-        let bind: BindUri = "inet://127.0.0.1:50000".parse().unwrap();
-        let local_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
-        let remote_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let local = EndpointAddr::direct(local_addr);
-        let remote = EndpointAddr::direct(remote_addr);
-
-        let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
-            .expect("matching loopback scope must be retained");
-        assert_eq!(link, Link::new(local_addr, remote_addr));
-        assert_eq!(pathway, Pathway::new(local, remote));
-    }
-
-    #[test]
-    fn direct_pairing_preserves_a_wildcard_local_link() {
-        let bind: BindUri = "inet://0.0.0.0:50000".parse().unwrap();
-        let local_addr: SocketAddr = "0.0.0.0:50000".parse().unwrap();
-        let remote_addr: SocketAddr = "203.0.113.10:4433".parse().unwrap();
-        let local = EndpointAddr::direct("192.0.2.10:50000".parse().unwrap());
-        let remote = EndpointAddr::direct(remote_addr);
-
-        let (_, link, pathway) = build_validated_way(&bind, local, remote, local_addr, remote_addr)
-            .expect("wildcard source selection belongs to IO");
-
-        assert_eq!(link, Link::new(local_addr, remote_addr));
-        assert_eq!(pathway, Pathway::new(local, remote));
-    }
-
-    #[test]
-    fn mixed_direct_agent_pair_is_rejected() {
-        let direct = EndpointAddr::direct("127.0.0.1:50000".parse().unwrap());
-        let agent = EndpointAddr::mediate(
-            "127.0.0.1:20004".parse().unwrap(),
-            "198.51.100.10:40000".parse().unwrap(),
+    fn local_addresses_are_announced_when_added_on_the_reliable_queue() {
+        let frames = RecordedFrames::default();
+        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder, Arc::from([]));
+        let endpoint = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
+        puncher.on_local_added(
+            "inet://127.0.0.1:5000".parse().unwrap(),
+            endpoint,
+            "198.51.100.1:5000".parse().unwrap(),
+            1,
+            NatType::RestrictedCone,
         );
         assert!(matches!(
-            validate_endpoint_pair(direct, agent),
-            Err(ResolvePathError::UnsupportedEndpointPair)
+            frames.0.lock().unwrap().as_slice(),
+            [ReliableFrame::AddAddress(frame)] if frame.seq_num() == 0
+        ));
+        puncher.on_local_removed(endpoint);
+        assert!(matches!(
+            frames.0.lock().unwrap().last(),
+            Some(ReliableFrame::RemoveAddress(frame)) if frame.seq_num.into_u64() == 0
         ));
     }
 
-    fn bind_uri() -> BindUri {
-        "inet://127.0.0.1:0".parse().expect("valid bind uri")
-    }
+    #[tokio::test]
+    async fn dock_observation_announces_mapping_changes_and_detaches_on_close() {
+        let dock = Dock::new(Arc::new(qprotocol::topology::Topology::new(
+            Arc::new(qprotocol::StunProtocol::new()),
+            Arc::new(qprotocol::ForwardProtocol::new()),
+            Arc::new(QuicProtocol::new()),
+        )));
+        let endpoint = dock.bind("127.0.0.1:0").unwrap();
+        let binding = dock.bindings().pop().unwrap();
+        let socket = binding.socket().clone();
+        let frames = RecordedFrames::default();
+        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder, Arc::from([]));
+        let (close, closed) = tokio::sync::oneshot::channel::<()>();
+        let (removed, mut removals) = tokio::sync::mpsc::unbounded_channel();
+        puncher.observe_endpoints(dock.subscribe(), closed, move |endpoint| {
+            let _ = removed.send(endpoint);
+        });
+        assert!(matches!(
+            frames.0.lock().unwrap().as_slice(),
+            [ReliableFrame::AddAddress(frame)] if frame.seq_num() == 0
+        ));
 
-    fn endpoint_addr() -> EndpointAddr {
-        EndpointAddr::direct("127.0.0.1:34567".parse().expect("socket addr"))
-    }
-
-    #[test]
-    fn guarded_add_local_address_rejects_absent_endpoint_without_mutating() {
-        let mut address_book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let endpoint_addr = endpoint_addr();
-        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-
-        let error = add_local_address_when_endpoint_present_locked(
-            &mut address_book,
-            LocalEndpointGuard {
-                bind_uri: &bind_uri,
-                key: interface_endpoint_key(endpoint_addr),
-                endpoint: endpoint_addr,
-            },
-            LocalAddressAdvertisement {
-                bind_uri: bind_uri.clone(),
-                addr: local_addr,
-                nat_type: NatType::FullCone,
-                tire: 7,
-            },
-        )
-        .expect_err("absent endpoint must be rejected");
-
-        assert_eq!(error.to_string(), "local endpoint removed");
-        assert!(address_book.get_local_address(&0).is_none());
-    }
-
-    #[test]
-    fn guarded_add_local_address_returns_frame_for_present_endpoint() {
-        let mut address_book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let endpoint_addr = endpoint_addr();
-        let advertised_bind_uri: BindUri =
-            "inet://127.0.0.1:45678".parse().expect("valid bind uri");
-        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-
-        address_book.upsert_local_endpoint(
-            bind_uri.clone(),
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-        );
-
-        let frame = add_local_address_when_endpoint_present_locked(
-            &mut address_book,
-            LocalEndpointGuard {
-                bind_uri: &bind_uri,
-                key: interface_endpoint_key(endpoint_addr),
-                endpoint: endpoint_addr,
-            },
-            LocalAddressAdvertisement {
-                bind_uri: advertised_bind_uri.clone(),
-                addr: local_addr,
-                nat_type: NatType::RestrictedCone,
-                tire: 7,
-            },
-        )
-        .expect("present endpoint must add local address");
-
-        assert_eq!(*frame, local_addr);
-        assert_eq!(frame.seq_num(), 0);
-        assert_eq!(frame.tire(), 7);
-        assert_eq!(frame.nat_type(), NatType::RestrictedCone);
+        let outer = "198.51.100.1:5000".parse().unwrap();
+        dock.update_outer(&binding, "127.0.0.1:3478".parse().unwrap(), outer)
+            .unwrap();
+        dock.update_nat(&binding, NatType::RestrictedCone).unwrap();
         assert_eq!(
-            address_book.get_local_address(&0),
-            Some((advertised_bind_uri, frame))
+            tokio::time::timeout(Duration::from_secs(1), removals.recv())
+                .await
+                .unwrap(),
+            Some(endpoint)
         );
-    }
+        assert!(matches!(
+            frames.0.lock().unwrap().as_slice(),
+            [ReliableFrame::AddAddress(_), ReliableFrame::RemoveAddress(old), ReliableFrame::AddAddress(new)]
+                if old.seq_num.into_u64() == 0 && new.seq_num() == 1 && **new == outer
+        ));
 
-    #[test]
-    fn guarded_dynamic_local_address_rejects_absent_endpoint_without_retaining_iface() {
-        let mut address_book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let endpoint_addr = endpoint_addr();
-        let dynamic_bind: BindUri = "inet://127.0.0.1:45678".parse().expect("valid bind uri");
-        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-
-        let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
-            &mut address_book,
-            LocalEndpointGuard {
-                bind_uri: &bind_uri,
-                key: interface_endpoint_key(endpoint_addr),
-                endpoint: endpoint_addr,
-            },
-            LocalAddressAdvertisement {
-                bind_uri: dynamic_bind,
-                addr: local_addr,
-                nat_type: NatType::Dynamic,
-                tire: 7,
-            },
-        );
-
-        let error = result.expect_err("absent endpoint must be rejected");
-        assert_eq!(error.to_string(), "local endpoint removed");
-        assert!(!retain_dynamic_iface);
-        assert!(address_book.get_local_address(&0).is_none());
-    }
-
-    #[test]
-    fn guarded_dynamic_local_address_returns_frame_and_retains_iface_for_present_endpoint() {
-        let mut address_book = AddressBook::default();
-        let bind_uri = bind_uri();
-        let endpoint_addr = endpoint_addr();
-        let dynamic_bind: BindUri = "inet://127.0.0.1:45678".parse().expect("valid bind uri");
-        let local_addr: SocketAddr = "127.0.0.1:45678".parse().expect("socket addr");
-
-        address_book.upsert_local_endpoint(
-            bind_uri.clone(),
-            interface_endpoint_key(endpoint_addr),
-            endpoint_addr,
-        );
-
-        let (result, retain_dynamic_iface) = add_guarded_dynamic_local_address_locked(
-            &mut address_book,
-            LocalEndpointGuard {
-                bind_uri: &bind_uri,
-                key: interface_endpoint_key(endpoint_addr),
-                endpoint: endpoint_addr,
-            },
-            LocalAddressAdvertisement {
-                bind_uri: dynamic_bind.clone(),
-                addr: local_addr,
-                nat_type: NatType::Dynamic,
-                tire: 7,
-            },
-        );
-
-        let frame = result.expect("present endpoint must add local address");
-        assert!(retain_dynamic_iface);
-        assert_eq!(*frame, local_addr);
-        assert_eq!(frame.seq_num(), 0);
-        assert_eq!(frame.tire(), 7);
-        assert_eq!(frame.nat_type(), NatType::Dynamic);
+        // An alias-only update must not withdraw and re-advertise the same address.
+        dock.register_endpoint(
+            EndpointAddr::direct("203.0.113.1:5000".parse().unwrap()),
+            &socket,
+        )
+        .unwrap();
+        assert!(dock.remove(&socket));
         assert_eq!(
-            address_book.get_local_address(&0),
-            Some((dynamic_bind, frame))
+            tokio::time::timeout(Duration::from_secs(1), removals.recv())
+                .await
+                .unwrap(),
+            Some(endpoint)
         );
+        assert!(matches!(
+            frames.0.lock().unwrap().as_slice(),
+            [ReliableFrame::AddAddress(_), ReliableFrame::RemoveAddress(_), ReliableFrame::AddAddress(_), ReliableFrame::RemoveAddress(frame)]
+                if frame.seq_num.into_u64() == 1
+        ));
+
+        close.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), removals.recv())
+                .await
+                .unwrap(),
+            None
+        );
+        let replacement = dock.bind("127.0.0.1:0").unwrap();
+        assert!(dock.find_socket(replacement.addr()).is_some());
+        assert_eq!(frames.0.lock().unwrap().len(), 4);
     }
 
-    #[test]
-    fn endpoint_advertisement_key_uses_bind_and_interface_endpoint_key() {
-        let bind = bind_uri();
-        let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
-        let outer: SocketAddr = "198.51.100.10:30000".parse().expect("outer addr");
-        let key = InterfaceEndpointKey::Agent(agent);
-        let endpoint = EndpointAddr::mediate(agent, outer);
-        let resource = LocalEndpointAdvertisementResource::new_for_test(
-            bind.clone(),
-            key,
-            endpoint,
-            7,
-            bind.clone(),
-            outer,
+    #[tokio::test]
+    async fn adding_another_default_group_binding_probes_that_specific_socket() {
+        let puncher = ArcPuncher::new(RecordedFrames::default(), UnusedEncoder, Arc::from([]));
+        let first = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
+        let second = EndpointAddr::direct("127.0.0.1:5001".parse().unwrap());
+        puncher.on_local_added(
+            first.addr().into(),
+            first,
+            first.addr(),
+            0,
+            NatType::FullCone,
         );
-
-        assert_eq!(resource.bind_uri(), &bind);
-        assert_eq!(resource.key(), key);
-        assert_eq!(resource.endpoint(), endpoint);
-        assert_eq!(resource.seq_num(), 7);
-        assert_eq!(resource.advertised_addr(), outer);
+        puncher.recv_add_address(AddAddressFrame::new(
+            9,
+            "127.0.0.1:6000".parse().unwrap(),
+            0,
+            NatType::FullCone,
+        ));
+        puncher.on_local_added(
+            second.addr().into(),
+            second,
+            second.addr(),
+            0,
+            NatType::FullCone,
+        );
+        assert!(puncher.0.transaction.contains_key(&PunchId::new(0, 9)));
+        assert!(puncher.0.transaction.contains_key(&PunchId::new(1, 9)));
+        // Cancel before yielding: this verifies scheduling without sending a UDP probe.
+        puncher.abort_transactions();
     }
 
-    #[test]
-    fn stale_agent_advertisement_guard_rejects_replaced_endpoint() {
-        let mut address_book = AddressBook::default();
-        let bind = bind_uri();
-        let agent: SocketAddr = "192.0.2.10:20004".parse().expect("agent addr");
-        let key = InterfaceEndpointKey::Agent(agent);
-        let first = EndpointAddr::mediate(agent, "198.51.100.10:30000".parse().expect("outer"));
-        let second = EndpointAddr::mediate(agent, "198.51.100.11:30001".parse().expect("outer"));
-
-        address_book.upsert_local_endpoint(bind.clone(), key, first);
-        address_book.upsert_local_endpoint(bind.clone(), key, second);
-
-        assert!(agent_endpoint_is_current(&address_book, &bind, key, second));
-        assert!(!agent_endpoint_is_current(&address_book, &bind, key, first));
+    #[tokio::test]
+    async fn unsolicited_direct_hello_gets_a_reliable_done_response() {
+        let frames = RecordedFrames::default();
+        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder, Arc::from([]));
+        let link = Link::new(
+            "127.0.0.1:5000".parse().unwrap(),
+            "127.0.0.1:6000".parse().unwrap(),
+        );
+        let hello = PunchHelloFrame::new(1, 2, 3);
+        puncher.recv_punch_hello(link.into(), link, hello);
+        assert!(matches!(
+            frames.0.lock().unwrap().as_slice(),
+            [ReliableFrame::PunchDone(done)] if *done == PunchDoneFrame::respond_to(&hello)
+        ));
     }
 }
