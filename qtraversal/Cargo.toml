@@ -1,5 +1,6 @@
 [package]
 name = "qtraversal"
+workspace = ".."
 version = "0.7.2"
 edition.workspace = true
 description = "NAT traversal utilities for QUIC, a part of dquic"
@@ -9,37 +10,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bon = { workspace = true }
-bytes = { workspace = true }
-dashmap = { workspace = true }
-futures = { workspace = true }
-nom = { workspace = true }
-qbase = { workspace = true }
-qresolve = { workspace = true }
-qevent = { workspace = true }
-qinterface = { workspace = true, features = ["qudp"] }
-rand = { workspace = true }
-smallvec = { workspace = true }
-snafu = { workspace = true }
-thiserror = { workspace = true }
+bytes.workspace = true
+dashmap.workspace = true
+qbase.workspace = true
+qprotocol = { path = "../qprotocol" }
+qtransport = { path = "../qtransport" }
+rand.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
-tokio-util = { workspace = true, features = ["rt"] }
-tracing = { workspace = true }
+tracing.workspace = true
 
 [dev-dependencies]
-clap = { workspace = true }
-tokio = { features = ["fs", "rt-multi-thread", "test-util"], workspace = true }
-
-[dev-dependencies.tracing-subscriber]
-workspace = true
-features = ["fmt", "ansi", "env-filter", "time", "tracing-log"]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 
 [features]
-# Enable shorter TTL only for tests (especially integration tests in other crates).
 test-ttl = []
-
-[[example]]
-name = "stun_client"
-
-[[example]]
-name = "stun_server"

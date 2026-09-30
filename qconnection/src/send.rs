@@ -1,4 +1,4 @@
-pub mod packet;
+pub use qtransport::packet::assemble as packet;
 mod task;
 use std::{
     future::Future,
