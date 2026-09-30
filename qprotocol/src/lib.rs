@@ -17,7 +17,7 @@ pub mod protocol;
 pub mod socket;
 pub mod topology;
 
-pub use addr_book::AddressBook;
+pub use addr_book::{AddressBook, AddressEvent};
 pub use bind_uri::BindUri;
 pub use dock::Dock;
 pub use protocol::{ForwardProtocol, QuicProtocol, StunProtocol};
