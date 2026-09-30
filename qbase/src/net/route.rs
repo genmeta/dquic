@@ -1,8 +1,4 @@
-use std::{
-    fmt::Display,
-    net::{IpAddr, SocketAddr},
-    ops::BitOr,
-};
+use std::{fmt::Display, net::SocketAddr, ops::BitOr};
 
 use bytes::BufMut;
 use derive_more::{Deref, DerefMut};
@@ -116,31 +112,9 @@ impl<E> Pathway<E> {
 impl Pathway {
     /// Returns whether the remote endpoint belongs to a listening scope.
     pub fn belongs_to(&self, scopes: Scopes) -> bool {
-        let scope = match self.remote {
-            EndpointAddr::Direct { addr } => match addr.ip() {
-                IpAddr::V4(ip) if ip.is_loopback() => Scope::Loopback,
-                IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Scope::Internal,
-                IpAddr::V6(ip)
-                    if ip.is_loopback()
-                        || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()) =>
-                {
-                    Scope::Loopback
-                }
-                IpAddr::V6(ip)
-                    if ip.is_unique_local()
-                        || ip.is_unicast_link_local()
-                        || ip
-                            .to_ipv4_mapped()
-                            .is_some_and(|ip| ip.is_private() || ip.is_link_local()) =>
-                {
-                    Scope::Internal
-                }
-                _ if self.remote.is_globally_routable() => Scope::External,
-                _ => return false,
-            },
-            EndpointAddr::Mediate { .. } => Scope::External,
-        };
-        scopes.contains(scope)
+        self.remote
+            .scope()
+            .is_some_and(|scope| scopes.contains(scope))
     }
 }
 
