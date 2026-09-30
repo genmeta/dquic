@@ -227,32 +227,21 @@ impl StunProtocol {
         }
     }
 
-    /// Detects the first server's mapped address and this socket's NAT type.
+    /// Discover this socket's mapped address at one STUN server.
     ///
     /// The concrete bound address must belong to a socket registered in this
-    /// protocol's Dock. Keep it registered and avoid concurrent probes or other
-    /// traffic to the discovery servers until detection finishes.
+    /// protocol's Dock. A binding response with MAPPED-ADDRESS is sufficient;
+    /// changed-source support is only required by [`Self::detect_nat`].
     ///
-    /// Servers must support the project's STUN encoding and changed-source
-    /// responses. Private-address detection requires three distinct server IPs.
-    /// An unanswered initial probe returns `(None, NatType::Blocked)`. As in
-    /// qtraversal, an unanswered final probe is classified as `Dynamic`; these
-    /// timeout classifications can also reflect packet loss or server failure.
-    /// The returned mapping is specific to the first server, particularly for
-    /// `Symmetric` and `Dynamic` NATs. Later probe errors discard that mapping.
-    pub async fn detect(
+    /// Returns `None` when all attempts go unanswered. This can reflect blocked
+    /// traffic, packet loss or server failure; no NAT classification is performed.
+    /// The address is specific to this server, particularly for `Symmetric` and
+    /// `Dynamic` NATs. This task is independent of [`Self::detect_nat`].
+    pub async fn detect_outer(
         self: &Arc<Self>,
         local_addr: SocketAddr,
         stun_server: SocketAddr,
-    ) -> Result<(Option<SocketAddr>, NatType), StunError> {
-        if local_addr.ip().is_unspecified() || local_addr.port() == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "NAT detection requires a concrete bound socket address",
-            )
-            .into());
-        }
-
+    ) -> Result<Option<SocketAddr>, StunError> {
         let Some(first) = probe(
             self,
             local_addr,
@@ -262,7 +251,37 @@ impl StunProtocol {
         )
         .await?
         else {
-            return Ok((None, NatType::Blocked));
+            return Ok(None);
+        };
+        Ok(Some(first.map_addr()?))
+    }
+
+    /// Classify this socket's NAT with its own complete sequence of probes.
+    ///
+    /// This task does not depend on [`Self::detect_outer`] or reuse its responses.
+    /// The concrete bound address must belong to a socket registered in this
+    /// protocol's Dock. Keep it registered and avoid concurrent probes or other
+    /// traffic to the discovery servers until classification finishes.
+    /// Servers must support the project's STUN encoding and changed-source
+    /// responses. Private-address detection requires three distinct server IPs.
+    /// An unanswered initial probe returns `Blocked`; an unanswered final probe
+    /// is classified as `Dynamic`. These can also reflect packet loss or server
+    /// failure.
+    pub async fn detect_nat(
+        self: &Arc<Self>,
+        local_addr: SocketAddr,
+        stun_server: SocketAddr,
+    ) -> Result<NatType, StunError> {
+        let Some(first) = probe(
+            self,
+            local_addr,
+            stun_server,
+            Request::default(),
+            PROBE_ATTEMPTS,
+        )
+        .await?
+        else {
+            return Ok(NatType::Blocked);
         };
         let outer_addr = first.map_addr()?;
         let server2 = first.changed_addr()?;
@@ -295,7 +314,7 @@ impl StunProtocol {
             })?;
 
             if second.map_addr()? != outer_addr {
-                return Ok((Some(outer_addr), NatType::Symmetric));
+                return Ok(NatType::Symmetric);
             }
             let server3 = second.changed_addr()?;
             if server3.ip() == stun_server.ip()
@@ -345,7 +364,7 @@ impl StunProtocol {
             }
         }
 
-        Ok((Some(outer_addr), NatType::from(features)))
+        Ok(NatType::from(features))
     }
 
     pub(crate) fn register_socket(&self, bound: SocketAddr, socket: &Arc<UdpSocket>) {
@@ -432,6 +451,14 @@ async fn probe(
     attempts: u8,
 ) -> Result<Option<Response>, StunError> {
     use qbase::datagram::stun::{CHANGE_IP, CHANGE_PORT};
+
+    if local_addr.ip().is_unspecified() || local_addr.port() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "STUN detection requires a concrete bound socket address",
+        )
+        .into());
+    }
 
     let mut transaction = protocol.new_transaction();
     let link = Link::new(local_addr, server);
