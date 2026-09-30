@@ -8,7 +8,7 @@ use std::{
 use bytes::BufMut;
 use serde::{Deserialize, Serialize};
 
-use crate::net::{Family, be_socket_addr};
+use crate::net::{Family, be_socket_addr, route::Scope};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
@@ -105,6 +105,34 @@ impl EndpointAddr {
         match self {
             EndpointAddr::Direct { .. } => Kind::Direct,
             EndpointAddr::Mediate { .. } => Kind::Mediate,
+        }
+    }
+
+    /// Classifies the network scope of this endpoint. Unroutable direct addresses have no scope.
+    pub fn scope(&self) -> Option<Scope> {
+        match self {
+            EndpointAddr::Direct { addr } => match addr.ip() {
+                IpAddr::V4(ip) if ip.is_loopback() => Some(Scope::Loopback),
+                IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Some(Scope::Internal),
+                IpAddr::V6(ip)
+                    if ip.is_loopback()
+                        || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()) =>
+                {
+                    Some(Scope::Loopback)
+                }
+                IpAddr::V6(ip)
+                    if ip.is_unique_local()
+                        || ip.is_unicast_link_local()
+                        || ip
+                            .to_ipv4_mapped()
+                            .is_some_and(|ip| ip.is_private() || ip.is_link_local()) =>
+                {
+                    Some(Scope::Internal)
+                }
+                _ if self.is_globally_routable() => Some(Scope::External),
+                _ => None,
+            },
+            EndpointAddr::Mediate { .. } => Some(Scope::External),
         }
     }
 
