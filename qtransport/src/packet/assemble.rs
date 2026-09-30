@@ -11,7 +11,8 @@ use qbase::{
         header::io::WriteHeader,
     },
 };
-use qtransport::keys::SealPacket;
+
+use crate::keys::SealPacket;
 
 /// Header and PN are encoded at construction. The cursor counts packet bytes.
 pub struct Packet<H, B> {
@@ -197,7 +198,7 @@ fn protect<H: HeaderSize + GetType, K: SealPacket>(
         (&mut bytes[pn_offset - 2..pn_offset]).put_u16(0x4000 | length as u16);
     }
     keys.seal(pn.0, bytes, pn_offset, body_offset, tag_len)
-        .map_err(super::packet_error)
+        .map_err(packet_error)
 }
 
 // BufMut alone does not provide a view of bytes already written. These buffers do.
@@ -216,4 +217,11 @@ seal_buffer!(BytesMut, &mut BytesMut, Vec<u8>, &mut Vec<u8>);
 
 fn layout_error() -> Error {
     QuicError::with_default_fty(ErrorKind::Internal, "invalid packet layout or send limits").into()
+}
+
+fn packet_error(error: crate::keys::PacketError) -> Error {
+    match error {
+        crate::keys::PacketError::Connection(error) => error,
+        error => QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
+    }
 }

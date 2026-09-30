@@ -13,6 +13,7 @@ use qevent::quic::{
     transport::{PacketDropped, PacketDroppedTrigger, PacketReceived},
 };
 
+pub mod assemble;
 pub mod channel;
 
 pub trait RcvdPacketHeader {
