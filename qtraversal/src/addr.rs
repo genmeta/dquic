@@ -4,13 +4,12 @@ use qbase::{
     frame::{AddAddressFrame, RemoveAddressFrame},
     net::{NatType, addr::EndpointAddr},
 };
-use qprotocol::BindUri;
 
-/// One local address advertised to this peer. `endpoint` selects the local UDP socket;
+/// One local address advertised to this peer. `bound` selects the local UDP socket;
 /// `frame` carries the address and NAT information visible to the peer.
 #[derive(Clone)]
 pub struct LocalAddress {
-    pub bind: BindUri,
+    pub bound: SocketAddr,
     pub endpoint: EndpointAddr,
     pub frame: AddAddressFrame,
 }
@@ -26,7 +25,7 @@ pub struct PunchAddresses {
 impl PunchAddresses {
     pub fn add_local(
         &mut self,
-        bind: BindUri,
+        bound: SocketAddr,
         endpoint: EndpointAddr,
         outer: SocketAddr,
         tire: u32,
@@ -38,7 +37,7 @@ impl PunchAddresses {
         self.local.insert(
             seq,
             LocalAddress {
-                bind,
+                bound,
                 endpoint,
                 frame,
             },
@@ -131,7 +130,7 @@ mod tests {
             (restricted, NatType::RestrictedPort),
             (cone, NatType::FullCone),
         ] {
-            addresses.add_local(endpoint.addr().into(), endpoint, endpoint.addr(), 0, nat);
+            addresses.add_local(endpoint.addr(), endpoint, endpoint.addr(), 0, nat);
         }
         let remote =
             AddAddressFrame::new(9, "127.0.0.1:6000".parse().unwrap(), 0, NatType::FullCone);
@@ -150,7 +149,7 @@ mod tests {
         let mut addresses = PunchAddresses::default();
         let endpoint = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
         addresses.add_local(
-            endpoint.addr().into(),
+            endpoint.addr(),
             endpoint,
             endpoint.addr(),
             0,
@@ -163,10 +162,10 @@ mod tests {
     #[test]
     fn local_and_remote_addresses_keep_connection_sequences() {
         let mut addresses = PunchAddresses::default();
-        let bind: BindUri = "inet://127.0.0.1:5000".parse().unwrap();
+        let bound: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let endpoint = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
         let local = addresses.add_local(
-            bind,
+            bound,
             endpoint,
             "198.51.100.1:5000".parse().unwrap(),
             7,
