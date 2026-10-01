@@ -9,16 +9,18 @@ description = "Sequential QUIC handshake growth on qtls and qtransport"
 
 [dependencies]
 bytes.workspace = true
+futures.workspace = true
 qbase.workspace = true
 qcongestion.workspace = true
 qprotocol = { path = "../qprotocol" }
 qrecovery.workspace = true
+qresolve.workspace = true
 qtls.workspace = true
 qtransport = { path = "../qtransport" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]
+netdev.workspace = true
 qudp.workspace = true
-futures.workspace = true
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tls-backend = { package = "rustls", git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std", "ring"] }

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use futures::StreamExt;
 use qbase::{
     ArcReceiving, Epoch,
     cid::ArcRemoteCids,
@@ -8,6 +9,7 @@ use qbase::{
     role::Role,
     token::ArcTokenRegistry,
 };
+use qprotocol::{AddressBook, Dock, QuicProtocol};
 use qtls::CryptoLevel;
 use qtransport::{
     keys::ArcKeys, packet::channel::RcvdPacket, router::QuicRouterRegistry, space::Space,
@@ -19,9 +21,11 @@ use crate::{
     TlsContext,
 };
 
-/// Grow an already routed client. Path creation and packet sending are external.
+/// Grow an already routed client and discover paths from the DNS result stream.
+/// The client owns discovery and cancels it before shutting down its paths.
 #[allow(clippy::too_many_arguments)]
 pub async fn client_growing(
+    server_name: String,
     client_params: ClientParameters,
     paths: Arc<Paths>,
     rcvd_pkt: RcvdPacket,
@@ -48,6 +52,16 @@ pub async fn client_growing(
             initial_phase.reliable_frames.clone(),
         ),
     );
+    let discovery = tokio::spawn({
+        let paths = paths.clone();
+        let resolver = qresolve::Resolver::get();
+        let addresses = AddressBook::global().clone();
+        async move {
+            if let Err(error) = resolve_paths(&paths, &addresses, resolver, &server_name).await {
+                paths.on_error(error);
+            }
+        }
+    });
     tokio::spawn(crate::tls::read_tls_to_crypto_stream(
         tls_context.clone(),
         CryptoLevel::Initial,
@@ -181,7 +195,7 @@ pub async fn client_growing(
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(close_error(&reason)));
-            return shutdown(&paths, &tls_context, &cid_registry.local, reason).await;
+            return shutdown(&paths, &tls_context, &cid_registry.local, reason, discovery).await;
         }
     };
     established(Ok(connected));
@@ -202,7 +216,7 @@ pub async fn client_growing(
             closed.clone().await.expect("growing owns close").expect("first close reason")
         }
     };
-    shutdown(&paths, &tls_context, &cid_registry.local, reason).await
+    shutdown(&paths, &tls_context, &cid_registry.local, reason, discovery).await
 }
 
 async fn shutdown(
@@ -210,9 +224,58 @@ async fn shutdown(
     tls: &TlsContext,
     local_cids: &crate::ArcLocalCids,
     reason: CloseReason,
+    discovery: tokio::task::JoinHandle<()>,
 ) -> CloseReason {
+    // Stop discovery before path cleanup so late DNS results cannot create senders.
+    discovery.abort();
+    let _ = discovery.await;
     tls.on_error(close_error(&reason));
     paths.finish(&reason).await;
     local_cids.clear();
     reason
 }
+
+async fn resolve_paths(
+    paths: &Arc<Paths>,
+    addresses: &AddressBook,
+    resolver: Arc<dyn qresolve::Resolve>,
+    server_name: &str,
+) -> Result<(), Error> {
+    let mut records = resolver
+        .lookup(server_name, "", None)
+        .await
+        .map_err(|error| {
+            QuicError::with_default_fty(
+                ErrorKind::NoViablePath,
+                format!("DNS lookup for {server_name} failed: {error}"),
+            )
+        })?;
+    while let Some((source, peer)) = records.next().await {
+        for pathway in addresses.pathways_to(peer, &source) {
+            let Some(socket) = QuicProtocol::global().find_socket(pathway.local()) else {
+                continue;
+            };
+            let Ok(bound) = socket.local_addr() else {
+                continue;
+            };
+            if !Dock::global()
+                .find_socket(bound)
+                .is_some_and(|registered| Arc::ptr_eq(&registered, &socket))
+            {
+                continue;
+            }
+            paths.add_path(pathway)?;
+        }
+    }
+    if paths.snapshot().is_empty() {
+        return Err(QuicError::with_default_fty(
+            ErrorKind::NoViablePath,
+            format!("DNS lookup for {server_name} ended without a usable path"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod discovery_tests;
