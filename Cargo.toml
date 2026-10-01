@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "dquic",
     "qmacro",
     "qbase",
     "qevent",
@@ -16,6 +17,7 @@ members = [
     "qresolve",
 ]
 default-members = [
+    "dquic",
     "qmacro",
     "qbase",
     "qevent",
@@ -86,6 +88,7 @@ parking_lot = "0.12"
 tracing-subscriber = "0.3"
 
 # members
+dquic = { path = "./dquic", version = "0.7.2" }
 qmacro = { path = "./qmacro", version = "0.5.1" }
 qbase = { path = "./qbase", version = "0.6.4" }
 qevent = { path = "./qevent", version = "0.6.2" }
