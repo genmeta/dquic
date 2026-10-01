@@ -302,6 +302,58 @@ async fn server_rejects_out_of_scope_sources_before_path_admission() {
     paths.retire_all();
 }
 
+#[tokio::test]
+async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
+    let pair = pair();
+    for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
+        let paths = empty_paths(receiver);
+        let local: EndpointAddr = "127.0.0.1:44501".parse().unwrap();
+        let original = paths
+            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()))
+            .unwrap();
+        paths.select_path(&original);
+        paths.handshake_confirmed();
+        let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
+        let packet = encoder(sender)
+            .encode_probe(PunchDoneFrame::new(1, 2, 3))
+            .unwrap();
+        let mut forged = packet.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        receive_on_paths(
+            receiver,
+            &paths,
+            vec![forged],
+            link.into(),
+            link,
+            Scopes::ALL,
+        )
+        .await;
+        assert!(
+            paths.get(&link.into()).is_none(),
+            "forged packet admitted a path"
+        );
+        receive_on_paths(
+            receiver,
+            &paths,
+            vec![packet],
+            link.into(),
+            link,
+            Scopes::ALL,
+        )
+        .await;
+        tokio::task::yield_now().await;
+        let path = paths.get(&link.into()).unwrap();
+        assert_eq!(path.selected(), Path::HANDSHAKED);
+        assert!(
+            path.challenge().is_some(),
+            "authenticated ingress must start validation"
+        );
+        assert!(!path.is_validated());
+        assert!(original.is_validated());
+        paths.retire_all();
+    }
+}
+
 fn take_reliable(phase: &MaturePhase) -> Vec<Frame> {
     use qbase::packet::{ConstraintBuffer, Constraints, GetType, Package};
     let mut bytes = BytesMut::with_capacity(1200);

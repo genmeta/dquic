@@ -260,18 +260,31 @@ pub async fn server_growing(
             .and_then(|result| result.map_err(CloseReason::from))
     };
 
-    match result {
-        Ok(connection) => (server.accept_cb)(Ok(connection)),
+    let connection = match result {
+        Ok(connection) => connection,
         Err(reason) => {
             (server.accept_cb)(Err(close_error(&reason)));
             return shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await;
         }
-    }
+    };
 
+    let crate::ConnPhase::Mature(mature_phase) = phase.get() else {
+        unreachable!("established server has 1-RTT material")
+    };
+    // The observer must not consume the connection's close reason.
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let observer = mature_phase.puncher.observe_endpoints(
+        qprotocol::AddressBook::global().subscribe_punch(scopes),
+        stopped,
+        |_| {},
+    );
+    (server.accept_cb)(Ok(connection));
     let reason = closed
         .await
         .expect("growing owns close")
         .expect("first close reason");
+    drop(stop);
+    let _ = observer.await;
     shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await
 }
 

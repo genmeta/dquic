@@ -40,7 +40,7 @@
 
 ### 底层接线
 
-客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建空的 `Paths`，由接收器在认证和帧解析成功后添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
+客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
 
 ```rust,ignore
 let phase = ArcConnPhase::new(InitialPhase::new(scid, original_dcid, initial_keys));
@@ -86,7 +86,7 @@ Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间
 
 Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `stun.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
 
-Initial、Handshake、1-RTT 接收均先检查范围、解密认证并解析帧，再接纳被动路径、启动路径发送任务和记入接收字节。伪造包、重复包和超出范围的来源不会创建路径。1-RTT 解密所需的 PTO 仅读取已有路径；未知路径使用现有路径中最大的 PTO，没有路径时使用一秒，不为获取 PTO 预建路径。
+接收流程当前先通过 `path_for` 取得或创建路径、记入接收字节，再进行解密认证。认证成功后才接纳新的被动路径（第 7 项）已回退，仍待后续处理。
 
 AddressBook 订阅、路径验证与发送限制、地址撤销后的路径退休和恢复、Puncher 关闭清理仍待完成。
 
