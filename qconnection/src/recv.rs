@@ -310,6 +310,8 @@ pub(crate) async fn receive_data(
         },
         |epoch, path| {
             inspect(epoch, path);
+            // Start validation only after authentication and path admission.
+            paths.start_validation(path);
             Ok(())
         },
         |keys, epoch, frame, path, link| {
