@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -11,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use qbase::{
     Epoch,
-    cid::{ConnectionId, Registry},
+    cid::ConnectionId,
     error::{AppError, ErrorKind, QuicError},
     flow::FlowController,
     frame::{AckFrame, Frame, MaxStreamsFrame, PingFrame, StreamCtlFrame, io::ReceiveFrame},
@@ -36,7 +36,6 @@ use crate::{
     keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket, SealPacket},
     packet::channel,
     path::Path,
-    recv::run_receive,
     send::{
         constraints::Constraints,
         write::{Packet as SendingPacket, PacketError},
@@ -93,6 +92,9 @@ fn enqueue(inbox: &channel::Inbox, packet: Packet) -> bool {
     let (pathway, link) = packet_way();
     inbox.try_send(packet, pathway, link)
 }
+
+mod receive;
+use receive::receive_packets;
 
 pub(crate) mod sender;
 pub(crate) use sender::Sender;
@@ -331,7 +333,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     assert!(enqueue(&inbox, Packet::Data(parse(bytes))));
     drop(inbox);
     let mut received = None;
-    run_receive(
+    receive_packets(
         packets.one_rtt,
         Epoch::Data,
         transport.data.keys.clone(),
@@ -593,7 +595,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         };
         if epoch == Epoch::Initial {
             let received_path = path.clone();
-            run_receive(
+            receive_packets(
                 rcvd_pkt.initial,
                 space.epoch,
                 space.keys.clone(),
@@ -612,7 +614,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             .await;
         } else {
             let received_path = path.clone();
-            run_receive(
+            receive_packets(
                 rcvd_pkt.handshake,
                 space.epoch,
                 space.keys.clone(),
@@ -676,12 +678,7 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
 
 #[tokio::test]
 async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
-    use qbase::{
-        ArcReceiving,
-        frame::{NewConnectionIdFrame, NewTokenFrame, RetireConnectionIdFrame},
-        net::route::Link,
-    };
-    use qrecovery::crypto::CryptoStream;
+    use qbase::{ArcReceiving, net::route::Link};
     use tokio::io::AsyncReadExt;
 
     use crate::router::QuicRouter;
@@ -694,26 +691,6 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     );
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
-    let cid_registry = Registry::new(
-        st.parameters.role(),
-        ConnectionId::default(),
-        ArcReceiving::<RetireConnectionIdFrame>::default(),
-        ArcReceiving::<NewConnectionIdFrame>::default(),
-    );
-    let dispatch = recv::frame_dispatcher(
-        st.data.clone(),
-        st.parameters.clone(),
-        st.flow.clone(),
-        [
-            CryptoStream::new(),
-            CryptoStream::new(),
-            st.data.crypto.clone(),
-        ],
-        cid_registry,
-        ArcReceiving::<NewTokenFrame>::default(),
-        move |_, frame, _| close_sink.recv_frame(frame),
-        |_, _, _| panic!("unexpected frame"),
-    );
     let streams_seen = Arc::new(AtomicUsize::new(0));
     let seen = streams_seen.clone();
     let router = Arc::new(QuicRouter::new());
@@ -725,7 +702,8 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let cid = ConnectionId::from_slice(b"original");
     let route = router.insert(cid.into(), inbox.clone());
     let journal = st.data.rcvd_journal.clone();
-    let task = tokio::spawn(run_receive(
+    let received = st.clone();
+    let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
         st.data.keys.clone(),
@@ -742,11 +720,15 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
             )
         },
         |_, _| Ok(()),
-        move |keys, epoch, frame, path, _| {
+        move |_, epoch, frame, path, _| {
             if matches!(frame, Frame::Stream(_, _)) {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
-            dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
+            assert_eq!(epoch, Epoch::Data);
+            if let Frame::Close(frame) = &frame {
+                close_sink.recv_frame(frame.clone())?;
+            }
+            dispatch(&received, path, frame)
         },
         |_| panic!("receive failed"),
     ));
@@ -811,7 +793,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     let mut ordinary = 0;
     let mut closes = 0;
     let mut processed = 0;
-    run_receive(
+    receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
         st.data.keys.clone(),
@@ -849,110 +831,6 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         st.data.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
         Ok(0)
     );
-}
-
-#[tokio::test]
-async fn frame_dispatcher_connects_crypto_cids_tokens_and_peer_close_to_original_components() {
-    use qbase::{
-        ArcReceiving,
-        frame::{
-            ConnectionCloseFrame, CryptoFrame, NewConnectionIdFrame, NewTokenFrame,
-            RetireConnectionIdFrame,
-        },
-    };
-    use qrecovery::crypto::CryptoStream;
-    use tokio::io::AsyncReadExt;
-    let [(client, ct, cp), (_server, _, _)] = pair(1);
-    let crypto = std::array::from_fn(|_| CryptoStream::new());
-    let retired = ArcReceiving::default();
-    let issued = ArcReceiving::default();
-    let token = ArcReceiving::default();
-    let handshake_ack = ArcReceiving::default();
-    let ack_sink = handshake_ack.clone();
-    let closing = Arc::new(AtomicBool::new(false));
-    let close_seen = ArcReceiving::default();
-    let close_sink = close_seen.clone();
-    let cid_registry = Registry::new(
-        ct.parameters.role(),
-        ConnectionId::default(),
-        retired.clone(),
-        issued.clone(),
-    );
-    let dispatch = recv::frame_dispatcher(
-        ct.data.clone(),
-        ct.parameters.clone(),
-        ct.flow.clone(),
-        crypto.clone(),
-        cid_registry,
-        token.clone(),
-        {
-            let closing = closing.clone();
-            move |_, frame, _| {
-                closing.store(true, Ordering::Release);
-                close_sink.recv_frame(frame)
-            }
-        },
-        move |epoch, frame, _| {
-            assert_eq!(epoch, Epoch::Handshake);
-            let Frame::Ack(frame) = frame else {
-                panic!("unexpected frame")
-            };
-            ack_sink.recv_frame(frame)
-        },
-    );
-    let ready = keys(&ct);
-    let dispatch =
-        |epoch, frame, path| dispatch(epoch, frame, path, &|generation| ready.on_ack(generation));
-    for (index, epoch) in [Epoch::Initial, Epoch::Handshake, Epoch::Data]
-        .into_iter()
-        .enumerate()
-    {
-        dispatch(
-            epoch,
-            Frame::Crypto(
-                CryptoFrame::new(0u32.into(), 1u32.into()),
-                Bytes::from(vec![index as u8]),
-            ),
-            &cp,
-        )
-        .unwrap();
-        let mut body = [0];
-        crypto[index].reader().read_exact(&mut body).await.unwrap();
-        assert_eq!(body, [index as u8]);
-    }
-    let retire = RetireConnectionIdFrame::new(0u32.into());
-    let issue = NewConnectionIdFrame::new(
-        ConnectionId::from_slice(b"newalias"),
-        1u32.into(),
-        0u32.into(),
-    );
-    let new_token = NewTokenFrame::new(b"token".to_vec());
-    dispatch(Epoch::Data, Frame::RetireConnectionId(retire), &cp).unwrap();
-    dispatch(Epoch::Data, Frame::NewConnectionId(issue), &cp).unwrap();
-    dispatch(Epoch::Data, Frame::NewToken(new_token.clone()), &cp).unwrap();
-    dispatch(Epoch::Handshake, Frame::Ack(ack(0)), &cp).unwrap();
-    assert_eq!(retired.await.unwrap(), Some(retire));
-    assert_eq!(issued.await.unwrap(), Some(issue));
-    assert_eq!(token.await.unwrap(), Some(new_token));
-    assert_eq!(handshake_ack.await.unwrap(), Some(ack(0)));
-    ready.update().unwrap();
-    let mut sender = Sender::new(ready.clone(), ct.clone(), cp.clone()).unwrap();
-    sender.heartbeat();
-    emit(&mut sender);
-    assert!(ready.update().is_err());
-    dispatch(Epoch::Data, Frame::Ack(ack(0)), &cp).unwrap();
-    ready.update().unwrap();
-    let accept_bi = client.accept_bi_stream();
-    let accept_uni = client.accept_uni_stream();
-    tokio::pin!(accept_bi, accept_uni);
-    assert!(futures::poll!(&mut accept_bi).is_pending());
-    assert!(futures::poll!(&mut accept_uni).is_pending());
-    let close = ConnectionCloseFrame::from(Error::from(AppError::new(7u32.into(), "peer closed")));
-    dispatch(Epoch::Data, Frame::Close(close.clone()), &cp).unwrap();
-    assert!(closing.load(Ordering::Acquire));
-    assert!(accept_bi.await.is_err());
-    assert!(accept_uni.await.is_err());
-    assert_eq!(close_seen.await.unwrap(), Some(close));
 }
 
 #[tokio::test]
@@ -1506,7 +1384,7 @@ async fn receiving_starts_with_ready_keys() {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
     let journal = data.rcvd_journal.clone();
-    let task = tokio::spawn(run_receive(
+    let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
         data.keys.clone(),
@@ -1576,7 +1454,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     let inspected = std::cell::Cell::new(0);
     let mut dispatched = 0;
     let mut errors = 0;
-    run_receive(
+    receive_packets(
         packets.one_rtt,
         Epoch::Data,
         st.data.keys.clone(),
@@ -2089,7 +1967,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         Epoch::Initial,
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
     ));
-    let mut task = tokio::spawn(run_receive(
+    let mut task = tokio::spawn(receive_packets(
         rcvd_pkt.initial,
         space.epoch,
         space.keys.clone(),

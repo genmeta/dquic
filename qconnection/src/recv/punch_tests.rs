@@ -5,11 +5,11 @@ use futures::FutureExt;
 use qbase::{
     cid::ConnectionId,
     frame::{
-        AddAddressFrame, FrameReader, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame,
-        RemoveAddressFrame,
+        AddAddressFrame, ConnectionCloseFrame, FrameReader, HandshakeDoneFrame, PingFrame,
+        PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, RemoveAddressFrame,
     },
     net::{NatType, addr::EndpointAddr, route::Line},
-    packet::{DataHeader, Packet, PacketReader},
+    packet::{DataHeader, Packet, PacketNumber, PacketReader},
     time::ArcConnIdle,
     token::handy::NoopTokenRegistry,
 };
@@ -104,6 +104,55 @@ fn encoder(phase: &MaturePhase) -> ProbeEncoder {
     ProbeEncoder::new(phase.spaces.data.clone(), phase.peer_cid)
 }
 
+fn encode_frame(
+    phase: &MaturePhase,
+    mut frame: impl for<'b> qbase::packet::Package<&'b mut BytesMut>,
+) -> BytesMut {
+    encode_frames(phase, [&mut frame])
+}
+
+fn encode_frames<const N: usize>(
+    phase: &MaturePhase,
+    frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut BytesMut>; N],
+) -> BytesMut {
+    use qbase::packet::{Constraints, assemble::Assemble};
+
+    let space = &phase.spaces.data;
+    let keys = space.keys.get().unwrap();
+    let (pn, key) = keys
+        .reserve(|_| space.next_pn().map_err(Into::into))
+        .unwrap();
+    let mut bytes = BytesMut::with_capacity(1200);
+    let packet = crate::send::Packet::new(
+        OneRttHeader::new(Default::default(), phase.peer_cid),
+        pn,
+        &mut bytes,
+    )
+    .unwrap();
+    let mut limits = Constraints {
+        flow_ctrl: usize::MAX,
+        send_quota: 1200,
+        credit: 1200,
+        max_size: 1200,
+        ..Default::default()
+    };
+    let mut sending = crate::send::SendingPacket {
+        packet,
+        keys: &key,
+        limits: &mut limits,
+    };
+    assert!(matches!(
+        sending.assemble(
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+            frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
+            &mut Vec::new(),
+        ),
+        std::task::Poll::Ready(Ok(n)) if n > 0
+    ));
+    sending.seal().unwrap();
+    bytes
+}
+
 fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
     let role = phase.parameters.role();
     let snapshot = ArcConnPhase::initial(InitialPhase::new(
@@ -136,7 +185,7 @@ async fn receive_on_paths(
     pathway: Pathway,
     link: Link,
     scopes: Scopes,
-) {
+) -> ArcHandshake<ArcReliableFrames> {
     let (tx, rx) = tokio::sync::mpsc::channel(packets.len());
     for bytes in packets {
         let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
@@ -155,35 +204,201 @@ async fn receive_on_paths(
     drop(tx);
     let closed = paths.closed();
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
-    if phase.parameters.role() == Role::Client {
-        receive_client_data(
-            rx,
-            phase.clone(),
-            paths.clone(),
-            phase.parameters.clone(),
-            phase.cid_registry.clone(),
-            tokens,
-            closed.clone(),
-            || {},
-        )
-        .await;
-    } else {
-        receive_server_data(
-            rx,
-            phase.clone(),
-            paths.clone(),
-            phase.parameters.clone(),
-            phase.cid_registry.clone(),
-            tokens,
-            closed.clone(),
-            scopes,
-        )
-        .await;
-    }
+    let role = phase.parameters.role();
+    let handshake = ArcHandshake::new(role, phase.spaces.data.reliable_frames.clone());
+    receive_data(
+        (rx, (role == Role::Server).then_some(scopes)),
+        phase.clone(),
+        paths.clone(),
+        phase.parameters.clone(),
+        phase.cid_registry.clone(),
+        tokens,
+        handshake.clone(),
+    )
+    .await;
     assert!(
         closed.now_or_never().is_none(),
-        "punch frames must not close the connection"
+        "received frames must not close the connection"
     );
+    handshake
+}
+
+#[tokio::test]
+async fn data_reception_delivers_crypto_and_streams_to_the_data_space() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let pair = pair();
+    for (sender, receiver) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
+        let data = &sender.spaces.data;
+        data.crypto.writer().write_all(b"ticket").await.unwrap();
+        let (_, mut writer) = data.streams.open_uni().await.unwrap().unwrap();
+        writer.write_all(b"stream").await.unwrap();
+        let mut crypto = data.crypto.outgoing();
+        let mut streams = data.streams.clone();
+        let bytes = encode_frames(sender, [&mut crypto, &mut streams]);
+        let link = Link::new(
+            "127.0.0.1:47001".parse().unwrap(),
+            "127.0.0.1:47002".parse().unwrap(),
+        );
+        receive(receiver, vec![bytes.clone(), bytes], link.into(), link).await;
+
+        let mut body = [0; 6];
+        receiver
+            .spaces
+            .data
+            .crypto
+            .reader()
+            .read_exact(&mut body)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        assert_eq!(&body, b"ticket");
+        for space in [&receiver.spaces.initial, &receiver.spaces.handshake] {
+            assert!(
+                space
+                    .crypto
+                    .reader()
+                    .read(&mut body)
+                    .now_or_never()
+                    .is_none()
+            );
+        }
+        let (_, mut reader) = receiver
+            .spaces
+            .data
+            .streams
+            .accept_uni()
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        reader
+            .read_exact(&mut body)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        assert_eq!(&body, b"stream");
+        assert!(reader.read(&mut body).now_or_never().is_none());
+    }
+}
+
+#[tokio::test]
+async fn handshake_done_confirms_the_shared_client_handshake() {
+    let [receiver, sender] = pair();
+    let paths = empty_paths(&receiver);
+    let link = Link::new(
+        "127.0.0.1:45001".parse().unwrap(),
+        "127.0.0.1:45002".parse().unwrap(),
+    );
+    let handshake = receive_on_paths(
+        &receiver,
+        &paths,
+        vec![
+            encode_frame(&sender, HandshakeDoneFrame),
+            encode_frame(&sender, HandshakeDoneFrame),
+        ],
+        link.into(),
+        link,
+        Scopes::ALL,
+    )
+    .await;
+    assert!(handshake.is_handshake_done());
+    assert_eq!(handshake.now_or_never(), Some(()));
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn data_close_takes_priority_and_reception_continues_after_errors() {
+    use tokio::io::AsyncReadExt;
+
+    let close = ConnectionCloseFrame::new_app(7u32.into(), "peer closed");
+    for (role, peer_close) in [
+        (Role::Client, true),
+        (Role::Server, true),
+        (Role::Server, false),
+    ] {
+        let pair = pair();
+        let (receiver, sender) = if role == Role::Client {
+            (&pair[0], &pair[1])
+        } else {
+            (&pair[1], &pair[0])
+        };
+        let paths = empty_paths(receiver);
+        let closed = paths.closed();
+        let first = if peer_close {
+            encode_frames(sender, [&mut HandshakeDoneFrame, &mut close.clone()])
+        } else {
+            encode_frame(sender, HandshakeDoneFrame)
+        };
+        let link = Link::new(
+            "127.0.0.1:46001".parse().unwrap(),
+            "127.0.0.1:46002".parse().unwrap(),
+        );
+        let (tx, rx) = tokio::sync::mpsc::channel(3);
+        for bytes in [
+            first,
+            encode_frame(sender, close.clone()),
+            encode_frame(sender, PingFrame),
+        ] {
+            let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
+                panic!("expected Data packet");
+            };
+            let DataHeader::Short(header) = packet.header else {
+                panic!("expected 1-RTT packet");
+            };
+            tx.try_send((
+                qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
+                link.into(),
+                link,
+            ))
+            .unwrap();
+        }
+        drop(tx);
+        let handshake = ArcHandshake::new(
+            receiver.parameters.role(),
+            receiver.spaces.data.reliable_frames.clone(),
+        );
+        receive_data(
+            (rx, Some(Scopes::ALL)),
+            receiver.clone(),
+            paths.clone(),
+            receiver.parameters.clone(),
+            receiver.cid_registry.clone(),
+            ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
+            handshake.clone(),
+        )
+        .await;
+        let reason = closed.now_or_never().unwrap().unwrap().unwrap();
+        if peer_close {
+            assert!(matches!(reason, CloseReason::Peer(frame) if frame == close));
+        } else {
+            assert!(matches!(reason, CloseReason::Internal(error)
+                if error.kind() == ErrorKind::ProtocolViolation));
+        }
+        assert!(matches!(
+            &*paths.terminator().lock_guard(),
+            Terminator::Draining { .. }
+        ));
+        assert!(!handshake.is_handshake_done());
+        assert!(receiver.spaces.data.streams.accept_uni().await.is_err());
+        assert!(receiver.spaces.data.streams.accept_bi().await.is_err());
+        assert!(
+            receiver
+                .spaces
+                .data
+                .crypto
+                .reader()
+                .read(&mut [0; 1])
+                .now_or_never()
+                .unwrap()
+                .is_err()
+        );
+        let journal = &receiver.spaces.data.rcvd_journal;
+        for pn in [0, 1] {
+            assert_eq!(journal.decode_pn(PacketNumber::encode(pn, 0)), Ok(pn));
+        }
+        assert!(journal.decode_pn(PacketNumber::encode(2, 0)).is_err());
+        paths.retire_all();
+    }
 }
 
 #[tokio::test]

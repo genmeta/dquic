@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use qbase::{
-    ArcReceiving, Epoch,
+    Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
+    handshake::ArcHandshake,
     param::{ClientParameters, ParameterId, Requirements},
     role::Role,
     token::ArcTokenRegistry,
@@ -18,6 +19,8 @@ use super::{any, close_error};
 use crate::{
     ArcParameters, ArcReliableFrames, CloseReason, ConnPhase, Connected, Error, MaturePhase, Paths,
     TlsContext,
+    recv::{receive_data, recv_ih_pkt_and_deliver_frames},
+    tls::{read_space_to_tls, read_tls_to_space},
 };
 
 /// Grow an already routed client and discover paths from the DNS result stream.
@@ -61,18 +64,18 @@ pub async fn client_growing(
             }
         }
     });
-    tokio::spawn(crate::tls::read_tls_to_space(
+    tokio::spawn(read_tls_to_space(
         tls_context.clone(),
         initial.as_ref(),
         closed.clone(),
     ));
-    tokio::spawn(crate::tls::read_space_to_tls(
+    tokio::spawn(read_space_to_tls(
         tls_context.clone(),
         initial.as_ref(),
         closed.clone(),
     ));
-    tokio::spawn(crate::recv::recv_client_ih_pkt_and_deliver_frames(
-        rcvd_pkt.initial,
+    tokio::spawn(recv_ih_pkt_and_deliver_frames(
+        (rcvd_pkt.initial, None),
         initial.clone(),
         paths.clone(),
         closed.clone(),
@@ -87,18 +90,18 @@ pub async fn client_growing(
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
 
-            tokio::spawn(crate::tls::read_tls_to_space(
+            tokio::spawn(read_tls_to_space(
                 tls_context.clone(),
                 handshake.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::tls::read_space_to_tls(
+            tokio::spawn(read_space_to_tls(
                 tls_context.clone(),
                 handshake.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::recv::recv_client_ih_pkt_and_deliver_frames(
-                rcvd_pkt.handshake,
+            tokio::spawn(recv_ih_pkt_and_deliver_frames(
+                (rcvd_pkt.handshake, None),
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
@@ -135,27 +138,23 @@ pub async fn client_growing(
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
 
-            let handshake_done = ArcReceiving::default();
-            tokio::spawn(crate::recv::receive_client_data(
-                rcvd_pkt.one_rtt,
+            let handshake_done = ArcHandshake::new_client();
+            tokio::spawn(receive_data(
+                (rcvd_pkt.one_rtt, None),
                 mature_phase.clone(),
                 paths.clone(),
                 parameters,
                 cid_registry.clone(),
                 token_registry,
-                closed.clone(),
-                {
-                    let handshake_done = handshake_done.clone();
-                    move || handshake_done.set(true)
-                },
+                handshake_done.clone(),
             ));
 
-            tokio::spawn(crate::tls::read_tls_to_space(
+            tokio::spawn(read_tls_to_space(
                 tls_context.clone(),
                 mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::tls::read_space_to_tls(
+            tokio::spawn(read_space_to_tls(
                 tls_context.clone(),
                 mature_phase.spaces.data.as_ref(),
                 closed.clone(),
@@ -211,7 +210,7 @@ pub async fn client_growing(
     let mut close = closed.clone();
     let reason = tokio::select! {
         Ok(Some(reason)) = &mut close => reason,
-        Ok(Some(true)) = handshake_done => {
+        () = handshake_done => {
             mature_phase
                 .spaces
                 .data
