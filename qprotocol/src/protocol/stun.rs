@@ -2,7 +2,7 @@ use std::{
     io::{self, IoSlice},
     net::SocketAddr,
     sync::{
-        Arc, Weak,
+        Arc, LazyLock, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -10,6 +10,10 @@ use std::{
 
 use bytes::BytesMut;
 use dashmap::{DashMap, mapref::entry::Entry};
+use futures::{
+    FutureExt, StreamExt,
+    future::{BoxFuture, Shared},
+};
 pub use qbase::datagram::stun::{
     Attribute as Attr, BindingRequest, BindingRequest as Request, BindingResponse,
     BindingResponse as Response, Message, MessageType, TransactionId, Type, WriteStunMessage,
@@ -20,13 +24,21 @@ use qbase::{
     datagram::{Datagram, WriteDatagram},
     net::{
         NatType, NetFeature,
+        addr::EndpointAddr,
         route::{Line, Link},
     },
 };
+use qresolve::{Resolve, SystemResolver};
 use thiserror::Error;
 use tokio::time::timeout;
 
 use crate::socket::UdpSocket;
+
+const STUN_SERVER: &str = "stun.genmeta.net";
+const STUN_PORT: &str = "20002";
+
+type StunServers = Result<Arc<[SocketAddr]>, Arc<io::Error>>;
+type StunLookup = Shared<BoxFuture<'static, StunServers>>;
 
 const PROBE_ATTEMPTS: u8 = 30;
 const FILTER_ATTEMPTS: u8 = 3;
@@ -96,6 +108,29 @@ impl Default for StunProtocol {
 }
 
 impl StunProtocol {
+    /// Global STUN protocol. First initialization starts DNS in the current Tokio runtime.
+    pub fn global() -> &'static Arc<Self> {
+        static STUN: OnceLock<Arc<StunProtocol>> = OnceLock::new();
+        STUN.get_or_init(|| {
+            tokio::spawn(async {
+                if let Err(error) = Self::stun_servers().await {
+                    tracing::debug!(%error, "STUN bootstrap DNS lookup failed");
+                }
+            });
+            Arc::new(Self::new())
+        })
+    }
+
+    /// One process-wide DNS result, including empty results and failures.
+    pub async fn stun_servers() -> io::Result<Arc<[SocketAddr]>> {
+        static SERVERS: LazyLock<StunLookup> =
+            LazyLock::new(|| resolve_stun_servers(Arc::new(SystemResolver)));
+        SERVERS
+            .clone()
+            .await
+            .map_err(|error| io::Error::new(error.kind(), error))
+    }
+
     pub fn new() -> Self {
         Self {
             transactions: DashMap::new(),
@@ -534,9 +569,30 @@ async fn send_datagram(
     }
 }
 
+fn resolve_stun_servers(resolver: Arc<dyn Resolve>) -> StunLookup {
+    async move {
+        let mut records = resolver
+            .lookup(STUN_SERVER, STUN_PORT, None)
+            .await
+            .map_err(Arc::new)?;
+        let mut servers = Vec::new();
+        while let Some((_, endpoint)) = records.next().await {
+            if let EndpointAddr::Direct { addr } = endpoint
+                && !servers.contains(&addr)
+            {
+                servers.push(addr);
+            }
+        }
+        Ok(servers.into())
+    }
+    .boxed()
+    .shared()
+}
+
 #[cfg(test)]
 mod tests {
     mod client;
+    mod discovery;
     mod server;
 
     use std::time::Duration;

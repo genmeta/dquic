@@ -18,6 +18,7 @@ use qtransport::{
     space::{DataSpace, Space, Spaces},
     transport::Transport,
 };
+use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use crate::{
     ArcParameters, ArcReliableFrames, CidRegistry, DataStreams, Error, FlowController,
@@ -99,6 +100,7 @@ pub struct MaturePhase {
     pub initial_dcid: ArcCidCell<ArcReliableFrames>,
     pub peer_cid: ConnectionId,
     pub parameters: ArcParameters,
+    pub puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
     trackers: Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>,
     pub(crate) terminator: ArcTerminator,
 }
@@ -151,7 +153,12 @@ impl MaturePhase {
             parameters.local(ParameterId::InitialMaxData),
             reliable_frames.clone(),
         );
-        let data = Arc::new(DataSpace::new(keys, streams, reliable_frames));
+        let data = Arc::new(DataSpace::new(keys, streams, reliable_frames.clone()));
+        // Both roles create the connection's puncher once 1-RTT material is ready.
+        let puncher = ArcPuncher::new(
+            reliable_frames,
+            ProbeEncoder::new(data.clone(), peer_cid),
+        );
         let sender = Arc::new(Self {
             spaces: Spaces {
                 initial: early.initial.clone(),
@@ -164,6 +171,7 @@ impl MaturePhase {
             initial_dcid,
             peer_cid,
             parameters: parameters.clone(),
+            puncher,
             trackers: early.trackers.clone(),
             terminator: early.terminator.clone(),
         });
