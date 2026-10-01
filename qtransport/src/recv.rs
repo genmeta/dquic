@@ -1,11 +1,10 @@
 //! Receive engines are functions. Their closures capture already connected component pipes.
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use qbase::{
     Epoch,
     cid::Registry,
-    error::{ErrorKind, QuicError},
     flow::FlowController,
     frame::{
         AckFrame, ConnectionCloseFrame, Frame, FrameReader, GetFrameType, NewConnectionIdFrame,
@@ -87,16 +86,20 @@ where
 /// Keys are ready before this engine starts. Closing keeps it alive for CLOSE frames.
 /// Retirement ends only this space; closing the inbox ends idle packet waits.
 /// Dispatch receives the same ready material used to open the packet.
+/// Dispatch also receives the datagram's actual link for direct UDP replies.
+/// A Pathway may contain advertised addresses and cannot reconstruct that link.
+/// `open` may inspect existing path state but must not create a path. Admission
+/// and receive accounting run only after authentication and frame parsing succeed.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_receive<H, M>(
     mut packets: PacketReceiver<H>,
     epoch: Epoch,
     keys: ArcKeys<M>,
     journal: ArcRcvdJournal,
-    mut path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
-    mut open: impl FnMut(&M, CipherPacket<H>, Duration) -> Result<Option<PlainPacket<H>>, Error>,
+    mut admit_path: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    mut open: impl FnMut(&M, CipherPacket<H>, Pathway) -> Result<Option<PlainPacket<H>>, Error>,
     mut inspect: impl FnMut(Epoch, &Arc<Path>) -> Result<(), Error>,
-    mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>) -> Result<(), Error>,
+    mut dispatch: impl FnMut(&M, Epoch, Frame<Bytes>, &Arc<Path>, Link) -> Result<(), Error>,
     mut on_error: impl FnMut(Error),
 ) where
     H: GetType,
@@ -104,14 +107,12 @@ pub async fn run_receive<H, M>(
 {
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = packets.recv().await {
-        let Some(path) = path_for(pathway, link) else {
-            continue;
-        };
-        path.on_datagram_received(packet.payload_len());
+        parsed_frames.clear();
+        let received_bytes = packet.payload_len();
         let Ok(keys) = keys.get() else {
             break;
         };
-        let result = open(&keys, packet, path.cc.get_pto(epoch)).and_then(|opened| {
+        let result = open(&keys, packet, pathway).and_then(|opened| {
             if let Some(packet) = opened {
                 let pn = packet.pn();
                 let frames = FrameReader::new(packet.body(), packet.get_type());
@@ -124,17 +125,21 @@ pub async fn run_receive<H, M>(
                     }
                     parsed_frames.push(frame);
                 }
+                let Some(path) = admit_path(pathway, link) else {
+                    return Ok(());
+                };
+                path.on_datagram_received(received_bytes);
                 inspect(epoch, &path)?;
                 // CLOSE reaches the control owner even when ordinary component pipes are full.
                 if let Some(frame) = parsed_frames
                     .iter()
                     .find(|frame| matches!(frame, Frame::Close(_)))
                 {
-                    dispatch(&keys, epoch, frame.clone(), &path)?;
+                    dispatch(&keys, epoch, frame.clone(), &path, link)?;
                     return Ok(());
                 }
                 for frame in parsed_frames.drain(..) {
-                    dispatch(&keys, epoch, frame, &path)?;
+                    dispatch(&keys, epoch, frame, &path, link)?;
                 }
                 let pto = path.cc.get_pto(epoch);
                 journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);

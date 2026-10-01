@@ -123,7 +123,7 @@ async fn replay_advertises_lan_immediately_and_external_aliases_after_nat_arrive
         binding.publish(&book, endpoint);
     }
     let frames = Frames::default();
-    let puncher = ArcPuncher::new(frames.clone(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
     let removed = Arc::new(Mutex::new(Vec::new()));
     let observed = removed.clone();
@@ -181,7 +181,7 @@ async fn replacement_and_binding_withdrawal_preserve_other_aliases_and_reset_nat
         binding.publish(&book, endpoint);
     }
     let frames = Frames::default();
-    let puncher = ArcPuncher::new(frames.clone(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
     let (removed, mut removals) = mpsc::unbounded_channel();
     let task =
@@ -238,7 +238,7 @@ async fn scoped_subscription_and_pending_endpoint_removal_do_not_leak_advertisem
     binding.publish(&book, inner);
     binding.publish(&book, outer);
     let frames = Frames::default();
-    let puncher = ArcPuncher::new(frames.clone(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (removed, mut removals) = mpsc::unbounded_channel();
     let task = puncher.observe_endpoints(
         book.subscribe_punch(Scope::External),
@@ -270,7 +270,7 @@ async fn nat_refresh_cancels_old_transactions_and_forgets_their_history() {
     binding.publish(&book, outer);
     book.set_nat(binding.bound(), NatType::RestrictedCone);
     let frames = Frames::default();
-    let puncher = ArcPuncher::new(frames.clone(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
     let task = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
     let seq = puncher.0.addresses.lock().unwrap().local_frames()[0].seq_num();
@@ -308,7 +308,7 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
     book.set_nat(binding.bound(), NatType::Symmetric);
-    let puncher = ArcPuncher::new(Frames::default(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(Frames::default(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
     let task = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
     let local = puncher
@@ -338,7 +338,7 @@ async fn alias_probes_use_the_actual_socket_source_address() {
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
     book.set_nat(binding.bound(), NatType::RestrictedCone);
-    let puncher = ArcPuncher::new(Frames::default(), Encoder, Arc::from([]));
+    let puncher = ArcPuncher::new(Frames::default(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
     let observer = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
     let local = puncher

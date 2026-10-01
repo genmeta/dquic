@@ -226,7 +226,6 @@ impl ServerRegistry {
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, DEFAULT_HEARTBEAT_INTERVAL);
                 phase.set_dcid(peer_cid);
                 let paths = Paths::new(Role::Server, phase, idle);
-                paths.add_path(pathway).expect("fresh server path");
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
                 }

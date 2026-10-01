@@ -5,7 +5,7 @@ use qbase::{
     ArcReceiving, Epoch,
     error::{ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame, io::ReceiveFrame},
-    net::route::{Link, Pathway, Scopes},
+    net::route::{Pathway, Scopes},
     packet::{GetScid, GetType, OneRttHeader},
     param::Requirements,
     role::Role,
@@ -19,6 +19,9 @@ use qtransport::{
     space::Space,
 };
 use tokio::time::Instant;
+
+#[cfg(test)]
+use qbase::net::route::Link;
 
 use crate::{ArcParameters, CloseReason, MaturePhase, Paths, terminate::Terminator};
 
@@ -102,16 +105,15 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
         space.rcvd_journal.clone(),
         {
             let paths = paths.clone();
-            move |pathway, _| {
-                belongs_to_scope(&pathway)
-                    .then(|| paths.on_incoming_path(pathway).ok())
-                    .flatten()
-            }
+            move |pathway, _| paths.on_incoming_path(pathway).ok()
         },
         {
             let space = space.clone();
             let initial_scid = initial_scid.clone();
-            move |keys: &Arc<qtls::BidirectionalKeys>, packet, _pto| {
+            move |keys: &Arc<qtls::BidirectionalKeys>, packet, pathway| {
+                if !belongs_to_scope(&pathway) {
+                    return Ok(None);
+                }
                 let scid = (space.epoch == Epoch::Initial).then(|| *packet.scid());
                 let opened = packet
                     .decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn))
@@ -149,7 +151,7 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
         },
         {
             let space = space.clone();
-            move |_, epoch, frame, path| match frame {
+            move |_, epoch, frame, path, _| match frame {
                 Frame::Padding(_) | Frame::Ping(_) => Ok(()),
                 Frame::Crypto(frame, bytes) => space.crypto.incoming().recv_frame((frame, bytes)),
                 Frame::Ack(frame) => {
@@ -197,10 +199,7 @@ pub(crate) async fn receive_client_data(
         packets,
         sender,
         paths.clone(),
-        {
-            let paths = paths.clone();
-            move |pathway, _| paths.on_incoming_path(pathway).ok()
-        },
+        |_| true,
         parameters,
         cid_registry,
         tokens,
@@ -234,15 +233,7 @@ pub(crate) async fn receive_server_data(
         packets,
         sender,
         paths.clone(),
-        {
-            let paths = paths.clone();
-            move |pathway, _| {
-                pathway
-                    .belongs_to(scopes)
-                    .then(|| paths.on_incoming_path(pathway).ok())
-                    .flatten()
-            }
-        },
+        move |pathway| pathway.belongs_to(scopes),
         parameters,
         cid_registry,
         tokens,
@@ -265,7 +256,7 @@ pub(crate) async fn receive_data(
     packets: PacketReceiver<OneRttHeader>,
     sender: Arc<MaturePhase>,
     paths: Arc<Paths>,
-    path_for: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
+    belongs_to_scope: impl Fn(&Pathway) -> bool,
     parameters: ArcParameters,
     cid_registry: crate::CidRegistry,
     tokens: ArcTokenRegistry,
@@ -318,20 +309,41 @@ pub(crate) async fn receive_data(
         Epoch::Data,
         sender.spaces.data.keys.clone(),
         sender.spaces.data.rcvd_journal.clone(),
-        path_for,
-        |keys: &OneRttKeys, packet, pto| {
+        |pathway, _| paths.on_incoming_path(pathway).ok(),
+        |keys: &OneRttKeys, packet, pathway| {
+            if !belongs_to_scope(&pathway) {
+                return Ok(None);
+            }
             keys.open_packet(
                 packet,
                 |pn| sender.spaces.data.rcvd_journal.decode_pn(pn),
-                pto,
+                paths.pto_for(&pathway, Epoch::Data),
             )
         },
         |epoch, path| {
             inspect(epoch, path);
             Ok(())
         },
-        |keys, epoch, frame, path| {
-            dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
+        |keys, epoch, frame, path, link| {
+            match frame {
+                Frame::AddAddress(frame) => sender.puncher.recv_add_address(frame),
+                Frame::RemoveAddress(frame) => {
+                    // Unknown sequence numbers are ignored; do not truncate a
+                    // wire VarInt into an existing 32-bit punch address ID.
+                    if let Ok(seq) = u32::try_from(frame.seq_num.into_u64()) {
+                        sender.puncher.recv_remove_address(seq);
+                    }
+                }
+                Frame::PunchMeNow(frame) => sender.puncher.recv_punch_me_now(path.pathway, frame),
+                Frame::PunchHello(frame) => {
+                    sender.puncher.recv_punch_hello(path.pathway, link, frame);
+                }
+                Frame::PunchDone(frame) => sender.puncher.recv_punch_done(link, frame),
+                frame => {
+                    return dispatch(epoch, frame, path, &|generation| keys.on_ack(generation));
+                }
+            }
+            Ok(())
         },
         |error| {
             sender.spaces.data.streams.on_conn_error(&error);
@@ -389,6 +401,10 @@ pub(crate) async fn tick(
 }
 
 #[cfg(test)]
+#[path = "recv/punch_tests.rs"]
+mod punch_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{task::Poll, time::Duration};
 
@@ -406,7 +422,7 @@ mod tests {
     use super::*;
     use crate::{ArcConnPhase, InitialPhase};
 
-    fn keys(server: bool) -> qtls::BidirectionalKeys {
+    pub(super) fn keys(server: bool) -> qtls::BidirectionalKeys {
         qtls::default_provider()
             .cipher_suites
             .iter()
@@ -579,6 +595,38 @@ mod tests {
             ))
             .unwrap();
         (paths, first, second)
+    }
+
+    #[tokio::test]
+    async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
+        for role in [Role::Client, Role::Server] {
+            for epoch in [Epoch::Initial, Epoch::Handshake] {
+                let (paths, first, _) = paths(role);
+                for path in paths.snapshot() {
+                    paths.remove(&path);
+                }
+                assert!(paths.snapshot().is_empty());
+
+                receive_ping(role, epoch, true, &paths, &first).await;
+                assert!(paths.snapshot().is_empty(), "forged packet admitted a path");
+
+                receive_ping(role, epoch, false, &paths, &first).await;
+                let admitted = paths.snapshot();
+                assert_eq!(admitted.len(), 1);
+                assert_eq!(admitted[0].pathway, first.pathway);
+                assert!(!Arc::ptr_eq(&admitted[0], &first));
+                if epoch == Epoch::Initial {
+                    assert!(matches!(
+                        admitted[0].state(),
+                        qtransport::path::PathState::AmplifyGuard {
+                            rcvd_bytes: 1200,
+                            sent_bytes: 0,
+                        }
+                    ));
+                }
+                paths.retire_all();
+            }
+        }
     }
 
     #[tokio::test]
