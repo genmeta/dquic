@@ -149,7 +149,8 @@ impl UdpSocket {
         }
     }
 
-    pub fn bind_device(&self, device: &str) -> io::Result<()> {
+    /// Bind the socket before sharing or publishing it, and retain the device metadata.
+    pub fn bind_device(&mut self, device: &str) -> io::Result<()> {
         #[cfg(not(unix))]
         {
             let _ = device;
@@ -163,7 +164,9 @@ impl UdpSocket {
             let index = nix::net::if_::if_nametoindex(device)?;
             let device = BoundDevice::new(device, index)?;
             let socket = socket2::SockRef::from(&self.io);
-            Self::bind_device_to_socket(&socket, self.io.local_addr()?, &device)
+            Self::bind_device_to_socket(&socket, self.io.local_addr()?, &device)?;
+            self.bound_device = Some(device);
+            Ok(())
         }
     }
 }

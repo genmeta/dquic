@@ -53,18 +53,30 @@ async fn main() -> Result<(), Error> {
     let addresses = AddressBook::new();
 
     // This example uses a private bind, so its bound address is Direct(inner).
-    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);
+    let interface = netdev::get_interfaces()
+        .into_iter()
+        .find(|interface| interface.ipv4.iter().any(|ip| ip.addr().is_loopback()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no loopback interface"))?;
+    let ip = interface
+        .ipv4
+        .iter()
+        .find(|ip| ip.addr().is_loopback())
+        .unwrap()
+        .addr();
+    let device = qudp::BoundDevice::new(interface.name, interface.index)?;
+    let raw = Arc::new(UdpSocket::bind_to_device((ip, 0).into(), device.clone())?);
     dock.add(raw.clone())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
     quic.register(inner, &raw)?;
-    addresses.insert_inner(bound, inner)?;
+    // The directory receives the same interface identity used to bind the socket.
+    addresses.insert_inner(&raw, inner)?;
     forward.serve(inner.addr(), &raw);
 
     // A FullCone result would add Direct(outer), while retaining the same raw socket.
     let outer = EndpointAddr::direct("203.0.113.10:50000".parse().unwrap());
     quic.register(outer, &raw)?;
-    addresses.insert_outer(bound, outer)?;
+    addresses.insert_outer(&raw, outer)?;
     forward.serve(outer.addr(), &raw);
 
     // A successful STUN agent is published independently of the Direct endpoints.
@@ -73,7 +85,7 @@ async fn main() -> Result<(), Error> {
         "203.0.113.10:50000".parse().unwrap(),
     );
     quic.register(agent, &raw)?;
-    addresses.insert_agent(bound, agent)?;
+    addresses.insert_agent(&raw, agent)?;
 
     // A second raw socket demonstrates the complete independent receive path.
     let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);

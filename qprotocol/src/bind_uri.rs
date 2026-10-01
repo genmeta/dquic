@@ -372,7 +372,7 @@ impl BindUri {
                 Ok(ResolvedBindUri {
                     addr: SocketAddr::new(ip_addr, port),
                     device: Some(ResolvedBindDevice {
-                        name: interface.to_owned(),
+                        name: device.name,
                         index: device.index,
                     }),
                 })
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(binding.addr, SocketAddr::new(IpAddr::V4(ip), 8080));
         assert_eq!(
             binding.device.as_ref().map(|device| device.name.as_str()),
-            Some(device_name.as_str())
+            Some(iface.name.as_str())
         );
         assert_eq!(
             binding.device.as_ref().map(|device| device.index),
