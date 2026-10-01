@@ -90,9 +90,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 registry,
                 dcid,
                 keys.unwrap().into(),
-            )
-            .unwrap()
-            .0;
+            );
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
             take_reliable(&phase);
             phase

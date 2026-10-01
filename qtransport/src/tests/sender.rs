@@ -1,5 +1,4 @@
 //! Component wiring for the established-connection integration tests.
-use qcongestion::Transport as _;
 use qprotocol::protocol::quic::QuicProtocol;
 
 use super::*;
