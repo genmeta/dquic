@@ -20,6 +20,7 @@ use qbase::{
         header::{GetType, io::WriteHeader},
     },
     param::ParameterId,
+    role::Role,
 };
 use qcongestion::{ArcCC, Transport as _};
 use qprotocol::QuicProtocol;
@@ -124,31 +125,33 @@ impl Future for Collector<'_> {
         let shared_phase = this.paths.phase();
         let phase = shared_phase.poll_phase(cx);
         let selected = this.path.selected();
+        // Quota polling registered the sender for path selection and retirement wakeups.
+        if selected == Path::SUSPEND {
+            return Poll::Pending;
+        }
         match &*phase {
             ConnPhase::Initial(phase) => {
-                if selected != Path::SUSPEND {
-                    while count < this.burst.datagrams.len() && limits.credit > 0 {
-                        let header =
-                            LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
-                        let crypto: &mut dyn for<'b> Package<&'b mut BytesMut> =
-                            if selected == Path::MP_INITIAL {
-                                &mut phase.initial.crypto.multipath()
-                            } else {
-                                &mut phase.initial.crypto.outgoing()
-                            };
-                        let n = this.collect_long(
-                            cx,
-                            &phase.initial,
-                            header,
-                            crypto,
-                            &mut limits,
-                            &mut acked[Epoch::Initial],
-                        )?;
-                        if n == 0 {
-                            break;
-                        }
-                        count += n;
+                while count < this.burst.datagrams.len() && limits.credit > 0 {
+                    let header =
+                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
+                    let crypto: &mut dyn for<'b> Package<&'b mut BytesMut> =
+                        if selected == Path::MP_INITIAL && this.paths.role() == Role::Client {
+                            &mut phase.initial.crypto.multipath()
+                        } else {
+                            &mut phase.initial.crypto.outgoing()
+                        };
+                    let n = this.collect_long(
+                        cx,
+                        &phase.initial,
+                        header,
+                        crypto,
+                        &mut limits,
+                        &mut acked[Epoch::Initial],
+                    )?;
+                    if n == 0 {
+                        break;
                     }
+                    count += n;
                 }
             }
             ConnPhase::Handshake(phase) => {
@@ -201,12 +204,14 @@ impl Future for Collector<'_> {
                         &mut limits,
                         &mut acked[Epoch::Handshake],
                     )?;
-                    count += ready!(this.collect_one_rtt(
-                        cx,
-                        phase,
-                        &mut limits,
-                        &mut acked[Epoch::Data]
-                    ))?;
+                    if selected != Path::MP_INITIAL {
+                        count += ready!(this.collect_one_rtt(
+                            cx,
+                            phase,
+                            &mut limits,
+                            &mut acked[Epoch::Data]
+                        ))?;
+                    }
                     if count == before {
                         break;
                     }
