@@ -57,6 +57,7 @@ jobs:
             qcongestion
             qrecovery
             qconnection
+            dquic
           )
 
           cargo metadata --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"

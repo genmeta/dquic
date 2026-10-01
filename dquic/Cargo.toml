@@ -1,0 +1,18 @@
+[package]
+name = "dquic"
+version = "0.7.2"
+edition.workspace = true
+description = "QUIC connection APIs for decentralized endpoint connectivity"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qbase.workspace = true
+qconnection.workspace = true
+qprotocol = { path = "../qprotocol", version = "0.6.1" }
+qresolve.workspace = true
+qtls.workspace = true
+qtransport = { path = "../qtransport", version = "0.6.1" }
