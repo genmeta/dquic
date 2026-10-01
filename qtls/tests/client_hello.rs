@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, CryptoLevel,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch,
     LocalAuthority, PrivateKeyDer, QuicVersion, RootCerts, ServerName, ServerResumptionConfig,
     ServerTlsConfig, TlsClient, TlsEvent, TlsServer, default_provider, incoming,
 };
@@ -30,10 +30,10 @@ fn client_hello() -> Bytes {
             local_transport_parameters: Bytes::from_static(b"client-parameters"),
         })
         .unwrap();
-    let Some(TlsEvent::WriteCrypto { level, bytes }) = tls.next_event() else {
+    let Some(TlsEvent::WriteCrypto { epoch: level, bytes }) = tls.next_event() else {
         panic!("client must emit ClientHello first")
     };
-    assert_eq!(level, CryptoLevel::Initial);
+    assert_eq!(level, Epoch::Initial);
     bytes
 }
 
@@ -86,7 +86,7 @@ fn encoded_client_hello_starts_the_selected_server() {
         )
         .unwrap();
     server
-        .receive_crypto(CryptoLevel::Initial, parsed.encoded())
+        .receive_crypto(Epoch::Initial, parsed.encoded())
         .unwrap();
 
     let observed = std::iter::from_fn(|| server.next_event()).find_map(|event| match event {

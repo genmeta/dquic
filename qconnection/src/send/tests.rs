@@ -862,7 +862,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
         .start(qtls::QuicVersion::V1, bytes::Bytes::new())
         .unwrap();
     while let Some(event) = client.next_event() {
-        if let qtls::TlsEvent::WriteCrypto { level, bytes } = event {
+        if let qtls::TlsEvent::WriteCrypto { epoch: level, bytes } = event {
             server.receive_crypto(level, &bytes).unwrap();
         }
     }

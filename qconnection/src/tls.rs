@@ -1,6 +1,4 @@
 //! Async views of independent TLS outputs. No packet or connection state lives here.
-mod io;
-
 use std::{
     collections::VecDeque,
     future::poll_fn,
@@ -9,13 +7,16 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-pub(crate) use io::read_tls_to_crypto_stream;
-pub use io::{read_crypto_stream_to_tls, write_crypto};
 use qbase::{
+    ArcReceiving, Epoch,
     error::{Error, ErrorKind, QuicError},
     param::{ClientParameters, ServerParameters, WriteParameters},
 };
-use qtls::{CryptoLevel, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
+use qtls::{HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
+use qtransport::space::Space;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::CloseReason;
 
 /// One reader for CRYPTO output, and one growing coroutine for handshake results.
 #[derive(Clone)]
@@ -30,7 +31,7 @@ enum Backend {
 
 struct Tls {
     backend: Backend,
-    messages: VecDeque<(CryptoLevel, Bytes)>,
+    messages: VecDeque<(Epoch, Bytes)>,
     keys: VecDeque<InstalledKeys>,
     client_hello: Option<(Option<Arc<str>>, Bytes)>,
     server_parameters: Option<Bytes>,
@@ -75,7 +76,7 @@ impl TlsContext {
         )?);
         let tls = endpoint.start(version, parameters).map_err(tls_error)?;
         let context = Self::new(tls, endpoint.max_flight_bytes())?;
-        context.write_msg(CryptoLevel::Initial, hello.encoded())?;
+        context.write_msg(Epoch::Initial, hello.encoded())?;
         if let Ok(tls) = context.0.lock().unwrap().as_mut() {
             tls.client_hello = None;
         }
@@ -107,7 +108,7 @@ impl TlsContext {
     }
 
     /// Read output bytes, not necessarily one complete TLS message. Cancellation is safe.
-    pub async fn read_msg(&self) -> Result<(CryptoLevel, Bytes), Error> {
+    pub async fn read_msg(&self) -> Result<(Epoch, Bytes), Error> {
         poll_fn(|cx| {
             let mut guard = self.0.lock().unwrap();
             let tls = match guard.as_mut() {
@@ -125,7 +126,7 @@ impl TlsContext {
         .await
     }
 
-    pub(crate) async fn read_msg_at(&self, level: CryptoLevel) -> Result<Bytes, Error> {
+    pub(crate) async fn read_msg_at(&self, level: Epoch) -> Result<Bytes, Error> {
         poll_fn(|cx| {
             let mut guard = self.0.lock().unwrap();
             let tls = match guard.as_mut() {
@@ -141,14 +142,14 @@ impl TlsContext {
                 tls.pending_bytes -= bytes.len();
                 Poll::Ready(Ok(bytes))
             } else {
-                tls.level_wakers[level_index(level)] = Some(cx.waker().clone());
+                tls.level_wakers[level] = Some(cx.waker().clone());
                 Poll::Pending
             }
         })
         .await
     }
 
-    pub(crate) fn try_read_msg_at(&self, level: CryptoLevel) -> Result<Option<Bytes>, Error> {
+    pub(crate) fn try_read_msg_at(&self, level: Epoch) -> Result<Option<Bytes>, Error> {
         let mut guard = self.0.lock().unwrap();
         let tls = guard.as_mut().map_err(|error| error.clone())?;
         let Some(index) = tls
@@ -164,7 +165,7 @@ impl TlsContext {
     }
 
     /// Feed contiguous CRYPTO input and publish all resulting facts without awaiting consumers.
-    pub fn write_msg(&self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+    pub fn write_msg(&self, level: Epoch, bytes: &[u8]) -> Result<(), Error> {
         let mut guard = self.0.lock().unwrap();
         let tls = guard.as_mut().map_err(|error| error.clone())?;
         let result = tls.write(level, bytes);
@@ -261,11 +262,11 @@ impl TlsContext {
 }
 
 impl Tls {
-    fn write(&mut self, level: CryptoLevel, bytes: &[u8]) -> Result<(), Error> {
+    fn write(&mut self, level: Epoch, bytes: &[u8]) -> Result<(), Error> {
         match &mut self.backend {
             Backend::Handshake(tls) => tls.receive_crypto(level, bytes).map_err(tls_error)?,
             Backend::Established(tls) => {
-                if level != CryptoLevel::OneRtt {
+                if level != Epoch::Data {
                     return Err(QuicError::with_default_fty(
                         ErrorKind::ProtocolViolation,
                         "post-handshake CRYPTO at an earlier encryption level",
@@ -283,7 +284,10 @@ impl Tls {
         while let Backend::Handshake(tls) = &mut self.backend {
             let Some(event) = tls.next_event() else { break };
             match event {
-                TlsEvent::WriteCrypto { level, bytes } => {
+                TlsEvent::WriteCrypto {
+                    epoch: level,
+                    bytes,
+                } => {
                     if bytes.len() > self.max_pending_bytes - self.pending_bytes {
                         return Err(QuicError::with_default_fty(
                             ErrorKind::CryptoBufferExceeded,
@@ -296,7 +300,7 @@ impl Tls {
                     if let Some(waker) = self.message_waker.take() {
                         waker.wake();
                     }
-                    if let Some(waker) = self.level_wakers[level_index(level)].take() {
+                    if let Some(waker) = self.level_wakers[level].take() {
                         waker.wake();
                     }
                 }
@@ -359,14 +363,6 @@ impl Tls {
     }
 }
 
-fn level_index(level: CryptoLevel) -> usize {
-    match level {
-        CryptoLevel::Initial => 0,
-        CryptoLevel::Handshake => 1,
-        CryptoLevel::OneRtt => 2,
-    }
-}
-
 pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
     let kind = match &error {
         qtls::TlsError::Alert(alert) => ErrorKind::Crypto(alert.description()),
@@ -377,4 +373,123 @@ pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
         _ => ErrorKind::Internal,
     };
     QuicError::with_default_fty(kind, error.to_string()).into()
+}
+
+/// One detached input coroutine per space. Retiring the reader ends only that space.
+pub fn read_space_to_tls<K>(
+    tls: TlsContext,
+    space: &Space<K>,
+    closed: ArcReceiving<CloseReason>,
+) -> impl Future<Output = ()> + Send + 'static + use<K> {
+    let epoch = space.epoch;
+    let mut reader = space.crypto.reader();
+    async move {
+        let mut buffer = [0; 4096];
+        while let Ok(length) = reader.read(&mut buffer).await {
+            if length == 0 {
+                break;
+            }
+            if let Err(error) = tls.write_msg(epoch, &buffer[..length]) {
+                closed.with(error.into());
+                break;
+            }
+        }
+    }
+}
+
+/// One detached TLS output coroutine per space.
+pub(crate) fn read_tls_to_space<K>(
+    tls: TlsContext,
+    space: &Space<K>,
+    closed: ArcReceiving<CloseReason>,
+) -> impl Future<Output = ()> + Send + 'static + use<K> {
+    let epoch = space.epoch;
+    let stream = space.crypto.clone();
+    async move {
+        loop {
+            let bytes = match tls.read_msg_at(epoch).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    stream.on_error(&error);
+                    closed.with(error.into());
+                    break;
+                }
+            };
+            if let Err(error) = stream.writer().write_all(&bytes).await {
+                tls.on_error(
+                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn tls_io_exits_naturally_when_the_context_fails() {
+        let [_, server] = common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
+        let spaces = Epoch::EPOCHS.map(|epoch| Space::new(epoch, ()));
+        let closed = ArcReceiving::default();
+        let reads = spaces
+            .iter()
+            .map(|space| tokio::spawn(read_space_to_tls(server.clone(), space, closed.clone())))
+            .collect::<Vec<_>>();
+        let writes = spaces
+            .iter()
+            .map(|space| tokio::spawn(read_tls_to_space(server.clone(), space, closed.clone())))
+            .collect::<Vec<_>>();
+        tokio::task::yield_now().await;
+        server.on_error(QuicError::with_default_fty(ErrorKind::Internal, "connection ended").into());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for write in writes {
+                write.await.unwrap();
+            }
+            for read in reads {
+                read.await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
+        let [client, _] = common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
+        let spaces = Epoch::EPOCHS.map(|epoch| Space::new(epoch, ()));
+        let closed = ArcReceiving::default();
+        // ClientHello is still pending, but its destination can no longer accept it.
+        spaces[Epoch::Initial].crypto.sender.retire();
+        let reads = spaces
+            .iter()
+            .map(|space| tokio::spawn(read_space_to_tls(client.clone(), space, closed.clone())))
+            .collect::<Vec<_>>();
+        let writes = spaces
+            .iter()
+            .map(|space| tokio::spawn(read_tls_to_space(client.clone(), space, closed.clone())))
+            .collect::<Vec<_>>();
+        tokio::time::timeout(Duration::from_millis(200), async {
+            assert!(matches!(
+                closed.await.unwrap().unwrap(),
+                CloseReason::Internal(_)
+            ));
+            for write in writes {
+                write.await.unwrap();
+            }
+            for reader in reads {
+                reader.await.unwrap();
+            }
+            assert!(client.read_keys().await.is_err());
+        })
+        .await
+        .unwrap();
+    }
 }

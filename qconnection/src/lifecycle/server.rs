@@ -9,7 +9,6 @@ use qbase::{
     role::Role,
     token::ArcTokenRegistry,
 };
-use qtls::CryptoLevel;
 use qtransport::{
     keys::ArcKeys, packet::channel::RcvdPacket, router::QuicRouterEntry, space::Space,
 };
@@ -127,10 +126,9 @@ pub async fn server_growing(
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
             initial.crypto.recver.retire();
 
-            tokio::spawn(crate::tls::read_crypto_stream_to_tls(
+            tokio::spawn(crate::tls::read_space_to_tls(
                 tls_ctx.clone(),
-                CryptoLevel::Handshake,
-                handshake.crypto.clone(),
+                handshake.as_ref(),
                 closed.clone(),
             ));
             tokio::spawn(crate::recv::recv_server_ih_pkt_and_deliver_frames(
@@ -161,7 +159,7 @@ pub async fn server_growing(
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
 
-            let initial_flight = tls_ctx.read_msg_at(CryptoLevel::Initial).await?;
+            let initial_flight = tls_ctx.read_msg_at(Epoch::Initial).await?;
             initial
                 .crypto
                 .writer()
@@ -170,7 +168,7 @@ pub async fn server_growing(
                 .map_err(|error| {
                     QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
                 })?;
-            while let Some(bytes) = tls_ctx.try_read_msg_at(CryptoLevel::Initial)? {
+            while let Some(bytes) = tls_ctx.try_read_msg_at(Epoch::Initial)? {
                 initial
                     .crypto
                     .writer()
@@ -180,7 +178,7 @@ pub async fn server_growing(
                         QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
                     })?;
             }
-            let handshake_flight = tls_ctx.read_msg_at(CryptoLevel::Handshake).await?;
+            let handshake_flight = tls_ctx.read_msg_at(Epoch::Handshake).await?;
             handshake
                 .crypto
                 .writer()
@@ -189,7 +187,7 @@ pub async fn server_growing(
                 .map_err(|error| {
                     QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
                 })?;
-            while let Some(bytes) = tls_ctx.try_read_msg_at(CryptoLevel::Handshake)? {
+            while let Some(bytes) = tls_ctx.try_read_msg_at(Epoch::Handshake)? {
                 handshake
                     .crypto
                     .writer()
@@ -200,22 +198,21 @@ pub async fn server_growing(
                     })?;
             }
 
-            for (level, stream) in [
-                (CryptoLevel::Initial, initial.crypto.clone()),
-                (CryptoLevel::Handshake, handshake.crypto.clone()),
-                (CryptoLevel::OneRtt, mature_phase.spaces.data.crypto.clone()),
-            ] {
-                tokio::spawn(crate::tls::read_tls_to_crypto_stream(
+            for space in [initial.as_ref(), handshake.as_ref()] {
+                tokio::spawn(crate::tls::read_tls_to_space(
                     tls_ctx.clone(),
-                    level,
-                    stream,
+                    space,
                     closed.clone(),
                 ));
             }
-            tokio::spawn(crate::tls::read_crypto_stream_to_tls(
+            tokio::spawn(crate::tls::read_tls_to_space(
                 tls_ctx.clone(),
-                CryptoLevel::OneRtt,
-                mature_phase.spaces.data.crypto.clone(),
+                mature_phase.spaces.data.as_ref(),
+                closed.clone(),
+            ));
+            tokio::spawn(crate::tls::read_space_to_tls(
+                tls_ctx.clone(),
+                mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
 
