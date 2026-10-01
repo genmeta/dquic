@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-exclude = ["dquic", "h3-shim"]
 members = [
     "qmacro",
     "qbase",
@@ -14,8 +13,6 @@ members = [
     "qtls",
     "qtransport",
     "qtraversal",
-    # "dquic",
-    # "h3-shim",
     "qresolve",
 ]
 default-members = [
@@ -28,8 +25,6 @@ default-members = [
     "qconnection",
     "qtls",
     "qtransport",
-    # "dquic",
-    # "h3-shim",
 ]
 
 [workspace.package]
@@ -77,7 +72,7 @@ tokio-util = { version = "0.7" }
 tracing = "0.1"
 x509-parser = "0.18"
 
-# h3 for h3-shim only , windows-sys, nix and libc for qudp only
+# windows-sys, nix and libc for qudp only
 # they are not the default members of the workspace
 # windows-sys = "?"
 # libc = "0.2"
@@ -85,14 +80,10 @@ x509-parser = "0.18"
 
 # dev-dependencies, for examples
 clap = { version = "4", features = ["derive"] }
-# h3 = "0.0.8"
 http = "1"
-# indicatif = { version = "0.18", features = ["tokio"] }
 parking_lot = "0.12"
 # postcard = { version = "1", features = ["use-std"] }
-# rustls-native-certs = "0.8"
 tracing-subscriber = "0.3"
-# tracing-appender = "0.2"
 
 # members
 qmacro = { path = "./qmacro", version = "0.5.1" }
@@ -105,7 +96,6 @@ qrecovery = { path = "./qrecovery", version = "0.6.2" }
 qcongestion = { path = "./qcongestion", version = "0.6.2" }
 qconnection = { path = "./qconnection", version = "0.6.1" }
 qtls = { path = "./qtls", version = "0.6.1" }
-# dquic = { path = "./dquic", version = "0.7.2" }
 
 
 [profile.bench]

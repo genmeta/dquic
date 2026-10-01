@@ -135,12 +135,14 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
         );
         assert!(inbox.try_send_initial(packet, pathway, link));
-        let growing = tokio::spawn(server_growing(
+        let tick = qconnection::recv::tick(paths.clone());
+        let growing = server_growing(
             route,
             received,
             paths.clone(),
             ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-        ));
+        );
+        let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
         created.send((phase, paths, growing)).unwrap();
     });
 
@@ -169,7 +171,8 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
     );
     let (deliver, connected) = oneshot::channel();
-    let growing = tokio::spawn(client_growing(
+    let tick = qconnection::recv::tick(paths.clone());
+    let growing = client_growing(
         format!("localhost:{}", server_socket.0.local_addr().unwrap().port()),
         parameters,
         paths.clone(),
@@ -180,7 +183,8 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         move |result| {
             let _ = deliver.send(result);
         },
-    ));
+    );
+    let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
     let client_connection = timeout(STEP_TIMEOUT, connected)
         .await
         .expect("stage 1: client handshake timed out")
@@ -295,6 +299,7 @@ async fn echo(
 
 #[tokio::test]
 async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_socket_loss() {
+    common::use_system_resolver();
     let server_socket = Socket::new();
     let old_socket = Socket::new();
     server_socket.publish();

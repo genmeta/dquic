@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use qbase::{
     ArcReceiving,
     error::{AppError, QuicError},
     frame::ConnectionCloseFrame,
+    net::route::Pathway,
 };
 use qrecovery::streams::DataStreams;
 
@@ -36,6 +37,7 @@ struct Connection {
     alpn: Bytes,
     streams: DataStreams<ArcReliableFrames>,
     close: ArcReceiving<CloseReason>,
+    paths: OnceLock<Box<dyn Fn() -> Vec<Pathway> + Send + Sync>>,
 }
 
 impl ArcConnection {
@@ -50,7 +52,26 @@ impl ArcConnection {
             alpn,
             streams,
             close,
+            paths: OnceLock::new(),
         }))
+    }
+
+    /// Integration only: attach a read-only view without retaining the lifecycle owner.
+    #[doc(hidden)]
+    pub fn with_path_observer(
+        self,
+        paths: impl Fn() -> Vec<Pathway> + Send + Sync + 'static,
+    ) -> Self {
+        let _ = self.0.paths.set(Box::new(paths));
+        self
+    }
+
+    /// Snapshot of currently validated paths. Retired and unvalidated paths are excluded.
+    pub fn validated_paths(&self) -> Vec<Pathway> {
+        self.0
+            .paths
+            .get()
+            .map_or_else(Vec::new, |snapshot| snapshot())
     }
 
     pub fn alpn(&self) -> &[u8] {

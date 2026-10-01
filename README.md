@@ -109,18 +109,10 @@ And interconnection does not mean unfettered access: DQuic enforces name-centere
 
 ## Quick Start
 
-Add DQuic to your `Cargo.toml`:
-
-```toml
-[dependencies]
-dquic = "0.7.0-beta.4"
-```
-
-For complete usage instructions and runnable examples, see:
+The `dquic` crate and its examples have been removed from this repository. See the current connection API and protocol documentation:
 
 - [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic)
-- [Client and Server examples](dquic/examples)
-- [HTTP/3 examples](h3-shim/examples)
+- [Connection API](qconnection/README.md)
 
 ## Contributing
 

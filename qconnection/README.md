@@ -25,6 +25,8 @@
 
 ## 使用
 
+可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块统一扫描网卡、注册 Dock 并探测地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
+
 `QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，由客户端生命周期启动并持有 DNS 查询任务。网络所有者先向全局 Dock、QuicProtocol 登记 socket，并把本地端点发布到 `AddressBook::global()`。查询使用全局 Resolver 的快照调用 `lookup(server_name, "", None)`，持续消费返回的流；每条 DNS 记录与当前 AddressBook 配对后调用 `paths.add_path`，重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；客户端在握手失败或连接关闭时取消并等待查询任务退出，再回收路径。服务端不启动 DNS 查询，Paths 仅管理路径。
 
 客户端将 DNS 来源直接交给 `AddressBook::pathways_to(peer, &source)`。AddressBook 按来源、地址族、通信范围和已登记的网卡信息生成候选；客户端检查候选对应的 socket 注册是否仍有效，然后添加路径。mDNS 的 `nic` 精确匹配登记时的网卡名称，缺少网卡信息时跳过候选；其他 DNS 来源沿用地址范围和地址族匹配，也可以返回内网地址。配对时不枚举系统网卡，不根据 IP 推断网卡，也不改写网卡名称。
@@ -42,29 +44,33 @@
 
 客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
 
+客户端和服务端都在创建连接任务时，将成长协程与 `recv::tick(paths.clone())` 放进同一个 `tokio::join!`。直接使用底层成长协程的调用者也需要这样接线；取消连接任务会同时取消 tick。
+
 ```rust,ignore
-let phase = ArcConnPhase::new(InitialPhase::new(scid, original_dcid, initial_keys));
+let phase = ArcConnPhase::initial(InitialPhase::new(scid, original_dcid, initial_keys));
 let paths = qconnection::Paths::new(Role::Client, phase, idle);
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
 let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
 
-paths.add_path(pathway, original_dcid)?;
-qconnection::client_growing(
+paths.add_path(pathway)?;
+let tick = qconnection::recv::tick(paths.clone());
+let growing = qconnection::client_growing(
     server_name,
+    client_params,
     paths,
-    tls,
-    local,
-    cid_registry,
     rcvd_pkt,
+    tls,
+    cid_registry,
     tokens,
     |result| {
         // 回调只调用一次：TLS 验证后交付身份和连接，失败时交付建连错误。
         deliver(result);
     },
-).await;
+);
+tokio::spawn(async move { tokio::join!(growing, tick).0 });
 ```
 
-服务端调用 `server_growing` 并传入 `ServerParameters`。双方各自先创建 `param::Requirements`，客户端初始化原始 DCID；Initial 包解密和解析成功后，在交付 CRYPTO 数据前记录包头 SCID。双方参数齐备后构造 `param::ArcParameters`，由 growing 调用 `authenticate_cids(requirements)` 验证 CID，再创建 MaturePhase。Retry 的 CID 记录和校验接口已具备，完整 Retry 握手仍未接入。
+服务端调用 `server_growing` 并从 SNI 注册项取得服务端参数。双方各自先创建 `param::Requirements`，客户端初始化原始 DCID；Initial 包解密和解析成功后，在交付 CRYPTO 数据前记录包头 SCID。双方参数齐备后构造 `param::ArcParameters`，由 growing 调用 `authenticate_cids(requirements)` 验证 CID，再创建 MaturePhase。Retry 的 CID 记录和校验接口已具备，完整 Retry 握手仍未接入。
 
 ## 阶段与退出
 
@@ -84,7 +90,7 @@ Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间
 
 客户端和服务端在创建 `MaturePhase` 时各创建并持有一个 `ArcPuncher`，复用连接的可靠帧队列。`ProbeEncoder` 使用同一 Data space 的 1-RTT 密钥、包号和对端 CID。1-RTT 接收流程解密认证后，将 `ADD_ADDRESS`、`REMOVE_ADDRESS`、`PUNCH_ME_NOW`、`PUNCH_HELLO`、`PUNCH_DONE` 交给该 Puncher；后两者保留收到数据报时的实际 `Link`，不从广告地址重建 UDP 地址。
 
-Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `stun.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
+Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `nat.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
 
 接收流程当前先通过 `path_for` 取得或创建路径、记入接收字节，再进行解密认证。认证成功后才接纳新的被动路径（第 7 项）已回退，仍待后续处理。
 
