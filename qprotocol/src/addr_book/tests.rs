@@ -1,6 +1,6 @@
 use std::sync::Barrier;
 
-use AddressEvent::{Added, BoundRemoved, NatDetected, Removed};
+use AddressEvent::{Added, BoundRemoved, Removed};
 use qbase::net::Family;
 
 use super::*;
@@ -22,23 +22,21 @@ fn drain(receiver: &mut mpsc::UnboundedReceiver<AddressEvent>) -> Vec<AddressEve
 }
 
 #[test]
-fn publishes_inner_to_mdns_and_outer_agent_to_ddns() {
+fn publishes_inner_to_mdns_and_outer_to_ddns() {
     let bound = addr("192.168.1.10:4433");
     let inner = EndpointAddr::direct(bound);
     let outer = direct("203.0.113.10:50000");
-    let agent = mediate("198.51.100.1:3478", "203.0.113.10:50000");
     let book = AddressBook::new();
     let mdns = book.subscribe_mdns(bound);
     let ddns = book.subscribe_ddns();
 
     book.insert(bound, inner, Scope::Internal, None).unwrap();
     book.insert(bound, outer, Scope::External, None).unwrap();
-    book.insert(bound, agent, Scope::External, None).unwrap();
 
     assert_eq!(book.mdns_endpoints(bound).as_ref(), &[inner]);
-    assert_eq!(book.ddns_endpoints().as_ref(), &[outer, agent]);
+    assert_eq!(book.ddns_endpoints().as_ref(), &[outer]);
     assert_eq!(mdns.borrow().as_ref(), &[inner]);
-    assert_eq!(ddns.borrow().as_ref(), &[outer, agent]);
+    assert_eq!(ddns.borrow().as_ref(), &[outer]);
 
     book.remove_bound(bound);
     assert!(book.mdns_endpoints(bound).is_empty());
@@ -81,37 +79,17 @@ fn dns_snapshots_survive_without_receivers_and_only_relevant_watchers_change() {
 }
 
 #[test]
-fn limits_agents_per_bound_and_replacement_does_not_consume_another_slot() {
-    let bound = addr("192.168.1.10:4433");
-    let book = AddressBook::new();
-    let agents = (3478..3482)
-        .map(|port| mediate(&format!("8.8.8.8:{port}"), "8.8.4.4:50000"))
-        .collect::<Vec<_>>();
-    for &endpoint in &agents[..3] {
-        book.insert(bound, endpoint, Scope::External, None).unwrap();
-    }
-    assert!(matches!(
-        book.insert(bound, agents[3], Scope::External, None),
-        Err(AddressBookError::TooManyAgents)
-    ));
-    book.replace(agents[0], agents[3]).unwrap();
-    assert_eq!(book.ddns_endpoints().len(), 3);
-    assert!(!book.ddns_endpoints().contains(&agents[0]));
-    assert!(book.ddns_endpoints().contains(&agents[3]));
-}
-
-#[test]
-fn punch_replays_only_in_scope_endpoints_and_one_nat_per_binding() {
+fn punch_replays_ready_endpoints_and_refreshes_external_classifications() {
     let book = AddressBook::new();
     let bound = addr("192.168.1.10:4433");
     let inner = EndpointAddr::direct(bound);
     let outer = direct("8.8.4.4:50000");
-    let agent = mediate("8.8.8.8:3478", "8.8.4.4:50000");
+    let alias = direct("8.8.4.4:50001");
     let loopback = direct("127.0.0.1:4433");
     book.set_nat(bound, NatType::FullCone);
     book.insert(bound, inner, Scope::Internal, None).unwrap();
     book.insert(bound, outer, Scope::External, None).unwrap();
-    book.insert(bound, agent, Scope::External, None).unwrap();
+    book.insert(bound, alias, Scope::External, None).unwrap();
     book.insert(loopback.addr(), loopback, Scope::Internal, None)
         .unwrap();
 
@@ -121,101 +99,135 @@ fn punch_replays_only_in_scope_endpoints_and_one_nat_per_binding() {
     assert_eq!(
         drain(&mut external),
         vec![
-            NatDetected {
+            Added {
                 bound,
+                endpoint: outer,
                 nat: NatType::FullCone
             },
             Added {
                 bound,
-                endpoint: outer
-            },
-            Added {
-                bound,
-                endpoint: agent
+                endpoint: alias,
+                nat: NatType::FullCone
             },
         ]
     );
     assert_eq!(
         drain(&mut internal),
-        vec![
-            NatDetected {
-                bound,
-                nat: NatType::FullCone
-            },
-            Added {
-                bound,
-                endpoint: inner
-            },
-        ]
+        vec![Added {
+            bound,
+            endpoint: inner,
+            nat: NatType::FullCone
+        },]
     );
     assert_eq!(
         drain(&mut local),
         vec![Added {
             bound: loopback.addr(),
-            endpoint: loopback
+            endpoint: loopback,
+            nat: NatType::FullCone,
         }]
     );
 
     assert!(book.set_nat(bound, NatType::RestrictedPort));
-    let event = NatDetected {
-        bound,
-        nat: NatType::RestrictedPort,
-    };
-    assert_eq!(drain(&mut external), vec![event]);
-    assert_eq!(drain(&mut internal), vec![event]);
+    assert_eq!(
+        drain(&mut external),
+        vec![
+            Added {
+                bound,
+                endpoint: outer,
+                nat: NatType::RestrictedPort
+            },
+            Added {
+                bound,
+                endpoint: alias,
+                nat: NatType::RestrictedPort
+            },
+        ]
+    );
+    assert!(drain(&mut internal).is_empty());
     assert!(drain(&mut local).is_empty());
     assert!(!book.set_nat(bound, NatType::RestrictedPort));
     assert!(drain(&mut external).is_empty());
 }
 
 #[test]
-fn nat_arriving_before_endpoint_or_while_out_of_scope_is_replayed() {
+fn external_advertisements_wait_for_nat_in_both_live_and_initial_subscriptions() {
     let book = AddressBook::new();
     let bound = addr("192.168.1.10:4433");
     let inner = EndpointAddr::direct(bound);
-    let agent = mediate("8.8.8.8:3478", "8.8.4.4:50000");
+    let outer = direct("8.8.4.4:50000");
+    let alias = direct("8.8.4.4:50001");
+    let mut live = book.subscribe_punch(Scopes::ALL);
+    book.insert(bound, inner, Scope::Internal, None).unwrap();
+    book.insert(bound, outer, Scope::External, None).unwrap();
+    book.insert(bound, alias, Scope::External, None).unwrap();
+    let mut replay = book.subscribe_punch(Scopes::ALL);
+    let local = Added {
+        bound,
+        endpoint: inner,
+        nat: NatType::FullCone,
+    };
+    assert_eq!(drain(&mut live), vec![local]);
+    assert_eq!(drain(&mut replay), vec![local]);
+    assert_eq!(book.nat(bound), None);
+    assert_eq!(book.ddns_endpoints().as_ref(), &[outer, alias]);
+
+    book.set_nat(bound, NatType::RestrictedCone);
+    book.set_nat(bound, NatType::Symmetric);
+    let expected = [NatType::RestrictedCone, NatType::Symmetric]
+        .into_iter()
+        .flat_map(|nat| {
+            [outer, alias].map(|endpoint| Added {
+                bound,
+                endpoint,
+                nat,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(drain(&mut live), expected);
+    assert_eq!(drain(&mut replay), expected);
+    let mut classified = book.subscribe_punch(Scope::External);
+    assert_eq!(drain(&mut classified), expected[2..]);
+}
+
+#[test]
+fn endpoints_carry_current_classification_after_insertion_or_scope_reentry() {
+    let book = AddressBook::new();
+    let bound = addr("192.168.1.10:4433");
+    let inner = EndpointAddr::direct(bound);
+    let outer = direct("8.8.4.4:50000");
     let mut events = book.subscribe_punch(Scope::External);
     book.insert(bound, inner, Scope::Internal, None).unwrap();
     book.set_nat(bound, NatType::RestrictedCone);
     assert!(drain(&mut events).is_empty());
 
-    book.insert(bound, agent, Scope::External, None).unwrap();
+    book.insert(bound, outer, Scope::External, None).unwrap();
     assert_eq!(
         drain(&mut events),
-        vec![
-            NatDetected {
-                bound,
-                nat: NatType::RestrictedCone
-            },
-            Added {
-                bound,
-                endpoint: agent
-            },
-        ]
+        vec![Added {
+            bound,
+            endpoint: outer,
+            nat: NatType::RestrictedCone
+        },]
     );
-    book.remove(agent);
+    book.remove(outer);
     assert_eq!(
         drain(&mut events),
         vec![Removed {
             bound,
-            endpoint: agent
+            endpoint: outer
         }]
     );
     book.set_nat(bound, NatType::Symmetric);
     assert!(drain(&mut events).is_empty());
-    book.insert(bound, agent, Scope::External, None).unwrap();
+    book.insert(bound, outer, Scope::External, None).unwrap();
     assert_eq!(
         drain(&mut events),
-        vec![
-            NatDetected {
-                bound,
-                nat: NatType::Symmetric
-            },
-            Added {
-                bound,
-                endpoint: agent
-            },
-        ]
+        vec![Added {
+            bound,
+            endpoint: outer,
+            nat: NatType::Symmetric
+        },]
     );
 }
 
@@ -223,8 +235,8 @@ fn nat_arriving_before_endpoint_or_while_out_of_scope_is_replayed() {
 fn replacing_an_endpoint_keeps_nat_and_publishes_final_dns_snapshot() {
     let book = AddressBook::new();
     let bound = addr("192.168.1.10:4433");
-    let old = mediate("8.8.8.8:3478", "8.8.4.4:50000");
-    let new = mediate("8.8.8.8:3478", "8.8.4.4:60000");
+    let old = direct("8.8.4.4:50000");
+    let new = direct("8.8.4.4:60000");
     book.insert(bound, old, Scope::External, None).unwrap();
     book.set_nat(bound, NatType::RestrictedPort);
     let mut events = book.subscribe_punch(Scope::External);
@@ -242,7 +254,8 @@ fn replacing_an_endpoint_keeps_nat_and_publishes_final_dns_snapshot() {
             },
             Added {
                 bound,
-                endpoint: new
+                endpoint: new,
+                nat: NatType::RestrictedPort
             }
         ]
     );
@@ -277,16 +290,11 @@ fn replacement_filters_old_and_new_scopes_independently() {
     );
     assert_eq!(
         drain(&mut internal),
-        vec![
-            NatDetected {
-                bound,
-                nat: NatType::FullCone
-            },
-            Added {
-                bound,
-                endpoint: new
-            },
-        ]
+        vec![Added {
+            bound,
+            endpoint: new,
+            nat: NatType::FullCone
+        },]
     );
     assert!(drain(&mut external).is_empty());
 
@@ -300,16 +308,11 @@ fn replacement_filters_old_and_new_scopes_independently() {
     );
     assert_eq!(
         drain(&mut loopback),
-        vec![
-            NatDetected {
-                bound,
-                nat: NatType::FullCone
-            },
-            Added {
-                bound,
-                endpoint: old
-            },
-        ]
+        vec![Added {
+            bound,
+            endpoint: old,
+            nat: NatType::FullCone
+        },]
     );
     assert!(drain(&mut external).is_empty());
 }
@@ -344,6 +347,10 @@ fn failed_mutations_preserve_directory_and_do_not_notify() {
     assert!(matches!(
         book.insert(bound, old, Scope::Internal, None),
         Err(AddressBookError::Duplicate(_))
+    ));
+    assert!(matches!(
+        book.insert(bound, agent, Scope::External, None),
+        Err(AddressBookError::ExpectedDirect)
     ));
     assert!(book.remove(absent).is_none());
     assert_eq!(book.ddns_endpoints(), before);
@@ -393,13 +400,7 @@ fn removing_a_binding_notifies_past_subscribers_and_clears_nat_for_reuse() {
     assert!(drain(&mut internal).is_empty());
 
     book.insert(bound, outer, Scope::External, None).unwrap();
-    assert_eq!(
-        drain(&mut external),
-        vec![Added {
-            bound,
-            endpoint: outer
-        }]
-    );
+    assert!(drain(&mut external).is_empty());
     book.remove(outer);
     drain(&mut external);
     // Even when the last endpoint was individually removed and NAT was never known,
@@ -417,7 +418,14 @@ fn disconnected_subscribers_do_not_interfere_with_remaining_receivers() {
     let mut active = book.subscribe_punch(Scopes::ALL);
     drop(abandoned);
     book.insert(bound, endpoint, Scope::Internal, None).unwrap();
-    assert_eq!(drain(&mut active), vec![Added { bound, endpoint }]);
+    assert_eq!(
+        drain(&mut active),
+        vec![Added {
+            bound,
+            endpoint,
+            nat: NatType::FullCone
+        }]
+    );
     assert_eq!(book.state.lock().unwrap().punch_subscribers.len(), 1);
     drop(book);
     assert_eq!(
@@ -447,21 +455,24 @@ fn concurrent_subscription_and_updates_have_no_gap_or_duplicate_additions() {
             writer.join().unwrap();
 
             let mut endpoints = HashMap::new();
-            let mut nat = None;
             for event in drain(&mut events) {
                 match event {
-                    Added { bound, endpoint } => {
+                    Added {
+                        bound,
+                        endpoint,
+                        nat: advertised,
+                    } => {
+                        assert_eq!(advertised, NatType::FullCone);
                         assert!(endpoints.insert(endpoint, bound).is_none());
                     }
                     Removed { bound, endpoint } => {
                         assert_eq!(endpoints.remove(&endpoint), Some(bound));
                     }
-                    NatDetected { nat: detected, .. } => nat = Some(detected),
                     BoundRemoved { .. } => panic!("binding was not withdrawn"),
                 }
             }
             assert_eq!(endpoints, HashMap::from([(new, bound)]));
-            assert_eq!(nat, Some(NatType::RestrictedPort));
+            assert_eq!(book.nat(bound), Some(NatType::RestrictedPort));
             assert_eq!(mdns.borrow().as_ref(), &[new]);
         });
     }
@@ -480,13 +491,6 @@ fn direct_pathways_use_actual_bindings_and_filter_scope_and_family() {
     }
     book.insert(first, direct("8.8.4.4:50000"), Scope::External, None)
         .unwrap();
-    book.insert(
-        first,
-        mediate("8.8.8.8:3478", "8.8.4.4:50000"),
-        Scope::External,
-        None,
-    )
-    .unwrap();
     let peer = direct("1.1.1.1:443");
     assert_eq!(
         book.pathways_to(peer, &Source::System),
@@ -515,25 +519,18 @@ fn direct_pathways_use_actual_bindings_and_filter_scope_and_family() {
 fn mediated_pathways_require_a_compatible_return_endpoint() {
     let book = AddressBook::new();
     let bound = addr("192.168.1.10:4433");
-    let local = mediate("8.8.8.8:3478", "8.8.4.4:50000");
     let outer = direct("8.8.4.4:50000");
     let peer = mediate("1.1.1.1:3478", "1.0.0.1:60000");
     book.insert(bound, bound.into(), Scope::Internal, None)
         .unwrap();
     assert!(book.pathways_to(peer, &Source::System).is_empty());
-    book.insert(bound, local, Scope::External, None).unwrap();
-    assert_eq!(
-        book.pathways_to(peer, &Source::System),
-        vec![Pathway::new(local, peer)]
-    );
     book.insert(bound, outer, Scope::External, None).unwrap();
     assert_eq!(
         book.pathways_to(peer, &Source::System),
-        vec![Pathway::new(outer, peer), Pathway::new(local, peer)]
+        vec![Pathway::new(outer, peer)]
     );
-    let new = mediate("8.8.8.8:3478", "8.8.4.4:60000");
-    book.replace(local, new).unwrap();
-    book.remove(outer);
+    let new = direct("8.8.4.4:60000");
+    book.replace(outer, new).unwrap();
     assert_eq!(
         book.pathways_to(peer, &Source::System),
         vec![Pathway::new(new, peer)]
@@ -605,13 +602,12 @@ async fn public_insertions_read_the_socket_binding_and_do_not_retain_it() {
     let agent = mediate("8.8.8.8:3478", "8.8.4.4:50000");
     book.insert_inner(&socket, inner).unwrap();
     book.insert_outer(&socket, outer).unwrap();
-    book.insert_agent(&socket, agent).unwrap();
     assert_eq!(
         book.state.lock().unwrap().interfaces.get(&bound),
         Some(&Some(device.clone()))
     );
     assert_eq!(book.mdns_endpoints(bound).as_ref(), &[inner]);
-    assert_eq!(book.ddns_endpoints().as_ref(), &[outer, agent]);
+    assert_eq!(book.ddns_endpoints().as_ref(), &[outer]);
     let peer = direct("127.0.0.1:1");
     assert_eq!(
         book.pathways_to(peer, &mdns(device.name(), Family::V4)),
@@ -627,10 +623,6 @@ async fn public_insertions_read_the_socket_binding_and_do_not_retain_it() {
     assert!(matches!(
         book.insert_outer(&socket, agent),
         Err(AddressBookError::ExpectedDirect)
-    ));
-    assert!(matches!(
-        book.insert_agent(&socket, inner),
-        Err(AddressBookError::ExpectedMediate)
     ));
     assert!(matches!(
         book.insert_inner(&socket, inner),
@@ -761,7 +753,6 @@ fn aliases_share_interface_metadata_and_bound_removal_clears_it_for_reuse() {
     let bound = addr("192.168.1.10:4433");
     let inner = EndpointAddr::direct(bound);
     let outer = direct("8.8.4.4:50000");
-    let agent = mediate("8.8.8.8:3478", "8.8.4.4:50000");
     let peer = mediate("1.1.1.1:3478", "1.0.0.1:60000");
     let source = mdns("lan0", Family::V4);
     let dev0 = qudp::BoundDevice::new("lan0", 7).unwrap();
@@ -770,11 +761,9 @@ fn aliases_share_interface_metadata_and_bound_removal_clears_it_for_reuse() {
         .unwrap();
     book.insert(bound, outer, Scope::External, Some(&dev0))
         .unwrap();
-    book.insert(bound, agent, Scope::External, Some(&dev0))
-        .unwrap();
     assert_eq!(
         book.pathways_to(peer, &source),
-        vec![Pathway::new(outer, peer), Pathway::new(agent, peer)]
+        vec![Pathway::new(outer, peer)]
     );
     let new_outer = direct("8.8.4.4:50001");
     let mut events = book.subscribe_punch(Scopes::ALL);
@@ -786,11 +775,10 @@ fn aliases_share_interface_metadata_and_bound_removal_clears_it_for_reuse() {
     assert!(drain(&mut events).is_empty());
     assert_eq!(
         book.pathways_to(peer, &source),
-        vec![Pathway::new(outer, peer), Pathway::new(agent, peer)]
+        vec![Pathway::new(outer, peer)]
     );
     book.replace(outer, new_outer).unwrap();
     book.remove(inner);
-    book.remove(agent);
     assert_eq!(
         book.pathways_to(peer, &source),
         vec![Pathway::new(new_outer, peer)]

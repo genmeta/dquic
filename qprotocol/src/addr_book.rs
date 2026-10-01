@@ -26,10 +26,6 @@ pub enum AddressBookError {
     NotFound(EndpointAddr),
     #[error("expected a Direct endpoint")]
     ExpectedDirect,
-    #[error("expected an Agent endpoint")]
-    ExpectedMediate,
-    #[error("a bound address can publish at most three Agent endpoints")]
-    TooManyAgents,
     #[error("{0} is already associated with another interface")]
     ConflictingInterface(SocketAddr),
 }
@@ -37,16 +33,18 @@ pub enum AddressBookError {
 /// Local directory changes delivered to one scoped punch subscription in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressEvent {
+    /// Insert or refresh an endpoint ready for advertisement, including its wire NAT type.
+    /// Internal and loopback endpoints use FullCone; external endpoints wait for classification.
     Added {
         bound: SocketAddr,
         endpoint: EndpointAddr,
+        nat: NatType,
     },
+    /// Withdraw an endpoint, including one whose advertisement was waiting for classification.
     Removed {
         bound: SocketAddr,
         endpoint: EndpointAddr,
     },
-    /// A classification result, also replayed when a binding enters a subscription's scope.
-    NatDetected { bound: SocketAddr, nat: NatType },
     /// The binding and its NAT record have been withdrawn from the directory.
     BoundRemoved { bound: SocketAddr },
 }
@@ -61,7 +59,6 @@ struct Subscriber {
 struct State {
     inner: HashMap<EndpointAddr, SocketAddr>,
     outer: HashMap<EndpointAddr, SocketAddr>,
-    agents: HashMap<EndpointAddr, SocketAddr>,
     interfaces: HashMap<SocketAddr, Option<qudp::BoundDevice>>,
     nat: HashMap<SocketAddr, NatType>,
     ddns: watch::Sender<Arc<[EndpointAddr]>>,
@@ -69,7 +66,7 @@ struct State {
     punch_subscribers: Vec<Subscriber>,
 }
 
-/// Shared local endpoint directory. Socket registration, reception and STUN tasks belong to
+/// Shared local Direct endpoint directory. Socket registration, reception and STUN tasks belong to
 /// the network owner. Register communication addresses before publishing them here, and
 /// finish old measurement tasks before removing or reusing a binding.
 ///
@@ -99,7 +96,6 @@ impl AddressBook {
             state: Mutex::new(State {
                 inner: HashMap::new(),
                 outer: HashMap::new(),
-                agents: HashMap::new(),
                 interfaces: HashMap::new(),
                 nat: HashMap::new(),
                 ddns,
@@ -116,7 +112,6 @@ impl AddressBook {
         socket: &UdpSocket,
         endpoint: EndpointAddr,
     ) -> Result<(), AddressBookError> {
-        ensure_kind(endpoint, Kind::Direct)?;
         self.insert(
             socket.local_addr()?,
             endpoint,
@@ -131,22 +126,6 @@ impl AddressBook {
         socket: &UdpSocket,
         endpoint: EndpointAddr,
     ) -> Result<(), AddressBookError> {
-        ensure_kind(endpoint, Kind::Direct)?;
-        self.insert(
-            socket.local_addr()?,
-            endpoint,
-            Scope::External,
-            socket.bound_device(),
-        )
-    }
-
-    /// Publish an agent alias, sharing its binding's interface metadata.
-    pub fn insert_agent(
-        &self,
-        socket: &UdpSocket,
-        endpoint: EndpointAddr,
-    ) -> Result<(), AddressBookError> {
-        ensure_kind(endpoint, Kind::Mediate)?;
         self.insert(
             socket.local_addr()?,
             endpoint,
@@ -157,21 +136,21 @@ impl AddressBook {
 
     /// Replace an endpoint in its existing table, retaining its binding and NAT record.
     /// Failed validation leaves the old endpoint intact. Punch consumers receive Removed
-    /// followed by Added (with a NAT replay when needed); DNS receives the final snapshot.
+    /// followed by Added when the new endpoint is ready; DNS receives the final snapshot.
     pub fn replace(&self, old: EndpointAddr, new: EndpointAddr) -> Result<(), AddressBookError> {
         let mut state = self.state.lock().unwrap();
         let (scope, bound) = state.locate(old).ok_or(AddressBookError::NotFound(old))?;
         if old == new {
             return Ok(());
         }
-        ensure_kind(new, old.kind())?;
+        ensure_direct(new)?;
         state.ensure_absent(new)?;
-        let addresses = state.addresses_mut(scope, old.kind());
+        let addresses = state.addresses_mut(scope);
         addresses.remove(&old);
         addresses.insert(new, bound);
         state.publish(scope, bound);
         state.removed(bound, old);
-        state.added(bound, new, Some(old));
+        state.added(bound, new);
         Ok(())
     }
 
@@ -179,9 +158,7 @@ impl AddressBook {
     pub fn remove(&self, endpoint: EndpointAddr) -> Option<SocketAddr> {
         let mut state = self.state.lock().unwrap();
         let (scope, bound) = state.locate(endpoint)?;
-        state
-            .addresses_mut(scope, endpoint.kind())
-            .remove(&endpoint);
+        state.addresses_mut(scope).remove(&endpoint);
         state.publish(scope, bound);
         state.removed(bound, endpoint);
         Some(bound)
@@ -197,14 +174,9 @@ impl AddressBook {
             .collect::<Vec<_>>();
         removed.sort_unstable();
         let inner_changed = state.inner.values().any(|candidate| *candidate == bound);
-        let ddns_changed = state
-            .outer
-            .values()
-            .chain(state.agents.values())
-            .any(|candidate| *candidate == bound);
+        let ddns_changed = state.outer.values().any(|candidate| *candidate == bound);
         state.inner.retain(|_, candidate| *candidate != bound);
         state.outer.retain(|_, candidate| *candidate != bound);
-        state.agents.retain(|_, candidate| *candidate != bound);
         state.nat.remove(&bound);
         state.interfaces.remove(&bound);
         if inner_changed {
@@ -230,6 +202,7 @@ impl AddressBook {
     }
 
     /// Store one classification per binding, independently of endpoint insertion.
+    /// Refresh the binding's external endpoints for punch subscribers when the value changes.
     /// Returns whether the value changed. DNS snapshots are unaffected.
     pub fn set_nat(&self, bound: SocketAddr, nat: NatType) -> bool {
         let mut state = self.state.lock().unwrap();
@@ -237,19 +210,13 @@ impl AddressBook {
             return false;
         }
         state.nat.insert(bound, nat);
-        let endpoints = state.bound_endpoints(bound);
-        state.punch_subscribers.retain(|subscriber| {
-            if subscriber.sender.is_closed() {
-                return false;
+        let mut endpoints = state.bound_endpoints(bound);
+        endpoints.sort_unstable();
+        for endpoint in endpoints {
+            if endpoint.scope() == Some(Scope::External) {
+                state.added(bound, endpoint);
             }
-            !endpoints
-                .iter()
-                .any(|&endpoint| in_scope(endpoint, subscriber.scopes))
-                || subscriber
-                    .sender
-                    .send(AddressEvent::NatDetected { bound, nat })
-                    .is_ok()
-        });
+        }
         true
     }
 
@@ -257,7 +224,7 @@ impl AddressBook {
         self.state.lock().unwrap().nat.get(&bound).copied()
     }
 
-    /// Subscribe to the latest complete outer and mediated DNS address set.
+    /// Subscribe to the latest complete outer DNS address set.
     /// Read the current value before awaiting subsequent watch changes.
     pub fn subscribe_ddns(&self) -> watch::Receiver<Arc<[EndpointAddr]>> {
         self.state.lock().unwrap().ddns.subscribe()
@@ -286,8 +253,9 @@ impl AddressBook {
         self.state.lock().unwrap().mdns_snapshot(bound)
     }
 
-    /// Replay existing in-scope endpoints and their NAT classifications, then deliver
-    /// subsequent changes in order. NAT is replayed before the first Added for a binding.
+    /// Replay in-scope endpoints ready for advertisement, then deliver changes in order.
+    /// Internal and loopback endpoints use FullCone; external endpoints wait for classification.
+    /// Added also refreshes an existing endpoint when its NAT classification changes.
     /// Dropping the receiver ends the subscription; later writes/subscriptions prune it.
     pub fn subscribe_punch(
         &self,
@@ -308,17 +276,16 @@ impl AddressBook {
             .collect::<Vec<_>>();
         endpoints.sort_unstable();
         for (bound, endpoint) in endpoints {
-            if subscriber.bounds.insert(bound)
-                && let Some(&nat) = state.nat.get(&bound)
-            {
-                // The receiver is still owned by this function, so it cannot be closed.
-                let _ = subscriber
-                    .sender
-                    .send(AddressEvent::NatDetected { bound, nat });
-            }
-            let _ = subscriber
-                .sender
-                .send(AddressEvent::Added { bound, endpoint });
+            subscriber.bounds.insert(bound);
+            let Some(nat) = state.advertisement_nat(bound, endpoint) else {
+                continue;
+            };
+            // The receiver is still owned by this function, so it cannot be closed.
+            let _ = subscriber.sender.send(AddressEvent::Added {
+                bound,
+                endpoint,
+                nat,
+            });
         }
         state
             .punch_subscribers
@@ -391,24 +358,13 @@ impl AddressBook {
         scope: Scope,
         interface: Option<&qudp::BoundDevice>,
     ) -> Result<(), AddressBookError> {
+        ensure_direct(endpoint)?;
         let mut state = self.state.lock().unwrap();
         state.ensure_absent(endpoint)?;
-        if endpoint.kind() == Kind::Mediate
-            && state
-                .agents
-                .values()
-                .filter(|&&candidate| candidate == bound)
-                .count()
-                >= 3
-        {
-            return Err(AddressBookError::TooManyAgents);
-        }
         state.set_interface(bound, interface)?;
-        state
-            .addresses_mut(scope, endpoint.kind())
-            .insert(endpoint, bound);
+        state.addresses_mut(scope).insert(endpoint, bound);
         state.publish(scope, bound);
-        state.added(bound, endpoint, None);
+        state.added(bound, endpoint);
         Ok(())
     }
 }
@@ -431,15 +387,10 @@ impl State {
         Ok(())
     }
 
-    fn addresses_mut(
-        &mut self,
-        scope: Scope,
-        kind: Kind,
-    ) -> &mut HashMap<EndpointAddr, SocketAddr> {
-        match (scope, kind) {
-            (Scope::Loopback | Scope::Internal, _) => &mut self.inner,
-            (Scope::External, Kind::Direct) => &mut self.outer,
-            (Scope::External, Kind::Mediate) => &mut self.agents,
+    fn addresses_mut(&mut self, scope: Scope) -> &mut HashMap<EndpointAddr, SocketAddr> {
+        match scope {
+            Scope::Loopback | Scope::Internal => &mut self.inner,
+            Scope::External => &mut self.outer,
         }
     }
 
@@ -453,11 +404,6 @@ impl State {
                     .get(&endpoint)
                     .map(|&bound| (Scope::External, bound))
             })
-            .or_else(|| {
-                self.agents
-                    .get(&endpoint)
-                    .map(|&bound| (Scope::External, bound))
-            })
     }
 
     fn ensure_absent(&self, endpoint: EndpointAddr) -> Result<(), AddressBookError> {
@@ -468,10 +414,7 @@ impl State {
     }
 
     fn entries(&self) -> impl Iterator<Item = (&EndpointAddr, &SocketAddr)> {
-        self.inner
-            .iter()
-            .chain(self.outer.iter())
-            .chain(self.agents.iter())
+        self.inner.iter().chain(self.outer.iter())
     }
 
     fn bound_endpoints(&self, bound: SocketAddr) -> Vec<EndpointAddr> {
@@ -481,12 +424,7 @@ impl State {
     }
 
     fn ddns_snapshot(&self) -> Arc<[EndpointAddr]> {
-        let mut endpoints = self
-            .outer
-            .keys()
-            .chain(self.agents.keys())
-            .copied()
-            .collect::<Vec<_>>();
+        let mut endpoints = self.outer.keys().copied().collect::<Vec<_>>();
         endpoints.sort_unstable();
         endpoints.into()
     }
@@ -514,9 +452,15 @@ impl State {
         }
     }
 
-    fn added(&mut self, bound: SocketAddr, endpoint: EndpointAddr, replaced: Option<EndpointAddr>) {
-        let nat = self.nat.get(&bound).copied();
-        let others = self.bound_endpoints(bound);
+    fn advertisement_nat(&self, bound: SocketAddr, endpoint: EndpointAddr) -> Option<NatType> {
+        match endpoint.scope()? {
+            Scope::Internal | Scope::Loopback => Some(NatType::FullCone),
+            Scope::External => self.nat.get(&bound).copied(),
+        }
+    }
+
+    fn added(&mut self, bound: SocketAddr, endpoint: EndpointAddr) {
+        let nat = self.advertisement_nat(bound, endpoint);
         self.punch_subscribers.retain_mut(|subscriber| {
             if subscriber.sender.is_closed() {
                 return false;
@@ -525,24 +469,16 @@ impl State {
                 return true;
             }
             subscriber.bounds.insert(bound);
-            // A binding can leave the scope and later reenter after an unobserved NAT result.
-            // Replay the current NAT when there is no other visible endpoint for this binding.
-            let previously_visible = replaced.is_some_and(|old| in_scope(old, subscriber.scopes))
-                || others
-                    .iter()
-                    .any(|&other| other != endpoint && in_scope(other, subscriber.scopes));
-            if !previously_visible
-                && let Some(nat) = nat
-                && subscriber
-                    .sender
-                    .send(AddressEvent::NatDetected { bound, nat })
-                    .is_err()
-            {
-                return false;
-            }
+            let Some(nat) = nat else {
+                return true;
+            };
             subscriber
                 .sender
-                .send(AddressEvent::Added { bound, endpoint })
+                .send(AddressEvent::Added {
+                    bound,
+                    endpoint,
+                    nat,
+                })
                 .is_ok()
         });
     }
@@ -561,14 +497,12 @@ impl State {
     }
 }
 
-fn ensure_kind(endpoint: EndpointAddr, expected: Kind) -> Result<(), AddressBookError> {
-    if endpoint.kind() == expected {
-        return Ok(());
+fn ensure_direct(endpoint: EndpointAddr) -> Result<(), AddressBookError> {
+    if endpoint.kind() == Kind::Direct {
+        Ok(())
+    } else {
+        Err(AddressBookError::ExpectedDirect)
     }
-    Err(match expected {
-        Kind::Direct => AddressBookError::ExpectedDirect,
-        Kind::Mediate => AddressBookError::ExpectedMediate,
-    })
 }
 
 fn in_scope(endpoint: EndpointAddr, scopes: Scopes) -> bool {

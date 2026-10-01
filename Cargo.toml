@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["dquic", "h3-shim", "qtraversal"]
+exclude = ["dquic", "h3-shim"]
 members = [
     "qmacro",
     "qbase",
@@ -13,6 +13,7 @@ members = [
     "qconnection",
     "qtls",
     "qtransport",
+    "qtraversal",
     # "dquic",
     # "h3-shim",
     "qresolve",
