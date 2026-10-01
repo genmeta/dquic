@@ -5,7 +5,6 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use qbase::{
-    Epoch,
     cid::{ConnectionId, GenUniqueCid},
     net::{addr::EndpointAddr, route::Pathway},
     packet::GetDcid,
@@ -14,7 +13,6 @@ use qbase::{
     time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qcongestion::Transport as _;
 use qconnection::{
     ArcConnPhase, ArcConnection, ArcReliableFrames, CloseReason, ConnPhase, InitialPhase, Paths,
     Scope, ServerRegistry, TlsContext, client_growing, server_growing,
@@ -325,7 +323,6 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     echo(&mut client_stream, &mut server_stream, b"before migration")
         .await
         .unwrap();
-    eprintln!("stage 1 passed: real handshake and echo on the original path");
 
     // Only publish a new address. The test must not manually wire observe_endpoints,
     // call on_local_added/start_validation, or mark the new Path as validated.
@@ -337,19 +334,6 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     })
     .await;
     if !punched {
-        eprintln!(
-            "old client path: {:?}; socket registered: {}; PTO Initial {:?}/{:?}, Handshake {:?}/{:?}, Data {:?}/{:?}",
-            old_client_path.state(),
-            QuicProtocol::global()
-                .find_socket(old_socket.endpoint())
-                .is_some(),
-            old_client_path.cc.get_pto(Epoch::Initial),
-            old_client_path.cc.pto_base(Epoch::Initial),
-            old_client_path.cc.get_pto(Epoch::Handshake),
-            old_client_path.cc.pto_base(Epoch::Handshake),
-            old_client_path.cc.get_pto(Epoch::Data),
-            old_client_path.cc.pto_base(Epoch::Data)
-        );
         panic!(
             "stage 2: publishing the address did not create the punched path\nclient: {}; lifecycle: {}\nserver: {}; lifecycle: {}",
             describe(&client.paths),
@@ -358,7 +342,6 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
             server.lifecycle_status().await
         );
     }
-    eprintln!("stage 2 passed: both peers admitted the new authenticated UDP path");
     assert!(
         wait_for(|| client
             .paths
@@ -373,7 +356,6 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
         describe(&client.paths),
         describe(&server.paths)
     );
-    eprintln!("stage 3 passed: new path validated on both peers");
 
     // Remove the old socket, not the Path. Its sender must detect the failure itself.
     old_socket.withdraw();
@@ -400,11 +382,6 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     assert!(
         wait_for(|| old_client_path.state() == PathState::Retired).await,
         "stage 4: the old client sender did not retire its unusable path"
-    );
-    // The remote path can outlive the local socket until its own loss detection fires.
-    eprintln!(
-        "stage 4 passed: 64 KiB echoed on the existing stream; old server path: {:?}",
-        old_server_path.state()
     );
     assert!(
         client

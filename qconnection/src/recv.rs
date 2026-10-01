@@ -345,7 +345,6 @@ pub(crate) async fn receive_data(
 }
 
 /// Connection-level deadlines continue even when a path disappears.
-#[expect(dead_code, reason = "started with the external path sender")]
 pub(crate) async fn tick(
     phase: crate::ArcConnPhase,
     paths: Arc<Paths>,
