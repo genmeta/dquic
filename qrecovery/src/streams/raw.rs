@@ -10,10 +10,10 @@ use qbase::{
         Frame, FrameType, GetFrameType, ResetStreamFrame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
+    metric::ArcConnectionMetrics,
     net::tx::ArcSendWakers,
     packet::ConstraintBuffer,
     param::{ArcParameters, ParameterId, core::Parameters},
-    role::Role,
     sid::{
         ControlStreamsConcurrency, Dir, StreamId, StreamIds,
         remote_sid::{AcceptSid, ExceedLimitError},
@@ -110,7 +110,7 @@ pub struct DataStreams<TX> {
     // 该queue与space中的transmitter中的frame_queue共享，为了方便向transmitter中写入帧
     ctrl_frames: TX,
 
-    role: Role,
+    parameters: ArcParameters,
     stream_ids: StreamIds<Ext<TX>, Ext<TX>>,
     // 所有流的待写端，要发送数据，就得向这些流索取
     output: ArcOutput<Ext<TX>>,
@@ -121,11 +121,7 @@ pub struct DataStreams<TX> {
     tls_fin: AtomicBool,
     tx_wakers: ArcSendWakers,
 
-    initial_max_stream_data_bidi_local: u64,
-    initial_max_stream_data_bidi_remote: u64,
-    initial_max_stream_data_uni: u64,
-
-    metrics: Option<qbase::metric::ArcConnectionMetrics>,
+    metrics: Option<ArcConnectionMetrics>,
 }
 
 fn wrapper_error(fty: FrameType) -> impl FnOnce(ExceedLimitError) -> QuicError {
@@ -315,7 +311,7 @@ where
     ) -> Result<usize, QuicError> {
         let sid = stream_frame.stream_id();
         // 对方必须是发送端，才能发送此帧
-        if sid.role() != self.role {
+        if sid.role() != self.parameters.role() {
             // 对方的sid，看是否跳跃，把跳跃的流给创建好
             self.try_accept_sid(sid)
                 .map_err(wrapper_error(stream_frame.frame_type()))?;
@@ -361,7 +357,7 @@ where
             StreamCtlFrame::ResetStream(reset) => {
                 let sid = reset.stream_id();
                 // 对方必须是发送端，才能发送此帧
-                if sid.role() != self.role {
+                if sid.role() != self.parameters.role() {
                     self.try_accept_sid(sid)
                         .map_err(wrapper_error(reset.frame_type()))?;
                 } else {
@@ -387,7 +383,7 @@ where
             StreamCtlFrame::StopSending(stop_sending) => {
                 let sid = stop_sending.stream_id();
                 // 对方必须是接收端，才能发送此帧
-                if sid.role() != self.role {
+                if sid.role() != self.parameters.role() {
                     // 对方创建的单向流，接收端是我方，不可能收到对方的StopSendingFrame
                     if sid.dir() == Dir::Uni {
                         return Err(QuicError::new(
@@ -416,7 +412,7 @@ where
             StreamCtlFrame::MaxStreamData(max_stream_data) => {
                 let sid = max_stream_data.stream_id();
                 // 对方必须是接收端，才能发送此帧
-                if sid.role() != self.role {
+                if sid.role() != self.parameters.role() {
                     // 对方创建的单向流，接收端是我方，不可能收到对方的MaxStreamData
                     if sid.dir() == Dir::Uni {
                         return Err(QuicError::new(
@@ -441,7 +437,7 @@ where
             StreamCtlFrame::StreamDataBlocked(stream_data_blocked) => {
                 let sid = stream_data_blocked.stream_id();
                 // 对方必须是发送端，才能发送此帧
-                if sid.role() != self.role {
+                if sid.role() != self.parameters.role() {
                     self.try_accept_sid(sid)
                         .map_err(wrapper_error(stream_data_blocked.frame_type()))?;
                 } else {
@@ -498,40 +494,27 @@ impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    pub(super) fn new<LR, RR>(
-        role: Role,
-        local_params: &Parameters<LR>,
-        remote_params: &Parameters<RR>,
+    pub(super) fn new(
+        parameters: ArcParameters,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
         metrics: Option<qbase::metric::ArcConnectionMetrics>,
     ) -> Self {
-        use ParameterId::*;
         let tx_wakers = ArcSendWakers::default();
         Self {
-            role,
             stream_ids: StreamIds::new(
-                role,
-                local_params.get::<u64>(InitialMaxStreamsBidi),
-                local_params.get::<u64>(InitialMaxStreamsUni),
-                remote_params.get::<u64>(InitialMaxStreamsBidi),
-                remote_params.get::<u64>(InitialMaxStreamsUni),
+                &parameters,
                 Ext(ctrl_frames.clone()),
                 ctrl,
                 tx_wakers.clone(),
             ),
+            parameters,
             output: ArcOutput::new(),
             input: ArcInput::default(),
             listener: ArcListener::new(),
             ctrl_frames,
             tls_fin: AtomicBool::new(false),
             tx_wakers,
-            initial_max_stream_data_bidi_local: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataBidiLocal),
-            initial_max_stream_data_bidi_remote: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote),
-            initial_max_stream_data_uni: local_params
-                .get::<u64>(ParameterId::InitialMaxStreamDataUni),
             metrics,
         }
     }
@@ -568,9 +551,10 @@ where
     pub(super) fn poll_open_bi_stream(
         &self,
         cx: &mut Context<'_>,
-        arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let snd_buf_size = arc_params.remote(ParameterId::InitialMaxStreamDataBidiRemote);
+        let snd_buf_size = self
+            .parameters
+            .remote(ParameterId::InitialMaxStreamDataBidiRemote);
         self.poll_open_bi_with_limit(cx, snd_buf_size)
     }
 
@@ -587,7 +571,11 @@ where
         };
 
         let arc_sender = self.create_sender(sid, snd_buf_size);
-        let arc_recver = self.create_recver(sid, self.initial_max_stream_data_bidi_local);
+        let arc_recver = self.create_recver(
+            sid,
+            self.parameters
+                .local(ParameterId::InitialMaxStreamDataBidiLocal),
+        );
         let io_state = IOState::bidirection();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state.clone());
         input.insert(sid, Incoming::new(arc_recver.clone()), io_state);
@@ -602,9 +590,8 @@ where
     pub(super) fn poll_open_uni_stream(
         &self,
         cx: &mut Context<'_>,
-        arc_params: &ArcParameters,
     ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
-        let snd_buf_size = arc_params.remote(ParameterId::InitialMaxStreamDataUni);
+        let snd_buf_size = self.parameters.remote(ParameterId::InitialMaxStreamDataUni);
         self.poll_open_uni_with_limit(cx, snd_buf_size)
     }
 
@@ -635,11 +622,8 @@ where
         self.listener.poll_accept_bi_with_limit(cx, snd_buf_size)
     }
 
-    pub(super) fn accept_bi<'a>(
-        &'a self,
-        params: &'a ArcParameters,
-    ) -> AcceptBiStream<'a, Ext<TX>> {
-        self.listener.accept_bi_stream(params)
+    pub(super) fn accept_bi(&self) -> AcceptBiStream<'_, Ext<TX>> {
+        self.listener.accept_bi_stream(&self.parameters)
     }
 
     pub(super) fn accept_uni(&self) -> AcceptUniStream<'_, Ext<TX>> {
@@ -669,8 +653,11 @@ where
             AcceptSid::Old => Ok(()),
             AcceptSid::New(need_create) => {
                 for sid in need_create {
-                    let arc_recver =
-                        self.create_recver(sid, self.initial_max_stream_data_bidi_remote);
+                    let arc_recver = self.create_recver(
+                        sid,
+                        self.parameters
+                            .local(ParameterId::InitialMaxStreamDataBidiRemote),
+                    );
                     // buf_size will be revised by Listener::poll_accept_bi_stream
                     let arc_sender = self.create_sender(sid, 0);
                     let io_state = IOState::bidirection();
@@ -698,7 +685,10 @@ where
             AcceptSid::Old => Ok(()),
             AcceptSid::New(need_create) => {
                 for sid in need_create {
-                    let arc_receiver = self.create_recver(sid, self.initial_max_stream_data_uni);
+                    let arc_receiver = self.create_recver(
+                        sid,
+                        self.parameters.local(ParameterId::InitialMaxStreamDataUni),
+                    );
                     let io_state = IOState::receive_only();
                     input.insert(sid, Incoming::new(arc_receiver.clone()), io_state);
                     listener.push_uni_stream(sid, arc_receiver);
@@ -734,7 +724,10 @@ mod tests {
     use qbase::{
         frame::{Frame, io::SendFrame},
         packet::PacketContent,
-        param::handy::{client_parameters, server_parameters},
+        param::{
+            ArcParameters,
+            handy::{client_parameters, server_parameters},
+        },
         role::Role,
         sid::{Dir, handy::DemandConcurrency},
     };
@@ -751,8 +744,71 @@ mod tests {
     }
 
     #[test]
+    fn receive_limits_follow_the_local_stream_direction() {
+        use qbase::{
+            error::ErrorKind,
+            frame::StreamFrame,
+            param::ParameterId,
+            sid::StreamId,
+        };
+
+        use crate::send::CancelStream;
+
+        for role in [Role::Client, Role::Server] {
+            for (local, dir, limit) in [(true, Dir::Bi, 3), (false, Dir::Bi, 5), (false, Dir::Uni, 7)] {
+                let mut client = client_parameters();
+                let mut server = server_parameters();
+                for (id, value) in [
+                    (ParameterId::InitialMaxStreamDataBidiLocal, 3u32),
+                    (ParameterId::InitialMaxStreamDataBidiRemote, 5),
+                    (ParameterId::InitialMaxStreamDataUni, 7),
+                ] {
+                    client
+                        .set(id, if role == Role::Client { value } else { 100 })
+                        .unwrap();
+                    server
+                        .set(id, if role == Role::Server { value } else { 100 })
+                        .unwrap();
+                }
+                let streams = DataStreams::new(
+                    ArcParameters::new(role, Arc::new(client), Arc::new(server)),
+                    Box::new(DemandConcurrency),
+                    MockFrameSender,
+                    None,
+                );
+                let sid = if local {
+                    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+                    let Poll::Ready(Ok(Some((sid, (_, mut writer))))) =
+                        streams.poll_open_bi_with_limit(&mut cx, 0)
+                    else {
+                        panic!("peer must allow a bidirectional stream");
+                    };
+                    writer.cancel(0);
+                    sid
+                } else {
+                    StreamId::new(!role, dir, 0)
+                };
+                assert_eq!(
+                    streams.recv_data((
+                        StreamFrame::new(sid, limit - 1, 1),
+                        bytes::Bytes::from_static(b"x"),
+                    )),
+                    Ok(limit as usize)
+                );
+                let error = streams
+                    .recv_data((
+                        StreamFrame::new(sid, limit, 1),
+                        bytes::Bytes::from_static(b"x"),
+                    ))
+                    .unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::FlowControl);
+            }
+        }
+    }
+
+    #[test]
     fn open_uni_uses_the_remote_unidirectional_limit() {
-        use qbase::param::{ArcParameters, ParameterId};
+        use qbase::param::ParameterId;
 
         use crate::send::CancelStream;
 
@@ -762,17 +818,14 @@ mod tests {
             .unwrap();
         let server = server_parameters();
         let streams = DataStreams::new(
-            Role::Server,
-            &server,
-            &client,
+            ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server)),
             Box::new(DemandConcurrency),
             MockFrameSender,
             None,
         );
-        let parameters = ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let Poll::Ready(Ok(Some((_, mut writer)))) =
-            streams.poll_open_uni_stream(&mut cx, &parameters)
+            streams.poll_open_uni_stream(&mut cx)
         else {
             panic!("ready parameters must allow opening the stream immediately");
         };
@@ -783,31 +836,29 @@ mod tests {
 
     #[test]
     fn ready_streams_use_current_parameters_even_with_remembered_limits() {
-        use qbase::param::{ArcParameters, ServerParameters};
+        use qbase::param::ServerParameters;
 
         use crate::send::CancelStream;
 
         let client = client_parameters();
         let server = server_parameters();
+        // Remembered defaults prohibit writing; current parameters permit it.
+        let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server))
+            .with_remembered(Some(Arc::new(ServerParameters::default())));
         let streams = DataStreams::new(
-            Role::Client,
-            &client,
-            &server,
+            parameters,
             Box::new(DemandConcurrency),
             MockFrameSender,
             None,
         );
-        // Remembered defaults prohibit writing; current parameters permit it.
-        let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server))
-            .with_remembered(Some(Arc::new(ServerParameters::default())));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let Poll::Ready(Ok(Some((_, (_, mut bi))))) =
-            streams.poll_open_bi_stream(&mut cx, &parameters)
+            streams.poll_open_bi_stream(&mut cx)
         else {
             panic!("ready parameters must allow opening the bidirectional stream");
         };
         let Poll::Ready(Ok(Some((_, mut uni)))) =
-            streams.poll_open_uni_stream(&mut cx, &parameters)
+            streams.poll_open_uni_stream(&mut cx)
         else {
             panic!("ready parameters must allow opening the unidirectional stream");
         };
@@ -834,9 +885,11 @@ mod tests {
             }
         }
         let streams = DataStreams::new(
-            Role::Client,
-            &client_parameters(),
-            &server_parameters(),
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
             Box::new(DemandConcurrency),
             MockFrameSender,
             None,
@@ -916,9 +969,11 @@ mod tests {
         use crate::recv::{Incoming, Reader};
 
         let streams = DataStreams::new(
-            Role::Client,
-            &client_parameters(),
-            &server_parameters(),
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
             Box::new(DemandConcurrency),
             MockFrameSender,
             None,
@@ -956,9 +1011,11 @@ mod tests {
     #[test]
     fn empty_stream_fin_is_effective_packet_content() {
         let streams = Arc::new(DataStreams::new(
-            Role::Client,
-            &client_parameters(),
-            &server_parameters(),
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
             Box::new(DemandConcurrency),
             MockFrameSender,
             None,
