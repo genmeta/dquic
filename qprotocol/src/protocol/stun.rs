@@ -34,7 +34,7 @@ use tokio::time::timeout;
 
 use crate::socket::UdpSocket;
 
-const STUN_SERVER: &str = "stun.genmeta.net";
+const STUN_SERVER: &str = "nat.genmeta.net";
 const STUN_PORT: &str = "20002";
 
 type StunServers = Result<Arc<[SocketAddr]>, Arc<io::Error>>;

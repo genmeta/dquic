@@ -124,7 +124,8 @@ impl QuicEndpoint {
         let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
 
-        tokio::spawn(client_growing(
+        let tick = crate::recv::tick(paths.clone());
+        let growing = client_growing(
             server_name,
             client_params,
             paths,
@@ -135,7 +136,8 @@ impl QuicEndpoint {
             move |result| {
                 let _ = deliver.send(result);
             },
-        ));
+        );
+        tokio::spawn(async move { tokio::join!(growing, tick).0 });
 
         connected
             .await
@@ -225,12 +227,14 @@ impl ServerRegistry {
                     return;
                 }
 
-                tokio::spawn(crate::server_growing(
+                let tick = crate::recv::tick(paths.clone());
+                let growing = crate::server_growing(
                     route,
                     rcvd_pkt,
                     paths,
                     ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-                ));
+                );
+                tokio::spawn(async move { tokio::join!(growing, tick).0 });
             });
             Self(RwLock::new(HashMap::new()))
         })

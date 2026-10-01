@@ -109,6 +109,8 @@ impl Future for Collector<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let shared_phase = this.paths.phase();
+        let phase = shared_phase.poll_phase(cx);
         let mut limits = Constraints {
             flow_ctrl: 0,
             send_quota: ready!(this.burst.cc.poll_send_quota(cx)).map_err(|error| {
@@ -122,8 +124,6 @@ impl Future for Collector<'_> {
         };
         let mut count = 0;
         let mut acked = [None; 3];
-        let shared_phase = this.paths.phase();
-        let phase = shared_phase.poll_phase(cx);
         let selected = this.path.selected();
         // Quota polling registered the sender for path selection and retirement wakeups.
         if selected == Path::SUSPEND {

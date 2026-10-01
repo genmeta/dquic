@@ -34,7 +34,7 @@ existing external endpoints through `Added`; there is no separate NAT event.
 
 Punch addresses keep the actual bound address used to find the socket in Dock.
 Temporary probes use the local bound address with a new port.
-The STUN module fixes the name to `stun.genmeta.net`. `StunProtocol::global()`
+The STUN module fixes the name to `nat.genmeta.net`. `StunProtocol::global()`
 starts one background task to warm `StunProtocol::stun_servers()`. The global
 Dock uses this STUN instance. The function-local static
 cache shares one system DNS lookup on port 20002 across the process, including

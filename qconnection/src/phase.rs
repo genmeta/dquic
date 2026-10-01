@@ -47,10 +47,7 @@ impl InitialPhase {
         keys: qtls::BidirectionalKeys,
         reliable_frames: ArcReliableFrames,
     ) -> Self {
-        let initial = Arc::new(Space::new(
-            Epoch::Initial,
-            ArcKeys::new(Arc::new(keys)),
-        ));
+        let initial = Arc::new(Space::new(Epoch::Initial, ArcKeys::new(Arc::new(keys))));
         let mut trackers = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
         trackers.push_back(initial.clone()).expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
@@ -172,6 +169,14 @@ pub enum ConnPhase {
 }
 
 impl ConnPhase {
+    pub(crate) fn retire_initial(&self) {
+        match self {
+            Self::Initial(phase) => phase.initial.retire(),
+            Self::Handshake(phase) => phase.initial.retire(),
+            Self::Mature(phase) => phase.spaces.initial.retire(),
+        }
+    }
+
     fn upgrade_wakers(&self) -> Option<&ArcSendWakers> {
         match self {
             Self::Initial(p) => Some(&p.upgrade_wakers),

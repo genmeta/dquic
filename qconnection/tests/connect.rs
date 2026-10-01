@@ -95,6 +95,11 @@ async fn connect_uses_dns_and_global_addresses_and_closes_its_discovery_stream()
         hostname: server_name.clone(),
         records: Mutex::new(Some(records)),
     }));
+    send.unbounded_send((
+        qresolve::Source::System,
+        server_socket.0.local_addr().unwrap().into(),
+    ))
+    .unwrap();
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(5), async {
         let connected = client.connect(server_name).await.unwrap();
         let accepted = incoming.recv().await.unwrap().unwrap();

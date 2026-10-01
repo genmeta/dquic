@@ -12,7 +12,6 @@ Cargo.lock
 
 # Exclude benchmark temp files
 /benchmark/*
-!/benchmark/launch.py
 
 # cago-tarpaulin (coverage tool) generates this
 tarpaulin-report.html

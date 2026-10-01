@@ -22,40 +22,9 @@ use crate::{
 
 /// Grow an already routed client and discover paths from the DNS result stream.
 /// The client owns discovery and cancels it before shutting down its paths.
+/// The caller runs [`crate::recv::tick`] alongside this future.
 #[allow(clippy::too_many_arguments)]
 pub async fn client_growing(
-    server_name: String,
-    client_params: ClientParameters,
-    paths: Arc<Paths>,
-    rcvd_pkt: RcvdPacket,
-    tls_context: TlsContext,
-    router_registry: QuicRouterRegistry<ArcReliableFrames>,
-    token_registry: ArcTokenRegistry,
-    established: impl FnOnce(Result<Connected, Error>),
-) -> CloseReason {
-    let tick = crate::recv::tick(
-        paths.phase(),
-        paths.clone(),
-        paths.terminator(),
-        paths.closed(),
-    );
-    let growing = growing(
-        server_name,
-        client_params,
-        paths,
-        rcvd_pkt,
-        tls_context,
-        router_registry,
-        token_registry,
-        established,
-    );
-    // Both futures belong to this lifecycle; cancelling it also cancels the tick.
-    let (reason, ()) = tokio::join!(growing, tick);
-    reason
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn growing(
     server_name: String,
     client_params: ClientParameters,
     paths: Arc<Paths>,
@@ -84,8 +53,8 @@ async fn growing(
     );
     let discovery = tokio::spawn({
         let paths = paths.clone();
-        let resolver = qresolve::Resolver::get();
         let addresses = AddressBook::global().clone();
+        let resolver = qresolve::Resolver::get();
         async move {
             if let Err(error) = resolve_paths(&paths, &addresses, resolver, &server_name).await {
                 paths.on_error(error);
@@ -113,6 +82,7 @@ async fn growing(
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            paths.handshake.got_handshake_key();
             phase.enter_handshake(handshake.clone());
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
@@ -205,7 +175,20 @@ async fn growing(
                         summary.alpn.unwrap_or_default(),
                         mature_phase.spaces.data.streams.clone(),
                         closed.clone(),
-                    ),
+                    )
+                    .with_path_observer({
+                        let paths = Arc::downgrade(&paths);
+                        move || {
+                            paths.upgrade().map_or_else(Vec::new, |paths| {
+                                paths
+                                    .snapshot()
+                                    .into_iter()
+                                    .filter(|path| path.is_validated())
+                                    .map(|path| path.pathway)
+                                    .collect()
+                            })
+                        }
+                    }),
                 ),
                 handshake_done,
                 mature_phase,
@@ -229,7 +212,6 @@ async fn growing(
     let reason = tokio::select! {
         Ok(Some(reason)) = &mut close => reason,
         Ok(Some(true)) = handshake_done => {
-            mature_phase.retire_handshake_spaces();
             mature_phase
                 .spaces
                 .data

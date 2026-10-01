@@ -296,8 +296,9 @@ impl AddressBook {
 
     /// Generate sorted, deduplicated bootstrap candidates without opening sockets or Paths.
     /// Direct peers use the actual binding; mediated peers need a publicly reachable local
-    /// return endpoint. The network owner must register each binding's Direct address as
-    /// well as published aliases with QuicProtocol. mDNS sources restrict the interface
+    /// return endpoint. For a known filtering NAT, the return endpoint uses the peer's relay.
+    /// The network owner must register that Mediate alias, the binding's Direct address and
+    /// published aliases with QuicProtocol. mDNS sources restrict the interface
     /// name and family using registered binding metadata; missing metadata cannot match.
     /// Names must be the same canonical netdev names used at registration.
     /// No system interface enumeration or IP-to-interface inference happens here.
@@ -337,14 +338,35 @@ impl AddressBook {
                 Some((direct, endpoint))
             })
             .flat_map(|(direct, endpoint)| {
-                std::iter::once(direct).chain(mediated.then_some(endpoint))
+                std::iter::once(direct)
+                    .chain(mediated.then_some(endpoint))
+                    .map(move |local| (direct.addr(), local))
             })
-            .filter(|local| {
+            .filter(|(_, local)| {
                 *local != peer
                     && local.addr().family() == family
                     && (!mediated || local.is_globally_routable())
             })
-            .map(|local| Pathway::new(local, peer))
+            .map(|(bound, local)| {
+                // A mapped address behind filtering NAT cannot receive the reply directly.
+                // The network owner registers this relay alias with QuicProtocol.
+                let local = if let EndpointAddr::Mediate { agent, .. } = peer
+                    && state.nat.get(&bound).is_some_and(|nat| {
+                        matches!(
+                            nat,
+                            NatType::RestrictedCone
+                                | NatType::RestrictedPort
+                                | NatType::Symmetric
+                                | NatType::Dynamic
+                        )
+                    }) {
+                    EndpointAddr::mediate(agent, local.addr())
+                } else {
+                    local
+                };
+                Pathway::new(local, peer)
+            })
+            .filter(|pathway| pathway.local() != pathway.remote())
             .collect::<Vec<_>>();
         pathways.sort_unstable();
         pathways.dedup();

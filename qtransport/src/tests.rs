@@ -251,7 +251,9 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     );
     let path = Arc::new(Path::new(
         pathway,
-        transport.parameters.role(),
+        Arc::new(qcongestion::HandshakeStatus::new(
+            transport.parameters.role() == Role::Server,
+        )),
         path_idle(),
         data_trackers(transport),
     ));
@@ -1906,7 +1908,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     protocol.register(local, &socket).unwrap();
     let path = Arc::new(Path::new(
         pathway,
-        Role::Client,
+        Arc::new(qcongestion::HandshakeStatus::new(false)),
         path_idle(),
         data_trackers(&ct),
     ));
@@ -1973,7 +1975,9 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
         let path = Arc::new(Path::new(
             pathway,
-            transport.parameters.role(),
+            Arc::new(qcongestion::HandshakeStatus::new(
+                transport.parameters.role() == Role::Server,
+            )),
             path_idle(),
             data_trackers(transport),
         ));
@@ -2012,7 +2016,7 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     let [(_client, transport, original), _] = pair(1);
     let path = Arc::new(Path::new(
         original.pathway,
-        Role::Client,
+        Arc::new(qcongestion::HandshakeStatus::new(false)),
         path_idle(),
         data_trackers(&transport),
     ));

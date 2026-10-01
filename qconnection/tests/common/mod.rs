@@ -166,3 +166,9 @@ where
     journal.on_assembled(pn.0, None, frames.drain(..));
     Ok(buffer)
 }
+
+/// Tests that use localhost DNS opt in explicitly; mock-only tests do not call this.
+pub fn use_system_resolver() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
+}
