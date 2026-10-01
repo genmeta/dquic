@@ -206,7 +206,18 @@ pub async fn client_growing(
                 .expect("live Data keys")
                 .allow_update();
             paths.handshake_confirmed();
-            closed.clone().await.expect("growing owns close").expect("first close reason")
+            // A separate stop channel leaves the connection's close reason to this coroutine.
+            // Dropping this coroutine also stops observation by dropping the sender.
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let observer = mature_phase.puncher.observe_endpoints(
+                AddressBook::global().subscribe_punch(crate::Scopes::ALL),
+                stopped,
+                |_| {},
+            );
+            let reason = closed.clone().await.expect("growing owns close").expect("first close reason");
+            drop(stop);
+            let _ = observer.await;
+            reason
         }
     };
     shutdown(&paths, &tls_context, &cid_registry.local, reason, discovery).await

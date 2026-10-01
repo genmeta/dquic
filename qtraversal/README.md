@@ -59,7 +59,11 @@ and protection, reusing `qtransport::packet::assemble`.
 Direct `PUNCH_HELLO` and `PUNCH_DONE` probes are sent on UDP sockets without a
 Path. `qconnection::MaturePhase` now creates and retains a Puncher for both roles,
 and authenticated 1-RTT reception dispatches all five punch/address frame types to
-it while preserving the received UDP link. Passive paths are admitted only after
-packet authentication and frame parsing; rejected and replayed packets cannot
-create paths or start their senders. AddressBook observation, path validation,
-and Puncher shutdown remain connection integration work.
+it while preserving the received UDP link. Reception currently obtains or creates
+a path before packet authentication; deferring passive-path admission remains
+connection integration work. After handshake confirmation, both connection
+lifecycles start AddressBook observation: clients observe all scopes and servers
+use their listening scopes. Observation stops before connection cleanup and also
+when the lifecycle coroutine is dropped. Address withdrawal updates only Puncher;
+the removal callback does not retire paths. Path validation and Puncher shutdown
+remain separate connection integration work.
