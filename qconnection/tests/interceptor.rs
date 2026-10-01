@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use qbase::{
+    Epoch,
     cid::ConnectionId,
     net::route::Pathway,
     param::{ClientParameters, ParameterId, WriteParameters},
 };
 use qconnection::{Interceptor, Scope, ServerRegistry};
-use qtls::{ClientStart, CryptoLevel, QuicVersion, TlsEvent};
+use qtls::{ClientStart, QuicVersion, TlsEvent};
 
 #[tokio::test]
 async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
@@ -28,10 +29,10 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
             local_transport_parameters: encoded_client_parameters.freeze(),
         })
         .unwrap();
-    let Some(TlsEvent::WriteCrypto { level, bytes }) = client.next_event() else {
+    let Some(TlsEvent::WriteCrypto { epoch, bytes }) = client.next_event() else {
         panic!("client must emit ClientHello first")
     };
-    assert_eq!(level, CryptoLevel::Initial);
+    assert_eq!(epoch, Epoch::Initial);
 
     let interceptor = Interceptor::new();
     let writer = interceptor.clone();

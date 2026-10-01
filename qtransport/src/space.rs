@@ -1,6 +1,7 @@
 //! Packet-number spaces and recovery feedback. No parent connection back-reference.
 use std::{sync::Arc, time::Duration};
 
+use derive_more::Deref;
 use qbase::{
     Epoch,
     frame::{AckFrame, Frame, ReliableFrame, StreamCtlFrame, io::SendFrame},
@@ -117,11 +118,10 @@ impl<K: Clone + Send> qcongestion::Resend for Space<ArcKeys<K>> {
 }
 
 /// Application-data space and all of its retransmittable frame sources.
+#[derive(Deref)]
 pub struct DataSpace {
-    pub keys: ArcOneRttKeys,
-    pub crypto: CryptoStream,
-    pub sent_journal: ArcSentJournal,
-    pub rcvd_journal: ArcRcvdJournal,
+    #[deref]
+    pub space: Space<ArcOneRttKeys>,
     pub streams: DataStreams<ArcReliableFrames>,
     pub reliable_frames: ArcReliableFrames,
 }
@@ -133,10 +133,7 @@ impl DataSpace {
         reliable_frames: ArcReliableFrames,
     ) -> Self {
         Self {
-            keys,
-            crypto: CryptoStream::new(),
-            sent_journal: ArcSentJournal::default(),
-            rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
+            space: Space::new(Epoch::Data, keys),
             streams,
             reliable_frames,
         }
