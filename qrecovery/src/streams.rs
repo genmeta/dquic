@@ -35,8 +35,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     packet::{ConstraintBuffer, Package},
-    param::{ArcParameters, core::Parameters},
-    role::Role,
+    param::ArcParameters,
     sid::{ControlStreamsConcurrency, StreamId},
 };
 
@@ -86,18 +85,14 @@ where
     /// Creates a new instance of [`DataStreams`].
     ///
     /// The `ctrl_frames` is the frame sender, read [`raw::DataStreams`] for more details.
-    pub fn new<LR, RR>(
-        role: Role,
-        local_params: &Parameters<LR>,
-        remote_params: &Parameters<RR>,
+    pub fn new(
+        parameters: ArcParameters,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
         metrics: Option<qbase::metric::ArcConnectionMetrics>,
     ) -> Self {
         Self(Arc::new(raw::DataStreams::new(
-            role,
-            local_params,
-            remote_params,
+            parameters,
             ctrl,
             ctrl_frames,
             metrics,
@@ -106,26 +101,20 @@ where
 
     /// Create a bidirectional stream, see the method of the same name on `QuicConnection` for more.
     #[inline]
-    pub fn open_bi<'a>(&'a self, params: &'a ArcParameters) -> OpenBiStream<'a, TX> {
-        OpenBiStream {
-            streams: self,
-            params,
-        }
+    pub fn open_bi(&self) -> OpenBiStream<'_, TX> {
+        OpenBiStream { streams: self }
     }
 
     /// Create a unidirectional stream, see the method of the same name on `QuicConnection` for more.
     #[inline]
-    pub fn open_uni<'a>(&'a self, params: &'a ArcParameters) -> OpenUniStream<'a, TX> {
-        OpenUniStream {
-            streams: self,
-            params,
-        }
+    pub fn open_uni(&self) -> OpenUniStream<'_, TX> {
+        OpenUniStream { streams: self }
     }
 
     /// accept a bidirectional stream, see the method of the same name on `QuicConnection` for more.
     #[inline]
-    pub fn accept_bi<'a>(&'a self, params: &'a ArcParameters) -> AcceptBiStream<'a, Ext<TX>> {
-        self.0.accept_bi(params)
+    pub fn accept_bi(&self) -> AcceptBiStream<'_, Ext<TX>> {
+        self.0.accept_bi()
     }
 
     /// accept a unidirectional stream, see the method of the same name on `QuicConnection` for more.
@@ -171,7 +160,6 @@ where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
     streams: &'d raw::DataStreams<TX>,
-    params: &'d ArcParameters,
 }
 
 impl<TX> Future for OpenBiStream<'_, TX>
@@ -181,7 +169,7 @@ where
     type Output = Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.streams.poll_open_bi_stream(cx, self.params)
+        self.streams.poll_open_bi_stream(cx)
     }
 }
 
@@ -198,7 +186,6 @@ where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
     streams: &'a raw::DataStreams<TX>,
-    params: &'a ArcParameters,
 }
 
 impl<TX> Future for OpenUniStream<'_, TX>
@@ -208,7 +195,7 @@ where
     type Output = Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.streams.poll_open_uni_stream(cx, self.params)
+        self.streams.poll_open_uni_stream(cx)
     }
 }
 

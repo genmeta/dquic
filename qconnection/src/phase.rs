@@ -9,7 +9,6 @@ use qbase::{
     cid::{ArcCidCell, ConnectionId},
     net::tx::ArcSendWakers,
     param::ParameterId,
-    role::Role,
     sid::handy::ConsistentConcurrency,
     util::IndexDeque,
 };
@@ -130,24 +129,12 @@ impl MaturePhase {
             parameters.local(ParameterId::InitialMaxStreamsBidi),
             parameters.local(ParameterId::InitialMaxStreamsUni),
         ));
-        let streams = match parameters.role() {
-            Role::Client => DataStreams::new(
-                parameters.role(),
-                parameters.client(),
-                parameters.server(),
-                concurrency,
-                reliable_frames.clone(),
-                None,
-            ),
-            Role::Server => DataStreams::new(
-                parameters.role(),
-                parameters.server(),
-                parameters.client(),
-                concurrency,
-                reliable_frames.clone(),
-                None,
-            ),
-        };
+        let streams = DataStreams::new(
+            parameters.clone(),
+            concurrency,
+            reliable_frames.clone(),
+            None,
+        );
         let flow = FlowController::new(
             parameters.remote(ParameterId::InitialMaxData),
             parameters.local(ParameterId::InitialMaxData),
