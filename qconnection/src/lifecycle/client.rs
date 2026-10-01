@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use qbase::{
@@ -41,7 +41,6 @@ pub async fn client_growing(
         unreachable!("client_growing starts with InitialPhase")
     };
 
-    let requirements = Arc::new(Mutex::new(Requirements::new_client(initial_phase.odcid)));
     let initial = &initial_phase.initial;
     let cid_registry = qbase::cid::Registry::new(
         Role::Client,
@@ -79,7 +78,6 @@ pub async fn client_growing(
         initial.clone(),
         paths.clone(),
         closed.clone(),
-        requirements.clone(),
     ));
 
     let result = {
@@ -107,7 +105,6 @@ pub async fn client_growing(
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
-                requirements.clone(),
             ));
 
             let parameters = ArcParameters::new(
@@ -115,7 +112,10 @@ pub async fn client_growing(
                 Arc::new(client_params),
                 Arc::new(tls_context.read_server_parameters().await?),
             );
-            parameters.authenticate_cids(*requirements.lock().unwrap())?;
+            parameters.authenticate_cids(Requirements::require_server(
+                phase.get().dcid(),
+                initial_phase.odcid,
+            ))?;
             let server_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
             let initial_dcid = cid_registry.remote.apply_dcid();
             cid_registry

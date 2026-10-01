@@ -171,24 +171,12 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         .unwrap();
     let params = ArcParameters::new(role, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = match role {
-        Role::Client => DataStreams::new(
-            role,
-            params.client(),
-            params.server(),
-            Box::new(DemandConcurrency),
-            reliable.clone(),
-            None,
-        ),
-        Role::Server => DataStreams::new(
-            role,
-            params.server(),
-            params.client(),
-            Box::new(DemandConcurrency),
-            reliable.clone(),
-            None,
-        ),
-    };
+    let streams = DataStreams::new(
+        params.clone(),
+        Box::new(DemandConcurrency),
+        reliable.clone(),
+        None,
+    );
     let flow = FlowController::new(
         params.remote(ParameterId::InitialMaxData),
         params.local(ParameterId::InitialMaxData),

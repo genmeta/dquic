@@ -7,6 +7,7 @@ use super::{
 use crate::{
     frame::{StreamsBlockedFrame, io::SendFrame},
     net::tx::ArcSendWakers,
+    param::{ArcParameters, ParameterId},
     role::Role,
 };
 
@@ -252,34 +253,29 @@ impl<T> StreamIds<T, T>
 where
     T: SendFrame<MaxStreamsFrame> + SendFrame<StreamsBlockedFrame> + Clone + Send + 'static,
 {
-    /// Create a new [`StreamIds`] with the given role, and maximum number of streams of each direction.
+    /// Create a new [`StreamIds`] from the connection's transport parameters.
     ///
-    /// The troublesome part is that the maximum number of streams that can be created locally
-    /// is restricted by the peer's `initial_max_streams_uni` and `initial_max_streams_bidi` transport
-    /// parameters, which are unknown at the beginning.
-    /// Therefore, peer's `initial_max_streams_xx` can be set to 0 initially,
-    /// and then updated later after obtaining the peer's `initial_max_streams_xx` setting.
-    #[allow(clippy::too_many_arguments)]
+    /// Peer parameters limit locally opened streams; local parameters limit peer-opened streams.
     pub fn new(
-        role: Role,
-        local_max_bi: u64,
-        local_max_uni: u64,
-        remote_max_bi: u64,
-        remote_max_uni: u64,
+        parameters: &ArcParameters,
         sid_frames_tx: T,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         tx_wakers: ArcSendWakers,
     ) -> Self {
-        // 缺省为0
         let local = ArcLocalStreamIds::new(
-            role,
-            remote_max_bi,
-            remote_max_uni,
+            parameters.role(),
+            parameters.remote(ParameterId::InitialMaxStreamsBidi),
+            parameters.remote(ParameterId::InitialMaxStreamsUni),
             sid_frames_tx.clone(),
             tx_wakers,
         );
-        let remote =
-            ArcRemoteStreamIds::new(!role, local_max_bi, local_max_uni, sid_frames_tx, ctrl);
+        let remote = ArcRemoteStreamIds::new(
+            !parameters.role(),
+            parameters.local(ParameterId::InitialMaxStreamsBidi),
+            parameters.local(ParameterId::InitialMaxStreamsUni),
+            sid_frames_tx,
+            ctrl,
+        );
         Self { local, remote }
     }
 

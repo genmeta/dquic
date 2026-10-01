@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use qbase::{
     cid::{ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
@@ -53,15 +53,11 @@ impl QuicEndpoint {
         scopes: impl Into<Scopes>,
         accept_cb: impl Fn(Result<Accepted, Error>) + Send + Sync + 'static,
     ) -> Result<(), Error> {
-        let server_parameters = Arc::new(self.server_parameters.clone());
-        let mut encoded_server_parameters = BytesMut::new();
-        encoded_server_parameters.put_parameters(&server_parameters);
         ServerRegistry::global().insert(
             self.identity.name().to_owned(),
             Server {
                 tls_server: self.tls_server()?,
-                server_parameters,
-                encoded_server_parameters: encoded_server_parameters.freeze(),
+                server_parameters: self.server_parameters.clone(),
                 scopes: scopes.into(),
                 accept_cb: Arc::new(accept_cb),
             },
@@ -161,8 +157,7 @@ pub type AcceptCallback = dyn Fn(Result<Accepted, Error>) + Send + Sync;
 
 pub struct Server {
     pub tls_server: qtls::TlsServer,
-    pub server_parameters: Arc<ServerParameters>,
-    pub encoded_server_parameters: Bytes,
+    pub server_parameters: ServerParameters,
     pub scopes: Scopes,
     pub accept_cb: Arc<AcceptCallback>,
 }
@@ -175,7 +170,7 @@ impl Server {
         scid: ConnectionId,
         odcid: ConnectionId,
     ) -> Result<(TlsContext, Arc<ClientParameters>, Arc<ServerParameters>), Error> {
-        let mut server_parameters = (*self.server_parameters).clone();
+        let mut server_parameters = self.server_parameters.clone();
         server_parameters
             .set(ParameterId::InitialSourceConnectionId, scid)
             .map_err(|error| internal_error(error.to_string()))?;
