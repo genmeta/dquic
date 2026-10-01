@@ -613,15 +613,6 @@ where
         Poll::Ready(Ok(Some((sid, Writer::new(arc_sender)))))
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn poll_accept_bi_with_limit(
-        &self,
-        cx: &mut Context<'_>,
-        snd_buf_size: u64,
-    ) -> Poll<Result<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>)), Error>> {
-        self.listener.poll_accept_bi_with_limit(cx, snd_buf_size)
-    }
-
     pub(super) fn accept_bi(&self) -> AcceptBiStream<'_, Ext<TX>> {
         self.listener.accept_bi_stream(&self.parameters)
     }

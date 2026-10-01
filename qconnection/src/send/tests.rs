@@ -916,7 +916,7 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         Epoch::Handshake,
         ArcKeys::new(Arc::new(keys(true))),
     ));
-    let (mature, _) = crate::MaturePhase::new(
+    let mature = crate::MaturePhase::new(
         &initial,
         handshake,
         parameters,
@@ -925,8 +925,7 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         registry,
         dcid,
         qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
-    )
-    .unwrap();
+    );
     (initial, mature)
 }
 
