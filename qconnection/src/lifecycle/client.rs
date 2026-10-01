@@ -33,6 +33,38 @@ pub async fn client_growing(
     token_registry: ArcTokenRegistry,
     established: impl FnOnce(Result<Connected, Error>),
 ) -> CloseReason {
+    let tick = crate::recv::tick(
+        paths.phase(),
+        paths.clone(),
+        paths.terminator(),
+        paths.closed(),
+    );
+    let growing = growing(
+        server_name,
+        client_params,
+        paths,
+        rcvd_pkt,
+        tls_context,
+        router_registry,
+        token_registry,
+        established,
+    );
+    // Both futures belong to this lifecycle; cancelling it also cancels the tick.
+    let (reason, ()) = tokio::join!(growing, tick);
+    reason
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn growing(
+    server_name: String,
+    client_params: ClientParameters,
+    paths: Arc<Paths>,
+    rcvd_pkt: RcvdPacket,
+    tls_context: TlsContext,
+    router_registry: QuicRouterRegistry<ArcReliableFrames>,
+    token_registry: ArcTokenRegistry,
+    established: impl FnOnce(Result<Connected, Error>),
+) -> CloseReason {
     let phase = paths.phase();
     let idle = paths.idle();
     let closed = paths.closed();

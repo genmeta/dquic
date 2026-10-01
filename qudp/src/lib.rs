@@ -4,12 +4,12 @@ use std::{
     net::SocketAddr,
     num::NonZeroU32,
     pin::Pin,
-    sync::atomic::AtomicI32,
+    sync::{Arc, atomic::AtomicI32},
     task::{Context, Poll, ready},
 };
 
 use bytes::BytesMut;
-use qbase::net::route::Line;
+use qbase::{net::route::Line, util::Wakers};
 use socket2::{Domain, Socket, Type};
 use tokio::io::Interest;
 pub const BATCH_SIZE: usize = 64;
@@ -25,11 +25,10 @@ cfg_if::cfg_if! {
     }
 }
 
-pub mod ext;
-
 #[derive(Debug)]
 pub struct UdpSocket {
     io: tokio::net::UdpSocket,
+    send_wakers: Arc<Wakers>,
     ttl: AtomicI32,
     bound_device: Option<BoundDevice>,
 }
@@ -89,6 +88,7 @@ impl UdpSocket {
         let io = tokio::net::UdpSocket::from_std(socket.into())?;
         let usc = Self {
             io,
+            send_wakers: Arc::new(Wakers::new()),
             ttl: AtomicI32::new(Line::DEFAULT_TTL as i32),
             bound_device,
         };
@@ -103,8 +103,10 @@ impl UdpSocket {
         self.bound_device.as_ref()
     }
 
+    /// Wake all concurrent senders through Tokio's single send-readiness waker.
     pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.io.poll_send_ready(cx)
+        self.send_wakers
+            .combine_with(cx, |cx| self.io.poll_send_ready(cx))
     }
 
     pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
