@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use qbase::{
-    ArcReceiving,
-    error::{ErrorKind, QuicError},
+    ArcReceiving, Epoch,
+    error::ErrorKind,
     frame::{CryptoFrame, io::ReceiveFrame},
 };
 use qconnection::{CloseReason, TlsContext};
-use qrecovery::crypto::CryptoStream;
-use qtls::{CryptoLevel, InstalledKeys};
+use qtls::InstalledKeys;
+use qtransport::space::Space;
 
 mod common;
 use common::backends;
@@ -17,7 +17,7 @@ fn pair(mutual: bool) -> [TlsContext; 2] {
     backends(mutual).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap())
 }
 
-async fn flight(from: &TlsContext, to: &TlsContext, expected: CryptoLevel) {
+async fn flight(from: &TlsContext, to: &TlsContext, expected: Epoch) {
     let (level, bytes) = tokio::time::timeout(Duration::from_secs(2), from.read_msg())
         .await
         .unwrap()
@@ -31,7 +31,7 @@ async fn tls_output_keys_and_parameters_have_independent_consumers() {
     let [client, server] = pair(false);
     assert!(client.read_keys().now_or_never().is_none()); // cancel this pending wait
     assert!(client.read_server_parameters().now_or_never().is_none());
-    flight(&client, &server, CryptoLevel::Initial).await;
+    flight(&client, &server, Epoch::Initial).await;
     // Neither output nor key consumption is required to retrieve ClientHello.
     assert!(server.read_server_parameters().now_or_never().is_none());
     let (name, _) = server.read_client_hello().await.unwrap();
@@ -45,13 +45,13 @@ async fn tls_output_keys_and_parameters_have_independent_consumers() {
         InstalledKeys::OneRtt(_)
     ));
     assert!(server.finished().now_or_never().is_none());
-    flight(&server, &client, CryptoLevel::Initial).await;
+    flight(&server, &client, Epoch::Initial).await;
     assert!(matches!(
         client.read_keys().await.unwrap(),
         InstalledKeys::Handshake(_)
     ));
     assert!(client.read_server_parameters().now_or_never().is_none());
-    flight(&server, &client, CryptoLevel::Handshake).await;
+    flight(&server, &client, Epoch::Handshake).await;
     assert!(client.read_client_hello().now_or_never().is_none());
     client.read_server_parameters().await.unwrap();
     assert!(matches!(
@@ -62,7 +62,7 @@ async fn tls_output_keys_and_parameters_have_independent_consumers() {
         client.finished().await.unwrap().remote.unwrap().name(),
         "localhost"
     );
-    flight(&client, &server, CryptoLevel::Handshake).await;
+    flight(&client, &server, Epoch::Handshake).await;
     assert!(server.finished().await.unwrap().remote.is_none());
 }
 
@@ -87,7 +87,7 @@ async fn tls_error_wakes_each_independent_waiter() {
     });
     tokio::task::yield_now().await;
     // Actual backend input failure, not a fabricated completion event.
-    assert!(server.write_msg(CryptoLevel::Handshake, &[1]).is_err());
+    assert!(server.write_msg(Epoch::Handshake, &[1]).is_err());
     tokio::time::timeout(Duration::from_secs(2), async {
         assert!(msg.await.unwrap());
         assert!(keys.await.unwrap());
@@ -114,48 +114,14 @@ async fn queued_output_is_bounded_without_waiting_for_its_reader() {
 }
 
 #[tokio::test]
-async fn tls_io_exits_naturally_when_the_context_fails() {
-    let [_, server] = pair(false);
-    let crypto = std::array::from_fn(|_| CryptoStream::new());
-    let closed = ArcReceiving::default();
-    let reads = [
-        CryptoLevel::Initial,
-        CryptoLevel::Handshake,
-        CryptoLevel::OneRtt,
-    ]
-    .into_iter()
-    .zip(crypto.iter())
-    .map(|(level, stream)| {
-        tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
-            server.clone(),
-            level,
-            stream.clone(),
-            closed.clone(),
-        ))
-    })
-    .collect::<Vec<_>>();
-    let write = tokio::spawn(qconnection::tls::write_crypto(server.clone(), crypto, closed));
-    tokio::task::yield_now().await;
-    server.on_error(QuicError::with_default_fty(ErrorKind::Internal, "connection ended").into());
-    tokio::time::timeout(Duration::from_secs(2), async {
-        write.await.unwrap();
-        for read in reads {
-            read.await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
 async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
-    let crypto = CryptoStream::new();
+    let space = Space::new(Epoch::Initial, ());
+    let crypto = &space.crypto;
     let closed = ArcReceiving::default();
-    let reader = tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
+    let reader = tokio::spawn(qconnection::tls::read_space_to_tls(
         server.clone(),
-        CryptoLevel::Initial,
-        crypto.clone(),
+        &space,
         closed.clone(),
     ));
     let (_, bytes) = client.read_msg().await.unwrap();
@@ -183,44 +149,64 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
 }
 
 #[tokio::test]
-async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
-    let [client, _] = pair(false);
-    let crypto: [CryptoStream; 3] = std::array::from_fn(|_| CryptoStream::new());
-    let closed = ArcReceiving::default();
-    // ClientHello is still pending, but its destination can no longer accept it.
-    crypto[0].sender.retire();
-    let reads = [
-        CryptoLevel::Initial,
-        CryptoLevel::Handshake,
-        CryptoLevel::OneRtt,
-    ]
-    .into_iter()
-    .zip(crypto.iter())
-    .map(|(level, stream)| {
-        tokio::spawn(qconnection::tls::read_crypto_stream_to_tls(
-            client.clone(),
-            level,
-            stream.clone(),
-            closed.clone(),
-        ))
-    })
-    .collect::<Vec<_>>();
-    let writer = tokio::spawn(qconnection::tls::write_crypto(
-        client.clone(),
-        crypto,
-        closed.clone(),
-    ));
-    tokio::time::timeout(Duration::from_millis(200), async {
+async fn data_space_delivers_post_handshake_crypto_to_tls() {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use qbase::{param::ArcParameters, role::Role, sid::handy::DemandConcurrency};
+    use qrecovery::streams::DataStreams;
+    use qtransport::{ArcReliableFrames, keys::ArcOneRttKeys, space::DataSpace};
+
+    let [client, server] = pair(false);
+    flight(&client, &server, Epoch::Initial).await;
+    flight(&server, &client, Epoch::Initial).await;
+    flight(&server, &client, Epoch::Handshake).await;
+    flight(&client, &server, Epoch::Handshake).await;
+
+    for (role, tls) in [(Role::Client, client), (Role::Server, server)] {
+        tls.finished().await.unwrap();
         assert!(matches!(
-            closed.await.unwrap().unwrap(),
-            CloseReason::Internal(_)
+            tls.read_keys().await.unwrap(),
+            InstalledKeys::Handshake(_)
         ));
-        writer.await.unwrap();
-        for reader in reads {
+        let keys = ArcOneRttKeys::from(tls.read_keys().await.unwrap());
+        let (client, server) = common::parameters();
+        let parameters = ArcParameters::new(role, Arc::new(client), Arc::new(server));
+        let reliable = ArcReliableFrames::with_capacity(0);
+        let streams = DataStreams::new(
+            parameters,
+            Box::new(DemandConcurrency),
+            reliable.clone(),
+            None,
+        );
+        let space = DataSpace::new(keys, streams, reliable);
+        let closed = ArcReceiving::default();
+        let reader = tokio::spawn(qconnection::tls::read_space_to_tls(
+            tls.clone(),
+            &space,
+            closed.clone(),
+        ));
+
+        // TLS KeyUpdate is forbidden in QUIC: the Data input must reach the TLS backend.
+        let bytes = Bytes::from_static(&[24, 0, 0, 1, 0]);
+        space
+            .crypto
+            .incoming()
+            .recv_frame((
+                CryptoFrame::new(0u32.into(), (bytes.len() as u32).into()),
+                bytes,
+            ))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let reason = closed.await.unwrap().unwrap();
+            assert!(matches!(
+                reason,
+                CloseReason::Internal(error) if matches!(error.kind(), ErrorKind::Crypto(_))
+            ));
             reader.await.unwrap();
-        }
-        assert!(client.read_keys().await.is_err());
-    })
-    .await
-    .unwrap();
+            assert!(tls.read_msg().await.is_err());
+        })
+        .await
+        .unwrap();
+    }
 }

@@ -27,7 +27,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
     while material.iter().any(Option::is_none) {
         while let Some(event) = client.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto { level, bytes } => {
+                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
                     server.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {
@@ -38,7 +38,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
         }
         while let Some(event) = server.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto { level, bytes } => {
+                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
                     client.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {

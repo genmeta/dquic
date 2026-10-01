@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, CryptoLevel,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch,
     HandshakeSummary, InstalledKeys, LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial,
     PrivateKeyDer, QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig,
     SessionSealKeyRing, SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake,
@@ -440,14 +440,14 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
         .unwrap();
 
     handshake
-        .receive_crypto(CryptoLevel::Handshake, &[])
+        .receive_crypto(Epoch::Handshake, &[])
         .unwrap();
     let error = handshake
-        .receive_crypto(CryptoLevel::Handshake, &[1])
+        .receive_crypto(Epoch::Handshake, &[1])
         .unwrap_err();
     assert!(error.to_string().contains("expected Initial"));
     let terminal = handshake
-        .receive_crypto(CryptoLevel::Initial, &[1])
+        .receive_crypto(Epoch::Initial, &[1])
         .unwrap_err();
     assert!(terminal.to_string().contains("terminal state"));
 }
@@ -510,7 +510,7 @@ fn transfer(
     while let Some(event) = sender.next_event() {
         progressed = true;
         match event {
-            TlsEvent::WriteCrypto { level, bytes } => {
+            TlsEvent::WriteCrypto { epoch: level, bytes } => {
                 for chunk in bytes.chunks(7) {
                     receiver.receive_crypto(level, chunk)?;
                 }
