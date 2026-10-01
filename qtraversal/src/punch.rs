@@ -4,7 +4,7 @@ mod puncher;
 mod scheduler;
 mod tx;
 
-use std::{collections::HashMap, future::Future, net::SocketAddr};
+use std::future::Future;
 
 pub use packet::ProbeEncoder;
 pub use puncher::{ArcPuncher, PunchPacketEncoder};
@@ -12,65 +12,42 @@ use qbase::{
     frame::{ReliableFrame, io::SendFrame},
     net::addr::EndpointAddr,
 };
-use qprotocol::{DockEvent, DockSubscription, LocalEndpoint};
+use qprotocol::AddressEvent;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 impl<TX, PE> ArcPuncher<TX, PE>
 where
     TX: SendFrame<ReliableFrame> + Clone + Send + Sync + 'static,
     PE: PunchPacketEncoder,
 {
-    /// Announce queued Dock state before returning, then process ordered updates until closure.
-    /// The caller handles path retirement when a local address is removed.
+    /// Consume AddressBook's queued replay before returning, then observe ordered changes.
+    /// Socket aliases must be registered with QuicProtocol before directory publication.
+    /// Removal callbacks also cover unadvertised endpoints and the binding's Direct address;
+    /// callers should retire paths idempotently. NAT changes alone do not retire paths.
+    /// The returned task ends and drops the subscription when closed resolves or the book drops.
     pub fn observe_endpoints(
         &self,
-        mut subscription: DockSubscription,
+        mut subscription: mpsc::UnboundedReceiver<AddressEvent>,
         closed: impl Future + Send + 'static,
         on_removed: impl Fn(EndpointAddr) + Send + 'static,
-    ) {
+    ) -> JoinHandle<()> {
         let puncher = self.clone();
-        let mut advertised = HashMap::<SocketAddr, LocalEndpoint>::new();
-        let mut apply = move |event| match event {
-            DockEvent::Added {
-                binding,
-                mapping: current,
-            }
-            | DockEvent::Updated {
-                binding, current, ..
+        let apply = move |event| match event {
+            AddressEvent::Added {
+                bound,
+                endpoint,
+                nat,
             } => {
-                let Ok(bound) = binding.local_addr() else {
-                    return;
-                };
-                let address = current.address(&binding);
-                if advertised.get(&bound) == address.as_ref() {
-                    return;
-                }
-                if let Some(previous) = advertised.remove(&bound) {
-                    puncher.on_local_removed(previous.endpoint);
-                    on_removed(previous.endpoint);
-                }
-                if let Some(address) = address {
-                    puncher.on_local_added(
-                        address.bind.clone(),
-                        address.endpoint,
-                        address.outer,
-                        0,
-                        address.nat,
-                    );
-                    advertised.insert(bound, address);
-                }
+                puncher.on_local_removed(endpoint);
+                puncher.on_local_added(bound, endpoint, endpoint.addr(), 0, nat);
             }
-            DockEvent::Removed(binding) => {
-                let Ok(bound) = binding.local_addr() else {
-                    return;
-                };
-                if let Some(previous) = advertised.remove(&bound) {
-                    puncher.on_local_removed(previous.endpoint);
-                }
+            AddressEvent::Removed { endpoint, .. } => {
+                puncher.on_local_removed(endpoint);
+                on_removed(endpoint);
             }
-            DockEvent::SocketRemoved(socket) => {
-                if let Ok(bound) = socket.local_addr() {
-                    on_removed(EndpointAddr::direct(bound));
-                }
+            AddressEvent::BoundRemoved { bound } => {
+                // AddressBook has already emitted Removed for each endpoint of this binding.
+                on_removed(EndpointAddr::direct(bound));
             }
         };
         while let Ok(event) = subscription.try_recv() {
@@ -88,6 +65,6 @@ where
                     },
                 }
             }
-        });
+        })
     }
 }

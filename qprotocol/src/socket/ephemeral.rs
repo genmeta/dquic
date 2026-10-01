@@ -9,7 +9,6 @@ use tokio::task::AbortHandle;
 
 use super::UdpSocket;
 use crate::{
-    bind_uri::ResolvedBindUri,
     dock::Dock,
     protocol::stun::{StunError, StunProtocol},
 };
@@ -19,20 +18,16 @@ use crate::{
 /// registrations and cancels reception, even when other UDP handles still exist.
 pub struct EphemeralSocket {
     udp: Arc<UdpSocket>,
-    dock: Arc<Dock>,
     endpoint: EndpointAddr,
     registration: AbortHandle,
 }
 
 impl EphemeralSocket {
-    pub fn bind(dock: Arc<Dock>, binding: ResolvedBindUri) -> io::Result<Self> {
-        let udp = Arc::new(match binding.device {
-            Some(device) => UdpSocket::bind_to_device(
-                binding.addr,
-                qudp::BoundDevice::new(device.name, device.index)?,
-            )?,
-            None => UdpSocket::bind(binding.addr)?,
-        });
+    /// Bind the target address and register with the global Dock and QUIC protocol.
+    /// Port zero lets the OS choose a port.
+    pub fn bind(bound: SocketAddr) -> io::Result<Self> {
+        let dock = Dock::global();
+        let udp = Arc::new(UdpSocket::bind(bound)?);
         let endpoint = EndpointAddr::direct(udp.local_addr()?);
         let registration = dock.register(udp.clone())?.ok_or_else(|| {
             io::Error::new(
@@ -42,14 +37,11 @@ impl EphemeralSocket {
         })?;
         let socket = Self {
             udp,
-            dock,
             endpoint,
             registration,
         };
         // The owner rolls back its Dock registration if QUIC registration fails.
-        socket
-            .dock
-            .topology()
+        dock.topology()
             .quic()
             .register(endpoint, &socket.udp)
             .map_err(|error| io::Error::new(io::ErrorKind::AddrInUse, error))?;
@@ -86,12 +78,11 @@ impl EphemeralSocket {
 
 impl Drop for EphemeralSocket {
     fn drop(&mut self) {
-        self.dock
+        Dock::global()
             .topology()
             .quic()
             .unregister(self.endpoint, &self.udp);
-        self.dock
-            .remove_registration(self.endpoint.addr(), self.registration.id());
+        Dock::global().remove_registration(self.endpoint.addr(), self.registration.id());
     }
 }
 
@@ -102,26 +93,17 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::{BindUri, ForwardProtocol, QuicProtocol, topology::Topology};
 
     #[tokio::test]
     async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
-        let stun = Arc::new(StunProtocol::new());
-        let quic = Arc::new(QuicProtocol::new());
-        let dock = Dock::new(Arc::new(Topology::new(
-            stun.clone(),
-            Arc::new(ForwardProtocol::new()),
-            quic.clone(),
-        )));
+        let dock = Dock::global();
+        let stun = dock.topology().stun();
+        let quic = dock.topology().quic();
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
         quic.on_receive(move |packet, pathway, _| {
-            sent.send((packet, pathway)).unwrap();
+            let _ = sent.send((packet, pathway));
         });
-        let socket = EphemeralSocket::bind(
-            dock.clone(),
-            BindUri::from("127.0.0.1:0").resolve_binding().unwrap(),
-        )
-        .unwrap();
+        let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let raw = socket.udp_socket().clone();
         let bound = raw.local_addr().unwrap();
         let endpoint = EndpointAddr::direct(bound);
@@ -148,13 +130,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_quic_registration_rolls_back_dock_and_preserves_the_existing_alias() {
-        let stun = Arc::new(StunProtocol::new());
-        let quic = Arc::new(QuicProtocol::new());
-        let dock = Dock::new(Arc::new(Topology::new(
-            stun.clone(),
-            Arc::new(ForwardProtocol::new()),
-            quic.clone(),
-        )));
+        let dock = Dock::global();
+        let stun = dock.topology().stun();
+        let quic = dock.topology().quic();
         let existing = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let reservation = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let bound = reservation.local_addr().unwrap();
@@ -162,36 +140,23 @@ mod tests {
         quic.register(endpoint, &existing).unwrap();
         drop(reservation);
 
-        let result = EphemeralSocket::bind(
-            dock.clone(),
-            ResolvedBindUri {
-                addr: bound,
-                device: None,
-            },
-        );
+        let result = EphemeralSocket::bind(bound);
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::AddrInUse));
-        assert!(dock.is_empty());
+        assert!(dock.find_socket(bound).is_none());
         assert!(Arc::ptr_eq(&quic.find_socket(endpoint).unwrap(), &existing));
         let error = stun
             .detect_outer(bound, existing.local_addr().unwrap())
             .await
             .unwrap_err();
         assert!(matches!(error, StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
+        quic.unregister(endpoint, &existing);
     }
 
     #[tokio::test]
     async fn old_owner_does_not_remove_replacement_registrations() {
-        let quic = Arc::new(QuicProtocol::new());
-        let dock = Dock::new(Arc::new(Topology::new(
-            Arc::new(StunProtocol::new()),
-            Arc::new(ForwardProtocol::new()),
-            quic.clone(),
-        )));
-        let socket = EphemeralSocket::bind(
-            dock.clone(),
-            BindUri::from("127.0.0.1:0").resolve_binding().unwrap(),
-        )
-        .unwrap();
+        let dock = Dock::global();
+        let quic = dock.topology().quic();
+        let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let raw = socket.udp_socket().clone();
         let bound = raw.local_addr().unwrap();
         let endpoint = EndpointAddr::direct(bound);
@@ -213,17 +178,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_the_owner_releases_the_receive_task_and_port() {
-        let quic = Arc::new(QuicProtocol::new());
-        let dock = Dock::new(Arc::new(Topology::new(
-            Arc::new(StunProtocol::new()),
-            Arc::new(ForwardProtocol::new()),
-            quic.clone(),
-        )));
-        let socket = EphemeralSocket::bind(
-            dock.clone(),
-            BindUri::from("127.0.0.1:0").resolve_binding().unwrap(),
-        )
-        .unwrap();
+        let dock = Dock::global();
+        let quic = dock.topology().quic();
+        let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let bound = socket.udp_socket().local_addr().unwrap();
         let weak = Arc::downgrade(socket.udp_socket());
         let task = tokio::spawn(async move {
@@ -233,7 +190,7 @@ mod tests {
         tokio::task::yield_now().await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(dock.is_empty());
+        assert!(dock.find_socket(bound).is_none());
         assert!(quic.find_socket(EndpointAddr::direct(bound)).is_none());
         timeout(Duration::from_secs(1), async {
             while weak.upgrade().is_some() {
