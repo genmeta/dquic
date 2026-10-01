@@ -75,8 +75,10 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 
 ## 快速开始
 
-本仓库已移除 `dquic` crate 及其示例。当前连接 API 和协议说明请参见：
+`dquic` crate 统一导出 `qconnection` API 及相关类型，可通过
+`dquic::QuicEndpoint` 建连或监听：
 
+- [公共接口入口](dquic/README.md)
 - [DQuic 使用文档](https://docs.dhttp.net/zh/docs/protocol/dquic)
 - [连接 API](qconnection/README.md)
 
