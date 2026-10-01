@@ -21,17 +21,10 @@ use rustls::{
 use x509_parser::{extensions::GeneralName, prelude::FromDer};
 
 use crate::{
-    BidirectionalKeys, CertificateError, ExporterError, HandshakeNotComplete, LocalAuthority,
-    OneRttKeyMaterial, PeerTlsError, RemoteAuthority, TlsAlert, TlsConfigError, TlsError,
-    TlsInvariantError, TlsLimits, root::RootCertsSnapshot,
+    BidirectionalKeys, CertificateError, Epoch, ExporterError, HandshakeNotComplete,
+    LocalAuthority, OneRttKeyMaterial, PeerTlsError, RemoteAuthority, TlsAlert, TlsConfigError,
+    TlsError, TlsInvariantError, TlsLimits, root::RootCertsSnapshot,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CryptoLevel {
-    Initial,
-    Handshake,
-    OneRtt,
-}
 
 pub enum InstalledKeys {
     ZeroRtt(crate::DirectionalKeys),
@@ -41,7 +34,7 @@ pub enum InstalledKeys {
 
 pub enum TlsEvent {
     WriteCrypto {
-        level: CryptoLevel,
+        epoch: Epoch,
         bytes: Bytes,
     },
     InstallKeys(InstalledKeys),
@@ -94,8 +87,8 @@ pub struct TlsHandshake {
     peer: PeerState,
     limits: TlsLimits,
     events: VecDeque<TlsEvent>,
-    input_level: CryptoLevel,
-    output_level: CryptoLevel,
+    input_epoch: Epoch,
+    output_epoch: Epoch,
     received_bytes: usize,
     peer_parameters_emitted: bool,
     complete: bool,
@@ -115,8 +108,8 @@ impl TlsHandshake {
             peer,
             limits,
             events: VecDeque::new(),
-            input_level: CryptoLevel::Initial,
-            output_level: CryptoLevel::Initial,
+            input_epoch: Epoch::Initial,
+            output_epoch: Epoch::Initial,
             received_bytes: 0,
             peer_parameters_emitted: false,
             complete: false,
@@ -126,21 +119,17 @@ impl TlsHandshake {
         Ok(handshake)
     }
 
-    pub fn receive_crypto(
-        &mut self,
-        level: CryptoLevel,
-        contiguous: &[u8],
-    ) -> Result<(), TlsError> {
+    pub fn receive_crypto(&mut self, level: Epoch, contiguous: &[u8]) -> Result<(), TlsError> {
         if contiguous.is_empty() {
             return Ok(());
         }
         if self.terminal {
             return Err(TlsInvariantError::EventAfterTerminal.into());
         }
-        if level != self.input_level {
+        if level != self.input_epoch {
             self.terminal = true;
             return Err(PeerTlsError::WrongCryptoLevel {
-                expected: self.input_level,
+                expected: self.input_epoch,
                 actual: level,
             }
             .into());
@@ -182,7 +171,7 @@ impl TlsHandshake {
             return Err(error);
         }
         if !self.connection.is_handshaking() {
-            self.input_level = CryptoLevel::OneRtt;
+            self.input_epoch = Epoch::Data;
         }
         if let Err(error) = self.emit_completion() {
             self.terminal = true;
@@ -248,7 +237,7 @@ impl TlsHandshake {
             let output_is_empty = output.is_empty();
             if !output_is_empty {
                 self.events.push_back(TlsEvent::WriteCrypto {
-                    level: self.output_level,
+                    epoch: self.output_epoch,
                     bytes: output.into(),
                 });
             }
@@ -257,15 +246,15 @@ impl TlsHandshake {
                 Some(rustls::quic::KeyChange::Handshake { keys }) => {
                     self.events
                         .push_back(TlsEvent::InstallKeys(InstalledKeys::Handshake(keys.into())));
-                    self.input_level = CryptoLevel::Handshake;
-                    self.output_level = CryptoLevel::Handshake;
+                    self.input_epoch = Epoch::Handshake;
+                    self.output_epoch = Epoch::Handshake;
                 }
                 Some(rustls::quic::KeyChange::OneRtt { keys, next }) => {
                     self.events
                         .push_back(TlsEvent::InstallKeys(InstalledKeys::OneRtt(
                             OneRttKeyMaterial::new(keys, next),
                         )));
-                    self.output_level = CryptoLevel::OneRtt;
+                    self.output_epoch = Epoch::Data;
                 }
                 None if output_is_empty => break,
                 None => {}

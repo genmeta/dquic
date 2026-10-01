@@ -10,7 +10,6 @@ use qbase::{
     token::ArcTokenRegistry,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol};
-use qtls::CryptoLevel;
 use qtransport::{
     keys::ArcKeys, packet::channel::RcvdPacket, router::QuicRouterRegistry, space::Space,
 };
@@ -61,16 +60,14 @@ pub async fn client_growing(
             }
         }
     });
-    tokio::spawn(crate::tls::read_tls_to_crypto_stream(
+    tokio::spawn(crate::tls::read_tls_to_space(
         tls_context.clone(),
-        CryptoLevel::Initial,
-        initial.crypto.clone(),
+        initial.as_ref(),
         closed.clone(),
     ));
-    tokio::spawn(crate::tls::read_crypto_stream_to_tls(
+    tokio::spawn(crate::tls::read_space_to_tls(
         tls_context.clone(),
-        CryptoLevel::Initial,
-        initial.crypto.clone(),
+        initial.as_ref(),
         closed.clone(),
     ));
     tokio::spawn(crate::recv::recv_client_ih_pkt_and_deliver_frames(
@@ -88,16 +85,14 @@ pub async fn client_growing(
             initial_phase.initial.crypto.recver.retire();
             initial_phase.initial.crypto.sender.retire();
 
-            tokio::spawn(crate::tls::read_tls_to_crypto_stream(
+            tokio::spawn(crate::tls::read_tls_to_space(
                 tls_context.clone(),
-                CryptoLevel::Handshake,
-                handshake.crypto.clone(),
+                handshake.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::tls::read_crypto_stream_to_tls(
+            tokio::spawn(crate::tls::read_space_to_tls(
                 tls_context.clone(),
-                CryptoLevel::Handshake,
-                handshake.crypto.clone(),
+                handshake.as_ref(),
                 closed.clone(),
             ));
             tokio::spawn(crate::recv::recv_client_ih_pkt_and_deliver_frames(
@@ -153,16 +148,14 @@ pub async fn client_growing(
                 },
             ));
 
-            tokio::spawn(crate::tls::read_tls_to_crypto_stream(
+            tokio::spawn(crate::tls::read_tls_to_space(
                 tls_context.clone(),
-                CryptoLevel::OneRtt,
-                mature_phase.spaces.data.crypto.clone(),
+                mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::tls::read_crypto_stream_to_tls(
+            tokio::spawn(crate::tls::read_space_to_tls(
                 tls_context.clone(),
-                CryptoLevel::OneRtt,
-                mature_phase.spaces.data.crypto.clone(),
+                mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
 

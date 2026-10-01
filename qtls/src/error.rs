@@ -1,7 +1,7 @@
 pub use rustls::CertificateError;
 use thiserror::Error;
 
-use crate::{CryptoLevel, SignatureScheme};
+use crate::{Epoch, SignatureScheme};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TlsAlert {
@@ -58,8 +58,8 @@ pub enum CryptoError {
 pub enum PeerTlsError {
     #[error("received CRYPTO data at {actual:?}; expected {expected:?}")]
     WrongCryptoLevel {
-        expected: CryptoLevel,
-        actual: CryptoLevel,
+        expected: Epoch,
+        actual: Epoch,
     },
     #[error("TLS peer exceeded {resource} limit of {limit} bytes")]
     ResourceLimit {

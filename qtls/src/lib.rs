@@ -5,6 +5,7 @@
 
 mod authority;
 mod config;
+mod epoch;
 mod error;
 mod handshake;
 pub mod incoming;
@@ -15,13 +16,12 @@ mod root;
 
 pub use authority::{LocalAuthority, RemoteAuthority, SignError};
 pub use config::{ClientStart, ClientTlsConfig, ServerTlsConfig, TlsClient, TlsLimits, TlsServer};
+pub use epoch::Epoch;
 pub use error::{
     CertificateError, CryptoError, ExporterError, HandshakeNotComplete, InvalidLocalAuthority,
     PeerTlsError, StoreError, TlsAlert, TlsConfigError, TlsError, TlsInvariantError,
 };
-pub use handshake::{
-    CryptoLevel, EstablishedTls, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake,
-};
+pub use handshake::{EstablishedTls, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
 pub use keys::{
     BidirectionalKeys, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial, PacketKey,
     PacketKeys, Secrets,

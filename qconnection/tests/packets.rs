@@ -150,11 +150,11 @@ enum ClientWait {
 async fn close_at_client_stage(wait: ClientWait) {
     use futures::FutureExt;
     use qbase::{
+        Epoch,
         frame::{CryptoFrame, io::ReceiveFrame},
         net::route::Link,
         packet::LongHeaderBuilder,
     };
-    use qtls::CryptoLevel;
     use qrecovery::journal::ArcSentJournal;
 
     let [tls, server_tls] =
@@ -162,7 +162,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let (level, hello) = tls.read_msg().await.unwrap();
     server_tls.write_msg(level, &hello).unwrap();
     let (level, hello) = server_tls.read_msg().await.unwrap();
-    assert_eq!(level, CryptoLevel::Initial);
+    assert_eq!(level, Epoch::Initial);
     let (_, flight) = server_tls.read_msg().await.unwrap();
     // EncryptedExtensions is enough to publish parameters, without authenticating the server.
     assert_eq!(flight[0], 8);

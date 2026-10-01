@@ -150,9 +150,10 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
         for i in 0..2 {
             while let Some(event) = peers[i].next_event() {
                 match event {
-                    qtls::TlsEvent::WriteCrypto { level, bytes } => {
-                        peers[1 - i].receive_crypto(level, &bytes).unwrap()
-                    }
+                    qtls::TlsEvent::WriteCrypto {
+                        epoch: level,
+                        bytes,
+                    } => peers[1 - i].receive_crypto(level, &bytes).unwrap(),
                     qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(key)) => {
                         keys[i] = Some(key)
                     }
