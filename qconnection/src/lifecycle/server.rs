@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use qbase::{
     Epoch,
@@ -34,7 +34,6 @@ pub async fn server_growing(
     };
     let idle = paths.idle();
     let closed = paths.closed();
-    let requirements = Arc::new(Mutex::new(Requirements::new_server()));
     let initial = &initial_phase.initial;
     let local_cids = crate::ArcLocalCids::new(
         initial_phase.scid,
@@ -48,7 +47,6 @@ pub async fn server_growing(
         initial.clone(),
         paths.clone(),
         closed.clone(),
-        requirements.clone(),
         scopes.clone(),
     ));
 
@@ -123,7 +121,7 @@ pub async fn server_growing(
     let result = {
         let establish = async {
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
-            parameters.authenticate_cids(*requirements.lock().unwrap())?;
+            parameters.authenticate_cids(Requirements::require_client(initial_phase.dcid()))?;
 
             let handshake_keys = tls_ctx.read_keys().await?;
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
@@ -140,7 +138,6 @@ pub async fn server_growing(
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
-                requirements.clone(),
                 scopes,
             ));
 

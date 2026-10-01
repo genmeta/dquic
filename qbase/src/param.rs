@@ -46,50 +46,40 @@ pub use self::{
 /// of [RFC9000](https://datatracker.ietf.org/doc/html/rfc9000)
 /// for more details.
 ///
-/// Whether client or server, after receiving the Initial packet from
-/// the peer, these requirements must be set;
+/// Whether client or server, construct these requirements with the SCID from
+/// the peer's first authenticated Initial packet;
 /// then after parsing the peer's Transport parameters, verify that
 /// all these requirements are met.
 /// If not met, it is considered a TransportParameters error.
 #[derive(Debug, Clone, Copy)]
 pub enum Requirements {
-    Client {
-        initial_scid: Option<ConnectionId>,
+    Server {
+        initial_scid: ConnectionId,
         retry_scid: Option<ConnectionId>,
         origin_dcid: ConnectionId,
     },
-    Server {
-        initial_scid: Option<ConnectionId>,
+    Client {
+        initial_scid: ConnectionId,
     },
 }
 
 impl Requirements {
-    pub fn new_client(origin_dcid: ConnectionId) -> Self {
-        Self::Client {
-            initial_scid: None,
+    pub fn require_server(initial_scid: ConnectionId, origin_dcid: ConnectionId) -> Self {
+        Self::Server {
+            initial_scid,
             retry_scid: None,
             origin_dcid,
         }
     }
 
-    pub fn new_server() -> Self {
-        Self::Server { initial_scid: None }
-    }
-
-    /// Record the SCID from the peer's first authenticated Initial packet.
-    /// The peer's transport parameters need not be available yet.
-    pub fn initial_scid_from_peer_need_equal(&mut self, cid: ConnectionId) -> &mut Self {
-        match self {
-            Self::Client { initial_scid, .. } => *initial_scid = Some(cid),
-            Self::Server { initial_scid } => *initial_scid = Some(cid),
-        }
-        self
+    pub fn require_client(initial_scid: ConnectionId) -> Self {
+        Self::Client { initial_scid }
     }
 
     /// Record the SCID from an accepted Retry packet for later authentication.
     pub fn retry_scid_from_server_need_equal(&mut self, cid: ConnectionId) -> &mut Self {
         match self {
-            Self::Client { retry_scid, .. } => *retry_scid = Some(cid),
+            Self::Server { retry_scid, .. } => *retry_scid = Some(cid),
             _ => unreachable!("not for server side"),
         }
         self
@@ -168,7 +158,7 @@ impl ArcParameters {
         match (self.role, requirements) {
             (
                 Role::Client,
-                Requirements::Client {
+                Requirements::Server {
                     initial_scid,
                     retry_scid,
                     origin_dcid,
@@ -177,8 +167,7 @@ impl ArcParameters {
                 if self
                     .server
                     .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    != initial_scid
-                    && initial_scid.is_some()
+                    != Some(initial_scid)
                 {
                     return Err(param_error(
                         "Initial Source Connection ID from server mismatch",
@@ -199,11 +188,11 @@ impl ArcParameters {
                     return Err(param_error("Retry Source Connection ID mismatch"));
                 }
             }
-            (Role::Server, Requirements::Server { initial_scid }) => {
+            (Role::Server, Requirements::Client { initial_scid }) => {
                 if self
                     .client
                     .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    != initial_scid
+                    != Some(initial_scid)
                 {
                     return Err(param_error(
                         "Initial Source Connection ID from client mismatch",
@@ -263,10 +252,12 @@ mod tests {
         ArcParameters::new(role, Arc::new(client), Arc::new(server))
     }
 
-    fn requirements(role: Role) -> Requirements {
+    fn requirements(role: Role, initial_scid: ConnectionId) -> Requirements {
         match role {
-            Role::Client => Requirements::new_client(ConnectionId::from_slice(b"origin")),
-            Role::Server => Requirements::new_server(),
+            Role::Client => {
+                Requirements::require_server(initial_scid, ConnectionId::from_slice(b"origin"))
+            }
+            Role::Server => Requirements::require_client(initial_scid),
         }
     }
 
@@ -295,8 +286,7 @@ mod tests {
     #[test]
     fn requirements_can_be_prepared_before_parameters() {
         for (role, cid) in [(Role::Client, b"server"), (Role::Server, b"client")] {
-            let mut requirements = requirements(role);
-            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(cid));
+            let requirements = requirements(role, ConnectionId::from_slice(cid));
             let params = parameters(role);
             assert_eq!(params.authenticate_cids(requirements), Ok(()));
             assert_eq!(params.clone().authenticate_cids(requirements), Ok(()));
@@ -306,8 +296,7 @@ mod tests {
     #[test]
     fn initial_cid_mismatches_return_transport_parameter_errors() {
         for role in [Role::Client, Role::Server] {
-            let mut requirements = requirements(role);
-            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"wrong"));
+            let requirements = requirements(role, ConnectionId::from_slice(b"wrong"));
             let params = parameters(role);
             let reason = if role == Role::Client {
                 "Initial Source Connection ID from server mismatch"
@@ -324,8 +313,7 @@ mod tests {
     #[test]
     fn missing_initial_cids_return_errors_instead_of_panicking() {
         for role in [Role::Client, Role::Server] {
-            let mut requirements = requirements(role);
-            requirements.initial_scid_from_peer_need_equal(ConnectionId::default());
+            let requirements = requirements(role, ConnectionId::default());
             let mut params = parameters(role);
             match role {
                 Role::Client => params.server = Arc::default(),
@@ -337,16 +325,20 @@ mod tests {
 
     #[test]
     fn original_dcid_requires_an_independent_matching_observation() {
-        let mut requirements = Requirements::new_client(ConnectionId::from_slice(b"wrong"));
-        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        let requirements = Requirements::require_server(
+            ConnectionId::from_slice(b"server"),
+            ConnectionId::from_slice(b"wrong"),
+        );
         let mut params = parameters(Role::Client);
         assert_eq!(
             params.authenticate_cids(requirements),
             Err(param_error("Original Destination Connection ID mismatch"))
         );
 
-        let mut requirements = Requirements::new_client(ConnectionId::from_slice(b"origin"));
-        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        let requirements = Requirements::require_server(
+            ConnectionId::from_slice(b"server"),
+            ConnectionId::from_slice(b"origin"),
+        );
         Arc::make_mut(&mut params.server)
             .map
             .remove(&ParameterId::OriginalDestinationConnectionId);
@@ -358,11 +350,11 @@ mod tests {
         let retry = ConnectionId::from_slice(b"retry");
         for advertised in [None, Some(retry), Some(ConnectionId::from_slice(b"wrong"))] {
             for received_retry in [false, true] {
-                let mut requirements = requirements(Role::Client);
+                let mut requirements =
+                    requirements(Role::Client, ConnectionId::from_slice(b"server"));
                 if received_retry {
                     requirements.retry_scid_from_server_need_equal(retry);
                 }
-                requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
                 let mut params = parameters(Role::Client);
                 if let Some(cid) = advertised {
                     Arc::make_mut(&mut params.server)
@@ -387,24 +379,22 @@ mod tests {
             } else {
                 Role::Client
             };
-            let mut requirements = requirements(wrong_role);
-            let params = parameters(role);
-            assert!(params.authenticate_cids(requirements).is_err());
-            requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(
-                if wrong_role == Role::Client {
+            let requirements = requirements(
+                wrong_role,
+                ConnectionId::from_slice(if wrong_role == Role::Client {
                     b"server"
                 } else {
                     b"client"
-                },
-            ));
+                }),
+            );
+            let params = parameters(role);
             assert!(params.authenticate_cids(requirements).is_err());
         }
     }
 
     #[test]
     fn remembered_parameters_survive_authentication_and_cloning() {
-        let mut requirements = requirements(Role::Client);
-        requirements.initial_scid_from_peer_need_equal(ConnectionId::from_slice(b"server"));
+        let requirements = requirements(Role::Client, ConnectionId::from_slice(b"server"));
         let remembered = Arc::new(ServerParameters::default());
         let params = parameters(Role::Client).with_remembered(Some(remembered.clone()));
         assert_eq!(params.authenticate_cids(requirements), Ok(()));

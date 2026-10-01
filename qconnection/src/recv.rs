@@ -1,13 +1,14 @@
 //! Space nodes capture their pipes once; parameter completion only adds the Data node.
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+use qbase::net::route::Link;
 use qbase::{
     ArcReceiving, Epoch,
     error::{ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame, io::ReceiveFrame},
     net::route::{Pathway, Scopes},
     packet::{GetScid, GetType, OneRttHeader},
-    param::Requirements,
     role::Role,
     token::ArcTokenRegistry,
 };
@@ -20,9 +21,6 @@ use qtransport::{
 };
 use tokio::time::Instant;
 
-#[cfg(test)]
-use qbase::net::route::Link;
-
 use crate::{ArcParameters, CloseReason, MaturePhase, Paths, terminate::Terminator};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
@@ -32,11 +30,10 @@ pub(crate) async fn recv_client_ih_pkt_and_deliver_frames<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
-    requirements: Arc<Mutex<Requirements>>,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
 {
-    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, requirements, |_| true).await;
+    recv_ih_pkt_and_deliver_frames_if(packets, space, paths, closed, |_| true).await;
 }
 
 pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
@@ -44,7 +41,6 @@ pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
-    requirements: Arc<Mutex<Requirements>>,
     scopes: Scopes,
 ) where
     H: GetScid + GetType + qtransport::packet::RcvdPacketHeader,
@@ -54,7 +50,6 @@ pub(crate) async fn recv_server_ih_pkt_and_deliver_frames<H>(
         space,
         paths,
         closed,
-        requirements,
         move |pathway| pathway.belongs_to(scopes),
     )
     .await;
@@ -65,7 +60,6 @@ pub(crate) async fn recv_pending_server_initial(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
-    requirements: Arc<Mutex<Requirements>>,
     scopes: Arc<OnceLock<Scopes>>,
 ) {
     recv_ih_pkt_and_deliver_frames_if(
@@ -73,7 +67,6 @@ pub(crate) async fn recv_pending_server_initial(
         space,
         paths,
         closed,
-        requirements,
         move |pathway| {
             scopes
                 .get()
@@ -88,7 +81,6 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
     closed: ArcReceiving<CloseReason>,
-    requirements: Arc<Mutex<Requirements>>,
     belongs_to_scope: impl Fn(&Pathway) -> bool,
 ) where
     H: GetScid + GetType + RcvdPacketHeader,
@@ -135,10 +127,6 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
                 .on_rcvd(qbase::packet::PacketContent::default());
             if let Some(dcid) = initial_scid.get() {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
-                requirements
-                    .lock()
-                    .unwrap()
-                    .initial_scid_from_peer_need_equal(*dcid);
                 inspect_paths.phase().set_dcid(*dcid);
             }
             if role == Role::Client || epoch == Epoch::Handshake {
@@ -483,7 +471,7 @@ mod tests {
         corrupt: bool,
         paths: &Arc<Paths>,
         path: &Arc<Path>,
-    ) -> Requirements {
+    ) {
         let space = Arc::new(Space::<ArcKeys>::new(
             epoch,
             ArcKeys::new(Arc::new(keys(role == Role::Server))),
@@ -514,11 +502,7 @@ mod tests {
         space: Arc<Space<ArcKeys>>,
         paths: &Arc<Paths>,
         path: &Arc<Path>,
-    ) -> Requirements {
-        let requirements = Arc::new(Mutex::new(match paths.role() {
-            Role::Client => Requirements::new_client(ConnectionId::from_slice(b"original")),
-            Role::Server => Requirements::new_server(),
-        }));
+    ) {
         let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
             panic!()
         };
@@ -541,7 +525,6 @@ mod tests {
                     space,
                     paths.clone(),
                     paths.closed(),
-                    requirements.clone(),
                     |_| true,
                 )
                 .await;
@@ -560,14 +543,12 @@ mod tests {
                     space,
                     paths.clone(),
                     paths.closed(),
-                    requirements.clone(),
                     |_| true,
                 )
                 .await;
             }
             _ => panic!(),
         }
-        *requirements.lock().unwrap()
     }
 
     fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
@@ -630,28 +611,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_authenticated_initial_packets_fill_cid_requirements() {
+    async fn only_authenticated_initial_packets_update_the_peer_cid() {
         for role in [Role::Client, Role::Server] {
             for epoch in [Epoch::Initial, Epoch::Handshake] {
                 for corrupt in [true, false] {
                     let (paths, first, _) = paths(role);
-                    let requirements = receive_ping(role, epoch, corrupt, &paths, &first).await;
-                    let initial_scid = match requirements {
-                        Requirements::Client {
-                            initial_scid,
-                            origin_dcid,
-                            retry_scid,
-                        } => {
-                            assert_eq!(origin_dcid, ConnectionId::from_slice(b"original"));
-                            assert_eq!(retry_scid, None);
-                            initial_scid
-                        }
-                        Requirements::Server { initial_scid } => initial_scid,
-                    };
+                    receive_ping(role, epoch, corrupt, &paths, &first).await;
                     assert_eq!(
-                        initial_scid,
-                        (!corrupt && epoch == Epoch::Initial)
-                            .then(|| ConnectionId::from_slice(b"peercid0"))
+                        paths.phase().get().dcid(),
+                        ConnectionId::from_slice(if !corrupt && epoch == Epoch::Initial {
+                            b"peercid0"
+                        } else {
+                            b"original"
+                        })
                     );
                     paths.retire_all();
                 }
