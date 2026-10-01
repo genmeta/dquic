@@ -1193,7 +1193,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     ));
     assert_eq!(pns[Epoch::Initial].len(), 1);
     pns[Epoch::Initial].clear();
-    // No unused peer CID is available. Submission waits for one, and retirement
+    // An undecided path must wait instead of collecting 1-RTT data. Retirement
     // must wake that wait even though the socket has never been polled.
     let waiting_path = Arc::new(Path::new(
         Pathway::new(
