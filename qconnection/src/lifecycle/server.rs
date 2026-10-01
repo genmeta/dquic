@@ -1,22 +1,27 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use qbase::{
     Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
-    frame::{HandshakeDoneFrame, io::SendFrame},
+    handshake::ArcHandshake,
     param::{ParameterId, Requirements},
     role::Role,
     token::ArcTokenRegistry,
 };
 use qtransport::{
-    keys::ArcKeys, packet::channel::RcvdPacket, router::QuicRouterEntry, space::Space,
+    keys::{ArcKeys, ArcOneRttKeys},
+    packet::channel::RcvdPacket,
+    router::QuicRouterEntry,
+    space::Space,
 };
 use tokio::io::AsyncWriteExt;
 
 use super::{any, close_error, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
     ArcParameters, CloseReason, Error, Interceptor, MaturePhase, Paths, ServerRegistry, TlsContext,
+    recv::{receive_data, recv_ih_pkt_and_deliver_frames},
+    tls::{read_space_to_tls, read_tls_to_space},
 };
 
 /// Select a listening server from an already routed Initial, then grow the connection.
@@ -41,13 +46,11 @@ pub async fn server_growing(
             .router()
             .registry_on_issuing_scid(route.inbox(), initial_phase.reliable_frames.clone()),
     );
-    let scopes = Arc::new(OnceLock::new());
-    tokio::spawn(crate::recv::recv_pending_server_initial(
-        rcvd_pkt.initial,
+    tokio::spawn(recv_ih_pkt_and_deliver_frames(
+        (rcvd_pkt.initial, None),
         initial.clone(),
         paths.clone(),
         closed.clone(),
-        scopes.clone(),
     ));
 
     let interceptor = Interceptor::new();
@@ -105,9 +108,6 @@ pub async fn server_growing(
             return shutdown_initial(&paths, &local_cids, error.into()).await;
         }
     };
-    scopes
-        .set(server.scopes)
-        .expect("server scope is selected once");
     let scopes = server.scopes;
     let cid_registry = qbase::cid::Registry::new(
         Role::Server,
@@ -128,17 +128,16 @@ pub async fn server_growing(
             paths.handshake.got_handshake_key();
             initial.crypto.recver.retire();
 
-            tokio::spawn(crate::tls::read_space_to_tls(
+            tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 handshake.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::recv::recv_server_ih_pkt_and_deliver_frames(
-                rcvd_pkt.handshake,
+            tokio::spawn(recv_ih_pkt_and_deliver_frames(
+                (rcvd_pkt.handshake, Some(scopes)),
                 handshake.clone(),
                 paths.clone(),
                 closed.clone(),
-                scopes,
             ));
 
             let client_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
@@ -154,79 +153,58 @@ pub async fn server_growing(
                 initial_phase.reliable_frames.clone(),
                 cid_registry.clone(),
                 initial_dcid,
-                qtransport::keys::ArcOneRttKeys::from(tls_ctx.read_keys().await?),
+                ArcOneRttKeys::from(tls_ctx.read_keys().await?),
             );
             cid_registry
                 .local
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
 
-            let initial_flight = tls_ctx.read_msg_at(Epoch::Initial).await?;
-            initial
-                .crypto
-                .writer()
-                .write_all(&initial_flight)
-                .await
-                .map_err(|error| {
-                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
-                })?;
-            while let Some(bytes) = tls_ctx.try_read_msg_at(Epoch::Initial)? {
-                initial
+            for space in [initial.as_ref(), handshake.as_ref()] {
+                let flight = tls_ctx.read_msg_at(space.epoch).await?;
+                space
                     .crypto
                     .writer()
-                    .write_all(&bytes)
+                    .write_all(&flight)
                     .await
                     .map_err(|error| {
                         QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
                     })?;
-            }
-            let handshake_flight = tls_ctx.read_msg_at(Epoch::Handshake).await?;
-            handshake
-                .crypto
-                .writer()
-                .write_all(&handshake_flight)
-                .await
-                .map_err(|error| {
-                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
-                })?;
-            while let Some(bytes) = tls_ctx.try_read_msg_at(Epoch::Handshake)? {
-                handshake
-                    .crypto
-                    .writer()
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|error| {
-                        QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
-                    })?;
+                while let Some(bytes) = tls_ctx.try_read_msg_at(space.epoch)? {
+                    space
+                        .crypto
+                        .writer()
+                        .write_all(&bytes)
+                        .await
+                        .map_err(|error| {
+                            QuicError::with_default_fty(ErrorKind::Internal, error.to_string())
+                        })?;
+                }
             }
 
             for space in [initial.as_ref(), handshake.as_ref()] {
-                tokio::spawn(crate::tls::read_tls_to_space(
-                    tls_ctx.clone(),
-                    space,
-                    closed.clone(),
-                ));
+                tokio::spawn(read_tls_to_space(tls_ctx.clone(), space, closed.clone()));
             }
-            tokio::spawn(crate::tls::read_tls_to_space(
+            tokio::spawn(read_tls_to_space(
                 tls_ctx.clone(),
                 mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
-            tokio::spawn(crate::tls::read_space_to_tls(
+            tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 mature_phase.spaces.data.as_ref(),
                 closed.clone(),
             ));
 
-            tokio::spawn(crate::recv::receive_server_data(
-                rcvd_pkt.one_rtt,
+            let handshake_done = ArcHandshake::new_server(initial_phase.reliable_frames.clone());
+            tokio::spawn(receive_data(
+                (rcvd_pkt.one_rtt, Some(scopes)),
                 mature_phase.clone(),
                 paths.clone(),
                 parameters,
                 cid_registry.clone(),
                 token,
-                closed.clone(),
-                scopes,
+                handshake_done.clone(),
             ));
             phase.enter_mature(mature_phase.clone());
 
@@ -241,9 +219,7 @@ pub async fn server_growing(
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
-            initial_phase
-                .reliable_frames
-                .send_frame([HandshakeDoneFrame]);
+            handshake_done.done();
             paths.handshake_confirmed();
 
             Ok::<_, Error>((
