@@ -1,6 +1,11 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, Waker},
 };
 
 use crate::{
@@ -12,32 +17,52 @@ use crate::{
     role::Role,
 };
 
-/// The completion flag for the client handshake.
-///
-/// The client considers the handshake complete only after
-/// receiving the [`HandshakeDoneFrame`] from the server.
-/// In the QUIC protocol, there are no tasks that specifically
-/// require waiting for the client handshake to complete.
-/// Instead, it simply queries the handshake status.
-#[derive(Debug, Default, Clone)]
-pub struct ClientHandshake {
-    done: Arc<AtomicBool>,
+/// Client handshake confirmation, with at most one pending waiter.
+#[derive(Debug, Default)]
+pub enum ClientHandshake {
+    #[default]
+    Pending,
+    Waiting(Waker),
+    Done,
 }
 
 impl ClientHandshake {
-    /// Check if the client handshake is complete.
+    /// Check if the client handshake is confirmed.
     pub fn is_handshake_done(&self) -> bool {
-        self.done.load(Ordering::Acquire)
+        matches!(self, Self::Done)
+    }
+
+    /// Wait for HANDSHAKE_DONE, replacing the registered waker on a subsequent poll.
+    /// Once confirmed, every poll returns success.
+    pub fn poll_done(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        match self {
+            Self::Pending => {
+                *self = Self::Waiting(cx.waker().clone());
+                Poll::Pending
+            }
+            Self::Waiting(waker) => {
+                waker.clone_from(cx.waker());
+                Poll::Pending
+            }
+            Self::Done => Poll::Ready(()),
+        }
     }
 
     /// Receive the HANDSHAKE_DONE frame.
     ///
     /// Once the client receives the HANDSHAKE_DONE frame,
-    /// it marks the completion of the client handshake.
+    /// it confirms the client handshake and wakes its waiter.
     ///
     /// Return whether it is the first time to receive the HANDSHAKE_DONE frame.
-    pub fn recv_handshake_done_frame(&self, _frame: HandshakeDoneFrame) -> bool {
-        !self.done.swap(true, Ordering::AcqRel)
+    pub fn recv_handshake_done_frame(&mut self, _frame: HandshakeDoneFrame) -> bool {
+        match std::mem::replace(self, Self::Done) {
+            Self::Pending => true,
+            Self::Waiting(waker) => {
+                waker.wake();
+                true
+            }
+            Self::Done => false,
+        }
     }
 }
 
@@ -50,11 +75,8 @@ impl ClientHandshake {
 /// The server considers the handshake complete only after receiving
 /// the [finished message](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.4.4)
 /// from the client during the TLS handshake process.
-/// If the [finished message](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.4.4)
-/// from the TLS handshake is not received,
-/// the server can also consider the handshake complete upon receiving and
-/// successfully decrypting the client's 1-RTT packet.
-/// Once the server's handshake is complete, the server will send a [`HandshakeDoneFrame`] immediately.
+/// Once TLS reports handshake completion, the server considers the handshake
+/// confirmed and sends a [`HandshakeDoneFrame`] immediately.
 #[derive(Debug, Clone)]
 pub struct ServerHandshake<T>
 where
@@ -88,9 +110,6 @@ where
     ///
     /// Call this method when the TLS handshake
     /// [finished message](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.4.4) is received.
-    /// If the TLS handshake completion message is not received,
-    /// receiving and successfully decrypting the client's 1-RTT packet
-    /// is also considered handshake completion.
     /// Servers MUST NOT send a [`HandshakeDoneFrame`] before completing the handshake.
     /// and once the server handshake is complete,
     /// servers should send the [`HandshakeDoneFrame`] immediately.
@@ -113,9 +132,8 @@ where
 
 /// A merged handshake state that can be used by both the client and the server.
 ///
-/// For convenience, a unified [`Handshake`]` should be used,
-/// which will internally choose the corresponding behavior based on the role.
-#[derive(Debug, Clone)]
+/// Use [`ArcHandshake`] to share this state and await client confirmation.
+#[derive(Debug)]
 pub enum Handshake<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
@@ -179,7 +197,60 @@ where
     }
 }
 
-impl<T> ReceiveFrame<HandshakeDoneFrame> for Handshake<T>
+/// Shared handshake state. Only one task may wait for client confirmation at a time.
+/// Waiting on the server panics.
+#[derive(Debug, Clone)]
+pub struct ArcHandshake<T>(Arc<Mutex<Handshake<T>>>)
+where
+    T: SendFrame<HandshakeDoneFrame> + Clone;
+
+impl<T> ArcHandshake<T>
+where
+    T: SendFrame<HandshakeDoneFrame> + Clone,
+{
+    pub fn new(role: Role, output: T) -> Self {
+        Self(Arc::new(Mutex::new(Handshake::new(role, output))))
+    }
+
+    pub fn new_client() -> Self {
+        Self(Arc::new(Mutex::new(Handshake::new_client())))
+    }
+
+    pub fn new_server(output: T) -> Self {
+        Self(Arc::new(Mutex::new(Handshake::new_server(output))))
+    }
+
+    pub fn is_handshake_done(&self) -> bool {
+        self.0.lock().unwrap().is_handshake_done()
+    }
+
+    /// Confirm the server handshake and queue HANDSHAKE_DONE once.
+    pub fn done(&self) -> bool {
+        self.0.lock().unwrap().done()
+    }
+
+    pub fn role(&self) -> Role {
+        self.0.lock().unwrap().role()
+    }
+}
+
+impl<T> Future for ArcHandshake<T>
+where
+    T: SendFrame<HandshakeDoneFrame> + Clone,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self.0.lock().unwrap() {
+            Handshake::Client(handshake) => handshake.poll_done(cx),
+            Handshake::Server(_) => {
+                unreachable!("server handshake confirmation cannot be awaited",)
+            }
+        }
+    }
+}
+
+impl<T> ReceiveFrame<HandshakeDoneFrame> for ArcHandshake<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
@@ -195,7 +266,7 @@ where
     ///
     /// Return whether it is the first time to receive the HANDSHAKE_DONE frame(for client).
     fn recv_frame(&self, frame: HandshakeDoneFrame) -> Result<bool, Error> {
-        match self {
+        match &mut *self.0.lock().unwrap() {
             Handshake::Client(h) => Ok(h.recv_handshake_done_frame(frame)),
             _ => Err(QuicError::with_default_fty(
                 ErrorKind::ProtocolViolation,
@@ -208,7 +279,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{sync::atomic::AtomicUsize, task::Wake};
 
     use super::*;
     use crate::{
@@ -225,9 +296,83 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn client_confirmation_wakes_the_latest_waiter_once() {
+        let mut handshake = ArcHandshake::<HandshakeDoneFrameTx>::new_client();
+        let receiver = handshake.clone();
+        let first = Arc::new(WakeCounter::default());
+        let second = Arc::new(WakeCounter::default());
+        let first_waker = Waker::from(first.clone());
+        let second_waker = Waker::from(second.clone());
+        assert!(
+            Pin::new(&mut handshake)
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        let mut cx = Context::from_waker(&second_waker);
+        assert!(Pin::new(&mut handshake).poll(&mut cx).is_pending());
+        assert!(receiver.recv_frame(HandshakeDoneFrame).unwrap());
+        assert_eq!(first.0.load(Ordering::Relaxed), 0);
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+        assert!(handshake.is_handshake_done());
+        assert!(matches!(
+            Pin::new(&mut handshake).poll(&mut cx),
+            Poll::Ready(())
+        ));
+        assert!(!receiver.recv_frame(HandshakeDoneFrame).unwrap());
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            Pin::new(&mut handshake).poll(&mut cx),
+            Poll::Ready(())
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_confirmation_before_waiting_is_preserved_for_clones() {
+        let handshake = ArcHandshake::<HandshakeDoneFrameTx>::new_client();
+        assert!(handshake.recv_frame(HandshakeDoneFrame).unwrap());
+        handshake.clone().await;
+        handshake.await;
+    }
+
+    #[test]
+    fn client_poll_done_waits_for_confirmation() {
+        let mut handshake = ClientHandshake::default();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(handshake.poll_done(&mut cx).is_pending());
+        assert!(handshake.recv_handshake_done_frame(HandshakeDoneFrame));
+        assert!(matches!(handshake.poll_done(&mut cx), Poll::Ready(())));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "server handshake confirmation cannot be awaited")]
+    async fn server_waiting_panics() {
+        ArcHandshake::new_server(HandshakeDoneFrameTx::default()).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "server handshake confirmation cannot be awaited")]
+    async fn server_waiting_after_completion_panics() {
+        let output = HandshakeDoneFrameTx::default();
+        let handshake = ArcHandshake::new_server(output.clone());
+        assert!(handshake.done());
+        assert!(!handshake.clone().done());
+        assert_eq!(output.0.lock().unwrap().len(), 1);
+        handshake.await;
+    }
+
     #[test]
     fn test_client_handshake() {
-        let handshake = Handshake::<HandshakeDoneFrameTx>::new_client();
+        let handshake = ArcHandshake::<HandshakeDoneFrameTx>::new_client();
         assert!(!handshake.is_handshake_done());
 
         let ret = handshake.recv_frame(HandshakeDoneFrame);
@@ -237,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_client_handshake_done() {
-        let handshake = Handshake::<HandshakeDoneFrameTx>::new_client();
+        let handshake = ArcHandshake::<HandshakeDoneFrameTx>::new_client();
         assert!(!handshake.is_handshake_done());
 
         assert!(handshake.recv_frame(HandshakeDoneFrame).unwrap());
@@ -250,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_server_handshake() {
-        let handshake = Handshake::new_server(HandshakeDoneFrameTx::default());
+        let handshake = ArcHandshake::new_server(HandshakeDoneFrameTx::default());
         assert!(!handshake.is_handshake_done());
 
         assert!(handshake.done());
@@ -263,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_server_recv_handshake_done_frame() {
-        let handshake = Handshake::new_server(HandshakeDoneFrameTx::default());
+        let handshake = ArcHandshake::new_server(HandshakeDoneFrameTx::default());
         assert!(!handshake.is_handshake_done());
 
         let ret = handshake.recv_frame(HandshakeDoneFrame);

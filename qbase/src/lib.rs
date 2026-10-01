@@ -89,6 +89,10 @@ impl<I> Receiving<I> {
         }
     }
 
+    fn is_received(&self) -> bool {
+        matches!(self, Self::Rcvd(_) | Self::Read)
+    }
+
     fn cancel(&mut self) {
         if let Self::Waiting(waker) = std::mem::replace(self, Self::Cancelled) {
             waker.wake();
@@ -176,6 +180,10 @@ impl<I> ArcReceiving<I> {
     #[inline]
     pub fn obtain(&self, item: I) {
         self.0.lock().unwrap().obtain(item);
+    }
+
+    pub fn is_received(&self) -> bool {
+        self.0.lock().unwrap().is_received()
     }
 
     /// Submits a value with the same semantics as [`Self::obtain`].
