@@ -42,9 +42,23 @@ use crate::{
         write::{Packet as SendingPacket, PacketError},
     },
     space::{DataSpace, Space},
-    transport::Transport,
     *,
 };
+
+/// Test wiring for packet components; application connections only retain streams.
+pub(crate) struct Transport {
+    pub(crate) data: Arc<DataSpace>,
+    pub(crate) parameters: ArcParameters,
+    pub(crate) flow: FlowController<ArcReliableFrames>,
+}
+
+impl Transport {
+    fn close(&self, error: Error) {
+        self.data.crypto.on_error(&error);
+        self.data.streams.on_conn_error(&error);
+        self.flow.on_conn_error(&error);
+    }
+}
 
 pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
     use qbase::packet::{ConstraintBuffer, Constraints, GetType};
@@ -184,7 +198,11 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
     );
     let data = Arc::new(DataSpace::new(ArcOneRttKeys::from(keys), streams, reliable));
     data.keys.get().unwrap().allow_update();
-    Arc::new(Transport::new(data, params, flow))
+    Arc::new(Transport {
+        data,
+        parameters: params,
+        flow,
+    })
 }
 pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 2] {
     let (keys, summaries) = handshake();
@@ -197,7 +215,11 @@ pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 
     .zip(summaries)
     .map(|(transport, summary)| {
         let path = path(&transport, 0);
-        let conn = ArcConnection::new(transport.clone(), summary.alpn.unwrap(), Default::default());
+        let conn = ArcConnection::new(
+            summary.alpn.unwrap(),
+            transport.data.streams.clone(),
+            Default::default(),
+        );
         (conn, transport, path)
     })
     .collect::<Vec<_>>()
@@ -662,7 +684,11 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     use crate::router::QuicRouter;
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
     let close = ArcReceiving::default();
-    let server = ArcConnection::new(st.clone(), Bytes::from_static(b"h3"), close.clone());
+    let server = ArcConnection::new(
+        Bytes::from_static(b"h3"),
+        st.data.streams.clone(),
+        close.clone(),
+    );
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
     let cid_registry = Registry::new(
@@ -1128,7 +1154,7 @@ async fn real_tls_keys_stream_roundtrip_and_ack_complete_shutdown() {
 
 #[tokio::test]
 async fn close_wakes_both_accepts_and_blocked_opens_without_changing_parameters() {
-    let [(client, _transport, _), _] = pair(0);
+    let [(client, transport, _), _] = pair(0);
     let mut bi = Box::pin(client.accept_bi_stream());
     let mut uni = Box::pin(client.accept_uni_stream());
     let mut open_bi = Box::pin(client.open_bi_stream());
@@ -1144,8 +1170,8 @@ async fn close_wakes_both_accepts_and_blocked_opens_without_changing_parameters(
     assert!(open_bi.await.is_err());
     assert!(open_uni.await.is_err());
     assert_eq!(
-        client
-            .parameters()
+        transport
+            .parameters
             .remote::<u64>(ParameterId::InitialMaxStreamsUni),
         0
     );
@@ -1747,7 +1773,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
             .assemble(&constraints, &mut frames, [&mut streams])
             .is_err()
     );
-    transport.on_tick(tokio::time::Instant::now());
+    transport.data.on_tick(tokio::time::Instant::now());
     assert!(
         packet
             .assemble(&constraints, &mut frames, [&mut streams])
@@ -1755,7 +1781,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     );
 
     tokio::time::advance(retransmit_after).await;
-    transport.on_tick(tokio::time::Instant::now());
+    transport.data.on_tick(tokio::time::Instant::now());
     let replacement = path(&transport, 1);
     let mut sender = Sender::new(keys(&transport), transport.clone(), replacement.clone()).unwrap();
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
@@ -1768,7 +1794,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
             .available(),
         credit
     );
-    transport.on_tick(tokio::time::Instant::now());
+    transport.data.on_tick(tokio::time::Instant::now());
     assert!(
         !sender.prepare().unwrap(),
         "a second tick must not duplicate recovery"

@@ -11,7 +11,7 @@ use qbase::{
 };
 
 use super::{fixture::TestSender as Sender, *};
-use crate::{keys::OpenPacket, transport::Transport};
+use crate::{keys::OpenPacket, tests::Transport};
 
 fn sender(transport: &Arc<Transport>, path: &Path) -> Sender {
     Sender::new(

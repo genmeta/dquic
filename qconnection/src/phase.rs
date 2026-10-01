@@ -15,12 +15,11 @@ use qbase::{
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     space::{DataSpace, Space, Spaces},
-    transport::Transport,
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use crate::{
-    ArcParameters, ArcReliableFrames, CidRegistry, DataStreams, Error, FlowController,
+    ArcParameters, ArcReliableFrames, CidRegistry, DataStreams, FlowController,
     terminate::ArcTerminator,
 };
 
@@ -124,7 +123,7 @@ impl MaturePhase {
         cid_registry: CidRegistry,
         initial_dcid: ArcCidCell<ArcReliableFrames>,
         keys: ArcOneRttKeys,
-    ) -> Result<(Arc<Self>, Arc<Transport>), Error> {
+    ) -> Arc<Self> {
         let concurrency = Box::new(ConsistentConcurrency::new(
             parameters.local(ParameterId::InitialMaxStreamsBidi),
             parameters.local(ParameterId::InitialMaxStreamsUni),
@@ -146,24 +145,22 @@ impl MaturePhase {
             reliable_frames,
             ProbeEncoder::new(data.clone(), peer_cid),
         );
-        let sender = Arc::new(Self {
+        Arc::new(Self {
             spaces: Spaces {
                 initial: early.initial.clone(),
                 handshake,
-                data: data.clone(),
+                data,
             },
             scid: early.scid,
-            flow: flow.clone(),
+            flow,
             cid_registry,
             initial_dcid,
             peer_cid,
-            parameters: parameters.clone(),
+            parameters,
             puncher,
             trackers: early.trackers.clone(),
             terminator: early.terminator.clone(),
-        });
-        let transport = Arc::new(Transport::new(data, parameters, flow));
-        Ok((sender, transport))
+        })
     }
 }
 
