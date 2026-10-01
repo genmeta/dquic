@@ -75,18 +75,10 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 
 ## 快速开始
 
-在 `Cargo.toml` 中添加 DQuic：
-
-```toml
-[dependencies]
-dquic = "0.7.0-beta.4"
-```
-
-完整用法和可运行示例：
+本仓库已移除 `dquic` crate 及其示例。当前连接 API 和协议说明请参见：
 
 - [DQuic 使用文档](https://docs.dhttp.net/zh/docs/protocol/dquic)
-- [客户端、服务端与 Stream 示例](dquic/examples)
-- [HTTP/3 示例](h3-shim/examples)
+- [连接 API](qconnection/README.md)
 
 ## 参与贡献
 

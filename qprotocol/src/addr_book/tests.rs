@@ -540,6 +540,42 @@ fn mediated_pathways_require_a_compatible_return_endpoint() {
 }
 
 #[test]
+fn filtering_nat_uses_the_relay_for_the_return_path() {
+    let book = AddressBook::new();
+    let bound = addr("192.168.1.10:4433");
+    let outer = direct("8.8.4.4:50000");
+    let peer = mediate("1.1.1.1:20002", "1.0.0.1:60000");
+    book.insert(bound, bound.into(), Scope::Internal, None)
+        .unwrap();
+    book.insert(bound, outer, Scope::External, None).unwrap();
+    for nat in [
+        NatType::RestrictedCone,
+        NatType::RestrictedPort,
+        NatType::Symmetric,
+        NatType::Dynamic,
+    ] {
+        book.set_nat(bound, nat);
+        assert_eq!(
+            book.pathways_to(peer, &Source::System),
+            vec![Pathway::new(
+                mediate("1.1.1.1:20002", "8.8.4.4:50000"),
+                peer
+            )]
+        );
+        // Direct peers still use the actual binding; LAN advertising stays independent.
+        assert_eq!(
+            book.pathways_to(direct("192.168.1.20:4433"), &Source::System),
+            vec![Pathway::new(bound.into(), direct("192.168.1.20:4433"))]
+        );
+    }
+    book.set_nat(bound, NatType::FullCone);
+    assert_eq!(
+        book.pathways_to(peer, &Source::System),
+        vec![Pathway::new(outer, peer)]
+    );
+}
+
+#[test]
 fn invalid_bootstrap_endpoints_do_not_produce_candidates() {
     let book = AddressBook::new();
     let bound = addr("192.168.1.10:4433");

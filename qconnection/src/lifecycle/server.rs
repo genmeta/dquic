@@ -20,26 +20,9 @@ use crate::{
 };
 
 /// Select a listening server from an already routed Initial, then grow the connection.
+/// The caller runs [`crate::recv::tick`] alongside this future.
 #[allow(clippy::too_many_arguments)]
 pub async fn server_growing(
-    route: QuicRouterEntry,
-    rcvd_pkt: RcvdPacket,
-    paths: Arc<Paths>,
-    token: ArcTokenRegistry,
-) -> CloseReason {
-    let tick = crate::recv::tick(
-        paths.phase(),
-        paths.clone(),
-        paths.terminator(),
-        paths.closed(),
-    );
-    let growing = growing(route, rcvd_pkt, paths, token);
-    // Tick stops on Closing/Draining while growing finishes connection cleanup.
-    let (reason, ()) = tokio::join!(growing, tick);
-    reason
-}
-
-async fn growing(
     route: QuicRouterEntry,
     rcvd_pkt: RcvdPacket,
     paths: Arc<Paths>,
@@ -142,6 +125,7 @@ async fn growing(
 
             let handshake_keys = tls_ctx.read_keys().await?;
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            paths.handshake.got_handshake_key();
             initial.crypto.recver.retire();
 
             tokio::spawn(crate::tls::read_space_to_tls(
@@ -247,7 +231,6 @@ async fn growing(
             phase.enter_mature(mature_phase.clone());
 
             let summary = tls_ctx.finished().await?;
-            mature_phase.retire_handshake_spaces();
             mature_phase
                 .spaces
                 .data
@@ -270,7 +253,20 @@ async fn growing(
                     summary.alpn.unwrap_or_default(),
                     mature_phase.spaces.data.streams.clone(),
                     closed.clone(),
-                ),
+                )
+                .with_path_observer({
+                    let paths = Arc::downgrade(&paths);
+                    move || {
+                        paths.upgrade().map_or_else(Vec::new, |paths| {
+                            paths
+                                .snapshot()
+                                .into_iter()
+                                .filter(|path| path.is_validated())
+                                .map(|path| path.pathway)
+                                .collect()
+                        })
+                    }
+                }),
             ))
         };
         any(establish, closed.clone())

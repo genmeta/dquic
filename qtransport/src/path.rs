@@ -14,11 +14,10 @@ use qbase::{
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
     packet::{ConstraintBuffer, Package},
-    role::Role,
     time::PathIdleTimer,
     util::IndexDeque,
 };
-use qcongestion::{Algorithm, ArcCC, Resend, HandshakeStatus, PathStatus, Transport as _};
+use qcongestion::{Algorithm, ArcCC, HandshakeStatus, PathStatus, Resend, Transport as _};
 
 use crate::Error;
 mod anti_amplifier;
@@ -58,14 +57,14 @@ impl Path {
     pub const SELECTED: u8 = 1;
     pub const HANDSHAKED: u8 = 2;
 
+    /// Construct a path using the connection's shared handshake lifecycle.
     pub fn new(
         pathway: Pathway,
-        role: Role,
+        handshake: Arc<HandshakeStatus>,
         activity: PathIdleTimer,
         trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
-        let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         let status = PathStatus::new(handshake.clone(), Arc::new(AtomicU16::new(1200)));
         let cc = ArcCC::new(
             Algorithm::NewReno,
@@ -326,6 +325,32 @@ mod package_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn handshake_confirmation_stops_early_epoch_pto() {
+        use qbase::Epoch;
+        let path = Path::new(
+            Pathway::new(
+                EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+                EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+            ),
+            Arc::new(HandshakeStatus::new(false)),
+            ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+            Arc::new(RwLock::new(IndexDeque::with_capacity(3))),
+        );
+        path.client_handshaking();
+        path.got_handshake_key();
+        for epoch in [Epoch::Initial, Epoch::Handshake] {
+            path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
+        }
+        path.handshake_confirmed();
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            path.cc.do_tick().unwrap();
+            assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
+            assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn validation_registers_only_when_both_sources_are_empty() {
         for queued in [false, true] {
             for quota in [0, 128] {
@@ -334,7 +359,7 @@ mod package_tests {
                         EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
                     ),
-                    Role::Server,
+                    Arc::new(HandshakeStatus::new(true)),
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
                     Arc::default(),
                 );

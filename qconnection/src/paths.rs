@@ -12,7 +12,7 @@ use qbase::{
     role::Role,
     time::ArcConnIdle,
 };
-use qcongestion::Transport as _;
+use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
     CloseReason,
     path::{Path, PathState},
@@ -23,6 +23,7 @@ use crate::{ArcConnPhase, ConnPhase, Error, terminate::ArcTerminator};
 /// Connection-level path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
+    pub(crate) handshake: Arc<HandshakeStatus>,
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
     role: Role,
@@ -35,8 +36,13 @@ pub struct Paths {
 impl Paths {
     pub fn new(role: Role, phase: ArcConnPhase, idle: ArcConnIdle) -> Arc<Self> {
         let terminator = phase.terminator();
+        let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
+        if !matches!(phase.get(), ConnPhase::Initial(_)) {
+            handshake.got_handshake_key();
+        }
         Arc::new(Self {
             phase,
+            handshake,
             entries: Mutex::new(BTreeMap::new()),
             responses: Mutex::new(HashMap::new()),
             role,
@@ -86,11 +92,11 @@ impl Paths {
         }
         let path = Arc::new(Path::new(
             pathway,
-            self.role,
+            self.handshake.clone(),
             self.idle.timer(),
             self.phase.get().trackers(),
         ));
-        if entries.values().any(|path| path.selected() == 2) {
+        if self.handshake.is_handshake_confirmed() {
             path.handshake_confirmed();
             if self.role == Role::Client {
                 path.client_validating();
@@ -167,7 +173,35 @@ impl Paths {
         self.closed.set(CloseReason::Peer(frame));
     }
 
+    pub(crate) fn on_handshake_sent(&self) {
+        let phase = self.phase.lock_guard();
+        if self.role == Role::Client {
+            phase.retire_initial();
+        }
+        self.handshake.on_handshake_sent();
+    }
+
+    pub(crate) fn on_handshake_received(&self) {
+        let phase = self.phase.lock_guard();
+        if self.role == Role::Server {
+            phase.retire_initial();
+        }
+        self.handshake.on_handshake_received();
+    }
+
     pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
+        {
+            let phase = self.phase.lock_guard();
+            match &*phase {
+                ConnPhase::Initial(p) => p.initial.retire(),
+                ConnPhase::Handshake(p) => {
+                    p.initial.retire();
+                    p.handshake.retire();
+                }
+                ConnPhase::Mature(p) => p.retire_handshake_spaces(),
+            }
+            self.handshake.handshake_confirmed();
+        }
         let entries = self.entries.lock().unwrap();
         for path in entries.values() {
             if self.is_handshake_path(path) {

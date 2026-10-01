@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard, RwLock},
+    sync::{Arc, Mutex, MutexGuard, RwLock, atomic::Ordering},
     task::{Context, Poll},
 };
 
@@ -18,6 +18,8 @@ use crate::{
 
 const INIT_CWND: usize = MSS * 10;
 const PACKET_THRESHOLD: usize = 3;
+// Report path failure when the PTO count exceeds this limit.
+const MAX_PTO_COUNT: u32 = 6;
 const TICK_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Imple RFC 9002 Appendix A. Loss Recovery
@@ -32,6 +34,7 @@ pub struct CongestionController {
     pto_count: u32,
     max_ack_delay: Duration,
     packet_spaces: [PacketSpace; Epoch::count()],
+    discarded_epochs: [bool; Epoch::count()],
     // pacer is used to control the burst rate
     pacer: pacing::Pacer,
     // The waker to notify when the controller is ready to send.
@@ -69,6 +72,7 @@ impl CongestionController {
                 PacketSpace::with_epoch(Epoch::Handshake, Duration::ZERO),
                 PacketSpace::with_epoch(Epoch::Data, max_ack_delay),
             ],
+            discarded_epochs: [false; Epoch::count()],
             pacer: Pacer::new(INITIAL_RTT, INIT_CWND, path_status.mtu(), now, None),
             pending_burst: false,
             trackers,
@@ -101,6 +105,10 @@ impl CongestionController {
         in_flight: bool,
         sent_bytes: usize,
     ) {
+        // A sealed batch may finish submission after this epoch's keys were retired.
+        if self.discarded_epochs[epoch] {
+            return;
+        }
         let now = Instant::now();
         let sent = SentPacket::new(packet_number, now, ack_eliciting, in_flight, sent_bytes);
         if in_flight {
@@ -155,10 +163,11 @@ impl CongestionController {
         // If this datagram unblocks the server, arm the PTO timer to avoid deadlock.
         if self.path_status.is_at_anti_amplification_limit() {
             let now = Instant::now();
+            let peer_validated = self.peer_completed_address_validation();
             self.set_loss_detection_timer();
             if self.loss_detection_timer.is_some_and(|t| t < now) {
                 // Execute PTO if it would have expired while the amplification limit applied.
-                self.on_loss_detection_timeout();
+                self.on_loss_detection_timeout(peer_validated);
             }
         }
     }
@@ -203,17 +212,23 @@ impl CongestionController {
     ///     pto_count = 0
     ///   SetLossDetectionTimer()
     pub fn on_ack_rcvd(&mut self, epoch: Epoch, ack_frame: &AckFrame, now: Instant) {
+        if self.discarded_epochs[epoch] {
+            return;
+        }
         self.packet_spaces[epoch].update_largest_acked_packet(ack_frame.largest());
 
         match self.packet_spaces[epoch].on_ack_rcvd(ack_frame, &mut self.algorithm) {
             None => return,
             Some(newly_acked_packets) => {
+                if epoch == Epoch::Handshake {
+                    self.path_status.handshake.received_handshake_ack();
+                }
                 let (largest_pn, largest_time_sent) = newly_acked_packets.largest;
                 if largest_pn == ack_frame.largest() && newly_acked_packets.include_ack_eliciting {
                     self.rtt.update(
                         now - largest_time_sent,
                         Duration::from_micros(ack_frame.delay()),
-                        self.path_status.is_handshake_confirmed(),
+                        self.path_status.handshake.is_handshake_confirmed(),
                     );
                 }
                 // Process ECN information if present.
@@ -311,7 +326,7 @@ impl CongestionController {
     ///
     ///   pto_count++
     ///   SetLossDetectionTimer()
-    fn on_loss_detection_timeout(&mut self) -> u32 {
+    fn on_loss_detection_timeout(&mut self, peer_validated: bool) -> u32 {
         if let Some((_, epoch)) = self.get_loss_time_and_epoch() {
             let mut loss_pns = self.packet_spaces[epoch]
                 .detect_lost_packets(self.rtt.loss_delay(), PACKET_THRESHOLD, &mut self.algorithm)
@@ -329,8 +344,15 @@ impl CongestionController {
         }
 
         if self.no_ack_eliciting_in_flight() {
-            // assert!(!self.peer_completed_address_validation());
-            if self.path_status.has_handshake_key() {
+            // Use the driver's decision: another path can advance the shared
+            // handshake after that decision without changing this timeout event.
+            debug_assert!(!peer_validated);
+            if self
+                .path_status
+                .handshake
+                .has_handshake_key
+                .load(Ordering::Acquire)
+            {
                 // Send an anti-deadlock packet: Initial is padded
                 // to earn more anti-amplification credit,
                 // a Handshake packet proves address ownership.
@@ -400,7 +422,12 @@ impl CongestionController {
         let now = Instant::now();
         if self.no_ack_eliciting_in_flight() {
             // assert!(!self.peer_completed_address_validation());
-            if self.path_status.has_handshake_key() {
+            if self
+                .path_status
+                .handshake
+                .has_handshake_key
+                .load(Ordering::Acquire)
+            {
                 return Some((now + duration, Epoch::Handshake));
             } else {
                 return Some((now + duration, Epoch::Initial));
@@ -415,7 +442,7 @@ impl CongestionController {
             if epoch == Epoch::Data {
                 // An endpoint MUST NOT set its PTO timer for the Application Data
                 // packet number epoch until the handshake is confirmed
-                if !self.path_status.is_handshake_confirmed() {
+                if !self.path_status.handshake.is_handshake_confirmed() {
                     return pto_time;
                 }
                 duration += self.max_ack_delay * (1 << self.pto_count);
@@ -444,9 +471,13 @@ impl CongestionController {
     ///   return has received Handshake ACK ||
     ///        handshake confirmed
     fn peer_completed_address_validation(&self) -> bool {
-        self.path_status.is_server()
-            || self.path_status.has_received_handshake_ack()
-            || self.path_status.is_handshake_confirmed()
+        self.path_status.handshake.is_server
+            || self
+                .path_status
+                .handshake
+                .has_received_handshake_ack
+                .load(Ordering::Acquire)
+            || self.path_status.handshake.is_handshake_confirmed()
     }
 
     fn process_ecn(&mut self, ack: &AckFrame, sent_time: &Instant, epoch: Epoch) {
@@ -486,11 +517,54 @@ impl CongestionController {
     //   SetLossDetectionTimer()
     fn discard_epoch(&mut self, epoch: Epoch) {
         assert!(epoch != Epoch::Data);
+        if std::mem::replace(&mut self.discarded_epochs[epoch], true) {
+            return;
+        }
         _ = self.packet_spaces[epoch].discard(&mut self.algorithm);
         self.need_send_ack_eliciting_packets[epoch] = 0;
         self.loss_detection_timer = None;
         self.pto_count = 0;
         self.set_loss_detection_timer();
+    }
+
+    /// Drive recovery: retire completed handshake spaces before processing a timeout.
+    fn tick(&mut self) -> Result<(), TooManyPtos> {
+        if !self.discarded_epochs[Epoch::Initial] {
+            let handshake = &self.path_status.handshake;
+            let initial_finished = if handshake.is_server {
+                handshake.has_received_handshake.load(Ordering::Acquire)
+            } else {
+                handshake.has_sent_handshake.load(Ordering::Acquire)
+            };
+            if initial_finished || handshake.is_handshake_confirmed() {
+                self.discard_epoch(Epoch::Initial);
+            }
+        }
+        if !self.discarded_epochs[Epoch::Handshake]
+            && self.path_status.handshake.is_handshake_confirmed()
+        {
+            self.discard_epoch(Epoch::Handshake);
+        }
+        // Another path's Handshake ACK can invalidate an already armed
+        // anti-deadlock PTO. Cancel it before dispatching a timeout. Preserve
+        // loss detection and existing PTO deadlines that are still needed.
+        let peer_validated = self.peer_completed_address_validation();
+        if peer_validated
+            && self.no_ack_eliciting_in_flight()
+            && self.get_loss_time_and_epoch().is_none()
+        {
+            self.loss_detection_timer = None;
+        }
+        if self
+            .loss_detection_timer
+            .is_some_and(|t| t <= Instant::now())
+        {
+            let count = self.on_loss_detection_timeout(peer_validated);
+            if count > MAX_PTO_COUNT {
+                return Err(TooManyPtos(count));
+            }
+        }
+        Ok(())
     }
 
     fn on_path_lost(&mut self) {
@@ -570,15 +644,7 @@ impl ArcCC {
     pub fn poll_send_quota(&self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
         let mut guard = self.0.lock().unwrap();
         guard.tx_waker.register(cx.waker());
-        if guard
-            .loss_detection_timer
-            .is_some_and(|t| t <= Instant::now())
-        {
-            let count = guard.on_loss_detection_timeout();
-            if count > 6 {
-                return Poll::Ready(Err(TooManyPtos(count)));
-            }
-        }
+        guard.tick()?;
         let quota = guard.send_quota();
         guard.pending_burst = quota < guard.path_status.mtu();
         Poll::Ready(Ok(if guard.pending_burst { 0 } else { quota }))
@@ -613,14 +679,8 @@ impl ArcCC {
 
 impl super::Transport for ArcCC {
     fn do_tick(&self) -> Result<(), TooManyPtos> {
-        let now = Instant::now();
         let mut guard = self.0.lock().unwrap();
-        if guard.loss_detection_timer.is_some_and(|t| t <= now) {
-            let pto_count = guard.on_loss_detection_timeout();
-            if pto_count > 6 {
-                return Err(TooManyPtos(pto_count));
-            }
-        }
+        guard.tick()?;
 
         if guard.pending_burst && guard.send_quota() >= guard.path_status.mtu() {
             guard.pending_burst = false;
@@ -682,6 +742,9 @@ impl super::Transport for ArcCC {
             return;
         }
         let mut guard = self.0.lock().unwrap();
+        if guard.discarded_epochs[epoch] {
+            return;
+        }
         guard.packet_spaces[epoch].rcvd_packets.on_pkt_rcvd(pn);
         guard.on_datagram_rcvd();
     }
@@ -716,6 +779,8 @@ mod tests {
 
     use super::*;
     use crate::{HandshakeStatus, Transport};
+
+    mod handshake_retirement;
 
     struct NoopFeedback;
 
@@ -830,6 +895,47 @@ mod tests {
         assert!(cc.need_ack(Epoch::Data).is_none());
         tokio::time::advance(Duration::from_millis(4)).await;
         assert!(cc.need_ack(Epoch::Data).is_some());
+    }
+
+    #[test]
+    fn handshake_ack_completes_peer_address_validation_before_handshake_done() {
+        let mut controller = controller();
+        controller.path_status = PathStatus::new(
+            Arc::new(HandshakeStatus::new(false)),
+            Arc::new(AtomicU16::new(MSS as u16)),
+        );
+        controller.path_status.release_anti_amplification_limit();
+        controller.on_packet_sent(0, Epoch::Handshake, true, true, MSS);
+        assert!(!controller.peer_completed_address_validation());
+        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        controller.on_ack_rcvd(Epoch::Handshake, &ack, Instant::now());
+        assert!(controller.peer_completed_address_validation());
+        assert!(controller.loss_detection_timer.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discarded_epochs_ignore_late_sends_and_do_not_reset_data_pto_twice() {
+        let cc = ArcCC(Arc::new(Mutex::new(controller())));
+        cc.discard_epoch(Epoch::Initial);
+        cc.discard_epoch(Epoch::Handshake);
+        // A datagram sealed before key retirement can finish submission afterwards.
+        for epoch in [Epoch::Initial, Epoch::Handshake] {
+            cc.on_pkt_sent(epoch, 0, true, MSS, true, None);
+            assert!(
+                cc.0.lock().unwrap().packet_spaces[epoch]
+                    .sent_packets
+                    .is_empty()
+            );
+        }
+        cc.on_pkt_sent(Epoch::Data, 1, true, MSS, true, None);
+        let deadline = cc.0.lock().unwrap().loss_detection_timer.unwrap();
+        tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
+        cc.do_tick().unwrap();
+        assert_eq!(cc.0.lock().unwrap().pto_count, 1);
+        cc.discard_epoch(Epoch::Initial);
+        cc.discard_epoch(Epoch::Handshake);
+        assert_eq!(cc.0.lock().unwrap().pto_count, 1);
+        assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     }
 
     #[test]
@@ -1065,7 +1171,11 @@ mod tests {
                 .loss_detection_timer
                 .expect("B must retain a PTO while its packet is unacknowledged");
             tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
-            assert_eq!(black_holed.on_loss_detection_timeout(), timeout_count);
+            let peer_validated = black_holed.peer_completed_address_validation();
+            assert_eq!(
+                black_holed.on_loss_detection_timeout(peer_validated),
+                timeout_count
+            );
         }
 
         assert_eq!(black_holed.pto_count, 7);

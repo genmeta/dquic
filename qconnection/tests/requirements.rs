@@ -107,12 +107,14 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         pathway,
         link
     ));
-    let growing = tokio::spawn(server_growing(
+    let tick = qconnection::recv::tick(paths.clone());
+    let growing = server_growing(
         route,
         received,
         paths.clone(),
         ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-    ));
+    );
+    let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
     let result = tokio::time::timeout(Duration::from_secs(1), acceptance)
         .await
         .unwrap()
