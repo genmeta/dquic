@@ -40,7 +40,7 @@
 
 ### 底层接线
 
-客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
+客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建空的 `Paths`，由接收器在认证和帧解析成功后添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
 
 ```rust,ignore
 let phase = ArcConnPhase::new(InitialPhase::new(scid, original_dcid, initial_keys));
@@ -79,6 +79,16 @@ server parameters 到达后才创建可靠帧、成对 CID 管理、DataStreams�
 Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间密钥；没有统一 Packet 队列或中间分流任务。Closing 期间这些任务继续接收 CLOSE；Draining 结束后 growing 取消接收任务、淘汰密钥并释放 CID 与路由守卫。额外 ODCID entry 的拥有者在协程退出后释放它。
 
 ## 范围
+
+### Puncher 接线
+
+客户端和服务端在创建 `MaturePhase` 时各创建并持有一个 `ArcPuncher`，复用连接的可靠帧队列。`ProbeEncoder` 使用同一 Data space 的 1-RTT 密钥、包号和对端 CID。1-RTT 接收流程解密认证后，将 `ADD_ADDRESS`、`REMOVE_ADDRESS`、`PUNCH_ME_NOW`、`PUNCH_HELLO`、`PUNCH_DONE` 交给该 Puncher；后两者保留收到数据报时的实际 `Link`，不从广告地址重建 UDP 地址。
+
+Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `stun.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
+
+Initial、Handshake、1-RTT 接收均先检查范围、解密认证并解析帧，再接纳被动路径、启动路径发送任务和记入接收字节。伪造包、重复包和超出范围的来源不会创建路径。1-RTT 解密所需的 PTO 仅读取已有路径；未知路径使用现有路径中最大的 PTO，没有路径时使用一秒，不为获取 PTO 预建路径。
+
+AddressBook 订阅、路径验证与发送限制、地址撤销后的路径退休和恢复、Puncher 关闭清理仍待完成。
 
 真实 UDP 测试覆盖匿名/双向身份、丢失 ServerHello/Finished、成熟后新增路径及接替原路径、流传输和 detached 任务释放。阶段测试覆盖 Handshake keys 前不创建 Handshake space，以及等待参数、1-RTT keys、HANDSHAKE_DONE 时关闭；交付时检查 Handshake recver 已退役而 sender 仍可用。
 

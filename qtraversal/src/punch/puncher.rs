@@ -65,7 +65,6 @@ struct Puncher<TX, PE> {
     punch_history: DashMap<PunchId, ()>,
     reliable_frames: TX,
     packet_encoder: PE,
-    stun_servers: Arc<[SocketAddr]>,
     temporary_sockets: DashMap<EndpointAddr, EphemeralSocket>,
 }
 
@@ -74,14 +73,13 @@ where
     TX: SendFrame<ReliableFrame> + Clone + Send + Sync + 'static,
     PE: PunchPacketEncoder,
 {
-    pub fn new(reliable_frames: TX, packet_encoder: PE, stun_servers: Arc<[SocketAddr]>) -> Self {
+    pub fn new(reliable_frames: TX, packet_encoder: PE) -> Self {
         Self(Arc::new(Puncher {
             addresses: Mutex::new(PunchAddresses::default()),
             transaction: DashMap::new(),
             punch_history: DashMap::new(),
             reliable_frames,
             packet_encoder,
-            stun_servers,
             temporary_sockets: DashMap::new(),
         }))
     }
@@ -403,9 +401,9 @@ where
         target.set_port(port);
         let socket = EphemeralSocket::bind(target)?;
         let local = socket.udp_socket().local_addr()?;
-        let server = self
-            .0
-            .stun_servers
+        let topology = Dock::global().topology();
+        let server = qprotocol::StunProtocol::stun_servers()
+            .await?
             .iter()
             .copied()
             .find(|server| server.is_ipv4() == local.is_ipv4())
@@ -413,7 +411,7 @@ where
                 io::Error::new(io::ErrorKind::NotFound, "no STUN server for address family")
             })?;
         let outer = socket
-            .outer_addr(Dock::global().topology().stun(), server)
+            .outer_addr(topology.stun(), server)
             .await
             .map_err(io::Error::other)?;
         Ok((socket, outer))
@@ -689,7 +687,7 @@ mod tests {
     #[test]
     fn local_addresses_are_announced_when_added_on_the_reliable_queue() {
         let frames = RecordedFrames::default();
-        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder, Arc::from([]));
+        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder);
         let endpoint = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
         puncher.on_local_added(
             "127.0.0.1:5000".parse().unwrap(),
@@ -711,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn adding_another_default_group_binding_probes_that_specific_socket() {
-        let puncher = ArcPuncher::new(RecordedFrames::default(), UnusedEncoder, Arc::from([]));
+        let puncher = ArcPuncher::new(RecordedFrames::default(), UnusedEncoder);
         let first = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
         let second = EndpointAddr::direct("127.0.0.1:5001".parse().unwrap());
         puncher.on_local_added(first.addr(), first, first.addr(), 0, NatType::FullCone);
@@ -731,7 +729,7 @@ mod tests {
     #[tokio::test]
     async fn unsolicited_direct_hello_gets_a_reliable_done_response() {
         let frames = RecordedFrames::default();
-        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder, Arc::from([]));
+        let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder);
         let link = Link::new(
             "127.0.0.1:5000".parse().unwrap(),
             "127.0.0.1:6000".parse().unwrap(),

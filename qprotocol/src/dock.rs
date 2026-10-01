@@ -21,11 +21,12 @@ pub struct Dock {
 
 impl Dock {
     /// Process-wide socket dock and its single protocol topology.
+    /// First initialization starts STUN DNS and requires a Tokio runtime.
     pub fn global() -> &'static Arc<Self> {
         static DOCK: OnceLock<Arc<Dock>> = OnceLock::new();
         DOCK.get_or_init(|| {
             Self::new(Arc::new(Topology::new(
-                Arc::new(crate::StunProtocol::new()),
+                crate::StunProtocol::global().clone(),
                 Arc::new(crate::ForwardProtocol::new()),
                 Arc::new(crate::QuicProtocol::new()),
             )))

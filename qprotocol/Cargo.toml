@@ -13,6 +13,7 @@ categories.workspace = true
 bytes = { workspace = true }
 derive_more = { workspace = true, features = ["display", "into"] }
 http = { workspace = true }
+futures = { workspace = true }
 netdev = { workspace = true }
 nom = { workspace = true }
 dashmap = { workspace = true }
