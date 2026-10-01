@@ -27,6 +27,24 @@ pub async fn server_growing(
     paths: Arc<Paths>,
     token: ArcTokenRegistry,
 ) -> CloseReason {
+    let tick = crate::recv::tick(
+        paths.phase(),
+        paths.clone(),
+        paths.terminator(),
+        paths.closed(),
+    );
+    let growing = growing(route, rcvd_pkt, paths, token);
+    // Tick stops on Closing/Draining while growing finishes connection cleanup.
+    let (reason, ()) = tokio::join!(growing, tick);
+    reason
+}
+
+async fn growing(
+    route: QuicRouterEntry,
+    rcvd_pkt: RcvdPacket,
+    paths: Arc<Paths>,
+    token: ArcTokenRegistry,
+) -> CloseReason {
     let phase = paths.phase();
     let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
