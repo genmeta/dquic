@@ -29,7 +29,7 @@
 | `keys` | Result<K, KeyRetired>、同步取材与退役、1-RTT 代次、认证与 AEAD 用量；OpenPacket、SealPacket、私有 open_with 包保护基础实现 |
 | `packet` | qtls 密钥驱动的 `CipherPacket<H>` / `PlainPacket<H>`；`channel` 提供四个加密级别的 typed channel |
 | `router` | Signpost → Inbox；RAII 路由守卫、CID registry、未知包 channel |
-| `recv` | run / run_receive / receive_packet / frame_dispatcher；各空间直接消费自己的 typed receiver |
+| `recv` | acknowledge；Data 空间的 ACK 处理 |
 | `path` | 每路径一个 CC、路径验证/重试、反放大信用、按实例退役 |
 | `send` | 每路径一个 Sender，分空间组包、Burst 批量提交；独立的 `acknowledge` 函数供原组件管道捕获 |
 | `send/write` | 四种包型共用的 Packet、含 datagram.msg 的 buffer、带约束和记录的 PacketWriter、消费式 seal |
@@ -39,7 +39,7 @@
 
 1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。将 `inbox` 注册到 Router，把 `(route, rcvd_pkt)` 传给 qconnection。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
 2. growing 从 TLS 取得密钥后，创建 `ArcKeys::new(keys)` 或 `ArcOneRttKeys::from(material)`，Initial/Handshake 通过 `Space::new(epoch, keys)` 构造空间，Data 通过 `DataSpace::new(keys, streams, reliable_frames)` 构造。`try_get()` 返回 `Result<K, KeyRetired>`，密钥层不再维护 Pending 或 Waker，也不实现 Future。取得密钥后直接使用 opening/sealing；收包用具体解密函数接线。
-3. `rcvd_pkt.initial / handshake / zero_rtt / one_rtt` 分别具有对应 header 类型。每个空间把自己的 receiver 直接交给 `run_receive`，完成路径取得、记账、解密、去重和帧投递；不经过统一 Packet 队列和二次分流。
+3. `rcvd_pkt.initial / handshake / zero_rtt / one_rtt` 分别具有对应 header 类型。qconnection 的接收循环直接消费各空间的 typed receiver，完成解密、去重与完整帧解析后，再接纳路径、记账和投递帧；不经过统一 Packet 队列和二次分流。
 4. 参数和 1-RTT 密钥就绪后构造 MaturePhase、streams/flow 和 Data 空间，再发布阶段并启动 Data 收包。`MaturePhase::new` 返回 `Arc<MaturePhase>`；从 Data 空间克隆 streams，将它与选定 ALPN、同一个关闭信号传给 `ArcConnection::new`。Connection 直接调用 streams 的开流/接流接口，不持有 DataSpace；构造函数不重复握手校验。
 5. 每路径创建 Sender，传入 QuicProtocol、Pathway、CC、共享 AntiAmplifier 和 send_waker。Sender 不持有 Path、flow 或 keys；STREAM 源从 MaturePhase 取得发送流控，握手阶段无需预建零额度流控。外部闭包同步 try_get 密钥（Ok(keys) 可用，Err(KeyRetired) 禁止继续使用该层发送），向 assemble_initial_packet / assemble_handshake_packet / assemble_0rtt_packet / assemble_1rtt_packet 传入 header、journal、Constraints 和 Package 源；burst 收集批次，poll_send 提交，或用 run 驱动两者。
 6. 应用关闭立即通知 DataStreams，并发送共享关闭信号；接收错误、对端 CLOSE 也通知生命周期驱动。qconnection 的 `Paths::finish` 终止 CRYPTO、streams 和连接流控，驱动 Closing/Draining；同一收包引擎继续解密，只投递 CLOSE。Closing/Draining 结束后 qconnection 取消四级接收任务、清理 CID registry 并释放路由守卫；最后一个 `Inbox` sender 释放后 receiver 关闭。
