@@ -110,6 +110,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let cid_registry =
         router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
     let growing = client_growing(
+        "localhost".into(),
         parameters,
         paths,
         rcvd_pkt,
@@ -197,6 +198,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let (delivered, mut delivery) = oneshot::channel();
     let (parameters, _) = common::parameters();
     let growing = tokio::spawn(client_growing(
+        "localhost".into(),
         parameters,
         paths.clone(),
         rcvd_pkt,
