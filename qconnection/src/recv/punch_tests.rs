@@ -120,7 +120,7 @@ async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Path
     // Preinstall a path without a sender so responses stay inspectable in the queue.
     let path = Arc::new(Path::new(
         pathway,
-        phase.parameters.role(),
+        paths.handshake.clone(),
         paths.idle().timer(),
         paths.phase().get().trackers(),
     ));

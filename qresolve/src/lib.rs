@@ -72,15 +72,16 @@ pub trait Resolve: Any + Send + Sync + Display + Debug {
     ) -> ResolveFuture<'l>;
 }
 
-/// A snapshot of the process-wide resolvers, including [`SystemResolver`] by default.
+/// A snapshot of the process-wide resolvers. The registry is empty by default.
 ///
-/// Register additional sources with [`Self::add`] and take a snapshot with
+/// Register sources explicitly with [`Self::add`] and take a snapshot with
 /// [`Self::get`] for each resolution. Lookups and result streams are polled
 /// concurrently, preserving each record's source. No configuration lock is held
 /// while a resolver runs. Later registrations affect subsequent snapshots only.
 ///
 /// ```no_run
 /// # async fn example() -> std::io::Result<()> {
+/// qresolve::Resolver::add(std::sync::Arc::new(qresolve::SystemResolver));
 /// let resolver = qresolve::Resolver::get();
 /// let records = resolver.lookup("example.com", "443", None).await?;
 /// # Ok(())
@@ -99,14 +100,14 @@ impl Resolver {
         })
     }
 
-    /// Add a resolver alongside the system resolver for subsequent snapshots.
+    /// Add a resolver for subsequent snapshots. System DNS is opt-in like any other source.
     pub fn add(resolver: Arc<dyn Resolve>) {
         Self::global().write().unwrap().push(resolver);
     }
 
     fn global() -> &'static RwLock<Vec<Arc<dyn Resolve>>> {
         static RESOLVERS: OnceLock<RwLock<Vec<Arc<dyn Resolve>>>> = OnceLock::new();
-        RESOLVERS.get_or_init(|| RwLock::new(vec![Arc::new(SystemResolver)]))
+        RESOLVERS.get_or_init(|| RwLock::new(Vec::new()))
     }
 }
 

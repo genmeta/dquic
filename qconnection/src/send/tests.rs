@@ -47,7 +47,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
     );
     let path = Arc::new(Path::new(
         pathway,
-        Role::Client,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -63,6 +63,58 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
     assert!(futures::poll!(&mut running).is_pending());
     watchdog.join().unwrap();
     running.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
+    let initial = InitialPhase::new(
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let phase = crate::ArcConnPhase::initial(initial);
+    phase.enter_handshake(Arc::new(Space::new(
+        Epoch::Handshake,
+        ArcKeys::new(Arc::new(keys(false))),
+    )));
+    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let paths = Paths::new(Role::Client, phase, idle.clone());
+    let path = Arc::new(Path::new(
+        Pathway::new(
+            "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
+            "127.0.0.1:5500".parse().unwrap(),
+        ),
+        paths.handshake.clone(),
+        idle.timer(),
+        paths.phase().get().trackers(),
+    ));
+    path.client_handshaking();
+    path.decide(true);
+    path.cc
+        .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
+    paths.on_handshake_sent();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let mut datagrams =
+        std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    let mut frames = Vec::new();
+    let mut pns: BurstPns = std::array::from_fn(|_| Vec::new());
+    let mut collect = Box::pin(
+        burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        )
+        .collect(&paths, &path, ConnectionId::from_slice(b"serverid")),
+    );
+    assert!(futures::poll!(&mut collect).is_pending());
+    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
+    // While waiting for HANDSHAKE_DONE, an anti-deadlock probe must use live Handshake keys.
+    tokio::time::advance(path.cc.pto_base(Epoch::Handshake)).await;
+    path.cc.do_tick().unwrap();
+    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
+    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
 }
 
 #[tokio::test]
@@ -83,7 +135,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
             EndpointAddr::direct("127.0.0.1:0".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
         ),
-        Role::Client,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -158,7 +210,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     );
     let path = Arc::new(Path::new(
         pathway,
-        Role::Client,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -248,7 +300,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
                     ),
-                    role,
+                    paths.handshake.clone(),
                     idle.timer(),
                     paths.phase().get().trackers(),
                 ));
@@ -350,7 +402,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
                 EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                 EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
             ),
-            Role::Client,
+            paths.handshake.clone(),
             idle.timer(),
             paths.phase().get().trackers(),
         ));
@@ -573,7 +625,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
     );
     let path = Arc::new(Path::new(
         pathway,
-        Role::Server,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -650,7 +702,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
                 EndpointAddr::direct(([127, 0, 0, 1], port).into()),
                 EndpointAddr::direct("127.0.0.1:32002".parse().unwrap()),
             ),
-            Role::Client,
+            paths.handshake.clone(),
             idle.timer(),
             paths.phase().get().trackers(),
         ));
@@ -751,7 +803,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
             EndpointAddr::direct("127.0.0.1:33001".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
         ),
-        Role::Server,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -1025,7 +1077,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
             EndpointAddr::direct("127.0.0.1:34101".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34102".parse().unwrap()),
         ),
-        Role::Server,
+        paths.handshake.clone(),
         idle.timer(),
         phase.get().trackers(),
     ));
@@ -1121,7 +1173,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             EndpointAddr::direct("127.0.0.1:34001".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
-        Role::Server,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));
@@ -1199,7 +1251,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             EndpointAddr::direct("127.0.0.1:34003".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
-        Role::Server,
+        paths.handshake.clone(),
         idle.timer(),
         paths.phase().get().trackers(),
     ));

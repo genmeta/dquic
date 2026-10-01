@@ -113,7 +113,9 @@ impl<K: Clone> Space<ArcKeys<K>> {
 
 impl<K: Clone + Send> qcongestion::Resend for Space<ArcKeys<K>> {
     fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        self.sent_journal.resend(pns, |frame| self.recover(frame));
+        if self.keys.get().is_ok() {
+            self.sent_journal.resend(pns, |frame| self.recover(frame));
+        }
     }
 }
 
@@ -198,7 +200,9 @@ impl DataSpace {
 
 impl qcongestion::Resend for DataSpace {
     fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        self.sent_journal.resend(pns, |frame| self.recover(frame));
+        if self.keys.get().is_ok() {
+            self.sent_journal.resend(pns, |frame| self.recover(frame));
+        }
     }
 }
 

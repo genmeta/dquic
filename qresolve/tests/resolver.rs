@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use futures::{FutureExt, StreamExt, stream};
-use qresolve::{EndpointAddr, Family, Resolve, ResolveFuture, Resolver, Source};
+use qresolve::{EndpointAddr, Family, Resolve, ResolveFuture, Resolver, Source, SystemResolver};
 
 #[derive(Debug)]
 struct ExtraResolver;
@@ -38,7 +38,7 @@ impl Resolve for ExtraResolver {
 
 // Keep global configuration checks in one test in this separate test process.
 #[test]
-fn adding_a_resolver_keeps_system_and_preserves_existing_snapshots() {
+fn registry_starts_empty_and_only_uses_explicit_sources() {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
@@ -47,12 +47,20 @@ fn adding_a_resolver_keeps_system_and_preserves_existing_snapshots() {
             let pending = snapshot.lookup("127.0.0.1", "8443", Some(Family::V4));
             Resolver::add(Arc::new(ExtraResolver));
 
-            let records = pending.await.unwrap().collect::<Vec<_>>().await;
-            assert!(!records.is_empty());
-            assert!(records.iter().all(|(source, endpoint)| {
-                *source == Source::System
-                    && *endpoint == EndpointAddr::direct("127.0.0.1:8443".parse().unwrap())
-            }));
+            assert_eq!(
+                pending.await.err().unwrap().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            let mock_only = Resolver::get();
+            Resolver::add(Arc::new(SystemResolver));
+            let records = mock_only
+                .lookup("127.0.0.1", "8443", Some(Family::V4))
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].0, Source::Dht);
 
             let records = Resolver::get()
                 .lookup("127.0.0.1", "8443", Some(Family::V4))

@@ -134,6 +134,7 @@ async fn recv_ih_pkt_and_deliver_frames_if<H>(
             }
             if epoch == Epoch::Handshake && inspect_paths.is_handshake_path(path) {
                 path.validate();
+                inspect_paths.on_handshake_received();
             }
             Ok(())
         },
@@ -344,13 +345,12 @@ pub(crate) async fn receive_data(
     .await;
 }
 
-/// Connection-level deadlines continue even when a path disappears.
-pub(crate) async fn tick(
-    phase: crate::ArcConnPhase,
-    paths: Arc<Paths>,
-    terminator: crate::terminate::ArcTerminator,
-    closed: ArcReceiving<CloseReason>,
-) {
+/// Drive connection deadlines alongside its growing future, once per connection.
+/// Path loss does not stop recovery; entering Closing or Draining ends this loop.
+pub async fn tick(paths: Arc<Paths>) {
+    let phase = paths.phase();
+    let terminator = paths.terminator();
+    let closed = paths.closed();
     while matches!(&*terminator.lock_guard(), Terminator::NoError(_)) {
         let now = Instant::now();
         let snapshot = phase.get();

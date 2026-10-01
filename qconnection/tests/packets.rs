@@ -89,6 +89,7 @@ async fn dropping_old_client_route_preserves_replacement() {
 
 #[tokio::test(start_paused = true)]
 async fn client_waits_for_keys_before_creating_handshake_space() {
+    common::use_system_resolver();
     use futures::FutureExt;
     let cid = ConnectionId::random_gen(8);
     let phase = ArcConnPhase::initial(InitialPhase::new(
@@ -109,6 +110,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     };
     let cid_registry =
         router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
+    let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
         "localhost".into(),
         parameters,
@@ -119,6 +121,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         |result| assert!(result.is_err()),
     );
+    let growing = async move { tokio::join!(growing, tick).0 };
     tokio::pin!(growing);
     assert!(growing.as_mut().now_or_never().is_none());
     let initial_only = matches!(phase.get(), ConnPhase::Initial(_));
@@ -148,6 +151,7 @@ enum ClientWait {
 }
 
 async fn close_at_client_stage(wait: ClientWait) {
+    common::use_system_resolver();
     use futures::FutureExt;
     use qbase::{
         Epoch,
@@ -197,7 +201,8 @@ async fn close_at_client_stage(wait: ClientWait) {
         router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
     let (delivered, mut delivery) = oneshot::channel();
     let (parameters, _) = common::parameters();
-    let growing = tokio::spawn(client_growing(
+    let tick = qconnection::recv::tick(paths.clone());
+    let growing = client_growing(
         "localhost".into(),
         parameters,
         paths.clone(),
@@ -208,7 +213,8 @@ async fn close_at_client_stage(wait: ClientWait) {
         move |result| {
             let _ = delivered.send(result);
         },
-    ));
+    );
+    let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
     let hello_len = hello.len();
     let bytes = [hello];
     let mut crypto = (

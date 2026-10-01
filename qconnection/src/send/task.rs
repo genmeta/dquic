@@ -45,6 +45,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
             let packets = datagrams.each_ref().map(|buffer| IoSlice::new(buffer));
             let mut first = 0;
             while first < count {
+                let mut sent_handshake = false;
                 let sent = QuicProtocol::global()
                     .send_with(path.pathway, &packets[first..count], |submit| {
                         let mut cc = path.cc.lock();
@@ -66,6 +67,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                                     deadlines[epoch].1,
                                 );
                                 for packet in submitted {
+                                    sent_handshake |= epoch == Epoch::Handshake;
                                     let size = datagrams[packet.index].len() + overhead;
                                     path.anti_amplifier.on_sent(size);
                                     cc.on_pkt_sent(
@@ -87,6 +89,9 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                     .map_err(|error| {
                         QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
                     })?;
+                if sent_handshake {
+                    paths.on_handshake_sent();
+                }
                 if sent == 0 {
                     return Err(QuicError::with_default_fty(
                         ErrorKind::NoViablePath,
