@@ -1,16 +1,14 @@
-use std::{future::poll_fn, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use qbase::{
     ArcReceiving,
     error::{AppError, QuicError},
     frame::ConnectionCloseFrame,
-    param::ParameterId,
 };
+use qrecovery::streams::DataStreams;
 
-use crate::{
-    ArcParameters, Error, Role, StreamId, StreamReader, StreamWriter, VarInt, transport::Transport,
-};
+use crate::{ArcReliableFrames, Error, StreamId, StreamReader, StreamWriter, VarInt};
 
 /// The source of a connection's first close request. qconnection drives its lifecycle.
 #[derive(Debug, Clone)]
@@ -36,79 +34,51 @@ pub struct ArcConnection(Arc<Connection>);
 
 struct Connection {
     alpn: Bytes,
-    transport: Arc<Transport>,
+    streams: DataStreams<ArcReliableFrames>,
     close: ArcReceiving<CloseReason>,
 }
 
 impl ArcConnection {
     /// Integration only: TLS and parameters are authenticated; qconnection awaits the shared close signal.
     #[doc(hidden)]
-    pub fn new(transport: Arc<Transport>, alpn: Bytes, close: ArcReceiving<CloseReason>) -> Self {
+    pub fn new(
+        alpn: Bytes,
+        streams: DataStreams<ArcReliableFrames>,
+        close: ArcReceiving<CloseReason>,
+    ) -> Self {
         Self(Arc::new(Connection {
             alpn,
-            transport,
+            streams,
             close,
         }))
     }
 
-    pub fn role(&self) -> Role {
-        self.parameters().role()
-    }
     pub fn alpn(&self) -> &[u8] {
         &self.0.alpn
-    }
-    pub fn parameters(&self) -> &ArcParameters {
-        &self.0.transport.parameters
     }
 
     /// Wait for stream credit; None means the stream-number space is exhausted.
     pub async fn open_bi_stream(
         &self,
     ) -> Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error> {
-        let window = self
-            .parameters()
-            .remote::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
-        poll_fn(|cx| {
-            self.0
-                .transport
-                .data
-                .streams
-                .poll_open_bi_with_limit(cx, window)
-        })
-        .await
+        self.0.streams.open_bi().await
     }
+
     pub async fn open_uni_stream(&self) -> Result<Option<(StreamId, StreamWriter)>, Error> {
-        let window = self
-            .parameters()
-            .remote::<u64>(ParameterId::InitialMaxStreamDataUni);
-        poll_fn(|cx| {
-            self.0
-                .transport
-                .data
-                .streams
-                .poll_open_uni_with_limit(cx, window)
-        })
-        .await
+        self.0.streams.open_uni().await
     }
+
     /// Use one accept loop per direction. Cancellation does not consume a stream.
     pub async fn accept_bi_stream(
         &self,
     ) -> Result<(StreamId, (StreamReader, StreamWriter)), Error> {
-        let window = self
-            .parameters()
-            .remote::<u64>(ParameterId::InitialMaxStreamDataBidiLocal);
-        poll_fn(|cx| {
-            self.0
-                .transport
-                .data
-                .streams
-                .poll_accept_bi_with_limit(cx, window)
-        })
-        .await
+        self.0.streams.accept_bi().await
     }
+
     pub async fn accept_uni_stream(&self) -> Result<(StreamId, StreamReader), Error> {
-        self.0.transport.data.streams.accept_uni().await
+        self.0.streams.accept_uni().await
     }
+
     /// Stop all clones and streams immediately; qconnection completes Closing/Draining.
     pub fn close(self, code: VarInt, reason: &str) {
         self.0.close(AppError::new(code, reason.to_owned()));
@@ -117,7 +87,7 @@ impl ArcConnection {
 
 impl Connection {
     fn close(&self, error: AppError) {
-        self.transport.close(error.clone().into());
+        self.streams.on_conn_error(&error.clone().into());
         self.close.obtain(CloseReason::App(error));
     }
 }
@@ -134,6 +104,27 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connection_keeps_streams_alive_without_retaining_the_data_space() {
+        use tokio::io::AsyncWriteExt;
+
+        let [(connection, transport, path), _] = crate::tests::pair(1);
+        let data = Arc::downgrade(&transport.data);
+        drop(path);
+        drop(transport);
+        assert!(data.upgrade().is_none());
+
+        let (_, mut writer) = connection.open_uni_stream().await.unwrap().unwrap();
+        writer.write_all(b"pending").await.unwrap();
+        let close = connection.0.close.clone();
+        connection.close(42u32.into(), "stop");
+        assert!(writer.flush().await.is_err());
+        assert!(matches!(
+            close.await.unwrap().unwrap(),
+            CloseReason::App(error) if error == AppError::new(42u32.into(), "stop")
+        ));
+    }
 
     #[tokio::test]
     async fn explicit_close_wakes_the_driver_and_preserves_the_first_reason() {

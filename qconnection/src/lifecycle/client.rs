@@ -122,7 +122,7 @@ pub async fn client_growing(
                 .remote
                 .apply_initial_dcid(server_scid, &initial_dcid);
 
-            let (mature_phase, transport) = MaturePhase::new(
+            let mature_phase = MaturePhase::new(
                 &initial_phase,
                 handshake.clone(),
                 parameters.clone(),
@@ -131,7 +131,7 @@ pub async fn client_growing(
                 cid_registry.clone(),
                 initial_dcid,
                 qtransport::keys::ArcOneRttKeys::from(tls_context.read_keys().await?),
-            )?;
+            );
             phase.enter_mature(mature_phase.clone());
             cid_registry
                 .local
@@ -177,8 +177,8 @@ pub async fn client_growing(
                     summary.local,
                     remote,
                     qtransport::ArcConnection::new(
-                        transport,
                         summary.alpn.unwrap_or_default(),
+                        mature_phase.spaces.data.streams.clone(),
                         closed.clone(),
                     ),
                 ),

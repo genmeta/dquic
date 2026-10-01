@@ -24,7 +24,6 @@ pub mod router;
 #[path = "tests/send.rs"]
 mod send;
 pub mod space;
-pub mod transport;
 
 pub use connection::{ArcConnection, CloseReason};
 pub use qbase::{
