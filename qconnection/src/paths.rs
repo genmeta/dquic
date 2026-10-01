@@ -47,11 +47,14 @@ impl Paths {
         })
     }
 
-    /// Add a path and start its only sending task. Existing paths are returned unchanged.
+    /// Enable a path and start its only sender. After handshake confirmation, also
+    /// start validation; existing paths and validation tasks are reused.
     pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
         let handshaking =
             self.role == Role::Client && matches!(self.phase.get(), ConnPhase::Initial(_));
-        self.create_path(pathway, handshaking)
+        let path = self.create_path(pathway, handshaking)?;
+        self.start_validation(&path);
+        Ok(path)
     }
 
     pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
@@ -437,7 +440,9 @@ mod tests {
         let added = paths.add_path(pathway(30006)).unwrap();
         assert_eq!(added.selected(), 2);
         assert_eq!(added.state(), PathState::ClientValidating);
-        paths.start_validation(&added);
+        let validating = paths.responses.lock().unwrap().len();
+        assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway).unwrap()));
+        assert_eq!(paths.responses.lock().unwrap().len(), validating);
         tokio::task::yield_now().await;
         assert!(first.challenge().is_none());
         assert!(second.challenge().is_some());
