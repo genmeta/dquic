@@ -28,7 +28,7 @@ use qbase::{
     time::{ArcConnIdle, PathIdleTimer},
     util::IndexDeque,
 };
-use qcongestion::Resend;
+use qcongestion::{Resend, Transport as _};
 use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
@@ -333,8 +333,8 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
             received = opened.as_ref().map(|packet| packet.pn());
             Ok(opened)
         },
-        |_, _, frame, path| dispatch(transport, path, frame),
         |_, _| Ok(()),
+        |_, _, frame, path, _| dispatch(transport, path, frame),
         |error| panic!("receive failed: {error}"),
     )
     .now_or_never()
@@ -567,7 +567,8 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             move |_: &Arc<qtls::BidirectionalKeys>,
                   received_epoch,
                   frame: Frame<Bytes>,
-                  _: &Arc<Path>| {
+                  _: &Arc<Path>,
+                  _: Link| {
                 assert_eq!(received_epoch, epoch);
                 let Frame::Crypto(_, body) = frame else {
                     panic!("unexpected frame")
@@ -591,8 +592,8 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                dispatch,
                 |_, _| Ok(()),
+                dispatch,
                 |_| panic!("receive failed"),
             )
             .await;
@@ -610,8 +611,8 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                         .transpose()
                         .map_err(Into::into)
                 },
-                dispatch,
                 |_, _| Ok(()),
+                dispatch,
                 |_| panic!("receive failed"),
             )
             .await;
@@ -712,17 +713,24 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
         Epoch::Data,
         st.data.keys.clone(),
         st.data.rcvd_journal.clone(),
-        move |_, _| Some(sp.clone()),
-        move |keys: &OneRttKeys, packet, pto| {
-            keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
+        {
+            let sp = sp.clone();
+            move |_, _| Some(sp.clone())
         },
-        move |keys, epoch, frame, path| {
+        move |keys: &OneRttKeys, packet, _| {
+            keys.open_packet(
+                packet,
+                |pn| journal.decode_pn(pn),
+                sp.cc.get_pto(Epoch::Data),
+            )
+        },
+        |_, _| Ok(()),
+        move |keys, epoch, frame, path, _| {
             if matches!(frame, Frame::Stream(_, _)) {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
             dispatch(epoch, frame, path, &|generation| keys.on_ack(generation))
         },
-        |_, _| Ok(()),
         |_| panic!("receive failed"),
     ));
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
@@ -791,11 +799,19 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         Epoch::Data,
         st.data.keys.clone(),
         st.data.rcvd_journal.clone(),
-        move |_, _| Some(sp.clone()),
-        |keys: &OneRttKeys, packet, pto| {
-            keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto)
+        |_, _| Some(sp.clone()),
+        |keys: &OneRttKeys, packet, _| {
+            keys.open_packet(
+                packet,
+                |pn| st.data.rcvd_journal.decode_pn(pn),
+                sp.cc.get_pto(Epoch::Data),
+            )
         },
-        |_, _, frame, _| {
+        |_, _| {
+            processed += 1;
+            Ok(())
+        },
+        |_, _, frame, _, _| {
             if matches!(frame, Frame::Close(_)) {
                 closes += 1;
                 Ok(())
@@ -803,10 +819,6 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
                 ordinary += 1;
                 Err(QuicError::with_default_fty(ErrorKind::Internal, "component failed").into())
             }
-        },
-        |_, _| {
-            processed += 1;
-            Ok(())
         },
         |error| {
             errors += 1;
@@ -1482,15 +1494,22 @@ async fn receiving_starts_with_ready_keys() {
         Epoch::Data,
         data.keys.clone(),
         data.rcvd_journal.clone(),
-        move |_, _| Some(cp.clone()),
-        move |keys: &OneRttKeys, packet, pto| {
-            keys.open_packet(packet, |pn| journal.decode_pn(pn), pto)
+        {
+            let cp = cp.clone();
+            move |_, _| Some(cp.clone())
         },
-        move |_, _, _, _| {
+        move |keys: &OneRttKeys, packet, _| {
+            keys.open_packet(
+                packet,
+                |pn| journal.decode_pn(pn),
+                cp.cc.get_pto(Epoch::Data),
+            )
+        },
+        |_, _| Ok(()),
+        move |_, _, _, _, _| {
             seen.fetch_add(1, Ordering::Relaxed);
             Ok(())
         },
-        |_, _| Ok(()),
         |_| panic!("receive failed"),
     ));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
@@ -1546,8 +1565,18 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         st.data.keys.clone(),
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
-        |keys, packet, pto| keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), pto),
-        |_, _, frame, _| {
+        |keys, packet, _| {
+            keys.open_packet(
+                packet,
+                |pn| st.data.rcvd_journal.decode_pn(pn),
+                sp.cc.get_pto(Epoch::Data),
+            )
+        },
+        |_, _| {
+            inspected.set(inspected.get() + 1);
+            Ok(())
+        },
+        |_, _, frame, _, _| {
             dispatched += 1;
             assert_eq!(inspected.get(), dispatched);
             match dispatched {
@@ -1561,10 +1590,6 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
                 3 => assert!(matches!(frame, Frame::Ping(_))),
                 _ => panic!("frames carried over from a previous packet"),
             }
-            Ok(())
-        },
-        |_, _| {
-            inspected.set(inspected.get() + 1);
             Ok(())
         },
         |_| errors += 1,
@@ -2052,8 +2077,8 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         space.rcvd_journal.clone(),
         |_, _| unreachable!(),
         |_: &Arc<qtls::BidirectionalKeys>, _, _| unreachable!(),
-        |_, _, _, _| unreachable!(),
         |_, _| unreachable!(),
+        |_, _, _, _, _| unreachable!(),
         |_| unreachable!(),
     ));
     tokio::task::yield_now().await;

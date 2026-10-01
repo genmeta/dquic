@@ -17,6 +17,7 @@ qrecovery.workspace = true
 qresolve.workspace = true
 qtls.workspace = true
 qtransport = { path = "../qtransport" }
+qtraversal = { path = "../qtraversal" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]

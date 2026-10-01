@@ -58,6 +58,20 @@ impl Paths {
         self.create_path(pathway, false)
     }
 
+    /// Opening-key retention needs a PTO before an unknown path is admitted.
+    /// Use existing path measurements without allocating a path or sender.
+    pub(crate) fn pto_for(&self, pathway: &Pathway, epoch: Epoch) -> Duration {
+        let entries = self.entries.lock().unwrap();
+        if let Some(path) = entries.get(pathway) {
+            return path.cc.get_pto(epoch);
+        }
+        entries
+            .values()
+            .map(|path| path.cc.get_pto(epoch))
+            .max()
+            .unwrap_or(Duration::from_secs(1))
+    }
+
     fn create_path(
         self: &Arc<Self>,
         pathway: Pathway,

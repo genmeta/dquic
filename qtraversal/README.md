@@ -29,11 +29,18 @@ existing external endpoints through `Added`; there is no separate NAT event.
 - Endpoint withdrawal invokes the removal callback even if NAT discovery had not
   yet allowed an advertisement. Binding withdrawal also reports its actual Direct
   address. Path retirement callbacks should be idempotent.
-- Advertisements use grouping value zero. The existing Puncher constructor still
-  receives the STUN servers used by temporary-socket mapping probes.
+- Advertisements use grouping value zero. Puncher construction takes only the
+  reliable frame sender and packet encoder.
 
 Punch addresses keep the actual bound address used to find the socket in Dock.
 Temporary probes use the local bound address with a new port.
+The STUN module fixes the name to `stun.genmeta.net`. `StunProtocol::global()`
+starts one background task to warm `StunProtocol::stun_servers()`. The global
+Dock uses this STUN instance. The function-local static
+cache shares one system DNS lookup on port 20002 across the process, including
+empty results and errors, without retries or periodic refresh. All Punchers wait
+for that same result and select a server matching the temporary socket's family.
+Cancelling a waiter does not cancel or restart DNS.
 `EphemeralSocket::bind(bound)` binds that target address and registers it with the
 global Dock and QUIC protocol. It does not reconstruct or resolve a BindUri.
 Address frames carry the endpoint's advertised address.
@@ -50,7 +57,9 @@ its shared `qtransport::DataSpace` and peer CID. `qtraversal` owns probe assembl
 and protection, reusing `qtransport::packet::assemble`.
 
 Direct `PUNCH_HELLO` and `PUNCH_DONE` probes are sent on UDP sockets without a
-Path. The remaining qconnection integration must authenticate received probes,
-admit and validate passive paths, dispatch punch frames, and own Puncher shutdown.
-The crate is a workspace member; this address adapter does not yet enable punching
-inside `QuicEndpoint` connections.
+Path. `qconnection::MaturePhase` now creates and retains a Puncher for both roles,
+and authenticated 1-RTT reception dispatches all five punch/address frame types to
+it while preserving the received UDP link. Passive paths are admitted only after
+packet authentication and frame parsing; rejected and replayed packets cannot
+create paths or start their senders. AddressBook observation, path validation,
+and Puncher shutdown remain connection integration work.
