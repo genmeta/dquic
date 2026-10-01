@@ -20,7 +20,7 @@ use qtransport::{packet::channel, router::QuicRouter};
 use tokio::sync::oneshot;
 
 use crate::{
-    Accepted, ArcConnPhase, Connected, Error, InitialPhase, Paths, ArcReliableFrames, TlsContext,
+    Accepted, ArcConnPhase, ArcReliableFrames, Connected, Error, InitialPhase, Paths, TlsContext,
     client_growing,
 };
 
@@ -80,8 +80,10 @@ impl QuicEndpoint {
         .map_err(|error| internal_error(error.to_string()))
     }
 
-    /// Starts the client connection skeleton. Path discovery and insertion are wired later.
+    /// Resolve the peer in the background and add every usable AddressBook pairing.
+    /// The client lifecycle owns discovery and stops it when the connection closes.
     pub async fn connect(&self, server_name: String) -> Result<Connected, Error> {
+        let tls_name = qresolve::split_host_port(&server_name).0.to_owned();
         let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
             provider: Arc::new(qtls::default_provider()),
             alpn: Vec::new(),
@@ -105,7 +107,7 @@ impl QuicEndpoint {
             .map_err(|error| internal_error(error.to_string()))?;
         let tls = TlsContext::client(
             &identity,
-            server_name
+            tls_name
                 .clone()
                 .try_into()
                 .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
@@ -123,10 +125,11 @@ impl QuicEndpoint {
             DEFAULT_HEARTBEAT_INTERVAL,
         );
         let paths = Paths::new(Role::Client, phase, idle);
-        let token = ArcTokenRegistry::with_sink(server_name, Arc::new(NoopTokenRegistry));
+        let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
 
         tokio::spawn(client_growing(
+            server_name,
             client_params,
             paths,
             rcvd_pkt,

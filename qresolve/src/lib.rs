@@ -3,11 +3,15 @@ use std::{
     fmt::{Debug, Display},
     io,
     net::{Ipv6Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use dns_lookup::{AddrFamily, AddrInfoHints, SockType, getaddrinfo};
-use futures::{FutureExt, future::BoxFuture, stream::BoxStream};
+use futures::{
+    FutureExt,
+    future::{self, BoxFuture},
+    stream::{BoxStream, FuturesUnordered},
+};
 pub use qbase::net::{Family, addr::EndpointAddr};
 
 pub type PublishFuture<'a> = BoxFuture<'a, io::Result<()>>;
@@ -66,6 +70,96 @@ pub trait Resolve: Any + Send + Sync + Display + Debug {
         servname: &'l str,
         family: Option<Family>,
     ) -> ResolveFuture<'l>;
+}
+
+/// A snapshot of the process-wide resolvers, including [`SystemResolver`] by default.
+///
+/// Register additional sources with [`Self::add`] and take a snapshot with
+/// [`Self::get`] for each resolution. Lookups and result streams are polled
+/// concurrently, preserving each record's source. No configuration lock is held
+/// while a resolver runs. Later registrations affect subsequent snapshots only.
+///
+/// ```no_run
+/// # async fn example() -> std::io::Result<()> {
+/// let resolver = qresolve::Resolver::get();
+/// let records = resolver.lookup("example.com", "443", None).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct Resolver {
+    resolvers: Vec<Arc<dyn Resolve>>,
+}
+
+impl Resolver {
+    /// Snapshot all registered resolvers for an aggregate lookup.
+    pub fn get() -> Arc<dyn Resolve> {
+        Arc::new(Self {
+            resolvers: Self::global().read().unwrap().clone(),
+        })
+    }
+
+    /// Add a resolver alongside the system resolver for subsequent snapshots.
+    pub fn add(resolver: Arc<dyn Resolve>) {
+        Self::global().write().unwrap().push(resolver);
+    }
+
+    fn global() -> &'static RwLock<Vec<Arc<dyn Resolve>>> {
+        static RESOLVERS: OnceLock<RwLock<Vec<Arc<dyn Resolve>>>> = OnceLock::new();
+        RESOLVERS.get_or_init(|| RwLock::new(vec![Arc::new(SystemResolver)]))
+    }
+}
+
+impl Display for Resolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Aggregate Resolver ({} sources)", self.resolvers.len())
+    }
+}
+
+impl Resolve for Resolver {
+    /// Return as soon as one resolver supplies a stream, then merge it with all
+    /// other streams as they become available. A slow lookup or stream does not
+    /// block records from another source. Records are not deduplicated.
+    ///
+    /// Failed sources are skipped. If every lookup fails, return the last error;
+    /// a successful empty stream counts as success. Errors arriving after a
+    /// successful lookup are also skipped because `RecordStream` carries records
+    /// only. Dropping the future or stream drops its pending child operations.
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
+        let hostname: Arc<str> = Arc::from(hostname);
+        let servname: Arc<str> = Arc::from(servname);
+        let mut pending = self
+            .resolvers
+            .iter()
+            .cloned()
+            .map(|resolver| {
+                let hostname = hostname.clone();
+                let servname = servname.clone();
+                async move { resolver.lookup(&hostname, &servname, family).await }.boxed()
+            })
+            .collect::<FuturesUnordered<_>>();
+        async move {
+            let mut error = io::Error::new(io::ErrorKind::NotFound, "no resolvers registered");
+            while let Some(result) = pending.next().await {
+                match result {
+                    Ok(first) => {
+                        let remaining = pending
+                            .filter_map(|result| future::ready(result.ok()))
+                            .flatten_unordered(None);
+                        return Ok(stream::select(first, remaining).boxed());
+                    }
+                    Err(failed) => error = failed,
+                }
+            }
+            Err(error)
+        }
+        .boxed()
+    }
 }
 
 use futures::{StreamExt, stream};
@@ -128,7 +222,9 @@ fn lookup_socket_addrs(
         .collect()
 }
 
-fn split_host_port(hostname: &str) -> (&str, Option<&str>) {
+/// Split an optional numeric port from a hostname or bracketed IPv6 address.
+/// Bare IPv6 addresses have no port; unrecognized suffixes remain part of the host.
+pub fn split_host_port(hostname: &str) -> (&str, Option<&str>) {
     if let Some(bracketed) = hostname.strip_prefix('[')
         && let Some((host, suffix)) = bracketed.split_once(']')
     {
@@ -156,6 +252,9 @@ fn split_host_port(hostname: &str) -> (&str, Option<&str>) {
 
     (hostname, None)
 }
+
+#[cfg(test)]
+mod resolver_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,19 +1,25 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use qbase::net::{
-    NatType,
+    AddrFamily, NatType,
     addr::{EndpointAddr, Kind},
     route::{Pathway, Scope, Scopes},
 };
+use qresolve::Source;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
+use crate::UdpSocket;
+
 #[derive(Debug, Error)]
 pub enum AddressBookError {
+    #[error("failed to read socket binding: {0}")]
+    Socket(#[from] io::Error),
     #[error("{0} is already present in the address book")]
     Duplicate(EndpointAddr),
     #[error("{0} is not present in the address book")]
@@ -24,6 +30,8 @@ pub enum AddressBookError {
     ExpectedMediate,
     #[error("a bound address can publish at most three Agent endpoints")]
     TooManyAgents,
+    #[error("{0} is already associated with another interface")]
+    ConflictingInterface(SocketAddr),
 }
 
 /// Local directory changes delivered to one scoped punch subscription in order.
@@ -54,6 +62,7 @@ struct State {
     inner: HashMap<EndpointAddr, SocketAddr>,
     outer: HashMap<EndpointAddr, SocketAddr>,
     agents: HashMap<EndpointAddr, SocketAddr>,
+    interfaces: HashMap<SocketAddr, Option<qudp::BoundDevice>>,
     nat: HashMap<SocketAddr, NatType>,
     ddns: watch::Sender<Arc<[EndpointAddr]>>,
     mdns: HashMap<SocketAddr, watch::Sender<Arc<[EndpointAddr]>>>,
@@ -77,6 +86,13 @@ impl Default for AddressBook {
 }
 
 impl AddressBook {
+    /// Process-wide local endpoint directory used by connection discovery.
+    /// The network owner registers sockets and publishes their endpoints here.
+    pub fn global() -> &'static Arc<Self> {
+        static ADDRESSES: OnceLock<Arc<AddressBook>> = OnceLock::new();
+        ADDRESSES.get_or_init(|| Arc::new(Self::new()))
+    }
+
     pub fn new() -> Self {
         let (ddns, _) = watch::channel(Arc::from([]));
         Self {
@@ -84,6 +100,7 @@ impl AddressBook {
                 inner: HashMap::new(),
                 outer: HashMap::new(),
                 agents: HashMap::new(),
+                interfaces: HashMap::new(),
                 nat: HashMap::new(),
                 ddns,
                 mdns: HashMap::new(),
@@ -92,31 +109,50 @@ impl AddressBook {
         }
     }
 
+    /// Publish an inner endpoint using the socket's actual binding and interface metadata.
+    /// Only the metadata is copied; the directory does not retain the socket.
     pub fn insert_inner(
         &self,
-        bound: SocketAddr,
+        socket: &UdpSocket,
         endpoint: EndpointAddr,
     ) -> Result<(), AddressBookError> {
         ensure_kind(endpoint, Kind::Direct)?;
-        self.insert(bound, endpoint, Scope::Internal)
+        self.insert(
+            socket.local_addr()?,
+            endpoint,
+            Scope::Internal,
+            socket.bound_device(),
+        )
     }
 
+    /// Publish an outer alias, sharing its binding's interface metadata.
     pub fn insert_outer(
         &self,
-        bound: SocketAddr,
+        socket: &UdpSocket,
         endpoint: EndpointAddr,
     ) -> Result<(), AddressBookError> {
         ensure_kind(endpoint, Kind::Direct)?;
-        self.insert(bound, endpoint, Scope::External)
+        self.insert(
+            socket.local_addr()?,
+            endpoint,
+            Scope::External,
+            socket.bound_device(),
+        )
     }
 
+    /// Publish an agent alias, sharing its binding's interface metadata.
     pub fn insert_agent(
         &self,
-        bound: SocketAddr,
+        socket: &UdpSocket,
         endpoint: EndpointAddr,
     ) -> Result<(), AddressBookError> {
         ensure_kind(endpoint, Kind::Mediate)?;
-        self.insert(bound, endpoint, Scope::External)
+        self.insert(
+            socket.local_addr()?,
+            endpoint,
+            Scope::External,
+            socket.bound_device(),
+        )
     }
 
     /// Replace an endpoint in its existing table, retaining its binding and NAT record.
@@ -151,7 +187,7 @@ impl AddressBook {
         Some(bound)
     }
 
-    /// Withdraw all endpoints and NAT information for a binding. Returns the withdrawn
+    /// Withdraw all endpoints, interface and NAT information for a binding. Returns the withdrawn
     /// endpoints for the network owner to clean up communication registrations.
     pub fn remove_bound(&self, bound: SocketAddr) -> Vec<EndpointAddr> {
         let mut state = self.state.lock().unwrap();
@@ -170,6 +206,7 @@ impl AddressBook {
         state.outer.retain(|_, candidate| *candidate != bound);
         state.agents.retain(|_, candidate| *candidate != bound);
         state.nat.remove(&bound);
+        state.interfaces.remove(&bound);
         if inner_changed {
             state.publish(Scope::Internal, bound);
         }
@@ -293,39 +330,55 @@ impl AddressBook {
     /// Generate sorted, deduplicated bootstrap candidates without opening sockets or Paths.
     /// Direct peers use the actual binding; mediated peers need a publicly reachable local
     /// return endpoint. The network owner must register each binding's Direct address as
-    /// well as published aliases with QuicProtocol. Socket liveness and interface preferences
-    /// are checked by the caller; scope compatibility alone does not establish reachability.
-    pub fn pathways_to(&self, peer: EndpointAddr) -> Vec<Pathway> {
-        if !usable_endpoint(peer) {
+    /// well as published aliases with QuicProtocol. mDNS sources restrict the interface
+    /// name and family using registered binding metadata; missing metadata cannot match.
+    /// Names must be the same canonical netdev names used at registration.
+    /// No system interface enumeration or IP-to-interface inference happens here.
+    /// The caller checks socket liveness; matching does not establish reachability.
+    pub fn pathways_to(&self, peer: EndpointAddr, source: &Source) -> Vec<Pathway> {
+        let family = peer.addr().family();
+        if !usable_endpoint(peer)
+            || matches!(source, Source::Mdns { family: expected, .. } if *expected != family)
+        {
             return Vec::new();
         }
         let Some(destination_scope) = EndpointAddr::direct(*peer).scope() else {
             return Vec::new();
         };
+        let mediated = peer.kind() == Kind::Mediate;
         let state = self.state.lock().unwrap();
-        let mut pathways = Vec::new();
-        for (&endpoint, &bound) in state.entries() {
-            let direct = EndpointAddr::direct(bound);
-            if !usable_endpoint(direct)
-                || bound.is_ipv4() != peer.addr().is_ipv4()
-                || !compatible_scope(direct.scope().unwrap(), destination_scope)
-                || !usable_endpoint(endpoint)
-            {
-                continue;
-            }
-            if peer.kind() == Kind::Direct || direct.is_globally_routable() {
-                if direct != peer {
-                    pathways.push(Pathway::new(direct, peer));
+        let mut pathways = state
+            .entries()
+            .filter_map(|(&endpoint, &bound)| {
+                let direct = EndpointAddr::direct(bound);
+                if bound.port() == 0
+                    || bound.family() != family
+                    || !compatible_scope(direct.scope()?, destination_scope)
+                    || !usable_endpoint(endpoint)
+                {
+                    return None;
                 }
-            }
-            if peer.kind() == Kind::Mediate
-                && endpoint.is_globally_routable()
-                && endpoint.addr().is_ipv4() == bound.is_ipv4()
-                && endpoint != peer
-            {
-                pathways.push(Pathway::new(endpoint, peer));
-            }
-        }
+                if let Source::Mdns { nic, .. } = source {
+                    let device = state.interfaces.get(&bound)?.as_ref()?;
+                    if device.name() != nic.as_ref()
+                        || matches!(bound, SocketAddr::V6(addr)
+                        if addr.scope_id() != 0 && addr.scope_id() != device.index().get())
+                    {
+                        return None;
+                    }
+                }
+                Some((direct, endpoint))
+            })
+            .flat_map(|(direct, endpoint)| {
+                std::iter::once(direct).chain(mediated.then_some(endpoint))
+            })
+            .filter(|local| {
+                *local != peer
+                    && local.addr().family() == family
+                    && (!mediated || local.is_globally_routable())
+            })
+            .map(|local| Pathway::new(local, peer))
+            .collect::<Vec<_>>();
         pathways.sort_unstable();
         pathways.dedup();
         pathways
@@ -336,6 +389,7 @@ impl AddressBook {
         bound: SocketAddr,
         endpoint: EndpointAddr,
         scope: Scope,
+        interface: Option<&qudp::BoundDevice>,
     ) -> Result<(), AddressBookError> {
         let mut state = self.state.lock().unwrap();
         state.ensure_absent(endpoint)?;
@@ -349,6 +403,7 @@ impl AddressBook {
         {
             return Err(AddressBookError::TooManyAgents);
         }
+        state.set_interface(bound, interface)?;
         state
             .addresses_mut(scope, endpoint.kind())
             .insert(endpoint, bound);
@@ -359,6 +414,23 @@ impl AddressBook {
 }
 
 impl State {
+    // Metadata is recorded atomically with endpoint publication. All aliases must
+    // agree, including an explicitly unscoped socket. remove_bound ends its lifetime.
+    fn set_interface(
+        &mut self,
+        bound: SocketAddr,
+        interface: Option<&qudp::BoundDevice>,
+    ) -> Result<(), AddressBookError> {
+        if let Some(known) = self.interfaces.get(&bound) {
+            if known.as_ref() != interface {
+                return Err(AddressBookError::ConflictingInterface(bound));
+            }
+        } else {
+            self.interfaces.insert(bound, interface.cloned());
+        }
+        Ok(())
+    }
+
     fn addresses_mut(
         &mut self,
         scope: Scope,
