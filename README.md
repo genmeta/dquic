@@ -109,8 +109,10 @@ And interconnection does not mean unfettered access: DQuic enforces name-centere
 
 ## Quick Start
 
-The `dquic` crate and its examples have been removed from this repository. See the current connection API and protocol documentation:
+The `dquic` crate re-exports the `qconnection` API and related types. Start with
+`dquic::QuicEndpoint` to connect or listen:
 
+- [Public crate API](dquic/README.md)
 - [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic)
 - [Connection API](qconnection/README.md)
 
