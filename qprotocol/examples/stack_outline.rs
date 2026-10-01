@@ -5,7 +5,7 @@ use std::{
 
 use qbase::net::{addr::EndpointAddr, route::Pathway};
 use qprotocol::{
-    AddressBook, BindUri, Dock, UdpSocket,
+    AddressBook, Dock, UdpSocket,
     addr_book::AddressBookError,
     protocol::{
         forward::ForwardProtocol,
@@ -79,14 +79,6 @@ async fn main() -> Result<(), Error> {
     addresses.insert_outer(&raw, outer)?;
     forward.serve(outer.addr(), &raw);
 
-    // A successful STUN agent is published independently of the Direct endpoints.
-    let agent = EndpointAddr::mediate(
-        "198.51.100.1:3478".parse().unwrap(),
-        "203.0.113.10:50000".parse().unwrap(),
-    );
-    quic.register(agent, &raw)?;
-    addresses.insert_agent(&raw, agent)?;
-
     // A second raw socket demonstrates the complete independent receive path.
     let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);
     dock.add(peer_raw.clone())?;
@@ -111,11 +103,10 @@ async fn main() -> Result<(), Error> {
     println!("mDNS: {:?}", addresses.mdns_endpoints(raw.local_addr()?));
     println!("DDNS: {:?}", addresses.ddns_endpoints());
 
-    // Ephemeral sockets join the same Dock/Topology, but never enter AddressBook.
-    let ephemeral = EphemeralSocket::bind(
-        dock.clone(),
-        BindUri::from("127.0.0.1:0").resolve_binding()?,
-    )?;
+    // Ephemeral sockets use the global Dock/Topology and never enter AddressBook.
+    let mut target = bound;
+    target.set_port(0);
+    let ephemeral = EphemeralSocket::bind(target)?;
     let ephemeral_bound = ephemeral.udp_socket().local_addr()?;
     let punched_endpoint = EndpointAddr::direct(ephemeral_bound);
     let punched = ephemeral;

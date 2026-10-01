@@ -3,13 +3,12 @@ use std::{
     future::{Future, poll_fn},
     io,
     net::SocketAddr,
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
 use qbase::{frame::PunchHelloFrame, net::route::Link};
-use qprotocol::{BindUri, Dock, EphemeralSocket, UdpSocket, bind_uri::Scheme};
+use qprotocol::{Dock, EphemeralSocket, UdpSocket};
 
 use super::{
     scheduler::SCHEDULER,
@@ -66,7 +65,7 @@ impl ProbeTable {
 }
 
 pub(super) struct PortPredictor {
-    bind_uri: BindUri,
+    bound: SocketAddr,
     dst: SocketAddr,
     device: String,
     probes: ProbeTable,
@@ -75,14 +74,16 @@ pub(super) struct PortPredictor {
 }
 
 impl PortPredictor {
-    pub(super) fn new(bind_uri: BindUri, dst: SocketAddr) -> io::Result<Self> {
-        let device = match bind_uri.scheme() {
-            Scheme::Iface => bind_uri.as_iface_bind_uri().unwrap().1.to_owned(),
-            Scheme::Inet => bind_uri.as_inet_bind_uri().unwrap().ip().to_string(),
-            _ => return Err(io::ErrorKind::Unsupported.into()),
+    pub(super) fn new(bound: SocketAddr, dst: SocketAddr) -> io::Result<Self> {
+        let source = Dock::global().find_socket(bound).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "source socket unavailable")
+        })?;
+        let device = match source.bound_device() {
+            Some(device) => device.name().to_owned(),
+            None => bound.ip().to_string(),
         };
         Ok(Self {
-            bind_uri,
+            bound,
             dst,
             device,
             probes: ProbeTable::new(),
@@ -112,28 +113,11 @@ impl PortPredictor {
         Ok(())
     }
 
-    fn port_to_bind_uri(&self, port: u16) -> BindUri {
-        let uri = match self.bind_uri.scheme() {
-            Scheme::Iface => {
-                let (family, device, _) = self.bind_uri.as_iface_bind_uri().unwrap();
-                format!(
-                    "iface://{family}.{device}:{port}?{}=true",
-                    BindUri::TEMPORARY_PROP
-                )
-            }
-            Scheme::Inet => {
-                let ip = self.bind_uri.as_inet_bind_uri().unwrap().ip();
-                format!("inet://{ip}:{port}?{}=true", BindUri::TEMPORARY_PROP)
-            }
-            _ => unreachable!(),
-        };
-        BindUri::from_str(&uri).expect("generated probe BindUri")
-    }
-
     fn create_socket(&self) -> io::Result<EphemeralSocket> {
         let port = MIN_PORT + rand::random::<u16>() % (u16::MAX - MIN_PORT);
-        let bind = self.port_to_bind_uri(port);
-        EphemeralSocket::bind(Dock::global().clone(), bind.resolve_binding()?)
+        let mut target = self.bound;
+        target.set_port(port);
+        EphemeralSocket::bind(target)
     }
 
     fn take_matching_done(&mut self, tx: &Transaction) -> Option<EphemeralSocket> {
