@@ -245,6 +245,10 @@ impl Control for NewReno {
         self.congestion_window
     }
 
+    fn bytes_in_flight(&self) -> usize {
+        self.bytes_in_flight
+    }
+
     fn pacing_rate(&self) -> Option<usize> {
         None
     }
