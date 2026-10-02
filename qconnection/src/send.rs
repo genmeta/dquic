@@ -1,5 +1,5 @@
 pub use qtransport::packet::assemble as packet;
-mod task;
+pub(crate) mod task;
 use std::{
     future::Future,
     pin::Pin,
@@ -60,9 +60,9 @@ fn packet_error(error: qtransport::keys::PacketError) -> crate::Error {
 pub struct Burst<'a> {
     cc: &'a ArcCC,
     anti_amplifier: &'a AntiAmplifier,
-    datagrams: &'a mut [BytesMut],
-    frames: &'a mut Vec<Frame>,
-    pns: &'a mut BurstPns,
+    pub(crate) datagrams: &'a mut [BytesMut],
+    pub(crate) frames: &'a mut Vec<Frame>,
+    pub(crate) pns: &'a mut BurstPns,
 }
 
 pub fn burst<'a>(
@@ -82,11 +82,11 @@ pub fn burst<'a>(
 }
 
 pub struct Collector<'a, 'path> {
-    burst: Burst<'a>,
+    pub(crate) burst: Burst<'a>,
     paths: &'path Arc<Paths>,
     path: &'path Arc<Path>,
     dcid_cell: &'path OnceLock<ArcCidCell<ArcReliableFrames>>,
-    dcid: Option<BorrowedCid<'path, ArcReliableFrames>>,
+    pub(crate) dcid: Option<BorrowedCid<'path, ArcReliableFrames>>,
 }
 
 impl<'a> Burst<'a> {
@@ -238,7 +238,7 @@ impl Collector<'_, '_> {
         self.burst.pns.iter().map(Vec::len).sum()
     }
 
-    fn collect_long<H>(
+    pub(crate) fn collect_long<H>(
         &mut self,
         cx: &mut Context<'_>,
         space: &Space<ArcKeys>,
@@ -448,6 +448,3 @@ impl Collector<'_, '_> {
         self.burst.pns[epoch].push(packet);
     }
 }
-
-#[cfg(test)]
-mod tests;

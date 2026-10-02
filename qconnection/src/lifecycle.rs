@@ -5,7 +5,7 @@ use std::{future::Future, time::Duration};
 use qbase::{ArcReceiving, Epoch};
 use qcongestion::Transport as _;
 
-mod client;
+pub(crate) mod client;
 mod interceptor;
 mod server;
 
@@ -16,7 +16,7 @@ pub use server::server_growing;
 use crate::{CloseReason, ConnPhase, Error, Paths};
 
 /// Wait for a future's output or a connection close reason.
-async fn any<T>(
+pub(crate) async fn any<T>(
     future: impl Future<Output = T>,
     mut closed: ArcReceiving<CloseReason>,
 ) -> Result<T, CloseReason> {
@@ -87,45 +87,5 @@ async fn finish(paths: &Paths, reason: &CloseReason) {
     }
     for path in active_paths {
         paths.remove(&path);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{future::pending, time::Duration};
-
-    use qbase::error::{ErrorKind, QuicError};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn any_preserves_future_output() {
-        let value = String::from("ready");
-        let closed = ArcReceiving::default();
-        assert_eq!(any(async { &value }, closed.clone()).await.unwrap(), &value);
-        assert_eq!(
-            any(async { Err::<(), _>("failed") }, closed).await.unwrap(),
-            Err("failed"),
-        );
-    }
-
-    #[tokio::test]
-    async fn any_close_interrupts_a_pending_future() {
-        let closed = ArcReceiving::default();
-        let waiting = tokio::spawn(any(pending::<()>(), closed.clone()));
-        tokio::task::yield_now().await;
-        closed.set(CloseReason::Internal(QuicError::with_default_fty(
-            ErrorKind::ConnectionRefused,
-            "connection closed while waiting",
-        )));
-
-        let reason = tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
-        assert!(matches!(reason, CloseReason::Internal(error)
-            if error.kind() == ErrorKind::ConnectionRefused
-                && error.reason() == "connection closed while waiting"));
     }
 }
