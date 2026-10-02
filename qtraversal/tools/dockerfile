@@ -1,33 +1,8 @@
-ARG TARGETPLATFORM=linux/amd64
-FROM --platform=$TARGETPLATFORM ubuntu:24.04
-ENV DEBIAN_FRONTEND=noninteractive \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+FROM rust:bookworm
 
-# # 1. 使用阿里云APT镜像源
-# RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-#     sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
-
-# 2. 分离系统包安装层（利用Docker缓存）
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
-    iproute2 \
-    iptables \
-    libssl-dev \
-    pkg-config \
-    tcpdump \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 iptables procps tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 安装Rust（独立层）
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path
-
-# # 4. 配置Cargo镜像源（使用TOML格式）
-# RUN mkdir -p $CARGO_HOME && \
-#     printf '[source.crates-io]\nreplace-with = "tuna"\n\n[source.tuna]\nregistry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"\n\n[net]\ngit-fetch-with-cli = true\nretry = 2\n' > $CARGO_HOME/config.toml
-
-# RUN rustup override set nightly
-
-# 5. 验证工具链
-RUN rustc --version && cargo --version
+WORKDIR /dquic
+ENV CARGO_TARGET_DIR=/build
