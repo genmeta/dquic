@@ -71,6 +71,7 @@ impl Ord for SentPacket {
 pub(crate) struct RcvdRecords {
     epoch: Epoch,
     ack_immedietly: bool,
+    ack_eliciting_since_ack: usize,
     latest_rcvd_time: Option<Instant>,
     largest_rcvd_packet: Option<(u64, Instant)>,
     max_ack_delay: Duration,
@@ -85,6 +86,7 @@ impl RcvdRecords {
         Self {
             epoch,
             ack_immedietly: false,
+            ack_eliciting_since_ack: 0,
             latest_rcvd_time: None,
             largest_rcvd_packet: None,
             max_ack_delay,
@@ -92,6 +94,8 @@ impl RcvdRecords {
     }
 
     pub(crate) fn on_pkt_rcvd(&mut self, pn: u64) {
+        self.ack_eliciting_since_ack = self.ack_eliciting_since_ack.saturating_add(1);
+        self.ack_immedietly |= self.ack_eliciting_since_ack >= 2;
         // An endpoint MUST acknowledge all ack-eliciting Initial and Handshake packets immediately
         if self.epoch == Epoch::Initial || self.epoch == Epoch::Handshake {
             self.ack_immedietly = true;
@@ -107,7 +111,7 @@ impl RcvdRecords {
         }
         self.ack_immedietly |= self
             .largest_rcvd_packet
-            .is_some_and(|(largest_pn, _)| pn < largest_pn);
+            .is_some_and(|(largest_pn, _)| pn < largest_pn || pn > largest_pn.saturating_add(1));
 
         self.largest_rcvd_packet =
             self.largest_rcvd_packet
@@ -149,11 +153,13 @@ impl RcvdRecords {
             self.largest_rcvd_packet = None;
             self.latest_rcvd_time = None;
             self.ack_immedietly = false;
+            self.ack_eliciting_since_ack = 0;
         }
     }
 
     fn clear(&mut self) {
         self.ack_immedietly = false;
+        self.ack_eliciting_since_ack = 0;
         self.latest_rcvd_time = None;
         self.largest_rcvd_packet = None;
     }

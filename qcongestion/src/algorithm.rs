@@ -27,6 +27,8 @@ pub trait Control: Send {
 
     fn congestion_window(&self) -> usize;
 
+    fn bytes_in_flight(&self) -> usize;
+
     fn pacing_rate(&self) -> Option<usize>;
 
     fn remove_from_bytes_in_flight(&mut self, packets: &mut dyn Iterator<Item = &SentPacket>);
