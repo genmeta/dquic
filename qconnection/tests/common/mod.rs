@@ -172,3 +172,33 @@ pub fn use_system_resolver() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
 }
+
+/// Build an isolated Initial phase for component tests without a live router.
+pub fn initial_phase(
+    role: qbase::role::Role,
+    scid: ConnectionId,
+    odcid: ConnectionId,
+    keys: qtls::BidirectionalKeys,
+) -> qconnection::InitialPhase {
+    let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
+    let router = Arc::new(qtransport::router::QuicRouter::new());
+    let (inbox, _) = qtransport::packet::channel::new();
+    let cid_registry = qconnection::CidRegistry::new(
+        role,
+        odcid,
+        qconnection::ArcLocalCids::new(
+            scid,
+            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
+        ),
+        qbase::cid::ArcRemoteCids::new(2, reliable_frames.clone()),
+    );
+    qconnection::InitialPhase::new((scid, odcid), keys, reliable_frames, cid_registry)
+}
+
+/// A ready CID cell for component tests that do not run the connection lifecycle.
+pub fn dcid(cid: ConnectionId) -> qbase::cid::ArcCidCell<qconnection::ArcReliableFrames> {
+    let remote =
+        qbase::cid::ArcRemoteCids::new(2, qconnection::ArcReliableFrames::with_capacity(0));
+    remote.set_initial_dcid(cid);
+    remote.apply_dcid()
+}

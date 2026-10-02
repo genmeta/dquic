@@ -10,7 +10,7 @@ use qprotocol::UdpSocket;
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
 use super::*;
-use crate::{ArcConnPhase, InitialPhase};
+use crate::ArcConnPhase;
 
 struct ScriptedResolver(Mutex<Option<ResolveResult>>);
 
@@ -58,7 +58,8 @@ fn paths() -> Arc<Paths> {
         .into();
     Paths::new(
         Role::Client,
-        ArcConnPhase::initial(InitialPhase::new(
+        ArcConnPhase::initial(crate::tests::initial_phase(
+            Role::Client,
             ConnectionId::from_slice(b"clientid"),
             ConnectionId::from_slice(b"original"),
             keys,

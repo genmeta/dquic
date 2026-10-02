@@ -6,7 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    cid::{ConnectionId, GenUniqueCid},
+    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
     error::{ErrorKind, QuicError},
     net::route::Scopes,
@@ -20,8 +20,8 @@ use qtransport::{packet::channel, router::QuicRouter};
 use tokio::sync::oneshot;
 
 use crate::{
-    Accepted, ArcConnPhase, ArcReliableFrames, Connected, Error, InitialPhase, Paths, TlsContext,
-    client_growing,
+    Accepted, ArcConnPhase, ArcLocalCids, ArcReliableFrames, CidRegistry, Connected, Error,
+    InitialPhase, Paths, TlsContext, client_growing,
 };
 
 pub struct QuicEndpoint {
@@ -88,18 +88,18 @@ impl QuicEndpoint {
             limits: Default::default(),
         })
         .map_err(|error| internal_error(error.to_string()))?;
-        let odcid = ConnectionId::random_gen(8);
+        let origin_dcid = ConnectionId::random_gen(8);
         let initial_keys = identity
-            .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
+            .initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref())
             .map_err(|error| internal_error(error.to_string()))?;
         let reliable_frames = ArcReliableFrames::with_capacity(0);
         let (inbox, rcvd_pkt) = channel::new();
-        let cid_registry =
+        let router_registry =
             QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
-        let scid = cid_registry.gen_unique_cid();
+        let initial_scid = router_registry.gen_unique_cid();
         let mut client_params = self.client_parameters.clone();
         client_params
-            .set(ParameterId::InitialSourceConnectionId, scid)
+            .set(ParameterId::InitialSourceConnectionId, initial_scid)
             .map_err(|error| internal_error(error.to_string()))?;
         let tls = TlsContext::client(
             &identity,
@@ -109,11 +109,20 @@ impl QuicEndpoint {
                 .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
             &client_params,
         )?;
-        let phase = ArcConnPhase::initial(InitialPhase::with_components(
-            scid,
-            odcid,
+        let cid_registry = CidRegistry::new(
+            Role::Client,
+            origin_dcid,
+            ArcLocalCids::new(initial_scid, router_registry),
+            ArcRemoteCids::new(
+                client_params.get::<u64>(ParameterId::ActiveConnectionIdLimit),
+                reliable_frames.clone(),
+            ),
+        );
+        let phase = ArcConnPhase::initial(InitialPhase::new(
+            (initial_scid, origin_dcid),
             initial_keys,
             reliable_frames,
+            cid_registry,
         ));
         let idle = ArcConnIdle::new(
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
@@ -131,7 +140,6 @@ impl QuicEndpoint {
             paths,
             rcvd_pkt,
             tls,
-            cid_registry,
             token,
             move |result| {
                 let _ = deliver.send(result);
@@ -201,7 +209,7 @@ impl ServerRegistry {
         GLOBAL.get_or_init(|| {
             QuicRouter::global().on_incoming(|packet, pathway, link| {
                 let odcid = *packet.dcid();
-                let peer_cid = *packet.scid();
+                let client_scid = *packet.scid();
                 let (inbox, rcvd_pkt) = channel::new();
                 let router = QuicRouter::global();
                 let route = router.insert(odcid.into(), inbox.clone());
@@ -210,18 +218,23 @@ impl ServerRegistry {
                 };
 
                 let reliable_frames = ArcReliableFrames::with_capacity(0);
-                let cid_registry =
+                let router_registry =
                     router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone());
-                let scid = cid_registry.gen_unique_cid();
-                let phase = ArcConnPhase::initial(InitialPhase::with_components(
-                    scid,
+                let initial_scid = router_registry.gen_unique_cid();
+                let cid_registry = CidRegistry::new(
+                    Role::Server,
                     odcid,
+                    ArcLocalCids::new(initial_scid, router_registry),
+                    ArcRemoteCids::new(2, reliable_frames.clone()),
+                );
+                let phase = ArcConnPhase::initial(InitialPhase::new(
+                    (initial_scid, client_scid),
                     initial_keys,
                     reliable_frames,
+                    cid_registry,
                 ));
                 let idle =
                     ArcConnIdle::new(Duration::ZERO, Duration::ZERO, DEFAULT_HEARTBEAT_INTERVAL);
-                phase.set_dcid(peer_cid);
                 let paths = Paths::new(Role::Server, phase, idle);
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
@@ -229,12 +242,17 @@ impl ServerRegistry {
 
                 let tick = crate::recv::tick(paths.clone());
                 let growing = crate::server_growing(
-                    route,
                     rcvd_pkt,
                     paths,
                     ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
                 );
-                tokio::spawn(async move { tokio::join!(growing, tick).0 });
+                tokio::spawn(async move {
+                    // Keep late Initial packets on this route through Closing/Draining.
+                    let reason = tokio::join!(growing, tick).0;
+                    // Dropping the guard removes the ODCID entry from the router.
+                    drop(route);
+                    reason
+                });
             });
             Self(RwLock::new(HashMap::new()))
         })

@@ -34,7 +34,8 @@ fn keys(server: bool) -> qtls::BidirectionalKeys {
 
 #[tokio::test]
 async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
-    let phase = crate::ArcConnPhase::initial(InitialPhase::new(
+    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+        Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
@@ -67,7 +68,9 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
 
 #[tokio::test(start_paused = true)]
 async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
-    let initial = InitialPhase::new(
+    let dcid_cell = OnceLock::new();
+    let initial = crate::tests::initial_phase(
+        Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
@@ -106,7 +109,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
             &mut frames,
             &mut pns,
         )
-        .collect(&paths, &path, ConnectionId::from_slice(b"serverid")),
+        .collect(&paths, &path, &dcid_cell),
     );
     assert!(futures::poll!(&mut collect).is_pending());
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
@@ -119,12 +122,13 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
 
 #[tokio::test]
 async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
-    let initial = InitialPhase::new(
+    let initial = crate::tests::initial_phase(
+        Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let space = initial.initial.clone();
+    let space = initial.initial_space.clone();
     space.crypto.writer().write_all(b"hello").await.unwrap();
     let phase = crate::ArcConnPhase::initial(initial);
     let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
@@ -151,7 +155,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
         .unwrap();
     assert!(paths.snapshot().is_empty());
     assert_eq!(path.state(), qtransport::path::PathState::Retired);
-    assert!(paths.closed().now_or_never().is_some());
+    assert!(paths.close_reason().now_or_never().is_some());
 
     let header =
         LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
@@ -177,14 +181,16 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
 
 #[tokio::test]
 async fn collector_mixes_spaces_and_selected_crypto_advances() {
-    let initial = InitialPhase::new(
+    let dcid_cell = OnceLock::new();
+    let initial = crate::tests::initial_phase(
+        Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
     let message = vec![42; 7200];
     initial
-        .initial
+        .initial_space
         .crypto
         .writer()
         .write_all(&message)
@@ -227,7 +233,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         &mut frames,
         &mut pns,
     )
-    .collect(&paths, &path, paths.phase().get().dcid())
+    .collect(&paths, &path, &dcid_cell)
     .now_or_never()
     .unwrap()
     .unwrap();
@@ -269,10 +275,12 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
 
 #[tokio::test]
 async fn only_undecided_client_initial_replays_flighting_crypto() {
+    let dcid_cell = OnceLock::new();
     for role in [Role::Client, Role::Server] {
         for handshaking in [false, true] {
             for selected in [u8::MAX, 0, 1, 2] {
-                let phase = crate::ArcConnPhase::initial(InitialPhase::new(
+                let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+                    role,
                     ConnectionId::from_slice(b"localcid"),
                     ConnectionId::from_slice(b"original"),
                     keys(role == Role::Server),
@@ -281,7 +289,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     unreachable!()
                 };
                 initial
-                    .initial
+                    .initial_space
                     .crypto
                     .writer()
                     .write_all(b"hello")
@@ -290,7 +298,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                 if handshaking {
                     phase.enter_handshake(Arc::new(Space::new(
                         Epoch::Handshake,
-                        initial.initial.keys.clone(),
+                        initial.initial_space.keys.clone(),
                     )));
                 }
                 let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
@@ -322,7 +330,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         &mut frames,
                         &mut pns,
                     )
-                    .collect(&paths, &path, phase.get().dcid())
+                    .collect(&paths, &path, &dcid_cell)
                     .now_or_never();
                     let replays = role == Role::Client && !handshaking && selected == u8::MAX;
                     if selected != 0 && (attempt == 0 || replays) {
@@ -376,13 +384,16 @@ fn packet_continues_after_pending_and_no_space_sources() {
 
 #[tokio::test]
 async fn mixed_packets_consume_shared_budget_once_including_envelope() {
+    let dcid_cell = OnceLock::new();
     for overhead in [0, 40] {
-        let initial = InitialPhase::new(
+        let initial = crate::tests::initial_phase(
+            Role::Client,
             ConnectionId::from_slice(b"clientid"),
             ConnectionId::from_slice(b"original"),
             keys(false),
         );
-        let space = initial.initial.clone();
+        let space = initial.initial_space.clone();
+        let terminator = initial.terminator.clone();
         space.crypto.writer().write_all(b"hello").await.unwrap();
         let handshake = Space::new(Epoch::Handshake, space.keys.clone());
         handshake
@@ -416,7 +427,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
             &mut frames,
             &mut pns,
         )
-        .collect(&paths, &path, paths.phase().get().dcid());
+        .collect(&paths, &path, &dcid_cell);
         let mut limits = Constraints {
             send_quota: 2400,
             credit: 2400,
@@ -430,6 +441,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
                 .collect_long(
                     &mut cx,
                     &space,
+                    &terminator,
                     header().initial(vec![]),
                     &mut space.crypto.outgoing(),
                     &mut limits,
@@ -445,6 +457,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
                 .collect_long(
                     &mut cx,
                     &handshake,
+                    &terminator,
                     header().handshake(),
                     &mut handshake.crypto.outgoing(),
                     &mut limits,
@@ -464,6 +477,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
                 .collect_long(
                     &mut cx,
                     &handshake,
+                    &terminator,
                     header().handshake(),
                     &mut handshake.crypto.outgoing(),
                     &mut limits,
@@ -605,6 +619,7 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
 
 #[tokio::test]
 async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription() {
+    let dcid_cell = OnceLock::new();
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counter(AtomicUsize);
     impl std::task::Wake for Counter {
@@ -612,7 +627,8 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let phase = crate::ArcConnPhase::initial(InitialPhase::new(
+    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+        Role::Server,
         ConnectionId::from_slice(b"serverid"),
         ConnectionId::from_slice(b"original"),
         keys(true),
@@ -635,7 +651,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
         panic!()
     };
     initial
-        .initial
+        .initial_space
         .rcvd_journal
         .on_rcvd_pn(0, true, Duration::from_secs(1));
     let mut datagrams = [BytesMut::with_capacity(1200)];
@@ -651,7 +667,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
         &mut frames,
         &mut pns,
     )
-    .collect(&paths, &path, paths.phase().get().dcid());
+    .collect(&paths, &path, &dcid_cell);
     assert!(Pin::new(&mut collector).poll(&mut cx).is_pending());
     assert_eq!(
         count.0.load(Ordering::Relaxed),
@@ -660,7 +676,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
     );
     drop(collector);
     initial
-        .initial
+        .initial_space
         .crypto
         .writer()
         .write_all(b"hello")
@@ -682,6 +698,8 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
 
 #[tokio::test]
 async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
+    let first_dcid = OnceLock::new();
+    let second_dcid = OnceLock::new();
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counter(AtomicUsize);
     impl std::task::Wake for Counter {
@@ -689,7 +707,8 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let phase = crate::ArcConnPhase::initial(InitialPhase::new(
+    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+        Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
@@ -729,7 +748,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
         &mut first_frames,
         &mut first_pns,
     )
-    .collect(&paths, &first, paths.phase().get().dcid());
+    .collect(&paths, &first, &first_dcid);
     let mut two = burst(
         &second.cc,
         &second.anti_amplifier,
@@ -737,7 +756,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
         &mut second_frames,
         &mut second_pns,
     )
-    .collect(&paths, &second, paths.phase().get().dcid());
+    .collect(&paths, &second, &second_dcid);
     assert!(
         Pin::new(&mut one)
             .poll(&mut Context::from_waker(&wa))
@@ -753,7 +772,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
         panic!()
     };
     initial
-        .initial
+        .initial_space
         .crypto
         .writer()
         .write_all(b"hello")
@@ -770,7 +789,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
     drop(two);
     let before = b.0.load(Ordering::Relaxed);
     initial
-        .initial
+        .initial_space
         .crypto
         .writer()
         .write_all(b"again")
@@ -788,80 +807,93 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
 
 #[tokio::test]
 async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() {
-    let initial = InitialPhase::new(
-        ConnectionId::from_slice(b"server00"),
-        ConnectionId::from_slice(b"original"),
-        keys(true),
-    );
-    let terminator = initial.terminator.clone();
-    let space = initial.initial.clone();
-    let phase = crate::ArcConnPhase::initial(initial);
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Server, phase, idle.clone());
-    let path = Arc::new(Path::new(
-        Pathway::new(
-            EndpointAddr::direct("127.0.0.1:33001".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
-        ),
-        paths.handshake.clone(),
-        idle.timer(),
-        paths.phase().get().trackers(),
-    ));
-    path.validate();
-    path.decide(true);
-    let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
-    terminator.on_error(
-        &crate::CloseReason::Internal(error.clone()),
-        Duration::from_secs(3),
-    );
-    space.crypto.on_error(&error.into());
-    let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
-    let mut frames = Vec::new();
-    let mut pns = std::array::from_fn(|_| Vec::new());
-    let mut collector = burst(
-        &path.cc,
-        &path.anti_amplifier,
-        &mut datagrams,
-        &mut frames,
-        &mut pns,
-    )
-    .collect(&paths, &path, paths.phase().get().dcid());
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        Pin::new(&mut collector).poll(&mut cx),
-        Poll::Ready(Ok(1))
-    ));
-    let pn = collector.burst.pns[Epoch::Initial][0].pn;
-    assert!(
-        space
-            .sent_journal
-            .lock_guard()
-            .frames(pn)
-            .any(|frame| matches!(frame, Frame::Close(_)))
-    );
-    assert!(
-        space
-            .sent_journal
-            .lock_guard()
-            .frames(pn)
-            .all(|frame| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
-    );
-    drop(collector);
-    pns[Epoch::Initial].clear();
-    let mut collector = burst(
-        &path.cc,
-        &path.anti_amplifier,
-        &mut datagrams,
-        &mut frames,
-        &mut pns,
-    )
-    .collect(&paths, &path, paths.phase().get().dcid());
-    assert!(Pin::new(&mut collector).poll(&mut cx).is_pending());
-    terminator.terminate();
-    assert!(matches!(
-        Pin::new(&mut collector).poll(&mut cx),
-        Poll::Ready(Err(_))
-    ));
+    for epoch in [Epoch::Initial, Epoch::Handshake] {
+        let dcid_cell = OnceLock::new();
+        let initial = crate::tests::initial_phase(
+            Role::Server,
+            ConnectionId::from_slice(b"server00"),
+            ConnectionId::from_slice(b"original"),
+            keys(true),
+        );
+        let terminator = initial.terminator.clone();
+        let mut space = initial.initial_space.clone();
+        let phase = crate::ArcConnPhase::initial(initial);
+        if epoch == Epoch::Handshake {
+            let handshake = Arc::new(Space::new(
+                Epoch::Handshake,
+                ArcKeys::new(Arc::new(keys(true))),
+            ));
+            phase.enter_handshake(handshake.clone());
+            space.retire();
+            space = handshake;
+        }
+        let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        let paths = Paths::new(Role::Server, phase, idle.clone());
+        let path = Arc::new(Path::new(
+            Pathway::new(
+                EndpointAddr::direct("127.0.0.1:33001".parse().unwrap()),
+                EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
+            ),
+            paths.handshake.clone(),
+            idle.timer(),
+            paths.phase().get().trackers(),
+        ));
+        path.validate();
+        path.decide(true);
+        let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
+        terminator.on_error(
+            &crate::CloseReason::Internal(error.clone()),
+            Duration::from_secs(3),
+        );
+        space.crypto.on_error(&error.into());
+        let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
+        let mut frames = Vec::new();
+        let mut pns = std::array::from_fn(|_| Vec::new());
+        let mut collector = burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        )
+        .collect(&paths, &path, &dcid_cell);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut collector).poll(&mut cx),
+            Poll::Ready(Ok(1))
+        ));
+        let pn = collector.burst.pns[epoch][0].pn;
+        assert!(
+            space
+                .sent_journal
+                .lock_guard()
+                .frames(pn)
+                .any(|frame| matches!(frame, Frame::Close(_)))
+        );
+        assert!(
+            space
+                .sent_journal
+                .lock_guard()
+                .frames(pn)
+                .all(|frame| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
+        );
+        drop(collector);
+        pns[epoch].clear();
+        let mut collector = burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        )
+        .collect(&paths, &path, &dcid_cell);
+        assert!(Pin::new(&mut collector).poll(&mut cx).is_pending());
+        terminator.terminate();
+        assert!(matches!(
+            Pin::new(&mut collector).poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+    }
 }
 
 fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
@@ -914,7 +946,11 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
         .start(qtls::QuicVersion::V1, bytes::Bytes::new())
         .unwrap();
     while let Some(event) = client.next_event() {
-        if let qtls::TlsEvent::WriteCrypto { epoch: level, bytes } = event {
+        if let qtls::TlsEvent::WriteCrypto {
+            epoch: level,
+            bytes,
+        } = event
+        {
             server.receive_crypto(level, &bytes).unwrap();
         }
     }
@@ -932,7 +968,8 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         ArcParameters,
         handy::{client_parameters, server_parameters},
     };
-    let initial = InitialPhase::new(
+    let initial = crate::tests::initial_phase(
+        Role::Server,
         ConnectionId::from_slice(b"server00"),
         ConnectionId::from_slice(b"original"),
         keys(true),
@@ -949,35 +986,50 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         Arc::new(client),
         Arc::new(server_parameters()),
     );
-    let router = Arc::new(qtransport::router::QuicRouter::new());
-    let (inbox, _receiver) = qtransport::packet::channel::new();
-    let registry = crate::CidRegistry::new(
-        Role::Server,
-        initial.odcid,
-        crate::ArcLocalCids::new(
-            initial.scid,
-            router.registry_on_issuing_scid(inbox, initial.reliable_frames.clone()),
-        ),
-        qbase::cid::ArcRemoteCids::new(2, initial.reliable_frames.clone()),
-    );
-    let dcid = registry.remote.apply_dcid();
-    registry
-        .remote
-        .apply_initial_dcid(ConnectionId::from_slice(b"client00"), &dcid);
+    let registry = initial.cid_registry.clone();
     let handshake = Arc::new(Space::new(
         Epoch::Handshake,
         ArcKeys::new(Arc::new(keys(true))),
     ));
-    let mature = crate::MaturePhase::new(
-        &initial,
-        handshake,
-        parameters,
-        ConnectionId::from_slice(b"client00"),
-        initial.reliable_frames.clone(),
-        registry,
-        dcid,
-        qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
+    let reliable_frames = initial.reliable_frames.clone();
+    let streams = crate::DataStreams::new(
+        parameters.clone(),
+        Box::new(qbase::sid::handy::ConsistentConcurrency::new(
+            parameters.local(qbase::param::ParameterId::InitialMaxStreamsBidi),
+            parameters.local(qbase::param::ParameterId::InitialMaxStreamsUni),
+        )),
+        reliable_frames.clone(),
+        None,
     );
+    let flow = crate::FlowController::new(
+        parameters.remote(qbase::param::ParameterId::InitialMaxData),
+        parameters.local(qbase::param::ParameterId::InitialMaxData),
+        reliable_frames.clone(),
+    );
+    let data = Arc::new(qtransport::space::DataSpace::new(
+        qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
+        streams,
+        reliable_frames.clone(),
+    ));
+    let puncher = qtraversal::punch::ArcPuncher::new(
+        reliable_frames,
+        qtraversal::punch::ProbeEncoder::new(data.clone(), ConnectionId::from_slice(b"client00")),
+    );
+    let mature = Arc::new(MaturePhase {
+        spaces: qtransport::space::Spaces {
+            initial: initial.initial_space.clone(),
+            handshake,
+            data,
+        },
+        scid: initial.scid,
+        flow_ctrl: flow,
+        cid_registry: registry,
+        dcid: ConnectionId::from_slice(b"client00"),
+        parameters,
+        puncher,
+        trackers: initial.trackers.clone(),
+        terminator: initial.terminator.clone(),
+    });
     (initial, mature)
 }
 
@@ -1031,20 +1083,24 @@ fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     let ConnPhase::Handshake(handshake) = phase.get() else {
         panic!("expected Handshake");
     };
-    assert!(Arc::ptr_eq(&handshake.initial, &mature.spaces.initial));
+    assert!(Arc::ptr_eq(
+        &handshake.initial_space,
+        &mature.spaces.initial
+    ));
     assert_eq!(handshake.scid, mature.scid);
     assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"peer0000"));
     phase.cancel(&b);
     phase.set_dcid(ConnectionId::from_slice(b"peer0001"));
-    assert_eq!(handshake.dcid(), ConnectionId::from_slice(b"peer0001"));
-    assert_eq!(first.0.load(Ordering::Relaxed), 3);
+    assert_eq!(handshake.dcid(), ConnectionId::from_slice(b"peer0000"));
+    assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"peer0000"));
+    assert_eq!(first.0.load(Ordering::Relaxed), 2);
     assert_eq!(second.0.load(Ordering::Relaxed), 1);
     drop(phase.poll_phase(&mut cx));
     drop(phase.poll_phase(&mut cx));
     drop(phase.poll_phase(&mut Context::from_waker(&b)));
 
     phase.enter_mature(mature);
-    assert_eq!(first.0.load(Ordering::Relaxed), 4);
+    assert_eq!(first.0.load(Ordering::Relaxed), 3);
     assert_eq!(second.0.load(Ordering::Relaxed), 2);
     assert_eq!(
         Arc::strong_count(&first),
@@ -1062,12 +1118,39 @@ fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     assert_eq!(Arc::strong_count(&second), 2);
     phase.cancel(&a);
     phase.set_dcid(ConnectionId::from_slice(b"ignored0"));
-    assert_eq!(first.0.load(Ordering::Relaxed), 4);
+    assert_eq!(first.0.load(Ordering::Relaxed), 3);
     assert_eq!(phase.get().dcid(), ConnectionId::from_slice(b"client00"));
+}
+
+#[test]
+fn phase_upgrades_preserve_cid_cleanup_and_termination() {
+    let (initial, mature) = mature_server_phase();
+    let cid_registry = initial.cid_registry.clone();
+    let terminator = initial.terminator.clone();
+    let phase = crate::ArcConnPhase::initial(initial);
+    phase.enter_handshake(mature.spaces.handshake.clone());
+    let ConnPhase::Handshake(handshake) = phase.get() else {
+        panic!("expected Handshake");
+    };
+    phase.enter_mature(mature.clone());
+
+    cid_registry.local.clear();
+    assert!(handshake.cid_registry.local.initial_scid().is_none());
+    assert!(mature.cid_registry.local.initial_scid().is_none());
+    terminator.terminate();
+    assert!(matches!(
+        &*handshake.terminator.lock_guard(),
+        crate::terminate::Terminator::Terminated(_)
+    ));
+    assert!(matches!(
+        &*phase.terminator().lock_guard(),
+        crate::terminate::Terminator::Terminated(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
 async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
+    let dcid_cell = OnceLock::new();
     let (initial, mature) = mature_server_phase();
     let phase = crate::ArcConnPhase::initial(initial);
     let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
@@ -1081,6 +1164,9 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         idle.timer(),
         phase.get().trackers(),
     ));
+    dcid_cell
+        .set(crate::tests::dcid(paths.phase().get().dcid()))
+        .unwrap();
     path.validate();
     path.decide(true);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
@@ -1110,7 +1196,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
                 &mut frames,
                 &mut pns,
             )
-            .collect(&paths, &path, phase.get().dcid())
+            .collect(&paths, &path, &dcid_cell)
             .now_or_never()
             .unwrap()
             .unwrap();
@@ -1140,7 +1226,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
             &mut frames,
             &mut pns,
         )
-        .collect(&paths, &path, phase.get().dcid())
+        .collect(&paths, &path, &dcid_cell)
         .now_or_never()
         .expect("loss must make the original CRYPTO range sendable")
         .unwrap();
@@ -1155,7 +1241,279 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
     }
 }
 #[tokio::test]
+async fn selected_sender_requests_its_cell_before_other_paths_are_released() {
+    use qbase::frame::{NewConnectionIdFrame, io::ReceiveFrame};
+
+    for confirmed_first in [false, true] {
+        let (initial, mature) = mature_server_phase();
+        let remote = &mature.cid_registry.remote;
+        remote.set_initial_dcid(mature.dcid);
+        let next = ConnectionId::from_slice(b"client01");
+        remote
+            .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
+            .unwrap();
+        let phase = crate::ArcConnPhase::initial(initial);
+        let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        let paths = Paths::new(Role::Server, phase.clone(), idle.clone());
+        let make_path = |port| {
+            let path = Arc::new(Path::new(
+                Pathway::new(
+                    EndpointAddr::direct(([127, 0, 0, 1], port).into()),
+                    EndpointAddr::direct("127.0.0.1:34300".parse().unwrap()),
+                ),
+                paths.handshake.clone(),
+                idle.timer(),
+                phase.get().trackers(),
+            ));
+            paths
+                .entries
+                .lock()
+                .unwrap()
+                .insert(path.pathway, path.clone());
+            path
+        };
+        let other = make_path(34301);
+        let selected = make_path(34302);
+        paths.select_path(&selected);
+        other.validate();
+        selected.validate();
+        let selected_cell = OnceLock::new();
+        let other_cell = OnceLock::new();
+        let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
+        let mut frames = Vec::new();
+        let mut pns = std::array::from_fn(|_| Vec::new());
+        let mut cx = Context::from_waker(Waker::noop());
+        // Selection alone does not request a cell while sending Initial packets.
+        let _ = Pin::new(
+            &mut burst(
+                &selected.cc,
+                &selected.anti_amplifier,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            )
+            .collect(&paths, &selected, &selected_cell),
+        )
+        .poll(&mut cx);
+        assert!(selected_cell.get().is_none());
+        phase.enter_mature(mature.clone());
+        if confirmed_first {
+            paths.handshake_confirmed();
+        }
+        // Poll the losing sender first, even when TLS has already confirmed the handshake.
+        assert!(
+            Pin::new(
+                &mut burst(
+                    &other.cc,
+                    &other.anti_amplifier,
+                    &mut datagrams,
+                    &mut frames,
+                    &mut pns
+                )
+                .collect(&paths, &other, &other_cell)
+            )
+            .poll(&mut cx)
+            .is_pending()
+        );
+        assert!(other_cell.get().is_none());
+        let _ = Pin::new(
+            &mut burst(
+                &selected.cc,
+                &selected.anti_amplifier,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            )
+            .collect(&paths, &selected, &selected_cell),
+        )
+        .poll(&mut cx);
+        assert!(
+            matches!(selected_cell.get().unwrap().borrow_cid(selected.send_waker.clone()),
+            Poll::Ready(Some(cid)) if *cid == mature.dcid)
+        );
+        // The sender notifies path control after collection releases the phase lock.
+        paths.activate_paths(&selected);
+        if !confirmed_first {
+            assert_eq!(selected.selected(), Path::SELECTED);
+            assert_eq!(other.selected(), Path::SUSPEND);
+            paths.handshake_confirmed();
+            assert_eq!(selected.selected(), Path::SELECTED);
+            assert_eq!(other.selected(), Path::SUSPEND);
+            paths.activate_paths(&selected);
+        }
+        assert_eq!(selected.selected(), Path::HANDSHAKED);
+        assert_eq!(other.selected(), Path::HANDSHAKED);
+        for entries in &mut pns {
+            entries.clear();
+        }
+        let _ = Pin::new(
+            &mut burst(
+                &other.cc,
+                &other.anti_amplifier,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            )
+            .collect(&paths, &other, &other_cell),
+        )
+        .poll(&mut cx);
+        assert!(
+            matches!(other_cell.get().unwrap().borrow_cid(other.send_waker.clone()),
+            Poll::Ready(Some(cid)) if *cid == next)
+        );
+        paths.retire_all();
+    }
+}
+
+#[tokio::test]
+async fn pending_path_cid_allows_long_headers_and_later_supplies_one_rtt_header() {
+    let dcid_cell = OnceLock::new();
+    use qbase::{
+        frame::{NewConnectionIdFrame, io::ReceiveFrame},
+        packet::GetDcid,
+    };
+
+    let (initial, mature) = mature_server_phase();
+    let remote = &mature.cid_registry.remote;
+    remote.set_initial_dcid(mature.dcid);
+    let initial_cell = remote.apply_dcid();
+    let phase = crate::ArcConnPhase::initial(initial);
+    phase.enter_mature(mature.clone());
+    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let paths = Paths::new(Role::Server, phase, idle.clone());
+    let path = Arc::new(Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:34201".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:34202".parse().unwrap()),
+        ),
+        paths.handshake.clone(),
+        idle.timer(),
+        paths.phase().get().trackers(),
+    ));
+    assert!(dcid_cell.get().is_none());
+    path.validate();
+    path.decide(true);
+    for crypto in [
+        &mature.spaces.initial.crypto,
+        &mature.spaces.handshake.crypto,
+        &mature.spaces.data.crypto,
+    ] {
+        crypto.writer().write_all(b"crypto").await.unwrap();
+    }
+    let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
+    let mut frames = Vec::new();
+    let mut pns = std::array::from_fn(|_| Vec::new());
+    assert_eq!(
+        burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns
+        )
+        .collect(&paths, &path, &dcid_cell)
+        .now_or_never()
+        .unwrap()
+        .unwrap(),
+        2
+    );
+    assert!(pns[Epoch::Data].is_empty());
+    for epoch in [Epoch::Initial, Epoch::Handshake] {
+        let index = pns[epoch][0].index;
+        let ParsedPacket::Data(packet) = PacketReader::new(datagrams[index].clone(), 8)
+            .next()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(*packet.header.dcid(), mature.dcid);
+    }
+    for entries in &mut pns {
+        entries.clear();
+    }
+
+    let mut collector = burst(
+        &path.cc,
+        &path.anti_amplifier,
+        &mut datagrams,
+        &mut frames,
+        &mut pns,
+    )
+    .collect(&paths, &path, &dcid_cell);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(Pin::new(&mut collector).poll(&mut cx).is_pending());
+    let next = ConnectionId::from_slice(b"client01");
+    remote
+        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
+        .unwrap();
+    assert!(matches!(
+        Pin::new(&mut collector).poll(&mut cx),
+        Poll::Ready(Ok(1))
+    ));
+    // Keep the CID borrowed while the assembled datagram awaits UDP submission.
+    let borrowed = collector.dcid.take().unwrap();
+    drop(collector);
+    let ParsedPacket::Data(packet) =
+        PacketReader::new(datagrams[pns[Epoch::Data][0].index].clone(), 8)
+            .next()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(*packet.header.dcid(), next);
+    initial_cell.retire();
+    let replacement = ConnectionId::from_slice(b"client02");
+    remote
+        .recv_frame(NewConnectionIdFrame::new(
+            replacement,
+            2u32.into(),
+            2u32.into(),
+        ))
+        .unwrap();
+    assert_eq!(*borrowed, next);
+    assert_eq!(paths.phase().get().dcid(), mature.dcid);
+    drop(borrowed);
+    assert!(
+        matches!(dcid_cell.get().unwrap().borrow_cid(path.send_waker.clone()),
+        Poll::Ready(Some(cid)) if *cid == replacement)
+    );
+
+    pns[Epoch::Data].clear();
+    mature
+        .spaces
+        .data
+        .crypto
+        .writer()
+        .write_all(b"next")
+        .await
+        .unwrap();
+    burst(
+        &path.cc,
+        &path.anti_amplifier,
+        &mut datagrams,
+        &mut frames,
+        &mut pns,
+    )
+    .collect(&paths, &path, &dcid_cell)
+    .now_or_never()
+    .unwrap()
+    .unwrap();
+    let ParsedPacket::Data(packet) =
+        PacketReader::new(datagrams[pns[Epoch::Data][0].index].clone(), 8)
+            .next()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(*packet.header.dcid(), replacement);
+}
+
+#[tokio::test]
 async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
+    let dcid_cell = OnceLock::new();
     let (initial, mature) = mature_server_phase();
     for crypto in [
         &mature.spaces.initial.crypto,
@@ -1177,6 +1535,9 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         idle.timer(),
         paths.phase().get().trackers(),
     ));
+    dcid_cell
+        .set(crate::tests::dcid(paths.phase().get().dcid()))
+        .unwrap();
     path.validate();
     path.decide(true);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
@@ -1190,7 +1551,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             &mut frames,
             &mut pns
         )
-        .collect(&paths, &path, paths.phase().get().dcid())
+        .collect(&paths, &path, &dcid_cell)
         .now_or_never()
         .unwrap()
         .unwrap(),
@@ -1224,7 +1585,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             &mut frames,
             &mut pns
         )
-        .collect(&paths, &path, paths.phase().get().dcid())
+        .collect(&paths, &path, &dcid_cell)
         .now_or_never()
         .is_none()
     );
@@ -1238,7 +1599,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             &mut frames,
             &mut pns
         )
-        .collect(&paths, &path, paths.phase().get().dcid())
+        .collect(&paths, &path, &dcid_cell)
         .now_or_never(),
         Some(Ok(1))
     ));
@@ -1279,7 +1640,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         &crate::CloseReason::Internal(error.clone()),
         Duration::from_secs(3),
     );
-    mature.flow.on_conn_error(&error.clone().into());
+    mature.flow_ctrl.on_conn_error(&error.clone().into());
     mature.spaces.data.crypto.on_error(&error.into());
     assert_eq!(
         burst(
@@ -1289,7 +1650,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             &mut frames,
             &mut pns
         )
-        .collect(&paths, &path, paths.phase().get().dcid())
+        .collect(&paths, &path, &dcid_cell)
         .now_or_never()
         .unwrap()
         .unwrap(),

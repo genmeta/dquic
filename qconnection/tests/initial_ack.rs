@@ -120,6 +120,22 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     }
     assert_eq!(acks, 1);
     assert!(!accepted.load(Ordering::Relaxed));
+
+    let incoming = Arc::new(AtomicBool::new(false));
+    let observed = incoming.clone();
+    QuicRouter::global().on_incoming(move |_, _, _| {
+        observed.store(true, Ordering::Relaxed);
+    });
+    QuicRouter::global().receive(
+        BytesMut::from(packet.as_ref()),
+        Pathway::new(local, EndpointAddr::direct(client_addr)),
+        Link::new(server_addr, client_addr),
+        8,
+    );
+    assert!(
+        !incoming.load(Ordering::Relaxed),
+        "a repeated Initial must keep routing to the existing connection"
+    );
     QuicProtocol::global().unregister(local, &server_socket);
     ServerRegistry::global().remove("localhost");
 }
