@@ -265,6 +265,7 @@ impl Collector<'_, '_> {
         let mut ping = (self.burst.pns[space.epoch].is_empty()
             && self.burst.cc.need_send_ack_eliciting(space.epoch) > 0)
             .then_some(PingFrame);
+        let mut heartbeat = (self.count() == 0).then(|| self.path.heartbeat.clone());
         limits.probe_quota = if ping.is_some() { 1200 } else { 0 };
         limits.max_size = 1200;
         limits.min_size = if space.epoch == Epoch::Initial {
@@ -285,7 +286,7 @@ impl Collector<'_, '_> {
         };
         match packet.assemble(
             cx,
-            [&mut terminator, &mut ack, crypto, &mut ping],
+            [&mut terminator, &mut ack, crypto, &mut heartbeat, &mut ping],
             self.burst.frames,
         ) {
             Poll::Ready(Ok(n)) if n > 0 => {
@@ -366,9 +367,7 @@ impl Collector<'_, '_> {
         let mut crypto = space.crypto.outgoing();
         let mut reliable = space.reliable_frames.clone();
         let mut streams = space.streams.clone();
-        let mut heartbeat = self.burst.pns[Epoch::Data]
-            .is_empty()
-            .then_some(&self.path.activity);
+        let mut heartbeat = (self.count() == 0).then(|| self.path.heartbeat.clone());
         let buffer = &mut self.burst.datagrams[index];
         buffer.clear();
         let (pn, key) = keys

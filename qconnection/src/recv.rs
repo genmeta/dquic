@@ -39,6 +39,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     let epoch = space.epoch;
     let role = paths.role();
     let terminator = paths.phase().terminator();
+    let idle = paths.idle();
     let mut initial_scid = None;
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, _)) = packets.recv().await {
@@ -77,8 +78,10 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 return Ok(());
             };
             path.on_datagram_received(received_bytes);
-            terminator.on_rcvd_packet(Instant::now());
-            path.activity.on_rcvd(PacketContent::default());
+            let now = Instant::now();
+            terminator.on_rcvd_packet(now);
+            let _ = idle.on_rcvd_at(now);
+            let _ = path.heartbeat.on_rcvd_at(content, now);
             if let Some(dcid) = initial_scid {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
                 paths.phase().set_dcid(dcid);
@@ -151,6 +154,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
 ) {
     let close_reason = paths.close_reason();
     let terminator = paths.phase().terminator();
+    let idle = paths.idle();
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = packets.recv().await {
         parsed_frames.clear();
@@ -184,8 +188,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                 return Ok(());
             };
             path.on_datagram_received(received_bytes);
-            terminator.on_rcvd_packet(Instant::now());
-            path.activity.on_rcvd(PacketContent::default());
+            let now = Instant::now();
+            terminator.on_rcvd_packet(now);
+            let _ = idle.on_rcvd_at(now);
+            let _ = path.heartbeat.on_rcvd_at(content, now);
             // Start validation only after authentication and path admission.
             paths.start_validation(&path);
             for frame in parsed_frames.drain(..) {
@@ -279,7 +285,6 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
 pub async fn tick(paths: Arc<Paths>) {
     let phase = paths.phase();
     let terminator = phase.terminator();
-    let closed = paths.close_reason();
     while matches!(&*terminator.lock_guard(), Terminator::NoError(_)) {
         let now = Instant::now();
         let snapshot = phase.get();
@@ -294,25 +299,6 @@ pub async fn tick(paths: Arc<Paths>) {
                 phase.spaces.handshake.on_tick(now);
                 phase.spaces.data.on_tick(now);
             }
-        }
-        let active_paths = paths.snapshot();
-        for path in &active_paths {
-            path.activity.on_tick(now);
-        }
-        let pto = active_paths
-            .iter()
-            .map(|p| p.cc.pto_base(Epoch::Data))
-            .max()
-            .unwrap_or(std::time::Duration::from_secs(1));
-        if matches!(&*terminator.lock_guard(), Terminator::NoError(_))
-            && active_paths
-                .first()
-                .is_some_and(|path| path.activity.timed_out(now, pto))
-        {
-            closed.set(CloseReason::Internal(QuicError::with_default_fty(
-                ErrorKind::NoViablePath,
-                "connection idle timeout",
-            )));
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

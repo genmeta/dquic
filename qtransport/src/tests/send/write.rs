@@ -313,8 +313,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn failed_sealing_leaves_journal_cancellation_to_the_caller() {
+    #[tokio::test]
+    async fn failed_sealing_leaves_journal_cancellation_to_the_caller() {
         let [(_client, transport, _path), _peer] = crate::tests::pair(1);
         let keys = crate::tests::keys(&transport);
         let journal = ArcSentJournal::default();
