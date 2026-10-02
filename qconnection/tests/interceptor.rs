@@ -15,7 +15,7 @@ use qtls::{ClientStart, QuicVersion, TlsEvent};
 #[tokio::test]
 async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
     let (client_parameters, _) = common::parameters();
-    let client = common::client_without_alpn();
+    let client = common::anonymous_client();
     let mut endpoint = common::quic_endpoint();
     endpoint
         .listen(Scope::Loopback | Scope::Internal, |_| {})

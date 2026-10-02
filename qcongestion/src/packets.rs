@@ -566,7 +566,7 @@ mod tests {
         rcvd_records.on_pkt_rcvd(10);
         assert_eq!(rcvd_records.need_ack(), None);
         rcvd_records.on_pkt_rcvd(15);
-        assert_eq!(rcvd_records.need_ack(), None);
+        assert_eq!(rcvd_records.need_ack().unwrap().0, 15);
         rcvd_records.on_pkt_rcvd(11);
         assert_eq!(rcvd_records.need_ack().unwrap().0, 15);
     }
@@ -580,5 +580,19 @@ mod tests {
         rcvd_records.on_ack_sent(10, 100);
 
         assert_eq!(rcvd_records.largest_rcvd_packet.unwrap().0, 101);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_ack_eliciting_packets_trigger_ack_without_waiting_for_delay() {
+        let mut records = RcvdRecords::new(Epoch::Data, Duration::from_millis(25));
+        records.on_pkt_rcvd(0);
+        assert!(records.need_ack().is_none());
+        records.on_pkt_rcvd(1);
+        assert_eq!(records.need_ack().unwrap().0, 1);
+        records.on_ack_sent(0, 1);
+        records.on_pkt_rcvd(2);
+        assert!(records.need_ack().is_none());
+        tokio::time::advance(Duration::from_millis(26)).await;
+        assert_eq!(records.need_ack().unwrap().0, 2);
     }
 }

@@ -44,7 +44,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         .register(local, &server_socket)
         .unwrap();
 
-    let client = common::client_without_alpn();
+    let client = common::anonymous_client();
     let (parameters, _) = common::parameters();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
     let (_, hello) = tls.read_msg().await.unwrap();
@@ -136,6 +136,6 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         !incoming.load(Ordering::Relaxed),
         "a repeated Initial must keep routing to the existing connection"
     );
-    QuicProtocol::global().unregister(local, &server_socket);
+    QuicProtocol::global().unregister(server_socket.local_addr().unwrap());
     ServerRegistry::global().remove("localhost");
 }

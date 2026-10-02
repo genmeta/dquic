@@ -734,19 +734,215 @@ mod tests {
         fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
     }
 
+    fn packet_frames(
+        streams: &DataStreams<MockFrameSender>,
+        waker: &std::task::Waker,
+    ) -> Vec<Frame> {
+        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader};
+
+        let mut bytes = BytesMut::new();
+        let mut frames = Vec::new();
+        let mut limits = Constraints {
+            flow_ctrl: 1200,
+            send_quota: 1200,
+            credit: 1200,
+            max_size: 1200,
+            ..Default::default()
+        };
+        let result = streams.poll_dump(
+            &mut Context::from_waker(waker),
+            &mut ConstraintBuffer::new(
+                &mut bytes,
+                &mut limits,
+                OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                0,
+                0,
+            ),
+            &mut frames,
+        );
+        assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
+        frames
+    }
+
     #[test]
-    fn receive_limits_follow_the_local_stream_direction() {
-        use qbase::{
-            error::ErrorKind,
-            frame::StreamFrame,
-            param::ParameterId,
-            sid::StreamId,
+    fn busy_streams_take_turns_before_either_exhausts_its_window() {
+        use crate::send::CancelStream;
+
+        let streams = DataStreams::new(
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut writers = Vec::new();
+        for _ in 0..2 {
+            let Poll::Ready(Ok(Some((id, mut writer)))) = streams.poll_open_uni_stream(&mut cx)
+            else {
+                panic!("stream should open");
+            };
+            writer
+                .write(bytes::Bytes::from(vec![7; 64 * 1024]))
+                .unwrap();
+            writers.push((id, writer));
+        }
+        let mut sent = std::collections::HashMap::new();
+        assert_eq!(streams.fresh_bytes_up_to(0), 0);
+        assert_eq!(streams.fresh_bytes_up_to(1200), 1200);
+        assert_eq!(streams.fresh_bytes(), 128 * 1024);
+        for _ in 0..10 {
+            for frame in packet_frames(&streams, cx.waker()) {
+                if let Frame::Stream(frame, ()) = frame {
+                    *sent.entry(frame.stream_id()).or_insert(0usize) += frame.len();
+                }
+            }
+        }
+        assert_eq!(
+            streams.fresh_bytes(),
+            128 * 1024 - sent.values().sum::<usize>()
+        );
+        for (_, writer) in &mut writers {
+            writer.cancel(0);
+        }
+        assert_eq!(sent.len(), 2, "one busy stream must not starve the other");
+        let bytes = sent.values().copied().collect::<Vec<_>>();
+        assert!(bytes[0].abs_diff(bytes[1]) <= 4096, "{sent:?}");
+    }
+
+    #[test]
+    fn full_packet_does_not_subscribe_to_idle_streams() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Wake, Waker},
         };
 
         use crate::send::CancelStream;
 
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let streams = DataStreams::new(
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut writers = Vec::new();
+        for _ in 0..32 {
+            let Poll::Ready(Ok(Some((_, writer)))) = streams.poll_open_uni_stream(&mut cx) else {
+                panic!("stream should open");
+            };
+            writers.push(writer);
+        }
+        // The highest ID is visited first and fills the packet completely.
+        writers
+            .last_mut()
+            .unwrap()
+            .write(bytes::Bytes::from(vec![7; 4096]))
+            .unwrap();
+        packet_frames(&streams, &waker);
+        for writer in &mut writers[..31] {
+            writer.write(bytes::Bytes::from_static(b"next")).unwrap();
+        }
+        let wakes = counter.0.load(Ordering::Relaxed);
+        for writer in &mut writers {
+            writer.cancel(0);
+        }
+        assert_eq!(
+            wakes, 0,
+            "a full packet must not poll and subscribe idle streams"
+        );
+    }
+
+    #[test]
+    fn idle_stream_resumes_for_writes_retransmission_and_fin() {
+        let streams = DataStreams::new(
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
+            Box::new(DemandConcurrency),
+            MockFrameSender,
+            None,
+        );
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let Poll::Ready(Ok(Some((_, mut writer)))) = streams.poll_open_uni_stream(&mut cx) else {
+            panic!("stream should open")
+        };
+        writer.write(bytes::Bytes::from_static(b"first")).unwrap();
+        let frames = packet_frames(&streams, cx.waker());
+        let Frame::Stream(first, ()) = frames[0] else {
+            panic!("expected stream data")
+        };
+        assert_eq!(streams.fresh_bytes(), 0);
+
+        streams.may_loss_data(&first);
+        assert_eq!(
+            streams.fresh_bytes(),
+            0,
+            "retransmissions use no new flow credit"
+        );
+        let frames = packet_frames(&streams, cx.waker());
+        let Frame::Stream(resent, ()) = frames[0] else {
+            panic!("expected retransmission")
+        };
+        assert_eq!(resent.range(), first.range());
+        streams.on_data_acked(resent);
+
+        writer.write(bytes::Bytes::from_static(b"next")).unwrap();
+        assert_eq!(streams.fresh_bytes(), 4);
+        let frames = packet_frames(&streams, cx.waker());
+        let Frame::Stream(next, ()) = frames[0] else {
+            panic!("expected new data")
+        };
+        assert_eq!(next.range(), 5..9);
+        streams.on_data_acked(next);
+
+        assert!(writer.poll_shutdown(&mut cx).is_pending());
+        let frames = packet_frames(&streams, cx.waker());
+        let Frame::Stream(fin, ()) = frames[0] else {
+            panic!("expected FIN")
+        };
+        assert!(fin.is_fin());
+        assert_eq!(fin.range(), 9..9);
+        streams.may_loss_data(&fin);
+        let frames = packet_frames(&streams, cx.waker());
+        let Frame::Stream(resent_fin, ()) = frames[0] else {
+            panic!("expected FIN retransmission")
+        };
+        assert!(resent_fin.is_fin());
+        assert_eq!(resent_fin.range(), fin.range());
+        streams.on_data_acked(resent_fin);
+        assert!(matches!(writer.poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn receive_limits_follow_the_local_stream_direction() {
+        use qbase::{error::ErrorKind, frame::StreamFrame, param::ParameterId, sid::StreamId};
+
+        use crate::send::CancelStream;
+
         for role in [Role::Client, Role::Server] {
-            for (local, dir, limit) in [(true, Dir::Bi, 3), (false, Dir::Bi, 5), (false, Dir::Uni, 7)] {
+            for (local, dir, limit) in [
+                (true, Dir::Bi, 3),
+                (false, Dir::Bi, 5),
+                (false, Dir::Uni, 7),
+            ] {
                 let mut client = client_parameters();
                 let mut server = server_parameters();
                 for (id, value) in [
@@ -815,9 +1011,7 @@ mod tests {
             None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let Poll::Ready(Ok(Some((_, mut writer)))) =
-            streams.poll_open_uni_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, mut writer)))) = streams.poll_open_uni_stream(&mut cx) else {
             panic!("ready parameters must allow opening the stream immediately");
         };
         let ready = writer.poll_ready(&mut cx);
@@ -843,14 +1037,10 @@ mod tests {
             None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let Poll::Ready(Ok(Some((_, (_, mut bi))))) =
-            streams.poll_open_bi_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, (_, mut bi))))) = streams.poll_open_bi_stream(&mut cx) else {
             panic!("ready parameters must allow opening the bidirectional stream");
         };
-        let Poll::Ready(Ok(Some((_, mut uni)))) =
-            streams.poll_open_uni_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, mut uni)))) = streams.poll_open_uni_stream(&mut cx) else {
             panic!("ready parameters must allow opening the unidirectional stream");
         };
         let bi_ready = bi.poll_ready(&mut cx);

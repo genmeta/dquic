@@ -691,6 +691,9 @@ fn timed_out() -> io::Error {
 mod observation_tests;
 
 #[cfg(test)]
+mod transaction_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -66,7 +66,6 @@ impl Binding {
         );
         Dock::global().add(socket.clone()).unwrap();
         let endpoint = EndpointAddr::direct(socket.local_addr().unwrap());
-        QuicProtocol::global().register(endpoint, &socket).unwrap();
         Self {
             socket,
             registered: vec![endpoint],
@@ -105,9 +104,6 @@ impl Binding {
 
 impl Drop for Binding {
     fn drop(&mut self) {
-        for endpoint in &self.registered {
-            QuicProtocol::global().unregister(*endpoint, &self.socket);
-        }
         Dock::global().remove(&self.socket);
     }
 }

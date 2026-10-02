@@ -433,6 +433,43 @@ mod tests {
     }
 
     #[test]
+    fn empty_credit_refunds_do_not_wake_the_sender() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Wake, Waker},
+        };
+
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let controller = ArcSendControler::new(100, SendControllerBroker::default());
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let Poll::Ready(Ok(credit)) = controller.poll_credit(&mut cx, 0) else {
+            panic!("zero credit must be available");
+        };
+        drop(credit);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+        let Poll::Ready(Ok(mut credit)) = controller.poll_credit(&mut cx, 10) else {
+            panic!("credit must be available");
+        };
+        credit.post_sent(10);
+        drop(credit);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+        // Returning actual credit must still wake another blocked sender.
+        let credit = controller.credit(90).unwrap();
+        assert_eq!(controller.credit(1).unwrap().available(), 0);
+        drop(credit);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn test_send_controler() {
         let broker = SendControllerBroker::default();
         let controler = ArcSendControler::new(0, broker.clone());

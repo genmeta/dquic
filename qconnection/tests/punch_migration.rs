@@ -40,9 +40,6 @@ impl Socket {
     fn new() -> Self {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         Dock::global().add(socket.clone()).unwrap();
-        QuicProtocol::global()
-            .register(socket.local_addr().unwrap().into(), &socket)
-            .unwrap();
         Self(socket)
     }
 
@@ -58,7 +55,6 @@ impl Socket {
 
     fn withdraw(&self) {
         AddressBook::global().remove_bound(self.0.local_addr().unwrap());
-        QuicProtocol::global().unregister(self.endpoint(), &self.0);
         Dock::global().remove(&self.0);
     }
 }
@@ -156,7 +152,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         created.send((phase, paths, growing)).unwrap();
     });
 
-    let client = common::client_without_alpn();
+    let client = common::anonymous_client();
     let odcid = ConnectionId::random_gen(8);
     let reliable = ArcReliableFrames::with_capacity(0);
     let (inbox, received) = channel::new();

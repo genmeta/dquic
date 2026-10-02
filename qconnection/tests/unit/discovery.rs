@@ -12,7 +12,7 @@ use qbase::{
     role::Role,
     time::ArcConnIdle,
 };
-use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{AddressBook, Dock, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
 use crate::{ArcConnPhase, Error, Paths, lifecycle::client::resolve_paths};
@@ -93,7 +93,6 @@ impl LocalSocket {
         Dock::global().add(socket.clone()).unwrap();
         let bound = socket.local_addr().unwrap();
         let endpoint = EndpointAddr::direct(bound);
-        QuicProtocol::global().register(endpoint, &socket).unwrap();
         book.insert_inner(&socket, endpoint).unwrap();
         Self(socket)
     }
@@ -105,7 +104,6 @@ impl LocalSocket {
 
 impl Drop for LocalSocket {
     fn drop(&mut self) {
-        QuicProtocol::global().unregister(self.endpoint(), &self.0);
         Dock::global().remove(&self.0);
     }
 }
