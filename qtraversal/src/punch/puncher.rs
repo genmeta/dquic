@@ -693,6 +693,9 @@ mod observation_tests;
 #[cfg(test)]
 mod transaction_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+mod network_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
