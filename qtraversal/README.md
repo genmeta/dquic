@@ -1,5 +1,15 @@
 # qtraversal
 
+## STUN server example
+
+Build the standalone node with `cargo build --release -p qtraversal --example stun_server`.
+It serves two UDP ports, supports public address mappings and changed-source
+responses, and enables dquic forwarding with `--relay`. See
+[deployment instructions](examples/stun-server/README.md) for the three-node
+configuration and systemd files.
+
+## Architecture
+
 `qtraversal` owns connection-scoped NAT hole punching for QUIC. `qprotocol::Dock`
 registers sockets, their direct QUIC addresses and receive tasks. `AddressBook`
 owns the local endpoint directory, NAT records and ordered address subscriptions.
