@@ -1,10 +1,13 @@
 # qtraversal
 
 `qtraversal` owns connection-scoped NAT hole punching for QUIC. `qprotocol::Dock`
-registers sockets and manages their receive tasks. `AddressBook` owns the local
-endpoint directory, NAT records and ordered address subscriptions. The network
-owner registers socket aliases with `QuicProtocol` before publishing endpoints,
-and runs STUN mapping discovery and NAT classification independently.
+registers sockets, their direct QUIC addresses and receive tasks. `AddressBook`
+owns the local endpoint directory, NAT records and ordered address subscriptions.
+The network owner registers extra socket aliases with `QuicProtocol` before
+explicitly publishing endpoints through `AddressBook`. It withdraws addresses
+through `AddressBook::remove_bound(bound)` before removing the socket from Dock;
+Dock revokes every QUIC endpoint for that binding with `unregister(bound)`.
+The network owner runs STUN mapping discovery and NAT classification independently.
 
 `ArcPuncher` keeps connection-specific address advertisements and punch
 transactions, the active and passive NAT strategy matrix, port predictor and

@@ -29,7 +29,7 @@ impl EphemeralSocket {
         let dock = Dock::global();
         let udp = Arc::new(UdpSocket::bind(bound)?);
         let endpoint = EndpointAddr::direct(udp.local_addr()?);
-        let registration = dock.register(udp.clone())?.ok_or_else(|| {
+        let registration = dock.add(udp.clone())?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::AddrInUse,
                 "socket is already registered in Dock",
@@ -40,11 +40,6 @@ impl EphemeralSocket {
             endpoint,
             registration,
         };
-        // The owner rolls back its Dock registration if QUIC registration fails.
-        dock.topology()
-            .quic()
-            .register(endpoint, &socket.udp)
-            .map_err(|error| io::Error::new(io::ErrorKind::AddrInUse, error))?;
         Ok(socket)
     }
 
@@ -78,10 +73,6 @@ impl EphemeralSocket {
 
 impl Drop for EphemeralSocket {
     fn drop(&mut self) {
-        Dock::global()
-            .topology()
-            .quic()
-            .unregister(self.endpoint, &self.udp);
         Dock::global().remove_registration(self.endpoint.addr(), self.registration.id());
     }
 }

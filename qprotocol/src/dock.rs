@@ -5,6 +5,7 @@ use std::{
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
+use qbase::net::addr::EndpointAddr;
 use tokio::task::{AbortHandle, Id, JoinHandle};
 
 use crate::{socket::UdpSocket, topology::Topology};
@@ -20,7 +21,7 @@ pub struct Dock {
 }
 
 impl Dock {
-    /// Process-wide socket dock and its single protocol topology.
+    /// Process-wide socket dock and its protocol topology.
     /// First initialization starts STUN DNS and requires a Tokio runtime.
     pub fn global() -> &'static Arc<Self> {
         static DOCK: OnceLock<Arc<Dock>> = OnceLock::new();
@@ -44,38 +45,39 @@ impl Dock {
         &self.topology
     }
 
-    pub fn add(self: &Arc<Self>, socket: Arc<UdpSocket>) -> io::Result<bool> {
-        self.register(socket)
-            .map(|registration| registration.is_some())
-    }
-
-    /// Return a handle so the owner can revoke this registration. Keeping the
-    /// handle alive prevents reuse of its task ID after reception has stopped.
-    pub(crate) fn register(
-        self: &Arc<Self>,
-        socket: Arc<UdpSocket>,
-    ) -> io::Result<Option<AbortHandle>> {
+    /// Register reception and the direct QUIC address.
+    /// The caller manages publication and withdrawal through [`crate::AddressBook`].
+    /// The handle identifies this registration even after reception has stopped.
+    pub fn add(self: &Arc<Self>, socket: Arc<UdpSocket>) -> io::Result<Option<AbortHandle>> {
         let bound = socket.local_addr()?;
-        // Hold the entry until the socket and task are installed together. A task
-        // that finishes immediately must wait for this registration before cleanup.
+        // Keep protocol registration and receiver installation under one entry
+        // lock so immediate receiver failure cannot leave a partially added socket.
         let entry = self.sockets.entry(bound);
         if let Entry::Occupied(existing) = &entry {
             let registration = existing.get();
             if registration.socket.upgrade().is_some() {
                 return Ok(None);
             }
-            self.topology
-                .stun()
-                .unregister_socket(bound, &registration.socket);
-            registration.task.abort();
+            self.cleanup(bound, registration);
         }
 
-        self.topology.stun().register_socket(bound, &socket);
         let registered = Arc::downgrade(&socket);
+        self.topology.stun().register_socket(bound, &socket);
+        let direct = EndpointAddr::direct(bound);
+        if let Err(error) = self.topology.quic().register(direct, &socket) {
+            self.topology.stun().unregister_socket(bound, &registered);
+            if let Entry::Occupied(entry) = entry {
+                entry.remove();
+            }
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, error));
+        }
         let dock = Arc::downgrade(self);
         let topology = self.topology.clone();
         let task = tokio::spawn(async move {
-            let _ = topology.receive(socket).await;
+            // Retain the socket through cleanup so every QUIC alias can be revoked.
+            if let Err(error) = topology.receive(socket.clone()).await {
+                tracing::warn!(%bound, %error, "UDP reception stopped");
+            }
             if let Some(dock) = dock.upgrade() {
                 dock.remove_registration(bound, tokio::task::id());
             }
@@ -129,17 +131,23 @@ impl Dock {
                 if registration.task.id() != id {
                     return false;
                 }
-                // Unregister while holding the entry: the same socket may be added
-                // again, so pointer identity alone cannot protect the new STUN entry.
-                self.topology
-                    .stun()
-                    .unregister_socket(bound, &registration.socket);
-                registration.task.abort();
+                // Hold the entry through cleanup: an old receiver must not revoke a
+                // newer registration, even when it uses the same socket instance.
+                self.cleanup(bound, registration);
                 true
             })
             .is_some()
     }
 
+    fn cleanup(&self, bound: SocketAddr, registration: &SocketRegistration) {
+        self.topology.quic().unregister(bound);
+        self.topology
+            .stun()
+            .unregister_socket(bound, &registration.socket);
+        registration.task.abort();
+    }
+
+    /// Find the registered socket for a local binding.
     pub fn find_socket(&self, bound: SocketAddr) -> Option<Arc<UdpSocket>> {
         let registration = self.sockets.get(&bound)?;
         let socket = registration.socket.upgrade();
@@ -173,12 +181,7 @@ impl Dock {
 
 impl Drop for Dock {
     fn drop(&mut self) {
-        for socket in self.sockets.iter() {
-            self.topology
-                .stun()
-                .unregister_socket(*socket.key(), &socket.socket);
-            socket.task.abort();
-        }
+        self.shutdown();
     }
 }
 

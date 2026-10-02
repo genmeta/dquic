@@ -159,15 +159,21 @@ where
             return;
         }
         if let Entry::Vacant(entry) = self.0.transaction.entry(id) {
+            if self.0.punch_history.contains_key(&id) {
+                return;
+            }
             let tx = Arc::new(Transaction::new());
             let puncher = self.clone();
             let task_tx = tx.clone();
             let task = tokio::spawn(async move {
-                let result = puncher.punch_actively(local, remote, task_tx).await;
-                puncher.0.punch_history.insert(id, ());
-                puncher.0.transaction.remove(&id);
+                let result = puncher.punch_actively(local, remote, task_tx.clone()).await;
+                if !puncher.finish_transaction(id, &task_tx) {
+                    return;
+                }
                 if let Err(error) = result {
                     tracing::debug!(target: "punch", %id, %error, "active punch ended");
+                } else {
+                    tracing::debug!(target: "punch", %id, "active punch completed");
                 }
             });
             entry.insert((task.abort_handle(), tx));
@@ -188,7 +194,11 @@ where
         else {
             return;
         };
-        match self.0.transaction.entry(id) {
+        let entry = self.0.transaction.entry(id);
+        if self.0.punch_history.contains_key(&id) {
+            return;
+        }
+        match entry {
             Entry::Occupied(mut entry) if pathway.local() < pathway.remote() => {
                 entry.get().0.abort();
                 let (abort, tx) = self.spawn_passive(id, local, frame);
@@ -213,14 +223,33 @@ where
         let puncher = self.clone();
         let task_tx = tx.clone();
         let task = tokio::spawn(async move {
-            let result = puncher.punch_passively(local, frame, task_tx).await;
-            puncher.0.punch_history.insert(id, ());
-            puncher.0.transaction.remove(&id);
+            let result = puncher.punch_passively(local, frame, task_tx.clone()).await;
+            if !puncher.finish_transaction(id, &task_tx) {
+                return;
+            }
             if let Err(error) = result {
                 tracing::debug!(target: "punch", %id, %error, "passive punch ended");
+            } else {
+                tracing::debug!(target: "punch", %id, "passive punch completed");
             }
         });
         (task.abort_handle(), tx)
+    }
+
+    fn finish_transaction(&self, id: PunchId, tx: &Arc<Transaction>) -> bool {
+        self.0
+            .transaction
+            .remove_if(&id, |_, (_, current)| {
+                if !Arc::ptr_eq(current, tx) {
+                    return false;
+                }
+                // An aborted active task may finish after a passive replacement
+                // has been installed. Only the current owner may retire this ID.
+                // Record history while holding the entry to serialize new starts.
+                self.0.punch_history.insert(id, ());
+                true
+            })
+            .is_some()
     }
 
     pub fn recv_punch_hello(&self, pathway: Pathway, link: Link, frame: PunchHelloFrame) {
@@ -453,6 +482,7 @@ where
         let id = (&local.frame, &remote).punch_id();
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
+        tracing::debug!(target: "punch", %id, ?local_nat, ?remote_nat, "active punch strategy");
         let dst = *remote;
         let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
@@ -582,6 +612,7 @@ where
         let id = PunchId::new(local.frame.seq_num(), remote.local_seq());
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
+        tracing::debug!(target: "punch", %id, ?local_nat, ?remote_nat, "passive punch strategy");
         let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
         })?;
