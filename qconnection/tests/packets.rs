@@ -305,7 +305,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
             assert!(paths.snapshot().is_empty());
             assert!(!route_exists(&router, cid).await);
-            QuicProtocol::global().unregister(local, &socket);
+            QuicProtocol::global().unregister(socket.local_addr().unwrap());
             drop(route);
             return;
         }
@@ -361,7 +361,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
     assert!(paths.snapshot().is_empty());
     assert!(!route_exists(&router, cid).await);
-    QuicProtocol::global().unregister(local, &socket);
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
     drop(route);
     drop(connection);
 }

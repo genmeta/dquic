@@ -52,11 +52,11 @@ pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     (client, server)
 }
 
-pub fn client_without_alpn() -> qtls::TlsClient {
+pub fn anonymous_client() -> qtls::TlsClient {
     set_roots();
     qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: Arc::new(qtls::default_provider()),
-        alpn: Vec::new(),
+        alpn: vec![b"h3".to_vec()],
         local: None,
         resumption: qtls::ClientResumptionConfig::Disabled,
         limits: Default::default(),

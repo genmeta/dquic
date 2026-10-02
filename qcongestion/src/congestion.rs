@@ -829,6 +829,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn pacing_tokens_do_not_bypass_the_congestion_window() {
+        let mut cc = controller();
+        let window = cc.algorithm.congestion_window();
+        for pn in 0..window / MSS {
+            cc.on_packet_sent(pn as u64, Epoch::Data, true, true, MSS);
+        }
+        // The pacing bucket refills, but none of the outstanding data is ACKed.
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert_eq!(cc.send_quota(), 0);
+
+        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+        cc.on_ack_rcvd(Epoch::Data, &ack, Instant::now());
+        assert!(cc.send_quota() > 0);
+        assert!(cc.send_quota() <= 2 * MSS);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn shared_trackers_follow_append_and_retirement() {
         struct UnlockedFeedback {
             trackers: std::sync::Weak<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
