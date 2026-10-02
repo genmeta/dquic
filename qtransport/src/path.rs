@@ -14,7 +14,7 @@ use qbase::{
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
     packet::{ConstraintBuffer, Package},
-    time::PathIdleTimer,
+    time::heartbeat::ArcHeartbeat,
     util::IndexDeque,
 };
 use qcongestion::{Algorithm, ArcCC, HandshakeStatus, PathStatus, Resend, Transport as _};
@@ -49,7 +49,7 @@ pub struct Path {
     pub send_waker: ArcSendWakers,
     responses: Mutex<VecDeque<PathResponseFrame>>,
     pub anti_amplifier: Arc<AntiAmplifier>,
-    pub activity: PathIdleTimer,
+    pub heartbeat: ArcHeartbeat,
 }
 
 impl Path {
@@ -62,7 +62,7 @@ impl Path {
     pub fn new(
         pathway: Pathway,
         handshake: Arc<HandshakeStatus>,
-        activity: PathIdleTimer,
+        heartbeat: ArcHeartbeat,
         trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
@@ -83,7 +83,7 @@ impl Path {
             send_waker,
             responses: Mutex::new(VecDeque::new()),
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
-            activity,
+            heartbeat,
         }
     }
 
@@ -313,7 +313,6 @@ mod package_tests {
     use qbase::{
         net::addr::EndpointAddr,
         packet::{Constraints, GetType, OneRttHeader},
-        time::ArcConnIdle,
     };
 
     use super::*;
@@ -334,7 +333,7 @@ mod package_tests {
                 EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
             ),
             Arc::new(HandshakeStatus::new(false)),
-            ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Arc::new(RwLock::new(IndexDeque::with_capacity(3))),
         );
         path.client_handshaking();
@@ -361,7 +360,7 @@ mod package_tests {
                         EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
                     ),
                     Arc::new(HandshakeStatus::new(true)),
-                    ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+                    ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     Arc::default(),
                 );
                 if queued {

@@ -210,10 +210,7 @@ fn pending_senders_are_woken_and_can_cancel_in_normal_and_closing() {
                     assert!(poll_close(&terminator, &waker).is_pending());
                 }
                 if cancel {
-                    <&ArcTerminator as Package<bytes::BytesMut>>::cancel(
-                        &mut &terminator,
-                        &waker,
-                    );
+                    terminator.cancel(&waker);
                 }
                 if draining {
                     terminator.on_rcvd_connection_close_frame(

@@ -16,7 +16,6 @@ use qbase::{
     },
     packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
     role::Role,
-    time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
@@ -85,11 +84,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         reliable_frames,
         cid_registry,
     ));
-    let paths = Paths::new(
-        Role::Server,
-        phase.clone(),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
-    );
+    let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
     paths.add_path(pathway).unwrap();
 
 

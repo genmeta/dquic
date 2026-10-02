@@ -35,6 +35,7 @@ fn close_error(reason: &CloseReason) -> Error {
 }
 
 async fn finish(paths: &Paths, reason: &CloseReason) {
+    paths.idle().cancel();
     let phase = paths.phase();
     let terminator = phase.terminator();
     let snapshot = phase.get();

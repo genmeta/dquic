@@ -10,7 +10,7 @@ use qbase::{
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
     role::Role,
-    time::ArcConnIdle,
+    time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
 };
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
@@ -27,16 +27,37 @@ pub struct Paths {
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub(crate) responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
     role: Role,
-    idle: ArcConnIdle,
+    idle: ArcIdleTimer,
+    max_idle_timeout: Mutex<Duration>,
+    defer_idle_timeout: Duration,
     close_reason: ArcReceiving<CloseReason>,
 }
 
 impl Paths {
-    pub fn new(role: Role, phase: ArcConnPhase, idle: ArcConnIdle) -> Arc<Self> {
+    pub fn new(
+        role: Role,
+        phase: ArcConnPhase,
+        max_idle_timeout: Duration,
+        defer_idle_timeout: Duration,
+    ) -> Arc<Self> {
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         if !matches!(phase.get(), ConnPhase::Initial(_)) {
             handshake.got_handshake_key();
         }
+        let idle = ArcIdleTimer::new(max_idle_timeout);
+        let close_reason = ArcReceiving::default();
+        tokio::spawn({
+            let idle = idle.clone();
+            let close_reason = close_reason.clone();
+            async move {
+                if idle.timeout().await.is_ok() {
+                    close_reason.set(CloseReason::Internal(QuicError::with_default_fty(
+                        ErrorKind::None,
+                        "connection idle timeout",
+                    )));
+                }
+            }
+        });
         Arc::new(Self {
             phase,
             handshake,
@@ -44,7 +65,9 @@ impl Paths {
             responses: Mutex::new(HashMap::new()),
             role,
             idle,
-            close_reason: ArcReceiving::default(),
+            max_idle_timeout: Mutex::new(max_idle_timeout),
+            defer_idle_timeout,
+            close_reason,
         })
     }
 
@@ -88,7 +111,10 @@ impl Paths {
         let path = Arc::new(Path::new(
             pathway,
             self.handshake.clone(),
-            self.idle.timer(),
+            ArcHeartbeat::new(
+                self.defer_idle_timeout,
+                *self.max_idle_timeout.lock().unwrap(),
+            ),
             self.phase.get().trackers(),
         ));
         if entries
@@ -140,8 +166,23 @@ impl Paths {
         self.role
     }
 
-    pub(crate) fn idle(&self) -> ArcConnIdle {
+    pub(crate) fn idle(&self) -> ArcIdleTimer {
         self.idle.clone()
+    }
+
+    pub(crate) fn update_max_idle_timeout(&self, timeout: Duration) {
+        // Parameters use MAX for disabled expiry; IdleTimer uses ZERO.
+        let timeout = if timeout == Duration::MAX {
+            Duration::ZERO
+        } else {
+            timeout
+        };
+        let entries = self.entries.lock().unwrap();
+        *self.max_idle_timeout.lock().unwrap() = timeout;
+        self.idle.update_max_idle_timeout(timeout);
+        for path in entries.values() {
+            path.heartbeat.adapt_max_idle_timeout(timeout);
+        }
     }
 
     pub(crate) fn close_reason(&self) -> ArcReceiving<CloseReason> {
@@ -304,5 +345,11 @@ impl Paths {
         } else {
             false
         }
+    }
+}
+
+impl Drop for Paths {
+    fn drop(&mut self) {
+        self.idle.cancel();
     }
 }

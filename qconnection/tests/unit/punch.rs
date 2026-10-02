@@ -17,7 +17,7 @@ use qbase::{
     },
     packet::{DataHeader, OneRttHeader, Packet, PacketNumber, PacketReader},
     role::Role,
-    time::ArcConnIdle,
+    time::heartbeat::ArcHeartbeat,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qtransport::{keys::ArcKeys, path::Path, space::Space};
@@ -193,8 +193,7 @@ fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
         ConnectionId::from_slice(b"original"),
         common::initial_keys(role == Role::Server),
     ));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    Paths::new(role, snapshot, idle)
+    Paths::new(role, snapshot, Duration::ZERO, Duration::ZERO)
 }
 
 async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Pathway, link: Link) {
@@ -203,7 +202,7 @@ async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Path
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
-        paths.idle().timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
@@ -765,4 +764,68 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
     ));
     // Let the finite direct-confirmation task finish before releasing its socket.
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heartbeat() {
+    use qbase::frame::{AckFrame, CryptoFrame};
+    use tokio::time::Instant;
+
+    for kind in 0..3 {
+        let [sender, receiver] = pair();
+        let paths = empty_paths(&receiver);
+        paths.update_max_idle_timeout(Duration::from_secs(5));
+        let link = Link::new(
+            "127.0.0.1:47001".parse().unwrap(),
+            "127.0.0.1:47002".parse().unwrap(),
+        );
+        let path = Arc::new(Path::new(
+            link.into(),
+            paths.handshake.clone(),
+            ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+            paths.phase().get().trackers(),
+        ));
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.pathway, path.clone());
+        let data = &receiver.spaces.data;
+        let pn = data.next_pn().unwrap().0;
+        data.on_assembled(pn, 0, []);
+        data.on_sent(
+            [(pn, false)],
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        );
+        let bytes = match kind {
+            0 => encode_frame(
+                &sender,
+                AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None),
+            ),
+            1 => encode_frame(&sender, PingFrame),
+            _ => encode_frame(
+                &sender,
+                (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice()),
+            ),
+        };
+        let start = Instant::now();
+        receive_on_paths(
+            &receiver,
+            &paths,
+            vec![bytes],
+            path.pathway,
+            link,
+            Scopes::ALL,
+        )
+        .await;
+        let reason = paths.close_reason().await.unwrap().unwrap();
+        assert!(
+            matches!(reason, CloseReason::Internal(error) if error.reason() == "connection idle timeout")
+        );
+        assert_eq!(Instant::now() - start, Duration::from_secs(5));
+        tokio::time::advance(Duration::from_secs(15)).await;
+        assert_eq!(super::take_heartbeat(&path), kind == 2);
+        paths.retire_all();
+    }
 }
