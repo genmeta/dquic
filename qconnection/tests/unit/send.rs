@@ -21,7 +21,7 @@ use qbase::{
     },
     param::ParameterId,
     role::Role,
-    time::ArcConnIdle,
+    time::heartbeat::ArcHeartbeat,
 };
 use qcongestion::Transport as _;
 use qtransport::{keys::ArcKeys, packet::CipherPacket, path::Path, space::Space};
@@ -43,8 +43,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     ));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase.clone(), idle.clone());
+    let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:30001".parse().unwrap()),
         EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()),
@@ -52,7 +51,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     path.client_handshaking();
@@ -83,15 +82,14 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         Epoch::Handshake,
         ArcKeys::new(Arc::new(keys(false))),
     )));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase, idle.clone());
+    let paths = Paths::new(Role::Client, phase, Duration::ZERO, Duration::ZERO);
     let path = Arc::new(Path::new(
         Pathway::new(
             "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
             "127.0.0.1:5500".parse().unwrap(),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     path.client_handshaking();
@@ -134,8 +132,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
     let space = initial.initial_space.clone();
     space.crypto.writer().write_all(b"hello").await.unwrap();
     let phase = crate::ArcConnPhase::initial(initial);
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase, idle.clone());
+    let paths = Paths::new(Role::Client, phase, Duration::ZERO, Duration::ZERO);
     // No registered socket: collect succeeds, but submitting the batch fails.
     let path = Arc::new(Path::new(
         Pathway::new(
@@ -143,7 +140,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
             EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     path.client_handshaking();
@@ -211,8 +208,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         .unwrap();
     let phase = crate::ArcConnPhase::initial(initial);
     phase.enter_handshake(handshake);
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase.clone(), idle.clone());
+    let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()),
         EndpointAddr::direct("127.0.0.1:31002".parse().unwrap()),
@@ -220,7 +216,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     path.client_handshaking();
@@ -304,15 +300,14 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         initial.initial_space.keys.clone(),
                     )));
                 }
-                let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-                let paths = Paths::new(role, phase.clone(), idle.clone());
+                let paths = Paths::new(role, phase.clone(), Duration::ZERO, Duration::ZERO);
                 let path = Arc::new(Path::new(
                     Pathway::new(
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
                     ),
                     paths.handshake.clone(),
-                    idle.timer(),
+                    ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     paths.phase().get().trackers(),
                 ));
                 path.validate();
@@ -405,11 +400,11 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
             .write_all(b"handshake")
             .await
             .unwrap();
-        let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
         let paths = Paths::new(
             Role::Client,
             crate::ArcConnPhase::initial(initial),
-            idle.clone(),
+            Duration::ZERO,
+            Duration::ZERO,
         );
         let path = Arc::new(Path::new(
             Pathway::new(
@@ -417,7 +412,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
                 EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
             ),
             paths.handshake.clone(),
-            idle.timer(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.phase().get().trackers(),
         ));
         let mut datagrams = std::array::from_fn::<_, 3, _>(|_| BytesMut::new());
@@ -636,8 +631,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
         ConnectionId::from_slice(b"original"),
         keys(true),
     ));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Server, phase.clone(), idle.clone());
+    let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()),
         EndpointAddr::direct("127.0.0.1:31002".parse().unwrap()),
@@ -645,7 +639,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
 
@@ -716,8 +710,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     ));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase.clone(), idle.clone());
+    let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let make_path = |port| {
         let path = Arc::new(Path::new(
             Pathway::new(
@@ -725,7 +718,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
                 EndpointAddr::direct("127.0.0.1:32002".parse().unwrap()),
             ),
             paths.handshake.clone(),
-            idle.timer(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.phase().get().trackers(),
         ));
 
@@ -830,15 +823,14 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
             space.retire();
             space = handshake;
         }
-        let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-        let paths = Paths::new(Role::Server, phase, idle.clone());
+        let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
         let path = Arc::new(Path::new(
             Pathway::new(
                 EndpointAddr::direct("127.0.0.1:33001".parse().unwrap()),
                 EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
             ),
             paths.handshake.clone(),
-            idle.timer(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.phase().get().trackers(),
         ));
         path.validate();
@@ -1156,15 +1148,14 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
     let dcid_cell = OnceLock::new();
     let (initial, mature) = mature_server_phase();
     let phase = crate::ArcConnPhase::initial(initial);
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Server, phase.clone(), idle.clone());
+    let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
     let path = Arc::new(Path::new(
         Pathway::new(
             EndpointAddr::direct("127.0.0.1:34101".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34102".parse().unwrap()),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         phase.get().trackers(),
     ));
     dcid_cell
@@ -1256,8 +1247,7 @@ async fn selected_sender_requests_its_cell_before_other_paths_are_released() {
             .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
             .unwrap();
         let phase = crate::ArcConnPhase::initial(initial);
-        let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-        let paths = Paths::new(Role::Server, phase.clone(), idle.clone());
+        let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
         let make_path = |port| {
             let path = Arc::new(Path::new(
                 Pathway::new(
@@ -1265,7 +1255,7 @@ async fn selected_sender_requests_its_cell_before_other_paths_are_released() {
                     EndpointAddr::direct("127.0.0.1:34300".parse().unwrap()),
                 ),
                 paths.handshake.clone(),
-                idle.timer(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 phase.get().trackers(),
             ));
             paths
@@ -1382,15 +1372,14 @@ async fn pending_path_cid_allows_long_headers_and_later_supplies_one_rtt_header(
     let initial_cell = remote.apply_dcid();
     let phase = crate::ArcConnPhase::initial(initial);
     phase.enter_mature(mature.clone());
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Server, phase, idle.clone());
+    let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
     let path = Arc::new(Path::new(
         Pathway::new(
             EndpointAddr::direct("127.0.0.1:34201".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34202".parse().unwrap()),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     assert!(dcid_cell.get().is_none());
@@ -1527,15 +1516,14 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     }
     let phase = crate::ArcConnPhase::initial(initial);
     phase.enter_mature(mature.clone());
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Server, phase, idle.clone());
+    let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
     let path = Arc::new(Path::new(
         Pathway::new(
             EndpointAddr::direct("127.0.0.1:34001".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     dcid_cell
@@ -1616,7 +1604,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
         paths.handshake.clone(),
-        idle.timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.phase().get().trackers(),
     ));
     waiting_path.validate();
@@ -1671,4 +1659,173 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             .frames(pn)
             .any(|f| matches!(f, Frame::Close(_)))
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use qbase::packet::PacketContent;
+
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for epoch in Epoch::EPOCHS {
+        let (initial, mature) = mature_server_phase();
+        let phase = crate::ArcConnPhase::initial(initial);
+        if epoch == Epoch::Handshake {
+            phase.enter_handshake(mature.spaces.handshake.clone());
+            mature.spaces.initial.retire();
+        } else if epoch == Epoch::Data {
+            phase.enter_mature(mature.clone());
+            mature.retire_handshake_spaces();
+        }
+        let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::from_secs(60));
+        let path = Arc::new(Path::new(
+            Pathway::new(
+                "127.0.0.1:30001".parse::<EndpointAddr>().unwrap(),
+                "127.0.0.1:30002".parse().unwrap(),
+            ),
+            paths.handshake.clone(),
+            ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+            paths.phase().get().trackers(),
+        ));
+        path.validate();
+        path.decide(true);
+        path.heartbeat
+            .on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now())
+            .unwrap();
+        let dcid = OnceLock::new();
+        if epoch == Epoch::Data {
+            dcid.set(crate::common::dcid(mature.dcid)).unwrap();
+        }
+        let mut datagrams = [BytesMut::with_capacity(1200)];
+        let mut frames = Vec::new();
+        let mut pns = std::array::from_fn(|_| Vec::new());
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut collector = burst(
+            &path.cc,
+            &path.anti_amplifier,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        )
+        .collect(&paths, &path, &dcid);
+        if epoch == Epoch::Data {
+            // Consume the CID advertisement queued by the fixture before testing idleness.
+            assert!(matches!(
+                Pin::new(&mut collector).poll(&mut cx),
+                Poll::Ready(Ok(1))
+            ));
+            collector.burst.pns[Epoch::Data].clear();
+        }
+        assert!(Pin::new(&mut collector).poll(&mut cx).is_pending());
+        tokio::task::yield_now().await;
+        let before = counter.0.load(Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::task::yield_now().await;
+        assert!(counter.0.load(Ordering::Relaxed) > before);
+        let result = Pin::new(&mut collector).poll(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Ok(1))),
+            "{epoch:?}: {result:?}"
+        );
+        drop(collector);
+        assert_eq!(pns[epoch].len(), 1);
+        assert_eq!(pns[epoch][0].content, PacketContent::JustPing);
+        path.retire();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
+    use qbase::net::route::{Line, Link};
+    use qprotocol::{QuicProtocol, UdpSocket};
+    use tokio::time::Instant;
+
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local = EndpointAddr::direct(socket.local_addr().unwrap());
+    QuicProtocol::global().register(local, &socket).unwrap();
+    let initial = crate::common::initial_phase(
+        Role::Server,
+        ConnectionId::from_slice(b"server00"),
+        ConnectionId::from_slice(b"original"),
+        keys(true),
+    );
+    let space = initial.initial_space.clone();
+    let paths = Paths::new(
+        Role::Server,
+        crate::ArcConnPhase::initial(initial),
+        Duration::from_secs(5),
+        Duration::ZERO,
+    );
+    let path = Arc::new(Path::new(
+        Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
+        paths.handshake.clone(),
+        ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+        paths.phase().get().trackers(),
+    ));
+    path.validate();
+    path.decide(true);
+    space
+        .rcvd_journal
+        .on_rcvd_pn(0, true, Duration::from_secs(1));
+    path.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
+    let start = Instant::now();
+    let sender = tokio::spawn(sending(paths.clone(), path.clone()));
+    let mut buffers = [BytesMut::zeroed(1500)];
+    let mut lines = [Line::new(
+        Link::new(local.addr(), peer.local_addr().unwrap()),
+        64,
+        None,
+        1500,
+    )];
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        peer.receive(&mut buffers, &mut lines),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let received = Instant::now();
+    buffers[0].truncate(lines[0].seg_size as usize);
+    let ParsedPacket::Data(packet) = PacketReader::new(buffers[0].clone(), 8)
+        .next()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!()
+    };
+    let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
+        panic!()
+    };
+    let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+        .decrypt_long_packet(&keys(false).opening, |_| Ok(0))
+        .unwrap()
+        .unwrap();
+    use qbase::packet::GetType;
+    assert!(
+        FrameReader::new(opened.body(), opened.get_type())
+            .all(|frame| matches!(frame.unwrap().0, Frame::Ack(_) | Frame::Padding(_)))
+    );
+    let reason = tokio::time::timeout(Duration::from_secs(6), paths.close_reason())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(reason, crate::CloseReason::Internal(error) if error.reason() == "connection idle timeout")
+    );
+    assert!(Instant::now() >= start + Duration::from_secs(5));
+    assert!(Instant::now() <= received + Duration::from_secs(5));
+    assert!(!super::take_heartbeat(&path));
+    path.retire();
+    sender.await.unwrap();
+    QuicProtocol::global().unregister(local, &socket);
 }

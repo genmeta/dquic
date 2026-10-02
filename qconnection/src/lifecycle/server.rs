@@ -37,7 +37,6 @@ pub async fn server_growing(
     let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
-    let idle = paths.idle();
     let closed = paths.close_reason();
     let initial = initial_phase.initial_space.clone();
     let reliable_frames = initial_phase.reliable_frames.clone();
@@ -93,7 +92,7 @@ pub async fn server_growing(
         )
         .await;
     };
-    idle.negotiate_max_idle_timeout(
+    paths.update_max_idle_timeout(
         server
             .server_parameters
             .get::<std::time::Duration>(ParameterId::MaxIdleTimeout),
@@ -158,7 +157,7 @@ pub async fn server_growing(
             cid_registry
                 .local
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
-            idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
+            paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             for space in [initial.as_ref(), handshake.as_ref()] {
                 let flight = tls_ctx.read_msg_at(space.epoch).await?;

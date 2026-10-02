@@ -39,7 +39,6 @@ pub async fn client_growing(
     token_registry: ArcTokenRegistry,
     established: impl FnOnce(Result<Connected, Error>),
 ) -> CloseReason {
-    let idle = paths.idle();
     let phase = paths.phase();
     let close_reason = paths.close_reason();
     let ConnPhase::Initial(initial_phase) = phase.get() else {
@@ -156,7 +155,7 @@ pub async fn client_growing(
             cid_registry
                 .local
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
-            idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
+            paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             let handshake_done = ArcHandshake::new_client();
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(

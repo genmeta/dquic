@@ -12,7 +12,6 @@ use qbase::{
     cid::ConnectionId,
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
-    time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
@@ -117,8 +116,12 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     ));
     let (endpoint, _) = common::endpoints(false);
     let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
-    let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase.clone(), idle);
+    let paths = Paths::new(
+        Role::Client,
+        phase.clone(),
+        Duration::from_secs(5),
+        Duration::ZERO,
+    );
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
         "localhost".into(),
@@ -203,8 +206,12 @@ async fn close_at_client_stage(wait: ClientWait) {
         reliable_frames,
         cid_registry,
     ));
-    let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
-    let paths = Paths::new(Role::Client, phase.clone(), idle);
+    let paths = Paths::new(
+        Role::Client,
+        phase.clone(),
+        Duration::from_secs(5),
+        Duration::ZERO,
+    );
     let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();

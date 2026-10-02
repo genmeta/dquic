@@ -10,7 +10,6 @@ use qbase::{
     error::ErrorKind,
     net::{Family, addr::EndpointAddr, route::Pathway},
     role::Role,
-    time::ArcConnIdle,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
@@ -69,7 +68,8 @@ fn paths() -> Arc<Paths> {
             ConnectionId::from_slice(b"original"),
             keys,
         )),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
+        Duration::ZERO,
+        Duration::ZERO,
     )
 }
 

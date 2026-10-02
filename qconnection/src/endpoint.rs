@@ -13,7 +13,6 @@ use qbase::{
     packet::{GetDcid, GetScid},
     param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
     role::Role,
-    time::{ArcConnIdle, DEFAULT_HEARTBEAT_INTERVAL},
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qtransport::{packet::channel, router::QuicRouter};
@@ -124,12 +123,12 @@ impl QuicEndpoint {
             reliable_frames,
             cid_registry,
         ));
-        let idle = ArcConnIdle::new(
+        let paths = Paths::new(
+            Role::Client,
+            phase,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
-            DEFAULT_HEARTBEAT_INTERVAL,
         );
-        let paths = Paths::new(Role::Client, phase, idle);
         let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
 
@@ -233,9 +232,7 @@ impl ServerRegistry {
                     reliable_frames,
                     cid_registry,
                 ));
-                let idle =
-                    ArcConnIdle::new(Duration::ZERO, Duration::ZERO, DEFAULT_HEARTBEAT_INTERVAL);
-                let paths = Paths::new(Role::Server, phase, idle);
+                let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
                 }

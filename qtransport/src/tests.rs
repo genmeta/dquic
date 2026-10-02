@@ -25,7 +25,7 @@ use qbase::{
         handy::{client_parameters, server_parameters},
     },
     sid::{Dir, handy::DemandConcurrency},
-    time::{ArcConnIdle, PathIdleTimer},
+    time::heartbeat::ArcHeartbeat,
     util::IndexDeque,
 };
 use qcongestion::{Resend, Transport as _};
@@ -256,7 +256,7 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         Arc::new(qcongestion::HandshakeStatus::new(
             transport.parameters.role() == Role::Server,
         )),
-        path_idle(),
+        path_heartbeat(),
         data_trackers(transport),
     ));
     path.handshake_confirmed();
@@ -264,8 +264,8 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     path
 }
 
-fn path_idle() -> PathIdleTimer {
-    ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer()
+fn path_heartbeat() -> ArcHeartbeat {
+    ArcHeartbeat::new(Duration::ZERO, Duration::ZERO)
 }
 fn parse(bytes: &[u8]) -> DataPacket {
     let Packet::Data(packet) = PacketReader::new(BytesMut::from(bytes), 8)
@@ -1787,7 +1787,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     let path = Arc::new(Path::new(
         pathway,
         Arc::new(qcongestion::HandshakeStatus::new(false)),
-        path_idle(),
+        path_heartbeat(),
         data_trackers(&ct),
     ));
     path.handshake_confirmed();
@@ -1856,7 +1856,7 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
             Arc::new(qcongestion::HandshakeStatus::new(
                 transport.parameters.role() == Role::Server,
             )),
-            path_idle(),
+            path_heartbeat(),
             data_trackers(transport),
         ));
         path.handshake_confirmed();
@@ -1895,7 +1895,7 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     let path = Arc::new(Path::new(
         original.pathway,
         Arc::new(qcongestion::HandshakeStatus::new(false)),
-        path_idle(),
+        path_heartbeat(),
         data_trackers(&transport),
     ));
     path.handshake_confirmed();
