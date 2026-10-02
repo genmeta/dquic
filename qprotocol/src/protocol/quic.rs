@@ -1,6 +1,7 @@
 use std::{
     future::poll_fn,
     io::{self, IoSlice},
+    net::SocketAddr,
     sync::{Arc, RwLock, Weak},
     task::{Context, Poll},
 };
@@ -66,10 +67,15 @@ impl QuicProtocol {
         Ok(())
     }
 
-    pub fn unregister(&self, ep_addr: EndpointAddr, socket: &Arc<UdpSocket>) {
-        let weak = Arc::downgrade(socket);
-        self.sockets
-            .remove_if(&ep_addr, |_, registered| Weak::ptr_eq(registered, &weak));
+    /// Revoke every endpoint for a local binding and discard expired registrations.
+    pub fn unregister(&self, bound: SocketAddr) {
+        self.sockets.retain(|_, registered| {
+            registered.upgrade().is_some_and(|socket| {
+                socket
+                    .local_addr()
+                    .is_ok_and(|registered| registered != bound)
+            })
+        });
     }
 
     pub fn find_socket(&self, endpoint_addr: EndpointAddr) -> Option<Arc<UdpSocket>> {

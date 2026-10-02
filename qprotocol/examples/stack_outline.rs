@@ -68,8 +68,6 @@ async fn main() -> Result<(), Error> {
     dock.add(raw.clone())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
-    quic.register(inner, &raw)?;
-    // The directory receives the same interface identity used to bind the socket.
     addresses.insert_inner(&raw, inner)?;
     forward.serve(inner.addr(), &raw);
 
@@ -83,7 +81,6 @@ async fn main() -> Result<(), Error> {
     let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);
     dock.add(peer_raw.clone())?;
     let peer = EndpointAddr::direct(peer_raw.local_addr()?);
-    quic.register(peer, &peer_raw)?;
 
     let packet = [0x40, 1, 2, 3];
     quic.send(Pathway::new(inner, peer), &[IoSlice::new(&packet)])
@@ -113,8 +110,8 @@ async fn main() -> Result<(), Error> {
     println!("punched Direct endpoint: {punched_endpoint}");
 
     drop(punched);
-    quic.unregister(peer, &peer_raw);
     dock.remove(&peer_raw);
+    addresses.remove_bound(bound);
     dock.shutdown();
     Ok(())
 }

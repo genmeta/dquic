@@ -27,7 +27,9 @@
 
 可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块统一扫描网卡、注册 Dock 并探测地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
 
-`QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，由客户端生命周期启动并持有 DNS 查询任务。网络所有者先向全局 Dock、QuicProtocol 登记 socket，并把本地端点发布到 `AddressBook::global()`。查询使用全局 Resolver 的快照调用 `lookup(server_name, "", None)`，持续消费返回的流；每条 DNS 记录与当前 AddressBook 配对后调用 `paths.add_path`，重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；客户端在握手失败或连接关闭时取消并等待查询任务退出，再回收路径。服务端不启动 DNS 查询，Paths 仅管理路径。
+网络所有者通过 `Dock::add(socket)` 登记接收任务及直接 QUIC 地址，额外别名通过 `QuicProtocol::register` 登记。地址发布由所有者显式调用 `AddressBook::insert_inner / insert_outer`；撤回时调用 `AddressBook::remove_bound(bound)`，再从 Dock 移除 socket。Dock 按实际绑定地址调用 `QuicProtocol::unregister(bound)`，撤销该绑定的全部 endpoint。
+
+`QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，由客户端生命周期启动并持有 DNS 查询任务。查询使用全局 Resolver 的快照调用 `lookup(server_name, "", None)`，持续消费返回的流；每条 DNS 记录与当前 AddressBook 配对后调用 `paths.add_path`，重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；客户端在握手失败或连接关闭时取消并等待查询任务退出，再回收路径。服务端不启动 DNS 查询，Paths 仅管理路径。
 
 客户端将 DNS 来源直接交给 `AddressBook::pathways_to(peer, &source)`。AddressBook 按来源、地址族、通信范围和已登记的网卡信息生成候选；客户端检查候选对应的 socket 注册是否仍有效，然后添加路径。mDNS 的 `nic` 精确匹配登记时的网卡名称，缺少网卡信息时跳过候选；其他 DNS 来源沿用地址范围和地址族匹配，也可以返回内网地址。配对时不枚举系统网卡，不根据 IP 推断网卡，也不改写网卡名称。
 

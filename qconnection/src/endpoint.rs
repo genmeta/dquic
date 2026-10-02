@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, LazyLock, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -23,6 +23,8 @@ use crate::{
     Accepted, ArcConnPhase, ArcLocalCids, ArcReliableFrames, CidRegistry, Connected, Error,
     InitialPhase, Paths, TlsContext, client_growing,
 };
+
+static DEFAULT_ALPN: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| vec![b"h3".to_vec()]);
 
 pub struct QuicEndpoint {
     pub identity: Arc<Endpoint>,
@@ -68,7 +70,7 @@ impl QuicEndpoint {
     fn tls_server(&self) -> Result<qtls::TlsServer, Error> {
         qtls::TlsServer::new(qtls::ServerTlsConfig {
             provider: Arc::new(qtls::default_provider()),
-            alpn: Vec::new(),
+            alpn: DEFAULT_ALPN.clone(),
             local: self.local_authority()?,
             resumption: qtls::ServerResumptionConfig::Disabled,
             limits: Default::default(),
@@ -77,12 +79,13 @@ impl QuicEndpoint {
     }
 
     /// Resolve the peer in the background and add every usable AddressBook pairing.
+    /// Uses the sources registered with [`qresolve::Resolver::add`].
     /// The client lifecycle owns discovery and stops it when the connection closes.
     pub async fn connect(&self, server_name: String) -> Result<Connected, Error> {
         let tls_name = qresolve::split_host_port(&server_name).0.to_owned();
         let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
             provider: Arc::new(qtls::default_provider()),
-            alpn: Vec::new(),
+            alpn: DEFAULT_ALPN.clone(),
             local: Some(self.local_authority()?),
             resumption: qtls::ClientResumptionConfig::Disabled,
             limits: Default::default(),
