@@ -5,17 +5,18 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use qbase::{
-    cid::{ConnectionId, GenUniqueCid},
+    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
     net::{addr::EndpointAddr, route::Pathway},
-    packet::GetDcid,
+    packet::{GetDcid, GetScid},
     param::ParameterId,
     role::Role,
     time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, ArcConnection, ArcReliableFrames, CloseReason, ConnPhase, InitialPhase, Paths,
-    Scope, ServerRegistry, TlsContext, client_growing, server_growing,
+    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, CloseReason,
+    ConnPhase, InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing,
+    server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
@@ -120,14 +121,21 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let route = router.insert(odcid.into(), inbox.clone());
         let reliable = ArcReliableFrames::with_capacity(0);
         let registry = router.registry_on_issuing_scid(inbox.clone(), reliable.clone());
-        let phase = ArcConnPhase::initial(InitialPhase::with_components(
-            registry.gen_unique_cid(),
+        let scid = registry.gen_unique_cid();
+        let cid_registry = CidRegistry::new(
+            Role::Server,
             odcid,
+            ArcLocalCids::new(scid, registry),
+            ArcRemoteCids::new(2, reliable.clone()),
+        );
+        let phase = ArcConnPhase::initial(InitialPhase::new(
+            (scid, *packet.scid()),
             server
                 .tls_server
                 .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
                 .unwrap(),
             reliable,
+            cid_registry,
         ));
         let paths = Paths::new(
             Role::Server,
@@ -137,12 +145,14 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
         let growing = server_growing(
-            route,
             received,
             paths.clone(),
             ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
         );
-        let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
+        let growing = tokio::spawn(async move {
+            let _route = route;
+            tokio::join!(growing, tick).0
+        });
         created.send((phase, paths, growing)).unwrap();
     });
 
@@ -157,13 +167,22 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .set(ParameterId::InitialSourceConnectionId, scid)
         .unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
-    let phase = ArcConnPhase::initial(InitialPhase::with_components(
-        scid,
+    let cid_registry = CidRegistry::new(
+        Role::Client,
         odcid,
+        ArcLocalCids::new(scid, registry),
+        ArcRemoteCids::new(
+            parameters.get::<u64>(ParameterId::ActiveConnectionIdLimit),
+            reliable.clone(),
+        ),
+    );
+    let phase = ArcConnPhase::initial(InitialPhase::new(
+        (scid, odcid),
         client
             .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
             .unwrap(),
         reliable,
+        cid_registry,
     ));
     let paths = Paths::new(
         Role::Client,
@@ -178,7 +197,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         paths.clone(),
         received,
         tls,
-        registry,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         move |result| {
             let _ = deliver.send(result);

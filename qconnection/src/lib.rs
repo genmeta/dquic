@@ -16,10 +16,13 @@ pub mod send;
 mod terminate;
 pub mod tls;
 
+use std::sync::{Arc, RwLock};
+
 pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
 pub use lifecycle::{Interceptor, client_growing, server_growing};
 pub use paths::Paths;
 pub use phase::{ArcConnPhase, ConnPhase, HandshakePhase, InitialPhase, MaturePhase};
+use qbase::util::IndexDeque;
 pub use qbase::{
     error::Error,
     net::route::{Scope, Scopes},
@@ -33,13 +36,21 @@ pub type ArcLocalCids =
     qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
 pub type CidRegistry =
     qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
+pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
+pub type ArcTracker = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
+
 pub type Connected = (
     Option<qtls::LocalAuthority>,
     qtls::RemoteAuthority,
     ArcConnection,
 );
+
 pub type Accepted = (
     Option<qtls::RemoteAuthority>,
     qtls::LocalAuthority,
     ArcConnection,
 );
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod tests;

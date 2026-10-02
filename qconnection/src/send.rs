@@ -3,7 +3,7 @@ mod task;
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     task::{Context, Poll, ready},
 };
 
@@ -11,7 +11,7 @@ use bytes::BytesMut;
 pub use packet::{Packet, SendingPacket};
 use qbase::{
     Epoch,
-    cid::ConnectionId,
+    cid::{ArcCidCell, BorrowedCid},
     error::{ErrorKind, QuicError},
     frame::{Frame, GetFrameType, PingFrame},
     packet::{
@@ -31,7 +31,7 @@ use qtransport::{
 };
 pub(crate) use task::sending;
 
-use crate::{ConnPhase, Error, MaturePhase, Paths};
+use crate::{ArcReliableFrames, ConnPhase, Error, MaturePhase, Paths, terminate::ArcTerminator};
 
 pub const MAX_BURST_PACKETS: usize = 8;
 /// Submission metadata retained independently of frames that an early ACK can release.
@@ -81,30 +81,32 @@ pub fn burst<'a>(
     }
 }
 
-pub struct Collector<'a> {
+pub struct Collector<'a, 'path> {
     burst: Burst<'a>,
-    paths: &'a Arc<Paths>,
-    path: &'a Arc<Path>,
-    dcid: ConnectionId,
+    paths: &'path Arc<Paths>,
+    path: &'path Arc<Path>,
+    dcid_cell: &'path OnceLock<ArcCidCell<ArcReliableFrames>>,
+    dcid: Option<BorrowedCid<'path, ArcReliableFrames>>,
 }
 
 impl<'a> Burst<'a> {
-    pub fn collect(
+    pub fn collect<'path>(
         self,
-        paths: &'a Arc<Paths>,
-        path: &'a Arc<Path>,
-        dcid: ConnectionId,
-    ) -> Collector<'a> {
+        paths: &'path Arc<Paths>,
+        path: &'path Arc<Path>,
+        dcid_cell: &'path OnceLock<ArcCidCell<ArcReliableFrames>>,
+    ) -> Collector<'a, 'path> {
         Collector {
             burst: self,
             paths,
             path,
-            dcid,
+            dcid_cell,
+            dcid: None,
         }
     }
 }
 
-impl Future for Collector<'_> {
+impl Future for Collector<'_, '_> {
     type Output = Result<usize, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -136,13 +138,14 @@ impl Future for Collector<'_> {
                         LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
                     let crypto: &mut dyn for<'b> Package<&'b mut BytesMut> =
                         if selected == Path::MP_INITIAL && this.paths.role() == Role::Client {
-                            &mut phase.initial.crypto.multipath()
+                            &mut phase.initial_space.crypto.multipath()
                         } else {
-                            &mut phase.initial.crypto.outgoing()
+                            &mut phase.initial_space.crypto.outgoing()
                         };
                     let n = this.collect_long(
                         cx,
-                        &phase.initial,
+                        &phase.initial_space,
+                        &phase.terminator,
                         header,
                         crypto,
                         &mut limits,
@@ -161,18 +164,20 @@ impl Future for Collector<'_> {
                         LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
                     count += this.collect_long(
                         cx,
-                        &phase.initial,
+                        &phase.initial_space,
+                        &phase.terminator,
                         header,
-                        &mut phase.initial.crypto.outgoing(),
+                        &mut phase.initial_space.crypto.outgoing(),
                         &mut limits,
                         &mut acked[Epoch::Initial],
                     )?;
                     let header = LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).handshake();
                     count += this.collect_long(
                         cx,
-                        &phase.handshake,
+                        &phase.handshake_space,
+                        &phase.terminator,
                         header,
-                        &mut phase.handshake.crypto.outgoing(),
+                        &mut phase.handshake_space.crypto.outgoing(),
                         &mut limits,
                         &mut acked[Epoch::Handshake],
                     )?;
@@ -185,20 +190,21 @@ impl Future for Collector<'_> {
                 while count < this.burst.datagrams.len() && limits.credit > 0 {
                     let before = count;
                     let header =
-                        LongHeaderBuilder::with_cid(phase.peer_cid, phase.scid).initial(vec![]);
+                        LongHeaderBuilder::with_cid(phase.dcid, phase.scid).initial(vec![]);
                     count += this.collect_long(
                         cx,
                         &phase.spaces.initial,
+                        &phase.terminator,
                         header,
                         &mut phase.spaces.initial.crypto.outgoing(),
                         &mut limits,
                         &mut acked[Epoch::Initial],
                     )?;
-                    let header =
-                        LongHeaderBuilder::with_cid(phase.peer_cid, phase.scid).handshake();
+                    let header = LongHeaderBuilder::with_cid(phase.dcid, phase.scid).handshake();
                     count += this.collect_long(
                         cx,
                         &phase.spaces.handshake,
+                        &phase.terminator,
                         header,
                         &mut phase.spaces.handshake.crypto.outgoing(),
                         &mut limits,
@@ -219,6 +225,7 @@ impl Future for Collector<'_> {
             }
         }
         if count == 0 {
+            this.dcid.take();
             Poll::Pending
         } else {
             Poll::Ready(Ok(count))
@@ -226,7 +233,7 @@ impl Future for Collector<'_> {
     }
 }
 
-impl Collector<'_> {
+impl Collector<'_, '_> {
     fn count(&self) -> usize {
         self.burst.pns.iter().map(Vec::len).sum()
     }
@@ -235,6 +242,7 @@ impl Collector<'_> {
         &mut self,
         cx: &mut Context<'_>,
         space: &Space<ArcKeys>,
+        mut terminator: &ArcTerminator,
         header: H,
         crypto: &mut dyn for<'b> Package<&'b mut BytesMut>,
         limits: &mut Constraints,
@@ -277,7 +285,7 @@ impl Collector<'_> {
         };
         match packet.assemble(
             cx,
-            [&mut &self.paths.terminator(), &mut ack, crypto, &mut ping],
+            [&mut terminator, &mut ack, crypto, &mut ping],
             self.burst.frames,
         ) {
             Poll::Ready(Ok(n)) if n > 0 => {
@@ -322,14 +330,31 @@ impl Collector<'_> {
         } else {
             0
         };
-        let header = OneRttHeader::new(Default::default(), self.dcid);
+        if self.dcid.is_none() {
+            self.path.send_waker.register(cx.waker());
+            let cell = self
+                .dcid_cell
+                .get_or_init(|| phase.cid_registry.remote.apply_dcid());
+            match cell.borrow_cid(self.path.send_waker.clone()) {
+                Poll::Ready(Some(dcid)) => self.dcid = Some(dcid),
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(QuicError::with_default_fty(
+                        ErrorKind::NoViablePath,
+                        "path CID retired",
+                    )
+                    .into()));
+                }
+                // Let an already collected long-header packet proceed without a Data CID.
+                Poll::Pending => return Poll::Ready(Ok(0)),
+            }
+        }
+        let header = OneRttHeader::new(Default::default(), **self.dcid.as_ref().unwrap());
         if limits.credit().min(limits.max_size()) < limits.min_size().max(header.size() + 24)
             || limits.send_quota() < limits.min_size()
         {
             return Poll::Ready(Ok(0));
         }
-        let terminator = self.paths.terminator();
-        let mut close = &terminator;
+        let mut close = &phase.terminator;
         let mut ack = space.rcvd_journal.ack_package(
             self.burst
                 .cc
@@ -369,7 +394,7 @@ impl Collector<'_> {
             space.cancel(pn.0);
             return Poll::Ready(Ok(0));
         }
-        let mut flow = std::task::ready!(phase.flow.sender.poll_credit(
+        let mut flow = std::task::ready!(phase.flow_ctrl.sender.poll_credit(
             cx,
             if packet.limits.send_quota() >= packet.limits.max_size() {
                 space.streams.fresh_bytes().min(1200)

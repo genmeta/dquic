@@ -40,7 +40,8 @@ pub enum PathState {
 
 pub struct Path {
     pub pathway: Pathway,
-    // 0xff: undecided, 0: not selected, 1: selected, 2: handshake confirmed.
+    // 0xff: undecided, 0: suspended, 1: selected, 2: released after handshake
+    // confirmation and the selected sender's CID allocation.
     selected: AtomicU8,
     handshake: Arc<HandshakeStatus>,
     pub cc: ArcCC,
@@ -108,7 +109,7 @@ impl Path {
 
     pub fn handshake_confirmed(&self) {
         self.handshake.handshake_confirmed();
-        self.selected.store(2, Ordering::Release);
+        self.selected.store(Self::HANDSHAKED, Ordering::Release);
         self.send_waker.wake_all();
     }
 

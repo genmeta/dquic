@@ -5,22 +5,27 @@ use std::sync::Arc;
 use qbase::net::route::{Link, Pathway};
 use qbase::{
     ArcReceiving, Epoch,
-    error::{ErrorKind, QuicError},
+    error::{Error, ErrorKind, QuicError},
     frame::{Frame, FrameReader, GetFrameType, io::ReceiveFrame},
-    handshake::ArcHandshake,
     net::route::Scopes,
     packet::{GetScid, GetType, OneRttHeader, PacketContent},
     role::Role,
     token::ArcTokenRegistry,
 };
 use qcongestion::Transport as _;
-#[cfg(test)]
-use qtransport::path::Path;
-use qtransport::{keys::ArcKeys, packet::RcvdPacketHeader, recv, space::Space};
+use qtransport::{
+    keys::ArcKeys,
+    packet::RcvdPacketHeader,
+    path::Path,
+    recv,
+    space::{DataSpace, Space},
+};
+use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::time::Instant;
 
 use crate::{
-    ArcParameters, ArcReliableFrames, CloseReason, MaturePhase, Paths, terminate::Terminator,
+    ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, CloseReason, FlowController,
+    Paths, terminate::Terminator,
 };
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
@@ -29,16 +34,16 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     (mut packets, scopes): (PacketReceiver<H>, Option<Scopes>),
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    closed: ArcReceiving<CloseReason>,
+    close_reason: ArcReceiving<CloseReason>,
 ) where
     H: GetScid + GetType + RcvdPacketHeader,
 {
-    let role = paths.role();
     let epoch = space.epoch;
+    let role = paths.role();
+    let terminator = paths.phase().terminator();
     let mut initial_scid = None;
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, _)) = packets.recv().await {
-        parsed_frames.clear();
         let received_bytes = packet.payload_len();
         let Ok(keys) = space.keys.get() else {
             break;
@@ -74,7 +79,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 return Ok(());
             };
             path.on_datagram_received(received_bytes);
-            paths.on_rcvd_packet();
+            terminator.on_rcvd_packet(Instant::now());
             path.activity.on_rcvd(PacketContent::default());
             if let Some(dcid) = initial_scid {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
@@ -83,17 +88,9 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             if role == Role::Client || epoch == Epoch::Handshake {
                 paths.select_path(&path);
             }
-            if epoch == Epoch::Handshake && paths.is_handshake_path(&path) {
+            if epoch == Epoch::Handshake && path.selected() == Path::SELECTED {
                 path.validate();
                 paths.on_handshake_received();
-            }
-            // CLOSE takes priority over ordinary frame delivery.
-            if let Some(Frame::Close(frame)) = parsed_frames
-                .iter()
-                .find(|frame| matches!(frame, Frame::Close(_)))
-            {
-                paths.on_rcvd_close(epoch, &path, frame.clone());
-                return Ok(());
             }
             for frame in parsed_frames.drain(..) {
                 match frame {
@@ -109,6 +106,14 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                         if role == Role::Server && epoch == Epoch::Initial && crypto_acked {
                             paths.select_path(&path);
                         }
+                    }
+                    Frame::Close(frame) => {
+                        terminator.on_rcvd_connection_close_frame(
+                            frame.clone(),
+                            path.cc.pto_base(epoch) * 3,
+                        );
+                        close_reason.set(CloseReason::Peer(frame));
+                        return Ok(());
                     }
                     _ => {
                         return Err(QuicError::with_default_fty(
@@ -128,23 +133,26 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             Ok(())
         })();
         if let Err(error) = result {
-            closed.set(error.into());
+            close_reason.set(error.into());
         }
     }
 }
 
 /// Receive Data packets and update the connection's paths, handshake and close state.
-pub(crate) async fn receive_data(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     (mut packets, scopes): (PacketReceiver<OneRttHeader>, Option<Scopes>),
-    sender: Arc<MaturePhase>,
+    data: Arc<DataSpace>,
+    flow: FlowController,
+    puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
     paths: Arc<Paths>,
     parameters: ArcParameters,
-    cid_registry: crate::CidRegistry,
+    cid_registry: CidRegistry,
     tokens: ArcTokenRegistry,
-    handshake: ArcHandshake<ArcReliableFrames>,
+    handshake: ArcHandshake,
 ) {
-    let closed = paths.closed();
-    let data = &sender.spaces.data;
+    let close_reason = paths.close_reason();
+    let terminator = paths.phase().terminator();
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = packets.recv().await {
         parsed_frames.clear();
@@ -178,28 +186,16 @@ pub(crate) async fn receive_data(
                 return Ok(());
             };
             path.on_datagram_received(received_bytes);
-            paths.on_rcvd_packet();
+            terminator.on_rcvd_packet(Instant::now());
             path.activity.on_rcvd(PacketContent::default());
             // Start validation only after authentication and path admission.
             paths.start_validation(&path);
-            // CLOSE reaches the control owner even when ordinary component pipes are full.
-            if let Some(Frame::Close(frame)) = parsed_frames
-                .iter()
-                .find(|frame| matches!(frame, Frame::Close(_)))
-            {
-                let error = crate::Error::from(frame.clone());
-                data.crypto.on_error(&error);
-                data.streams.on_conn_error(&error);
-                sender.flow.on_conn_error(&error);
-                paths.on_rcvd_close(Epoch::Data, &path, frame.clone());
-                return Ok(());
-            }
             for frame in parsed_frames.drain(..) {
-                let kind = frame.frame_type();
+                let fty = frame.frame_type();
                 match frame {
                     Frame::Ping(_) => {}
                     Frame::Ack(frame) => {
-                        recv::acknowledge(data, &parameters, &frame, &path, |generation| {
+                        recv::acknowledge(&data, &parameters, &frame, &path, |generation| {
                             keys.on_ack(generation)
                         })?;
                     }
@@ -208,14 +204,14 @@ pub(crate) async fn receive_data(
                     }
                     Frame::Stream(frame, bytes) => {
                         let fresh = data.streams.recv_frame((frame, bytes))?;
-                        sender.flow.recver.on_new_rcvd(kind, fresh)?;
+                        flow.recver.on_new_rcvd(fty, fresh)?;
                     }
                     Frame::StreamCtl(frame) => {
                         let fresh = data.streams.recv_frame(frame)?;
-                        sender.flow.recver.on_new_rcvd(kind, fresh)?;
+                        flow.recver.on_new_rcvd(fty, fresh)?;
                     }
-                    Frame::MaxData(frame) => sender.flow.sender.recv_frame(frame)?,
-                    Frame::DataBlocked(frame) => sender.flow.recver.recv_frame(frame)?,
+                    Frame::MaxData(frame) => flow.sender.recv_frame(frame)?,
+                    Frame::DataBlocked(frame) => flow.recver.recv_frame(frame)?,
                     Frame::NewConnectionId(frame) => {
                         cid_registry.remote.recv_frame(frame)?;
                     }
@@ -230,21 +226,31 @@ pub(crate) async fn receive_data(
                     Frame::HandshakeDone(frame) => {
                         handshake.recv_frame(frame)?;
                     }
-                    Frame::AddAddress(frame) => sender.puncher.recv_add_address(frame),
+                    Frame::Close(frame) => {
+                        let error = Error::from(frame.clone());
+                        data.crypto.on_error(&error);
+                        data.streams.on_conn_error(&error);
+                        flow.on_conn_error(&error);
+                        terminator.on_rcvd_connection_close_frame(
+                            frame.clone(),
+                            path.cc.pto_base(Epoch::Data) * 3,
+                        );
+                        close_reason.set(CloseReason::Peer(frame));
+                        return Ok(());
+                    }
+                    Frame::AddAddress(frame) => puncher.recv_add_address(frame),
                     Frame::RemoveAddress(frame) => {
                         // Unknown sequence numbers are ignored; do not truncate a
                         // wire VarInt into an existing 32-bit punch address ID.
                         if let Ok(seq) = u32::try_from(frame.seq_num.into_u64()) {
-                            sender.puncher.recv_remove_address(seq);
+                            puncher.recv_remove_address(seq);
                         }
                     }
-                    Frame::PunchMeNow(frame) => {
-                        sender.puncher.recv_punch_me_now(path.pathway, frame)
-                    }
+                    Frame::PunchMeNow(frame) => puncher.recv_punch_me_now(path.pathway, frame),
                     Frame::PunchHello(frame) => {
-                        sender.puncher.recv_punch_hello(path.pathway, link, frame);
+                        puncher.recv_punch_hello(path.pathway, link, frame);
                     }
-                    Frame::PunchDone(frame) => sender.puncher.recv_punch_done(link, frame),
+                    Frame::PunchDone(frame) => puncher.recv_punch_done(link, frame),
                     _ => {
                         return Err(QuicError::with_default_fty(
                             ErrorKind::ProtocolViolation,
@@ -264,8 +270,8 @@ pub(crate) async fn receive_data(
         })();
         if let Err(error) = result {
             data.streams.on_conn_error(&error);
-            sender.flow.on_conn_error(&error);
-            closed.set(error.into());
+            flow.on_conn_error(&error);
+            close_reason.set(error.into());
         }
     }
 }
@@ -274,16 +280,16 @@ pub(crate) async fn receive_data(
 /// Path loss does not stop recovery; entering Closing or Draining ends this loop.
 pub async fn tick(paths: Arc<Paths>) {
     let phase = paths.phase();
-    let terminator = paths.terminator();
-    let closed = paths.closed();
+    let terminator = phase.terminator();
+    let closed = paths.close_reason();
     while matches!(&*terminator.lock_guard(), Terminator::NoError(_)) {
         let now = Instant::now();
         let snapshot = phase.get();
         match &snapshot {
-            crate::ConnPhase::Initial(phase) => phase.initial.on_tick(now),
+            crate::ConnPhase::Initial(phase) => phase.initial_space.on_tick(now),
             crate::ConnPhase::Handshake(phase) => {
-                phase.initial.on_tick(now);
-                phase.handshake.on_tick(now);
+                phase.initial_space.on_tick(now);
+                phase.handshake_space.on_tick(now);
             }
             crate::ConnPhase::Mature(phase) => {
                 phase.spaces.initial.on_tick(now);
@@ -334,7 +340,7 @@ mod tests {
     use qtransport::packet::CipherPacket;
 
     use super::*;
-    use crate::{ArcConnPhase, InitialPhase};
+    use crate::ArcConnPhase;
 
     pub(super) fn keys(server: bool) -> qtls::BidirectionalKeys {
         qtls::default_provider()
@@ -446,8 +452,13 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone(), paths.closed())
-                    .await;
+                recv_ih_pkt_and_deliver_frames(
+                    (rx, None),
+                    space,
+                    paths.clone(),
+                    paths.close_reason(),
+                )
+                .await;
             }
             DataHeader::Long(long::DataHeader::Handshake(header)) => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -458,15 +469,21 @@ mod tests {
                 ))
                 .unwrap();
                 drop(tx);
-                recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone(), paths.closed())
-                    .await;
+                recv_ih_pkt_and_deliver_frames(
+                    (rx, None),
+                    space,
+                    paths.clone(),
+                    paths.close_reason(),
+                )
+                .await;
             }
             _ => panic!(),
         }
     }
 
     fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
-        let phase = ArcConnPhase::initial(InitialPhase::new(
+        let phase = ArcConnPhase::initial(crate::tests::initial_phase(
+            role,
             ConnectionId::from_slice(b"localcid"),
             ConnectionId::from_slice(b"original"),
             keys(role == Role::Server),
@@ -490,6 +507,81 @@ mod tests {
             ))
             .unwrap();
         (paths, first, second)
+    }
+
+    #[tokio::test]
+    async fn initial_and_handshake_close_enter_draining_through_phase_terminator() {
+        use tokio::io::AsyncReadExt;
+
+        for role in [Role::Client, Role::Server] {
+            for epoch in [Epoch::Initial, Epoch::Handshake] {
+                let (paths, path, _) = paths(role);
+                let phase = paths.phase();
+                let crate::ConnPhase::Initial(initial) = phase.get() else {
+                    unreachable!()
+                };
+                let space = if epoch == Epoch::Initial {
+                    initial.initial_space.clone()
+                } else {
+                    let space = Arc::new(Space::new(
+                        Epoch::Handshake,
+                        ArcKeys::new(Arc::new(keys(role == Role::Server))),
+                    ));
+                    phase.enter_handshake(space.clone());
+                    space
+                };
+                let peer_keys = keys(role != Role::Server);
+                let header = LongHeaderBuilder::with_cid(
+                    ConnectionId::from_slice(b"localcid"),
+                    ConnectionId::from_slice(b"peercid0"),
+                );
+                let mut close = qbase::frame::ConnectionCloseFrame::from(crate::Error::from(
+                    QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed"),
+                ));
+                let journal = ArcSentJournal::default();
+                let mut crypto = (
+                    qbase::frame::CryptoFrame::new(0u32.into(), 4u32.into()),
+                    b"data".as_slice(),
+                );
+                let bytes = if epoch == Epoch::Initial {
+                    seal(
+                        header.initial(vec![]),
+                        &peer_keys.sealing,
+                        &journal,
+                        [&mut crypto, &mut close],
+                    )
+                } else {
+                    seal(
+                        header.handshake(),
+                        &peer_keys.sealing,
+                        &journal,
+                        [&mut crypto, &mut close],
+                    )
+                }
+                .unwrap();
+                receive_bytes(bytes, space.clone(), &paths, &path).await;
+                let mut received = [0; 4];
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    space.crypto.reader().read_exact(&mut received),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(&received, b"data");
+                let reason = tokio::time::timeout(Duration::from_secs(1), paths.close_reason())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(reason, CloseReason::Peer(frame) if frame == close));
+                assert!(matches!(
+                    &*initial.terminator.lock_guard(),
+                    Terminator::Draining { frame, .. } if frame == &close
+                ));
+                paths.retire_all();
+            }
+        }
     }
 
     #[tokio::test]
