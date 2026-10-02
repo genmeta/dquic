@@ -1,0 +1,22 @@
+[Unit]
+Description=dquic STUN and UDP relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/dquic/stun-server.env
+ExecStart=/opt/dquic/stun_server --bind-ip ${STUN_BIND_IP} --public-ip ${STUN_PUBLIC_IP} --change-ip ${STUN_CHANGE_IP} --port ${STUN_PORT} --alternate-port ${STUN_ALTERNATE_PORT} --relay
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
