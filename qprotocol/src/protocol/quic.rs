@@ -235,7 +235,7 @@ mod tests {
         assert!(protocol.on_packet(BytesMut::from(&b"quic"[..]), link.into(), link));
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
 
-        protocol.unregister(endpoint, &raw);
+        protocol.unregister(raw.local_addr().unwrap());
         assert!(protocol.find_socket(endpoint).is_none());
     }
 
@@ -334,5 +334,26 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
         assert!(!protocol.sockets.contains_key(&local));
+    }
+
+    #[tokio::test]
+    async fn unregister_bound_clears_all_its_endpoints_and_preserves_other_bindings() {
+        let protocol = QuicProtocol::new();
+        let first = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let second = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let bound = first.local_addr().unwrap();
+        let direct = EndpointAddr::direct(bound);
+        let outer = EndpointAddr::direct("8.8.8.8:4567".parse().unwrap());
+        let mediated = EndpointAddr::mediate("127.0.0.1:3478".parse().unwrap(), outer.addr());
+        let other = EndpointAddr::direct(second.local_addr().unwrap());
+        protocol.register(direct, &first).unwrap();
+        protocol.register(outer, &first).unwrap();
+        protocol.register(mediated, &first).unwrap();
+        protocol.register(other, &second).unwrap();
+        protocol.unregister(bound);
+        assert!(!protocol.sockets.contains_key(&direct));
+        assert!(!protocol.sockets.contains_key(&outer));
+        assert!(!protocol.sockets.contains_key(&mediated));
+        assert!(Arc::ptr_eq(&protocol.find_socket(other).unwrap(), &second));
     }
 }

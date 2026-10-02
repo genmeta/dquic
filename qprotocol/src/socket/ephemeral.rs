@@ -140,7 +140,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
-        quic.unregister(endpoint, &existing);
+        quic.unregister(existing.local_addr().unwrap());
     }
 
     #[tokio::test]
@@ -152,19 +152,12 @@ mod tests {
         let bound = raw.local_addr().unwrap();
         let endpoint = EndpointAddr::direct(bound);
         assert!(dock.remove(&raw));
-        assert!(dock.add(raw.clone()).unwrap());
-        let replacement = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        quic.unregister(endpoint, &raw);
-        quic.register(endpoint, &replacement).unwrap();
+        assert!(dock.add(raw.clone()).unwrap().is_some());
 
         drop(socket);
         assert!(Arc::ptr_eq(&dock.find_socket(bound).unwrap(), &raw));
-        assert!(Arc::ptr_eq(
-            &quic.find_socket(endpoint).unwrap(),
-            &replacement
-        ));
+        assert!(Arc::ptr_eq(&quic.find_socket(endpoint).unwrap(), &raw));
         assert!(dock.remove(&raw));
-        quic.unregister(endpoint, &replacement);
     }
 
     #[tokio::test]

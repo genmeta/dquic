@@ -7,9 +7,9 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt, channel::mpsc, stream};
-use qbase::net::{Family, addr::EndpointAddr};
+use qbase::net::Family;
 use qconnection::{Scope, ServerRegistry};
-use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{AddressBook, Dock, UdpSocket};
 use qresolve::{Record, Resolve, ResolveFuture, Resolver};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -54,12 +54,9 @@ impl Registration {
     fn new(publish: bool) -> Self {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         Dock::global().add(socket.clone()).unwrap();
-        let bound = socket.local_addr().unwrap();
-        let endpoint = EndpointAddr::direct(bound);
-        QuicProtocol::global().register(endpoint, &socket).unwrap();
         if publish {
             AddressBook::global()
-                .insert_inner(&socket, endpoint)
+                .insert_inner(&socket, socket.local_addr().unwrap().into())
                 .unwrap();
         }
         Self(socket)
@@ -68,9 +65,7 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let bound = self.0.local_addr().unwrap();
-        AddressBook::global().remove_bound(bound);
-        QuicProtocol::global().unregister(EndpointAddr::direct(bound), &self.0);
+        AddressBook::global().remove_bound(self.0.local_addr().unwrap());
         Dock::global().remove(&self.0);
     }
 }
@@ -103,6 +98,9 @@ async fn connect_uses_dns_and_global_addresses_and_closes_its_discovery_stream()
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(5), async {
         let connected = client.connect(server_name).await.unwrap();
         let accepted = incoming.recv().await.unwrap().unwrap();
+        assert_eq!(connected.1.name(), "localhost");
+        assert_eq!(connected.2.alpn(), b"h3");
+        assert_eq!(accepted.2.alpn(), b"h3");
         (connected, accepted)
     })
     .await

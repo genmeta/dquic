@@ -50,7 +50,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     );
     let pathway = Pathway::from(link);
 
-    let client = common::client_without_alpn();
+    let client = common::anonymous_client();
     let (client_parameters, _) = common::parameters();
     let tls =
         TlsContext::client(&client, "localhost".try_into().unwrap(), &client_parameters).unwrap();
@@ -140,6 +140,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     );
     assert!(matches!(phase.get(), ConnPhase::Initial(_)));
     assert!(paths.snapshot().is_empty());
-    QuicProtocol::global().unregister(local, &socket);
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
     ServerRegistry::global().remove("localhost");
 }

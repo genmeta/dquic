@@ -25,6 +25,27 @@
 
 ## 使用
 
+### 本地多流文件传输测试
+
+在 IPv4 loopback 上建立一条 QUIC 连接，同时打开 1024 条双向流，每条流从客户端
+向服务端传输同一个 10 MiB 文件，总计 10 GiB。测试生成临时文件，读取后共享内容，
+以 64 KiB 分块发送；每条流就绪后立即传输自己的数据，逐字节验证内容、长度和 EOF，
+并逐流返回完成确认。结束时输出耗时和有效载荷吞吐量，删除临时文件并撤销 socket 注册。
+使用仓库内的测试证书和本地静态名称解析，不需要另外启动服务端。
+
+此压力测试默认忽略，显式运行：
+
+```sh
+cargo test --release -p qconnection --test local_transfer -- --ignored --nocapture
+```
+
+默认传输超时为 600 秒，握手超时为 15 秒。可通过 `DQUIC_TEST_TIMEOUT_SECS`
+调整传输超时。快速验证可以减少流数量（`1..=1024`，每条流仍传 10 MiB）：
+
+```sh
+DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignored --nocapture
+```
+
 可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块统一扫描网卡、注册 Dock 并探测地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
 
 网络所有者通过 `Dock::add(socket)` 登记接收任务及直接 QUIC 地址，额外别名通过 `QuicProtocol::register` 登记。地址发布由所有者显式调用 `AddressBook::insert_inner / insert_outer`；撤回时调用 `AddressBook::remove_bound(bound)`，再从 Dock 移除 socket。Dock 按实际绑定地址调用 `QuicProtocol::unregister(bound)`，撤销该绑定的全部 endpoint。
