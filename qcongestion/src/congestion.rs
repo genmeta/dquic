@@ -497,13 +497,19 @@ impl CongestionController {
     #[inline]
     fn send_quota(&mut self) -> usize {
         let now = Instant::now();
-        self.pacer.schedule(
+        let pacing_quota = self.pacer.schedule(
             self.rtt.smoothed_rtt(),
             self.algorithm.congestion_window(),
             self.path_status.mtu(),
             now,
             self.algorithm.pacing_rate(),
-        )
+        );
+        // Pacing tokens do not permit sending past the outstanding-byte limit.
+        let window = self
+            .algorithm
+            .congestion_window()
+            .saturating_sub(self.algorithm.bytes_in_flight());
+        pacing_quota.min(window)
     }
 
     //OnPacketNumberSpaceDiscarded(pn_space):
