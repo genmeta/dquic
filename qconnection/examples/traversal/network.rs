@@ -84,12 +84,11 @@ impl Socket {
         let device = qudp::BoundDevice::new(interface.name.clone(), interface.index)?;
         let udp = Arc::new(UdpSocket::bind_to_device(addr, device)?);
         Dock::global().add(udp.clone())?;
-        let mut socket = Self {
+        let direct = udp.local_addr()?.into();
+        Ok(Self {
             udp,
-            aliases: Vec::new(),
-        };
-        socket.register(socket.udp.local_addr()?.into())?;
-        Ok(socket)
+            aliases: vec![direct],
+        })
     }
 
     fn register(&mut self, endpoint: EndpointAddr) -> Result<(), Error> {
@@ -132,9 +131,6 @@ impl Drop for Socket {
     fn drop(&mut self) {
         if let Ok(bound) = self.udp.local_addr() {
             AddressBook::global().remove_bound(bound);
-        }
-        for alias in &self.aliases {
-            QuicProtocol::global().unregister(*alias, &self.udp);
         }
         Dock::global().remove(&self.udp);
     }
