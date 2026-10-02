@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use qtransport::{
     path::{Path, PathState},
 };
 
-use crate::{ArcConnPhase, ConnPhase, Error, terminate::ArcTerminator};
+use crate::{ArcConnPhase, ConnPhase, Error};
 
 /// Connection-level path control. Every path has exactly one sending task.
 pub struct Paths {
@@ -27,15 +27,12 @@ pub struct Paths {
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
     role: Role,
-    selected: OnceLock<Weak<Path>>,
     idle: ArcConnIdle,
-    closed: ArcReceiving<CloseReason>,
-    terminator: ArcTerminator,
+    close_reason: ArcReceiving<CloseReason>,
 }
 
 impl Paths {
     pub fn new(role: Role, phase: ArcConnPhase, idle: ArcConnIdle) -> Arc<Self> {
-        let terminator = phase.terminator();
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         if !matches!(phase.get(), ConnPhase::Initial(_)) {
             handshake.got_handshake_key();
@@ -46,10 +43,8 @@ impl Paths {
             entries: Mutex::new(BTreeMap::new()),
             responses: Mutex::new(HashMap::new()),
             role,
-            selected: OnceLock::new(),
             idle,
-            closed: ArcReceiving::default(),
-            terminator,
+            close_reason: ArcReceiving::default(),
         })
     }
 
@@ -96,12 +91,18 @@ impl Paths {
             self.idle.timer(),
             self.phase.get().trackers(),
         ));
-        if self.handshake.is_handshake_confirmed() {
+        if entries
+            .values()
+            .any(|path| path.selected() == Path::HANDSHAKED)
+        {
             path.handshake_confirmed();
             if self.role == Role::Client {
                 path.client_validating();
             }
-        } else if self.selected.get().is_some() {
+        } else if entries
+            .values()
+            .any(|path| path.selected() != Path::MP_INITIAL)
+        {
             path.decide(false);
         } else if handshaking {
             path.client_handshaking();
@@ -116,7 +117,11 @@ impl Paths {
 
     pub(crate) fn select_path(&self, path: &Arc<Path>) {
         let entries = self.entries.lock().unwrap();
-        if self.selected.set(Arc::downgrade(path)).is_err() {
+        if path.selected() != Path::MP_INITIAL
+            || !entries
+                .get(&path.pathway)
+                .is_some_and(|current| Arc::ptr_eq(current, path))
+        {
             return;
         }
         for other in entries.values() {
@@ -125,12 +130,6 @@ impl Paths {
                 other.guard_amplification();
             }
         }
-    }
-
-    pub(crate) fn is_handshake_path(&self, path: &Path) -> bool {
-        self.selected
-            .get()
-            .is_some_and(|selected| std::ptr::eq(selected.as_ptr(), path))
     }
 
     pub(crate) fn phase(&self) -> ArcConnPhase {
@@ -145,32 +144,12 @@ impl Paths {
         self.idle.clone()
     }
 
-    pub(crate) fn closed(&self) -> ArcReceiving<CloseReason> {
-        self.closed.clone()
-    }
-
-    pub(crate) fn terminator(&self) -> ArcTerminator {
-        self.terminator.clone()
+    pub(crate) fn close_reason(&self) -> ArcReceiving<CloseReason> {
+        self.close_reason.clone()
     }
 
     pub(crate) fn on_error(&self, error: Error) {
-        self.closed.set(error.into());
-    }
-
-    pub(crate) fn on_rcvd_packet(&self) {
-        self.terminator.on_rcvd_packet(tokio::time::Instant::now());
-    }
-
-    pub(crate) fn on_rcvd_close(
-        &self,
-        epoch: Epoch,
-        path: &Path,
-        frame: qbase::frame::ConnectionCloseFrame,
-    ) {
-        let duration = path.cc.pto_base(epoch) * 3;
-        self.terminator
-            .on_rcvd_connection_close_frame(frame.clone(), duration);
-        self.closed.set(CloseReason::Peer(frame));
+        self.close_reason.set(error.into());
     }
 
     pub(crate) fn on_handshake_sent(&self) {
@@ -193,18 +172,31 @@ impl Paths {
         {
             let phase = self.phase.lock_guard();
             match &*phase {
-                ConnPhase::Initial(p) => p.initial.retire(),
+                ConnPhase::Initial(p) => p.initial_space.retire(),
                 ConnPhase::Handshake(p) => {
-                    p.initial.retire();
-                    p.handshake.retire();
+                    p.initial_space.retire();
+                    p.handshake_space.retire();
                 }
                 ConnPhase::Mature(p) => p.retire_handshake_spaces(),
             }
             self.handshake.handshake_confirmed();
         }
+        // The selected sender releases paths after it has requested its CID cell.
+        for path in self.entries.lock().unwrap().values() {
+            if path.selected() == Path::SELECTED {
+                path.send_waker.wake_all();
+            }
+        }
+    }
+
+    /// Called by the selected sender only after it has requested its CID cell.
+    pub(crate) fn activate_paths(self: &Arc<Self>, selected: &Path) {
         let entries = self.entries.lock().unwrap();
+        if selected.selected() != Path::SELECTED || !self.handshake.is_handshake_confirmed() {
+            return;
+        }
         for path in entries.values() {
-            if self.is_handshake_path(path) {
+            if path.selected() == Path::SELECTED {
                 path.validate();
             } else if self.role == Role::Client {
                 path.client_validating();
@@ -316,66 +308,8 @@ impl Paths {
 
     #[cfg(test)]
     pub(crate) fn retire_all(&self) {
-        self.terminator.terminate();
+        self.phase.terminator().terminate();
         for path in self.snapshot() {
-            self.remove(&path);
-        }
-    }
-
-    pub(crate) async fn finish(&self, reason: &CloseReason) {
-        let snapshot = self.phase.get();
-        let error: Error = match reason {
-            CloseReason::App(error) => error.clone().into(),
-            CloseReason::Internal(error) => error.clone().into(),
-            CloseReason::Peer(frame) => frame.clone().into(),
-        };
-        let active_paths = self.snapshot();
-        let pto = active_paths
-            .iter()
-            .map(|path| path.cc.pto_base(Epoch::Data))
-            .max()
-            .unwrap_or(Duration::from_secs(1));
-        self.terminator.on_error(reason, pto * 3);
-
-        match &snapshot {
-            ConnPhase::Initial(phase) => phase.initial.crypto.on_error(&error),
-            ConnPhase::Handshake(phase) => {
-                phase.initial.crypto.on_error(&error);
-                phase.handshake.crypto.on_error(&error);
-            }
-            ConnPhase::Mature(phase) => {
-                phase.spaces.initial.crypto.on_error(&error);
-                phase.spaces.handshake.crypto.on_error(&error);
-                phase.spaces.data.crypto.on_error(&error);
-                phase.spaces.data.streams.on_conn_error(&error);
-                phase.flow.on_conn_error(&error);
-            }
-        }
-        for path in &active_paths {
-            for epoch in [Epoch::Initial, Epoch::Handshake] {
-                path.cc.discard_epoch(epoch);
-            }
-        }
-
-        self.terminator.wait().await;
-        match &snapshot {
-            ConnPhase::Initial(phase) => phase.initial.retire(),
-            ConnPhase::Handshake(phase) => {
-                phase.initial.retire();
-                phase.handshake.retire();
-            }
-            ConnPhase::Mature(phase) => {
-                phase.retire_handshake_spaces();
-                phase.spaces.data.keys.retire();
-            }
-        }
-        {
-            let trackers = snapshot.trackers();
-            let mut trackers = trackers.write().unwrap();
-            let end = trackers.largest();
-            trackers.drain_to(end).for_each(drop);
-        }
-        for path in active_paths {
             self.remove(&path);
         }
     }
@@ -387,7 +321,6 @@ mod tests {
     use qtransport::space::Space;
 
     use super::*;
-    use crate::InitialPhase;
 
     fn paths(role: Role) -> Arc<Paths> {
         let keys = qtls::default_provider()
@@ -407,7 +340,8 @@ mod tests {
             .into();
         Paths::new(
             role,
-            ArcConnPhase::initial(InitialPhase::new(
+            ArcConnPhase::initial(crate::tests::initial_phase(
+                role,
                 ConnectionId::from_slice(b"localcid"),
                 ConnectionId::from_slice(b"original"),
                 keys,
@@ -455,7 +389,7 @@ mod tests {
         };
         paths.phase.enter_handshake(Arc::new(Space::new(
             Epoch::Handshake,
-            initial.initial.keys.clone(),
+            initial.initial_space.keys.clone(),
         )));
         assert_eq!(
             paths
@@ -465,15 +399,28 @@ mod tests {
             0
         );
         paths.handshake_confirmed();
+        assert_eq!(first.selected(), Path::SELECTED);
+        assert_eq!(second.selected(), Path::SUSPEND);
+        let waiting = paths.add_path(pathway(30007)).unwrap();
+        assert_eq!(waiting.selected(), Path::SUSPEND);
+        paths.select_path(&waiting);
+        assert_eq!(first.selected(), Path::SELECTED);
+        paths.activate_paths(&first);
         assert!(paths.snapshot().iter().all(|path| path.selected() == 2));
         assert!(first.is_validated());
         assert!(!second.is_validated());
         assert_eq!(second.state(), PathState::ClientValidating);
         assert_eq!(second.amplification_credit(), usize::MAX);
-        assert!(paths.is_handshake_path(&first));
         let added = paths.add_path(pathway(30006)).unwrap();
         assert_eq!(added.selected(), 2);
         assert_eq!(added.state(), PathState::ClientValidating);
+        paths.select_path(&added);
+        assert!(
+            paths
+                .snapshot()
+                .iter()
+                .all(|path| path.selected() == Path::HANDSHAKED)
+        );
         let validating = paths.responses.lock().unwrap().len();
         assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway).unwrap()));
         assert_eq!(paths.responses.lock().unwrap().len(), validating);
@@ -484,6 +431,42 @@ mod tests {
         paths.on_path_response(&second, second.challenge().unwrap().into());
         tokio::task::yield_now().await;
         assert!(second.is_validated());
+        paths.remove(&first);
+        let after_removal = paths.add_path(pathway(30008)).unwrap();
+        assert_eq!(after_removal.selected(), Path::HANDSHAKED);
+        assert_eq!(after_removal.state(), PathState::ClientValidating);
+        paths.retire_all();
+    }
+
+    #[tokio::test]
+    async fn removed_undecided_path_cannot_override_selection() {
+        let paths = paths(Role::Client);
+        let stale = paths.add_path(pathway(30002)).unwrap();
+        let selected = paths.add_path(pathway(30003)).unwrap();
+        paths.remove(&stale);
+        paths.select_path(&selected);
+        paths.select_path(&stale);
+        assert_eq!(selected.selected(), Path::SELECTED);
+        paths.retire_all();
+    }
+
+    #[tokio::test]
+    async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
+        let paths = paths(Role::Client);
+        let first = paths.add_path(pathway(30002)).unwrap();
+        let second = paths.add_path(pathway(30003)).unwrap();
+        paths.select_path(&first);
+        paths.remove(&first);
+        let added = paths.add_path(pathway(30004)).unwrap();
+        assert_eq!(added.selected(), Path::SUSPEND);
+        paths.select_path(&second);
+        paths.select_path(&added);
+        assert!(
+            paths
+                .snapshot()
+                .iter()
+                .all(|path| path.selected() == Path::SUSPEND)
+        );
         paths.retire_all();
     }
 
@@ -529,7 +512,7 @@ mod tests {
         assert!(paths.get(&path.pathway).is_none());
         assert!(paths.responses.lock().unwrap().is_empty());
         assert!(
-            matches!(paths.closed().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
+            matches!(paths.close_reason().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
         );
         let replacement = paths.add_path(pathway(30002)).unwrap();
         replacement.handshake_confirmed();

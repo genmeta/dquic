@@ -67,7 +67,7 @@ where
         }
     }
 
-    fn apply_initial_dcid(&mut self, initial_dcid: ConnectionId, dcid_cell: &ArcCidCell<RETIRED>) {
+    fn set_initial_dcid(&mut self, initial_dcid: ConnectionId) {
         assert!(
             self.cid_deque.is_empty() && self.cid_deque.offset() == 0 && self.cursor == 0,
             "NewConnectionIdFrame received before the first initial packet processed"
@@ -76,18 +76,6 @@ where
         self.cid_deque
             .push_back(Some((0, initial_dcid, ResetToken::default())))
             .expect("Initial connection ID should be inserted at the offset 0");
-
-        let handshake_path = self
-            .pending_cells
-            .iter()
-            .enumerate()
-            .find_map(|(idx, cell)| Arc::ptr_eq(&cell.0, &dcid_cell.0).then_some(idx))
-            .expect("Initial path should be in pending_cells");
-        // Move the initial path to the front of the pending cells
-        let handshake_path = self.pending_cells.remove(handshake_path).unwrap();
-        self.pending_cells.insert(0, handshake_path);
-
-        self.arrange_idle_cid();
     }
 
     /// Receive a [`NewConnectionIdFrame`] from peer.
@@ -254,47 +242,38 @@ where
         ))))
     }
 
-    /// Apply initial dcid to handshake path.
-    ///
-    /// dquic implements multi-path handshake feature, the client creates many paths and sends initial packets.
-    ///
-    /// The client and server must negotiate a handshake path and assign the initial dcid to this path
-    /// to prevent the unique connection ID from being obtained by an invalid path, causing the connection to fail.
-    ///
-    /// The client and server choose the path where they receive the first initial packet as the handshake path.
-    /// The server will only return the initial packet on the handshake path to negotiate the handshake path.
-    ///
-    /// This method should only be called when the connection receives the first initial packet, or panic.
-    /// The parameters are the Source Connection Id of the first initial packet received by the connection,
-    /// and the [`ArcCidCell`] of the path that passed this packet.
-    pub fn apply_initial_dcid(&self, initial_dcid: ConnectionId, dcid_cell: &ArcCidCell<RETIRED>) {
-        self.0
-            .lock()
-            .unwrap()
-            .apply_initial_dcid(initial_dcid, dcid_cell);
+    /// Set the local CID limit once the server has been selected, before receiving 1-RTT.
+    pub fn set_limit(&self, active_cid_limit: u64) {
+        self.0.lock().unwrap().active_cid_limit = active_cid_limit;
     }
 
-    /// Apply for a new connection ID, which is used when the Path is created.
+    /// Register the peer's Initial SCID as connection ID sequence zero.
+    ///
+    /// Call this once, after the peer's Initial SCID is known and before receiving
+    /// NEW_CONNECTION_ID frames or requesting any CID cells. Connection growth
+    /// registers it before publishing the Mature phase; registration does not
+    /// depend on which path is selected for the handshake.
+    ///
+    /// This only inserts sequence zero. It does not create or assign a cell,
+    /// rearrange pending cells, or advance the allocation cursor. The first
+    /// subsequent [`Self::apply_dcid`] gets sequence zero unless the peer has
+    /// already retired it through NEW_CONNECTION_ID's retire_prior_to field.
+    ///
+    /// With multiple paths, the caller must let the selected path's sending task
+    /// request its cell before allowing the other sending tasks to request theirs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CID queue has already been initialized or advanced.
+    pub fn set_initial_dcid(&self, initial_dcid: ConnectionId) {
+        self.0.lock().unwrap().set_initial_dcid(initial_dcid);
+    }
+
+    /// Apply for a CID cell when a path starts sending 1-RTT packets.
     ///
     /// Return an [`ArcCidCell`], which may be not ready state.
     pub fn apply_dcid(&self) -> ArcCidCell<RETIRED> {
         self.0.lock().unwrap().apply_dcid()
-    }
-
-    /// Return the latest connection ID issued by the peer.
-    ///
-    /// The cid is used to assemble the packet that contains a connection close frame. When the
-    /// connection is closed, the connection close frame will be sent to the peer.
-    pub fn latest_dcid(&self) -> Option<ConnectionId> {
-        self.0
-            .lock()
-            .unwrap()
-            .cid_deque
-            .iter()
-            .rev()
-            .flatten()
-            .next()
-            .map(|(_, cid, _)| *cid)
     }
 }
 
@@ -486,13 +465,75 @@ mod tests {
     }
 
     #[test]
+    fn initial_registration_leaves_allocation_to_the_first_sender() {
+        let mut remote = RemoteCids::new(4, RetiredCids::default());
+        let initial = ConnectionId::from_slice(b"client00");
+        let next = ConnectionId::from_slice(b"client01");
+        remote.set_initial_dcid(initial);
+        assert_eq!(remote.cursor, 0);
+        assert!(remote.ready_cells.is_empty());
+        assert!(remote.pending_cells.is_empty());
+
+        remote
+            .recv_new_cid_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
+            .unwrap();
+        let selected = remote.apply_dcid();
+        assert!(matches!(selected.borrow_cid(ArcSendWakers::default()),
+            Poll::Ready(Some(cid)) if *cid == initial));
+        let other = remote.apply_dcid();
+        assert!(matches!(other.borrow_cid(ArcSendWakers::default()),
+            Poll::Ready(Some(cid)) if *cid == next));
+    }
+
+    #[test]
+    fn initial_cid_can_be_retired_before_any_sender_requests_a_cell() {
+        let remote = ArcRemoteCids::new(2, RetiredCids::default());
+        remote.set_initial_dcid(ConnectionId::from_slice(b"client00"));
+        let next = ConnectionId::from_slice(b"client01");
+        remote
+            .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
+            .unwrap();
+        let selected = remote.apply_dcid();
+        assert!(matches!(selected.borrow_cid(ArcSendWakers::default()),
+            Poll::Ready(Some(cid)) if *cid == next));
+    }
+
+    #[test]
+    fn selected_server_limit_preserves_existing_cid_cells() {
+        let remote = ArcRemoteCids::new(2, RetiredCids::default());
+        let initial = ConnectionId::from_slice(b"client00");
+        remote.set_initial_dcid(initial);
+        let cell = remote.apply_dcid();
+
+        remote.clone().set_limit(8);
+        let frame = NewConnectionIdFrame::new(
+            ConnectionId::from_slice(b"client08"),
+            VarInt::from_u32(8),
+            VarInt::from_u32(0),
+        );
+        assert!(remote.recv_frame(frame).is_ok());
+        assert!(matches!(
+            cell.borrow_cid(ArcSendWakers::default()),
+            Poll::Ready(Some(cid)) if *cid == initial
+        ));
+
+        let frame = NewConnectionIdFrame::new(
+            ConnectionId::from_slice(b"client09"),
+            VarInt::from_u32(9),
+            VarInt::from_u32(0),
+        );
+        assert!(matches!(remote.recv_frame(frame), Err(Error::Quic(error))
+            if error.kind() == ErrorKind::ConnectionIdLimit));
+    }
+
+    #[test]
     fn test_remote_cids() {
         let retired_cids = RetiredCids::default();
         let mut remote_cids = RemoteCids::new(8, retired_cids);
 
         let initial_dcid = ConnectionId::random_gen(8);
+        remote_cids.set_initial_dcid(initial_dcid);
         let cid_apply0 = remote_cids.apply_dcid();
-        remote_cids.apply_initial_dcid(initial_dcid, &cid_apply0);
 
         let waker = ArcSendWakers::default();
         assert!(matches!(
@@ -538,8 +579,8 @@ mod tests {
         let remote_cids = ArcRemoteCids::new(8, retired_cids);
 
         let initial_dcid = ConnectionId::random_gen(8);
+        remote_cids.set_initial_dcid(initial_dcid);
         let cid_apply0 = remote_cids.apply_dcid();
-        remote_cids.apply_initial_dcid(initial_dcid, &cid_apply0);
 
         let mut guard = remote_cids.0.lock().unwrap();
 
@@ -618,8 +659,8 @@ mod tests {
         let remote_cids = ArcRemoteCids::new(8, retired_cids);
 
         let initial_dcid = ConnectionId::random_gen(8);
+        remote_cids.set_initial_dcid(initial_dcid);
         let cid_apply0 = remote_cids.apply_dcid();
-        remote_cids.apply_initial_dcid(initial_dcid, &cid_apply0);
 
         let mut guard = remote_cids.0.lock().unwrap();
 

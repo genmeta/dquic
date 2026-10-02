@@ -1,6 +1,8 @@
 use std::{
+    future::{Future, poll_fn},
     io::IoSlice,
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, OnceLock},
     task::{Poll, Waker},
 };
 
@@ -18,6 +20,7 @@ use super::{BurstPns, MAX_BURST_PACKETS, burst};
 use crate::{ConnPhase, Error, Paths};
 
 pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
+    let dcid_cell = OnceLock::new();
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::with_capacity(256);
@@ -26,15 +29,25 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let overhead = QuicProtocol::packet_overhead(path.pathway);
     let outcome: Result<(), Error> = async {
         loop {
-            let count = burst(
+            let mut collector = burst(
                 &path.cc,
                 &path.anti_amplifier,
                 &mut datagrams,
                 &mut frames,
                 &mut pns,
             )
-            .collect(&paths, &path, phase.get().dcid())
+            .collect(&paths, &path, &dcid_cell);
+            let count = poll_fn(|cx| {
+                let result = Pin::new(&mut collector).poll(cx);
+                // Collector has released the phase lock before path activation.
+                if dcid_cell.get().is_some() && path.selected() == Path::SELECTED {
+                    paths.activate_paths(&path);
+                }
+                result
+            })
             .await?;
+            let dcid = collector.dcid.take();
+            drop(collector);
             let sending_phase = phase.get();
             let deadlines = Epoch::EPOCHS.map(|epoch| {
                 (
@@ -101,6 +114,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                 }
                 first += sent;
             }
+            drop(dcid);
         }
     }
     .await;
@@ -110,6 +124,10 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
         for packet in pns[epoch].drain(..) {
             phase.cancel(epoch, packet.pn);
         }
+    }
+    // All burst loans have been released before retiring this path's CID.
+    if let Some(dcid) = dcid_cell.into_inner() {
+        dcid.retire();
     }
     paths.remove(&path);
     if let Err(error) = outcome
@@ -126,9 +144,9 @@ pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
         path.anti_amplifier.cancel(waker);
         let phase = paths.phase();
         phase.cancel(waker);
+        let mut terminator = &phase.terminator();
         let phase = phase.lock_guard();
         path.cc.cancel(waker);
-        let mut terminator = &paths.terminator();
         <&crate::terminate::ArcTerminator as Package<BytesMut>>::cancel(&mut terminator, waker);
         fn cancel_space(
             crypto: &qrecovery::crypto::CryptoStream,
@@ -146,15 +164,27 @@ pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
         }
         match &*phase {
             ConnPhase::Initial(p) => {
-                cancel_space(&p.initial.crypto, &p.initial.rcvd_journal, waker);
+                cancel_space(
+                    &p.initial_space.crypto,
+                    &p.initial_space.rcvd_journal,
+                    waker,
+                );
                 <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
                     &mut p.reliable_frames.clone(),
                     waker,
                 );
             }
             ConnPhase::Handshake(p) => {
-                cancel_space(&p.initial.crypto, &p.initial.rcvd_journal, waker);
-                cancel_space(&p.handshake.crypto, &p.handshake.rcvd_journal, waker);
+                cancel_space(
+                    &p.initial_space.crypto,
+                    &p.initial_space.rcvd_journal,
+                    waker,
+                );
+                cancel_space(
+                    &p.handshake_space.crypto,
+                    &p.handshake_space.rcvd_journal,
+                    waker,
+                );
                 <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
                     &mut p.reliable_frames.clone(),
                     waker,
@@ -180,7 +210,7 @@ pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
                     &mut p.spaces.data.streams.clone(),
                     waker,
                 );
-                p.flow.sender.cancel(waker);
+                p.flow_ctrl.sender.cancel(waker);
             }
         }
     }

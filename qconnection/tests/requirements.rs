@@ -65,10 +65,25 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         .tls_server
         .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
         .unwrap();
-    let phase = ArcConnPhase::initial(InitialPhase::new(
-        ConnectionId::from_slice(b"server00"),
+    let router = Arc::new(QuicRouter::new());
+    let (inbox, received) = channel::new();
+    let _route = router.insert(odcid.into(), inbox.clone());
+    let scid = ConnectionId::from_slice(b"server00");
+    let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
+    let cid_registry = qconnection::CidRegistry::new(
+        Role::Server,
         odcid,
+        qconnection::ArcLocalCids::new(
+            scid,
+            router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone()),
+        ),
+        qbase::cid::ArcRemoteCids::new(2, reliable_frames.clone()),
+    );
+    let phase = ArcConnPhase::initial(InitialPhase::new(
+        (scid, ConnectionId::from_slice(b"wrongcid")),
         server_keys,
+        reliable_frames,
+        cid_registry,
     ));
     let paths = Paths::new(
         Role::Server,
@@ -76,9 +91,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
     );
     paths.add_path(pathway).unwrap();
-    let router = Arc::new(QuicRouter::new());
-    let (inbox, received) = channel::new();
-    let route = router.insert(odcid.into(), inbox.clone());
+
 
     let data = [hello];
     let mut crypto = (
@@ -109,7 +122,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     ));
     let tick = qconnection::recv::tick(paths.clone());
     let growing = server_growing(
-        route,
         received,
         paths.clone(),
         ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
