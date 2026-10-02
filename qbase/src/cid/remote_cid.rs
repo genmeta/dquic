@@ -91,7 +91,26 @@ where
     ) -> Result<Option<ResetToken>, Error> {
         let seq = frame.sequence();
         let retire_prior_to = frame.retire_prior_to();
-        let active_len = seq.saturating_sub(retire_prior_to);
+        // Discard frames for CIDs already retired by the peer.
+        if seq < self.cid_deque.offset() {
+            return Ok(None);
+        }
+
+        // Count received, non-retired CIDs after this frame's retirement boundary.
+        // Empty slots, retired path cells and retransmissions consume no capacity.
+        let active_len = self
+            .cid_deque
+            .iter()
+            .flatten()
+            .filter(|(sequence, _, _)| {
+                *sequence >= retire_prior_to
+                    && self
+                        .ready_cells
+                        .get(*sequence)
+                        .is_none_or(|cell| !cell.is_retired())
+            })
+            .count() as u64
+            + u64::from(self.cid_deque.get(seq).is_none_or(Option::is_none));
         if active_len > self.active_cid_limit {
             return Err(QuicError::new(
                 ErrorKind::ConnectionIdLimit,
@@ -102,11 +121,6 @@ where
                 ),
             )
             .into());
-        }
-
-        // Discard the frame if the sequence number is less than the current offset.
-        if seq < self.cid_deque.offset() {
-            return Ok(None);
         }
 
         let id = *frame.connection_id();
