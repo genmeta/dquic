@@ -20,9 +20,11 @@ tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+clap.workspace = true
 netdev.workspace = true
 qudp.workspace = true
-tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "signal"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]
 test-ttl = []
