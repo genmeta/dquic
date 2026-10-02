@@ -8,6 +8,15 @@ responses, and enables dquic forwarding with `--relay`. See
 [deployment instructions](examples/stun-server/README.md) for the three-node
 configuration and systemd files.
 
+## Docker network unit tests
+
+Run `bash qtraversal/tools/run.sh` from the workspace root. The ignored tests in
+`punch::puncher::network_tests` drive two Punchers with a mock reliable broker and
+real UDP/STUN traffic through isolated NATs. They cover RestrictedPort/Symmetric
+in both active/passive roles, simultaneous active arbitration, retained probe
+sockets and direct UDP round trips. Examples are independent of this harness.
+See [the test guide](tools/README.md) for cases, topology and logs.
+
 ## Architecture
 
 `qtraversal` owns connection-scoped NAT hole punching for QUIC. `qprotocol::Dock`

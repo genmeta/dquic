@@ -12,134 +12,17 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  nat-detection:
-    # qtraversal is excluded until its qinterface dependency is migrated.
-    if: ${{ false }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image with cache
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: qtraversal/tools/dockerfile
-          tags: dquic-traversal-test:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Create cargo cache volume
-        run: docker volume create cargo-cache
-
-      - name: Compile tests and get NAT detection test list
-        run: |
-          docker run --rm --privileged \
-            -v ${{ github.workspace }}:/dquic \
-            -v cargo-cache:/usr/local/cargo/registry \
-            dquic-traversal-test:latest \
-            /bin/bash -c "
-              set -e
-              cd /dquic
-              cargo build --example stun_server --release
-              cargo test --package qtraversal test_detect --no-run
-              cargo test --package qtraversal test_detect -- --list
-            " | grep ": test$" | awk '{print $1}' | sed 's/:$//' > /tmp/nat_tests.txt
-          cat /tmp/nat_tests.txt
-
-      - name: Run NAT detection tests serially
-        run: |
-          mapfile -t NAT_TESTS < /tmp/nat_tests.txt
-
-          for test in "${NAT_TESTS[@]}"; do
-            if [ -z "$test" ]; then
-              continue
-            fi
-            echo "========================================"
-            echo "Running NAT detection: $test"
-            echo "========================================"
-
-            docker run --rm --privileged \
-              -v ${{ github.workspace }}:/dquic \
-              -v cargo-cache:/usr/local/cargo/registry \
-              dquic-traversal-test:latest \
-              /bin/bash -c "
-                set -e
-                cd /dquic
-                bash qtraversal/tools/run_stun.sh
-                echo 'DEBUG: Running test [$test]'
-                ip netns exec nsa cargo test --package qtraversal '$test' -- --nocapture --include-ignored
-              "
-
-            echo "Completed: $test"
-            echo ""
-          done
-
   punch:
-    # qtraversal is excluded until its qinterface dependency is migrated.
-    if: ${{ false }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image with cache
-        uses: docker/build-push-action@v6
+      - name: Run isolated NAT traversal matrix
+        run: bash qtraversal/tools/run.sh
+      - name: Upload traversal logs and NAT counters
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: qtraversal/tools/dockerfile
-          tags: dquic-traversal-test:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Create cargo cache volume
-        run: docker volume create cargo-cache
-
-      - name: Compile tests and get hole punching test list
-        run: |
-          docker run --rm --privileged \
-            -v ${{ github.workspace }}:/dquic \
-            -v cargo-cache:/usr/local/cargo/registry \
-            dquic-traversal-test:latest \
-            /bin/bash -c "
-              set -e
-              cd /dquic
-              cargo build --example stun_server --release
-              cargo test --test traversal --no-run
-              cargo test --test traversal -- --list
-            " | grep ": test$" | awk '{print $1}' | sed 's/:$//' > /tmp/hp_tests.txt
-          cat /tmp/hp_tests.txt
-
-      - name: Run hole punching tests serially
-        run: |
-          mapfile -t HP_TESTS < /tmp/hp_tests.txt
-
-          for test in "${HP_TESTS[@]}"; do
-            if [ -z "$test" ]; then
-              continue
-            fi
-            echo "========================================"
-            echo "Running hole punching: $test"
-            echo "========================================"
-
-            docker run --rm --privileged \
-              -v ${{ github.workspace }}:/dquic \
-              -v cargo-cache:/usr/local/cargo/registry \
-              dquic-traversal-test:latest \
-              /bin/bash -c "
-                set -e
-                cd /dquic
-                bash qtraversal/tools/run_stun.sh
-                echo 'DEBUG: Running test [$test]'
-                ip netns exec nsa cargo test --test traversal '$test' -- --include-ignored --nocapture
-              "
-
-            echo "Completed: $test"
-            echo ""
-          done
+          name: traversal-logs
+          path: target/traversal-docker/
+          if-no-files-found: warn
