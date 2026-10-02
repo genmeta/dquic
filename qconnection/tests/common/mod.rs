@@ -202,3 +202,22 @@ pub fn dcid(cid: ConnectionId) -> qbase::cid::ArcCidCell<qconnection::ArcReliabl
     remote.set_initial_dcid(cid);
     remote.apply_dcid()
 }
+
+/// Initial packet keys shared by send, receive, and punch component tests.
+pub fn initial_keys(server: bool) -> qtls::BidirectionalKeys {
+    qtls::default_provider()
+        .cipher_suites
+        .iter()
+        .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
+        .unwrap()
+        .keys(
+            b"original",
+            if server {
+                tls_backend::Side::Server
+            } else {
+                tls_backend::Side::Client
+            },
+            tls_backend::quic::Version::V1,
+        )
+        .into()
+}

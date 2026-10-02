@@ -1,25 +1,32 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use futures::FutureExt;
 use qbase::{
+    Epoch,
     cid::ConnectionId,
+    error::ErrorKind,
     frame::{
-        AddAddressFrame, ConnectionCloseFrame, FrameReader, HandshakeDoneFrame, PingFrame,
+        AddAddressFrame, ConnectionCloseFrame, Frame, FrameReader, HandshakeDoneFrame, PingFrame,
         PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, RemoveAddressFrame,
     },
-    net::{NatType, addr::EndpointAddr, route::Line},
-    packet::{DataHeader, Packet, PacketNumber, PacketReader},
+    net::{
+        NatType,
+        addr::EndpointAddr,
+        route::{Line, Link, Pathway},
+    },
+    packet::{DataHeader, OneRttHeader, Packet, PacketNumber, PacketReader},
+    role::Role,
     time::ArcConnIdle,
-    token::handy::NoopTokenRegistry,
+    token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
+use qtransport::{keys::ArcKeys, path::Path, space::Space};
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
-use super::*;
-use crate::{ArcConnPhase, MaturePhase};
-
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use crate::{
+    ArcConnPhase, ArcHandshake, ArcParameters, CloseReason, MaturePhase, Paths, Scopes, common,
+    recv::receive_1rtt_pkt_and_deliver_frames, terminate::Terminator,
+};
 
 fn pair() -> [Arc<MaturePhase>; 2] {
     let [mut client, mut server] = common::backends(false);
@@ -66,16 +73,16 @@ fn pair() -> [Arc<MaturePhase>; 2] {
             );
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
-            let initial = crate::tests::initial_phase(
+            let initial = crate::common::initial_phase(
                 role,
                 scid,
                 ConnectionId::from_slice(b"original"),
-                super::tests::keys(role == Role::Server),
+                common::initial_keys(role == Role::Server),
             );
             let registry = initial.cid_registry.clone();
             let handshake = Arc::new(Space::new(
                 Epoch::Handshake,
-                ArcKeys::new(Arc::new(super::tests::keys(role == Role::Server))),
+                ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
             ));
             let reliable_frames = initial.reliable_frames.clone();
             let streams = crate::DataStreams::new(
@@ -180,11 +187,11 @@ fn encode_frames<const N: usize>(
 
 fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
     let role = phase.parameters.role();
-    let snapshot = ArcConnPhase::initial(crate::tests::initial_phase(
+    let snapshot = ArcConnPhase::initial(crate::common::initial_phase(
         role,
         phase.scid,
         ConnectionId::from_slice(b"original"),
-        super::tests::keys(role == Role::Server),
+        common::initial_keys(role == Role::Server),
     ));
     let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
     Paths::new(role, snapshot, idle)

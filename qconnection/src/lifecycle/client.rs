@@ -272,7 +272,7 @@ async fn shutdown(
     reason
 }
 
-async fn resolve_paths(
+pub(crate) async fn resolve_paths(
     paths: &Arc<Paths>,
     addresses: &AddressBook,
     resolver: Arc<dyn qresolve::Resolve>,
@@ -313,6 +313,3 @@ async fn resolve_paths(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod discovery_tests;
