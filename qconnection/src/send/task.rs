@@ -15,6 +15,7 @@ use qbase::{
 use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
 use qtransport::path::Path;
+use tokio::time::Instant;
 
 use super::{BurstPns, MAX_BURST_PACKETS, burst};
 use crate::{ConnPhase, Error, Paths};
@@ -26,6 +27,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut frames = Vec::with_capacity(256);
     let mut pns: BurstPns = std::array::from_fn(|_| Vec::with_capacity(MAX_BURST_PACKETS));
     let phase = paths.phase();
+    let idle = paths.idle();
     let overhead = QuicProtocol::packet_overhead(path.pathway);
     let outcome: Result<(), Error> = async {
         loop {
@@ -91,7 +93,9 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                                         packet.in_flight,
                                         packet.ack,
                                     );
-                                    path.activity.on_sent(packet.content);
+                                    let now = Instant::now();
+                                    let _ = idle.on_sent_at(now);
+                                    let _ = path.heartbeat.on_sent_at(packet.content, now);
                                 }
                                 pns[epoch].retain(|packet| packet.index >= first + sent);
                             }
@@ -140,14 +144,14 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
 pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
-        path.activity.ignore(waker);
+        path.heartbeat.cancel(waker);
         path.anti_amplifier.cancel(waker);
         let phase = paths.phase();
         phase.cancel(waker);
-        let mut terminator = &phase.terminator();
+        let terminator = phase.terminator();
         let phase = phase.lock_guard();
         path.cc.cancel(waker);
-        <&crate::terminate::ArcTerminator as Package<BytesMut>>::cancel(&mut terminator, waker);
+        terminator.cancel(waker);
         fn cancel_space(
             crypto: &qrecovery::crypto::CryptoStream,
             journal: &qrecovery::journal::ArcRcvdJournal,

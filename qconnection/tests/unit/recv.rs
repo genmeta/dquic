@@ -12,7 +12,6 @@ use qbase::{
     },
     packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
     role::Role,
-    time::ArcConnIdle,
 };
 use qrecovery::journal::ArcSentJournal;
 use qtransport::{keys::ArcKeys, packet::CipherPacket, path::Path, space::Space};
@@ -150,11 +149,7 @@ fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
         ConnectionId::from_slice(b"original"),
         keys(role == Role::Server),
     ));
-    let paths = Paths::new(
-        role,
-        phase,
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
-    );
+    let paths = Paths::new(role, phase, Duration::ZERO, Duration::ZERO);
     let local = EndpointAddr::direct("127.0.0.1:30001".parse().unwrap());
     let first = paths
         .add_path(Pathway::new(
@@ -430,4 +425,80 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     }
     assert!(second.cc.need_ack(Epoch::Initial).is_none());
     paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_heartbeat() {
+    use qbase::{frame::CryptoFrame, packet::Package, time::heartbeat::ArcHeartbeat};
+    use tokio::time::Instant;
+
+    for epoch in [Epoch::Initial, Epoch::Handshake] {
+        for kind in 0..3 {
+            let phase = ArcConnPhase::initial(crate::common::initial_phase(
+                Role::Server,
+                ConnectionId::from_slice(b"localcid"),
+                ConnectionId::from_slice(b"original"),
+                keys(true),
+            ));
+            let paths = Paths::new(
+                Role::Server,
+                phase,
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+            );
+            let link = Link::new(
+                "127.0.0.1:30001".parse().unwrap(),
+                "127.0.0.1:30002".parse().unwrap(),
+            );
+            let path = Arc::new(Path::new(
+                link.into(),
+                paths.handshake.clone(),
+                ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+                paths.phase().get().trackers(),
+            ));
+            paths
+                .entries
+                .lock()
+                .unwrap()
+                .insert(path.pathway, path.clone());
+            let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(keys(true)))));
+            let pn = space.next_pn().unwrap().0;
+            space.on_assembled(pn, []);
+            space.on_sent(
+                [(pn, false)],
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+            );
+            let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+            let mut ping = PingFrame;
+            let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
+            let source: &mut dyn for<'b> Package<&'b mut BytesMut> = match kind {
+                0 => &mut ack,
+                1 => &mut ping,
+                _ => &mut crypto,
+            };
+            let header = LongHeaderBuilder::with_cid(
+                ConnectionId::from_slice(b"localcid"),
+                ConnectionId::from_slice(b"peercid0"),
+            );
+            let peer = keys(false);
+            let journal = ArcSentJournal::default();
+            let bytes = if epoch == Epoch::Initial {
+                seal(header.initial(vec![]), &peer.sealing, &journal, [source])
+            } else {
+                seal(header.handshake(), &peer.sealing, &journal, [source])
+            }
+            .unwrap();
+            let start = Instant::now();
+            receive_bytes(bytes, space, &paths, &path).await;
+            let reason = paths.close_reason().await.unwrap().unwrap();
+            assert!(
+                matches!(reason, CloseReason::Internal(error) if error.reason() == "connection idle timeout")
+            );
+            assert_eq!(Instant::now() - start, Duration::from_secs(5));
+            tokio::time::advance(Duration::from_secs(15)).await;
+            assert_eq!(super::take_heartbeat(&path), kind == 2);
+            paths.retire_all();
+        }
+    }
 }

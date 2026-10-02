@@ -7,7 +7,6 @@ use qbase::{
     frame::PathChallengeFrame,
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
-    time::ArcConnIdle,
 };
 use qtransport::{
     path::{Path, PathState},
@@ -17,6 +16,10 @@ use qtransport::{
 use crate::{ArcConnPhase, CloseReason, ConnPhase, Paths};
 
 fn paths(role: Role) -> Arc<Paths> {
+    paths_with_timeouts(role, Duration::ZERO, Duration::ZERO)
+}
+
+fn paths_with_timeouts(role: Role, max: Duration, defer: Duration) -> Arc<Paths> {
     let keys = qtls::default_provider()
         .cipher_suites
         .iter()
@@ -40,8 +43,36 @@ fn paths(role: Role) -> Arc<Paths> {
             ConnectionId::from_slice(b"original"),
             keys,
         )),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
+        max,
+        defer,
     )
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
+    let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
+    let start = tokio::time::Instant::now();
+    paths.idle().on_rcvd_at(start).unwrap().unwrap();
+    let reason = paths.close_reason().await.unwrap().unwrap();
+    assert!(matches!(reason, CloseReason::Internal(error)
+        if error.kind() == ErrorKind::NoViablePath && error.reason() == "connection idle timeout"));
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(5));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_idle_timer_does_not_request_close() {
+    use futures::FutureExt;
+
+    let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
+    let idle = paths.idle();
+    idle.on_rcvd_at(tokio::time::Instant::now())
+        .unwrap()
+        .unwrap();
+    tokio::task::yield_now().await;
+    idle.cancel();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    assert!(paths.close_reason().now_or_never().is_none());
 }
 
 fn pathway(port: u16) -> Pathway {
@@ -223,4 +254,60 @@ async fn validation_times_out_after_three_attempts_and_retirement_cancels_waitin
     assert!(response.await.is_err());
     tokio::task::yield_now().await;
     assert!(paths.responses.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn paths_have_independent_heartbeats_and_retirement_cancels_only_one() {
+    use qbase::packet::PacketContent;
+    use tokio::time::Instant;
+
+    let paths = paths_with_timeouts(
+        Role::Server,
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+    let first = paths.add_path(pathway(30002)).unwrap();
+    let second = paths.add_path(pathway(30003)).unwrap();
+    first
+        .heartbeat
+        .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    assert!(super::take_heartbeat(&first));
+    assert!(!super::take_heartbeat(&second));
+    paths.remove(&first);
+    assert!(
+        first
+            .heartbeat
+            .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
+            .is_err()
+    );
+    assert!(
+        second
+            .heartbeat
+            .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
+            .is_ok()
+    );
+    paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
+    let paths = paths(Role::Server);
+    paths.update_max_idle_timeout(Duration::MAX);
+    paths
+        .idle()
+        .on_rcvd_at(tokio::time::Instant::now())
+        .unwrap()
+        .unwrap();
+    let waiting = paths.idle().timeout();
+    tokio::pin!(waiting);
+    assert!(futures::poll!(&mut waiting).is_pending());
+    paths.idle().cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), waiting)
+            .await
+            .unwrap()
+            .is_err()
+    );
 }
