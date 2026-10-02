@@ -237,6 +237,9 @@ where
 
 impl<TX> Drop for Credit<'_, TX> {
     fn drop(&mut self) {
+        if self.available == 0 {
+            return;
+        }
         if let Ok(inner) = self.controller.0.lock().unwrap().as_mut() {
             inner.return_back(self.available as u64);
         }

@@ -183,10 +183,10 @@ where
         // 各流轮流按令牌桶算法发放的tokens来整理数据去发送
         const DEFAULT_TOKENS: usize = 4096;
         let result = match &output.cursor {
-            // rev([..=sid]) + rev([sid+1..])
+            // Rotate after the exhausted stream, then wrap around.
             Some((sid, tokens)) if *tokens == 0 => poll_streams(
-                (output.outgoings.range(..=sid).rev())
-                    .chain(output.outgoings.range((Excluded(sid), Unbounded)).rev())
+                (output.outgoings.range(..sid).rev())
+                    .chain(output.outgoings.range(sid..).rev())
                     .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS))
                     .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
@@ -1066,6 +1066,14 @@ where
 {
     /// Bound reservations by actual pending fresh bytes; idle polling must not reserve and refund flow credit.
     pub fn fresh_bytes(&self) -> usize {
+        self.fresh_bytes_up_to(usize::MAX)
+    }
+
+    /// Stop counting once the caller has enough credit for its packet.
+    pub fn fresh_bytes_up_to(&self, limit: usize) -> usize {
+        if limit == 0 {
+            return 0;
+        }
         let streams = self.output.streams();
         let Ok(output) = streams.as_ref() else {
             return 0;
@@ -1073,16 +1081,18 @@ where
         let remote = self.stream_ids.remote.role();
         let bidi = self.stream_ids.local.opened_streams(Dir::Bi);
         let uni = self.stream_ids.local.opened_streams(Dir::Uni);
-        output
-            .outgoings
-            .iter()
-            .filter(|(sid, _)| {
-                sid.role() == remote
-                    || (sid.dir() == Dir::Bi && sid.id() < bidi)
-                    || (sid.dir() == Dir::Uni && sid.id() < uni)
-            })
-            .map(|(_, (stream, _))| stream.fresh_bytes())
-            .fold(0usize, usize::saturating_add)
+        let mut total = 0usize;
+        for (_, (stream, _)) in output.outgoings.iter().filter(|(sid, _)| {
+            sid.role() == remote
+                || (sid.dir() == Dir::Bi && sid.id() < bidi)
+                || (sid.dir() == Dir::Uni && sid.id() < uni)
+        }) {
+            total = total.saturating_add(stream.fresh_bytes());
+            if total >= limit {
+                return limit;
+            }
+        }
+        total
     }
 
     pub(crate) fn poll_dump<B: BufMut + ?Sized>(
@@ -1099,6 +1109,18 @@ where
         };
         let start = frames.len();
         loop {
+            // A full packet or a lengthless STREAM cannot accept another frame.
+            buffer.for_frame(
+                FrameType::Stream(
+                    qbase::frame::Offset::Zero,
+                    qbase::frame::Len::Explicit,
+                    qbase::frame::Fin::No,
+                ),
+                frames,
+            );
+            if buffer.remaining_mut() < 2 {
+                return Poll::Ready(Ok(frames.len() - start));
+            }
             match self.poll_dump_once(output, cx, buffer, frames) {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(n)) if n > 0 => {}
