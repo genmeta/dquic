@@ -1,40 +1,43 @@
-use std::{task::Waker, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
 
+use bytes::BytesMut;
 use futures::FutureExt;
 use qbase::{
+    Epoch,
     cid::ConnectionId,
-    frame::FrameReader,
+    error::{ErrorKind, QuicError},
+    frame::{Frame, FrameReader, PingFrame},
     net::{addr::EndpointAddr, route::Pathway},
-    packet::{DataHeader, Packet as ParsedPacket, PacketReader, long},
+    packet::{
+        DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketReader,
+        assemble::{Assemble, Constraints},
+        long,
+    },
+    param::ParameterId,
     role::Role,
     time::ArcConnIdle,
 };
-use qtransport::{keys::ArcKeys, packet::CipherPacket, space::Space};
+use qcongestion::Transport as _;
+use qtransport::{keys::ArcKeys, packet::CipherPacket, path::Path, space::Space};
 use tokio::io::AsyncWriteExt;
 
-use super::*;
-use crate::InitialPhase;
-fn keys(server: bool) -> qtls::BidirectionalKeys {
-    qtls::default_provider()
-        .cipher_suites
-        .iter()
-        .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
-        .unwrap()
-        .keys(
-            b"original",
-            if server {
-                tls_backend::Side::Server
-            } else {
-                tls_backend::Side::Client
-            },
-            tls_backend::quic::Version::V1,
-        )
-        .into()
-}
+use crate::{
+    ConnPhase, InitialPhase, MaturePhase, Paths,
+    common::initial_keys as keys,
+    send::{
+        BurstPns, MAX_BURST_PACKETS, Packet, PendingPacket, SendingPacket, burst, sending, task,
+    },
+};
 
 #[tokio::test]
 async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
-    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+    let phase = crate::ArcConnPhase::initial(crate::common::initial_phase(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
@@ -69,7 +72,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
 #[tokio::test(start_paused = true)]
 async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     let dcid_cell = OnceLock::new();
-    let initial = crate::tests::initial_phase(
+    let initial = crate::common::initial_phase(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
@@ -122,7 +125,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
 
 #[tokio::test]
 async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
-    let initial = crate::tests::initial_phase(
+    let initial = crate::common::initial_phase(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
@@ -182,7 +185,7 @@ async fn failed_submission_returns_crypto_and_exits_the_sending_task() {
 #[tokio::test]
 async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let dcid_cell = OnceLock::new();
-    let initial = crate::tests::initial_phase(
+    let initial = crate::common::initial_phase(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
@@ -279,7 +282,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
     for role in [Role::Client, Role::Server] {
         for handshaking in [false, true] {
             for selected in [u8::MAX, 0, 1, 2] {
-                let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+                let phase = crate::ArcConnPhase::initial(crate::common::initial_phase(
                     role,
                     ConnectionId::from_slice(b"localcid"),
                     ConnectionId::from_slice(b"original"),
@@ -386,7 +389,7 @@ fn packet_continues_after_pending_and_no_space_sources() {
 async fn mixed_packets_consume_shared_budget_once_including_envelope() {
     let dcid_cell = OnceLock::new();
     for overhead in [0, 40] {
-        let initial = crate::tests::initial_phase(
+        let initial = crate::common::initial_phase(
             Role::Client,
             ConnectionId::from_slice(b"clientid"),
             ConnectionId::from_slice(b"original"),
@@ -627,7 +630,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+    let phase = crate::ArcConnPhase::initial(crate::common::initial_phase(
         Role::Server,
         ConnectionId::from_slice(b"serverid"),
         ConnectionId::from_slice(b"original"),
@@ -707,7 +710,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let phase = crate::ArcConnPhase::initial(crate::tests::initial_phase(
+    let phase = crate::ArcConnPhase::initial(crate::common::initial_phase(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
@@ -809,7 +812,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
 async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let dcid_cell = OnceLock::new();
-        let initial = crate::tests::initial_phase(
+        let initial = crate::common::initial_phase(
             Role::Server,
             ConnectionId::from_slice(b"server00"),
             ConnectionId::from_slice(b"original"),
@@ -968,7 +971,7 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         ArcParameters,
         handy::{client_parameters, server_parameters},
     };
-    let initial = crate::tests::initial_phase(
+    let initial = crate::common::initial_phase(
         Role::Server,
         ConnectionId::from_slice(b"server00"),
         ConnectionId::from_slice(b"original"),
@@ -1165,7 +1168,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         phase.get().trackers(),
     ));
     dcid_cell
-        .set(crate::tests::dcid(paths.phase().get().dcid()))
+        .set(crate::common::dcid(paths.phase().get().dcid()))
         .unwrap();
     path.validate();
     path.decide(true);
@@ -1536,7 +1539,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         paths.phase().get().trackers(),
     ));
     dcid_cell
-        .set(crate::tests::dcid(paths.phase().get().dcid()))
+        .set(crate::common::dcid(paths.phase().get().dcid()))
         .unwrap();
     path.validate();
     path.decide(true);

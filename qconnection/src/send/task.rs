@@ -137,7 +137,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     }
 }
 
-pub(super) fn cancel_waiters(paths: &Paths, path: &Path) {
+pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
         path.activity.ignore(waker);

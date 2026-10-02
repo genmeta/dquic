@@ -1,16 +1,21 @@
-use std::{fmt, io, sync::Mutex, time::Duration};
+use std::{
+    fmt, io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use futures::{FutureExt, channel::mpsc, stream};
+use futures::{FutureExt, StreamExt, channel::mpsc, stream};
 use qbase::{
     cid::ConnectionId,
+    error::ErrorKind,
     net::{Family, addr::EndpointAddr, route::Pathway},
+    role::Role,
     time::ArcConnIdle,
 };
-use qprotocol::UdpSocket;
+use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
-use super::*;
-use crate::ArcConnPhase;
+use crate::{ArcConnPhase, Error, Paths, lifecycle::client::resolve_paths};
 
 struct ScriptedResolver(Mutex<Option<ResolveResult>>);
 
@@ -58,7 +63,7 @@ fn paths() -> Arc<Paths> {
         .into();
     Paths::new(
         Role::Client,
-        ArcConnPhase::initial(crate::tests::initial_phase(
+        ArcConnPhase::initial(crate::common::initial_phase(
             Role::Client,
             ConnectionId::from_slice(b"clientid"),
             ConnectionId::from_slice(b"original"),

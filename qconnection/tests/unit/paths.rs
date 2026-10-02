@@ -1,0 +1,226 @@
+use std::{sync::Arc, time::Duration};
+
+use qbase::{
+    Epoch,
+    cid::ConnectionId,
+    error::ErrorKind,
+    frame::PathChallengeFrame,
+    net::{addr::EndpointAddr, route::Pathway},
+    role::Role,
+    time::ArcConnIdle,
+};
+use qtransport::{
+    path::{Path, PathState},
+    space::Space,
+};
+
+use crate::{ArcConnPhase, CloseReason, ConnPhase, Paths};
+
+fn paths(role: Role) -> Arc<Paths> {
+    let keys = qtls::default_provider()
+        .cipher_suites
+        .iter()
+        .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
+        .unwrap()
+        .keys(
+            b"original",
+            if role == Role::Server {
+                tls_backend::Side::Server
+            } else {
+                tls_backend::Side::Client
+            },
+            tls_backend::quic::Version::V1,
+        )
+        .into();
+    Paths::new(
+        role,
+        ArcConnPhase::initial(crate::common::initial_phase(
+            role,
+            ConnectionId::from_slice(b"localcid"),
+            ConnectionId::from_slice(b"original"),
+            keys,
+        )),
+        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
+    )
+}
+
+fn pathway(port: u16) -> Pathway {
+    Pathway::new(
+        EndpointAddr::direct(([127, 0, 0, 1], 30001).into()),
+        EndpointAddr::direct(([127, 0, 0, 1], port).into()),
+    )
+}
+
+#[tokio::test]
+async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard() {
+    let paths = paths(Role::Client);
+    let first = paths.add_path(pathway(30002)).unwrap();
+    let second = paths.add_path(pathway(30003)).unwrap();
+    assert_eq!(first.state(), PathState::ClientHandshaking);
+    assert_eq!(second.amplification_credit(), usize::MAX);
+    let incoming = paths.on_incoming_path(pathway(30004)).unwrap();
+    assert_eq!(incoming.amplification_credit(), 0);
+    assert_eq!(first.selected(), u8::MAX);
+    assert_eq!(second.selected(), u8::MAX);
+    paths.select_path(&first);
+    assert_eq!(first.selected(), 1);
+    assert_eq!(second.selected(), 0);
+    assert_eq!(incoming.selected(), 0);
+    assert_eq!(first.state(), PathState::ClientHandshaking);
+    assert_eq!(
+        second.state(),
+        PathState::AmplifyGuard {
+            rcvd_bytes: 0,
+            sent_bytes: 0
+        }
+    );
+    assert_eq!(second.amplification_credit(), 0);
+    second.on_datagram_received(100);
+    second.anti_amplifier.on_sent(200);
+    assert_eq!(second.amplification_credit(), 100);
+    let ConnPhase::Initial(initial) = paths.phase().get() else {
+        panic!()
+    };
+    paths.phase().enter_handshake(Arc::new(Space::new(
+        Epoch::Handshake,
+        initial.initial_space.keys.clone(),
+    )));
+    assert_eq!(
+        paths
+            .add_path(pathway(30005))
+            .unwrap()
+            .amplification_credit(),
+        0
+    );
+    paths.handshake_confirmed();
+    assert_eq!(first.selected(), Path::SELECTED);
+    assert_eq!(second.selected(), Path::SUSPEND);
+    let waiting = paths.add_path(pathway(30007)).unwrap();
+    assert_eq!(waiting.selected(), Path::SUSPEND);
+    paths.select_path(&waiting);
+    assert_eq!(first.selected(), Path::SELECTED);
+    paths.activate_paths(&first);
+    assert!(paths.snapshot().iter().all(|path| path.selected() == 2));
+    assert!(first.is_validated());
+    assert!(!second.is_validated());
+    assert_eq!(second.state(), PathState::ClientValidating);
+    assert_eq!(second.amplification_credit(), usize::MAX);
+    let added = paths.add_path(pathway(30006)).unwrap();
+    assert_eq!(added.selected(), 2);
+    assert_eq!(added.state(), PathState::ClientValidating);
+    paths.select_path(&added);
+    assert!(
+        paths
+            .snapshot()
+            .iter()
+            .all(|path| path.selected() == Path::HANDSHAKED)
+    );
+    let validating = paths.responses.lock().unwrap().len();
+    assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway).unwrap()));
+    assert_eq!(paths.responses.lock().unwrap().len(), validating);
+    tokio::task::yield_now().await;
+    assert!(first.challenge().is_none());
+    assert!(second.challenge().is_some());
+    assert!(added.challenge().is_some());
+    paths.on_path_response(&second, second.challenge().unwrap().into());
+    tokio::task::yield_now().await;
+    assert!(second.is_validated());
+    paths.remove(&first);
+    let after_removal = paths.add_path(pathway(30008)).unwrap();
+    assert_eq!(after_removal.selected(), Path::HANDSHAKED);
+    assert_eq!(after_removal.state(), PathState::ClientValidating);
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn removed_undecided_path_cannot_override_selection() {
+    let paths = paths(Role::Client);
+    let stale = paths.add_path(pathway(30002)).unwrap();
+    let selected = paths.add_path(pathway(30003)).unwrap();
+    paths.remove(&stale);
+    paths.select_path(&selected);
+    paths.select_path(&stale);
+    assert_eq!(selected.selected(), Path::SELECTED);
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
+    let paths = paths(Role::Client);
+    let first = paths.add_path(pathway(30002)).unwrap();
+    let second = paths.add_path(pathway(30003)).unwrap();
+    paths.select_path(&first);
+    paths.remove(&first);
+    let added = paths.add_path(pathway(30004)).unwrap();
+    assert_eq!(added.selected(), Path::SUSPEND);
+    paths.select_path(&second);
+    paths.select_path(&added);
+    assert!(
+        paths
+            .snapshot()
+            .iter()
+            .all(|path| path.selected() == Path::SUSPEND)
+    );
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn server_paths_start_guarded_and_only_the_correct_path_response_validates() {
+    let paths = paths(Role::Server);
+    let first = paths.add_path(pathway(30002)).unwrap();
+    let second = paths.add_path(pathway(30003)).unwrap();
+    assert_eq!(first.amplification_credit(), 0);
+    paths.start_validation(&first);
+    assert!(paths.responses.lock().unwrap().is_empty());
+    first.handshake_confirmed();
+    paths.start_validation(&first);
+    paths.start_validation(&first);
+    tokio::task::yield_now().await;
+    assert_eq!(paths.responses.lock().unwrap().len(), 1);
+    let challenge = first.challenge().unwrap();
+    paths.on_path_response(&second, challenge.into());
+    paths.on_path_response(&first, PathChallengeFrame::from_slice(&[42; 8]).into());
+    assert!(!first.is_validated());
+    paths.on_path_response(&first, challenge.into());
+    tokio::task::yield_now().await;
+    assert!(first.is_validated());
+    assert_eq!(first.amplification_credit(), usize::MAX);
+    assert_eq!(second.amplification_credit(), 0);
+    assert!(paths.responses.lock().unwrap().is_empty());
+    paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn validation_times_out_after_three_attempts_and_retirement_cancels_waiting() {
+    let paths = paths(Role::Server);
+    let path = paths.add_path(pathway(30002)).unwrap();
+    path.handshake_confirmed();
+    paths.start_validation(&path);
+    tokio::task::yield_now().await;
+    for _ in 0..3 {
+        assert!(path.challenge().is_some());
+        tokio::time::advance(path.cc.pto_base(Epoch::Data) * 3).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(path.state(), PathState::Retired);
+    assert!(paths.get(&path.pathway).is_none());
+    assert!(paths.responses.lock().unwrap().is_empty());
+    assert!(
+        matches!(paths.close_reason().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
+    );
+    let replacement = paths.add_path(pathway(30002)).unwrap();
+    replacement.handshake_confirmed();
+    paths.start_validation(&replacement);
+    tokio::task::yield_now().await;
+    let response = paths
+        .responses
+        .lock()
+        .unwrap()
+        .get(&replacement.pathway)
+        .unwrap()
+        .clone();
+    paths.remove(&replacement);
+    assert!(response.await.is_err());
+    tokio::task::yield_now().await;
+    assert!(paths.responses.lock().unwrap().is_empty());
+}

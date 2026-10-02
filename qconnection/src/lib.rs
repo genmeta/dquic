@@ -4,16 +4,13 @@
 //! acknowledge Initial fragments before it has received a complete ClientHello.
 //! Every path burst reads that shared sending snapshot.
 
-#[cfg(test)]
-extern crate self as qconnection;
-
 mod endpoint;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod paths;
 pub mod phase;
 pub mod recv;
 pub mod send;
-mod terminate;
+pub(crate) mod terminate;
 pub mod tls;
 
 use std::sync::{Arc, RwLock};
@@ -50,7 +47,3 @@ pub type Accepted = (
     qtls::LocalAuthority,
     ArcConnection,
 );
-
-#[cfg(test)]
-#[path = "../tests/common/mod.rs"]
-mod tests;
