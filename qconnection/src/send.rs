@@ -397,7 +397,7 @@ impl Collector<'_, '_> {
         let mut flow = std::task::ready!(phase.flow_ctrl.sender.poll_credit(
             cx,
             if packet.limits.send_quota() >= packet.limits.max_size() {
-                space.streams.fresh_bytes().min(1200)
+                space.streams.fresh_bytes_up_to(1200)
             } else {
                 0
             }
