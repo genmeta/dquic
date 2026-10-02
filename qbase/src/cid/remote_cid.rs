@@ -520,20 +520,22 @@ mod tests {
         let cell = remote.apply_dcid();
 
         remote.clone().set_limit(8);
-        let frame = NewConnectionIdFrame::new(
-            ConnectionId::from_slice(b"client08"),
-            VarInt::from_u32(8),
-            VarInt::from_u32(0),
-        );
-        assert!(remote.recv_frame(frame).is_ok());
+        for seq in 1..8u32 {
+            let frame = NewConnectionIdFrame::new(
+                ConnectionId::from_slice(&u64::from(seq).to_be_bytes()),
+                VarInt::from_u32(seq),
+                VarInt::from_u32(0),
+            );
+            assert!(remote.recv_frame(frame).is_ok());
+        }
         assert!(matches!(
             cell.borrow_cid(ArcSendWakers::default()),
             Poll::Ready(Some(cid)) if *cid == initial
         ));
 
         let frame = NewConnectionIdFrame::new(
-            ConnectionId::from_slice(b"client09"),
-            VarInt::from_u32(9),
+            ConnectionId::from_slice(b"client08"),
+            VarInt::from_u32(8),
             VarInt::from_u32(0),
         );
         assert!(matches!(remote.recv_frame(frame), Err(Error::Quic(error))
