@@ -92,24 +92,33 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     common::use_system_resolver();
     use futures::FutureExt;
     let cid = ConnectionId::random_gen(8);
-    let phase = ArcConnPhase::initial(InitialPhase::new(
-        cid,
+    let router = QuicRouter::global().clone();
+    let (inbox, rcvd_pkt) = channel::new();
+    let route = router.insert(cid.into(), inbox.clone());
+    let (parameters, _) = common::parameters();
+    let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
+    let cid_registry = qconnection::CidRegistry::new(
+        Role::Client,
         ConnectionId::from_slice(b"original"),
+        qconnection::ArcLocalCids::new(
+            cid,
+            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
+        ),
+        qbase::cid::ArcRemoteCids::new(
+            parameters.get::<u64>(qbase::param::ParameterId::ActiveConnectionIdLimit),
+            reliable_frames.clone(),
+        ),
+    );
+    let phase = ArcConnPhase::initial(InitialPhase::new(
+        (cid, ConnectionId::from_slice(b"original")),
         initial_keys(false),
+        reliable_frames,
+        cid_registry,
     ));
     let (endpoint, _) = common::endpoints(false);
-    let (parameters, _) = common::parameters();
     let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
     let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
     let paths = Paths::new(Role::Client, phase.clone(), idle);
-    let (inbox, rcvd_pkt) = channel::new();
-    let router = QuicRouter::global();
-    let route = router.insert(cid.into(), inbox.clone());
-    let ConnPhase::Initial(initial_phase) = phase.get() else {
-        unreachable!()
-    };
-    let cid_registry =
-        router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
         "localhost".into(),
@@ -117,7 +126,6 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         paths,
         rcvd_pkt,
         tls.clone(),
-        cid_registry,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         |result| assert!(result.is_err()),
     );
@@ -172,10 +180,28 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert_eq!(flight[0], 8);
     let parameters_end = 4 + u32::from_be_bytes([0, flight[1], flight[2], flight[3]]) as usize;
     let cid = ConnectionId::random_gen(8);
-    let phase = ArcConnPhase::initial(InitialPhase::new(
-        cid,
+    let router = Arc::new(QuicRouter::new());
+    let (inbox, rcvd_pkt) = channel::new();
+    let route = router.insert(cid.into(), inbox.clone());
+    let (parameters, _) = common::parameters();
+    let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
+    let cid_registry = qconnection::CidRegistry::new(
+        Role::Client,
         ConnectionId::from_slice(b"original"),
+        qconnection::ArcLocalCids::new(
+            cid,
+            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
+        ),
+        qbase::cid::ArcRemoteCids::new(
+            parameters.get::<u64>(qbase::param::ParameterId::ActiveConnectionIdLimit),
+            reliable_frames.clone(),
+        ),
+    );
+    let phase = ArcConnPhase::initial(InitialPhase::new(
+        (cid, ConnectionId::from_slice(b"original")),
         initial_keys(false),
+        reliable_frames,
+        cid_registry,
     ));
     let idle = ArcConnIdle::new(Duration::from_secs(5), Duration::ZERO, Duration::ZERO);
     let paths = Paths::new(Role::Client, phase.clone(), idle);
@@ -191,16 +217,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         EndpointAddr::direct(link.dst),
     );
     paths.add_path(pathway).unwrap();
-    let router = Arc::new(QuicRouter::new());
-    let (inbox, rcvd_pkt) = channel::new();
-    let route = router.insert(cid.into(), inbox.clone());
-    let ConnPhase::Initial(initial_phase) = phase.get() else {
-        unreachable!()
-    };
-    let cid_registry =
-        router.registry_on_issuing_scid(inbox, initial_phase.reliable_frames.clone());
     let (delivered, mut delivery) = oneshot::channel();
-    let (parameters, _) = common::parameters();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
         "localhost".into(),
@@ -208,7 +225,6 @@ async fn close_at_client_stage(wait: ClientWait) {
         paths.clone(),
         rcvd_pkt,
         tls.clone(),
-        cid_registry,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         move |result| {
             let _ = delivered.send(result);
@@ -237,7 +253,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let ConnPhase::Handshake(connecting) = phase.get() {
-                break connecting.handshake.clone();
+                break connecting.handshake_space.clone();
             }
             tokio::task::yield_now().await;
         }
@@ -249,8 +265,8 @@ async fn close_at_client_stage(wait: ClientWait) {
         Err(oneshot::error::TryRecvError::Empty)
     ));
     let initial = match phase.get() {
-        ConnPhase::Initial(phase) => phase.initial.clone(),
-        ConnPhase::Handshake(phase) => phase.initial.clone(),
+        ConnPhase::Initial(phase) => phase.initial_space.clone(),
+        ConnPhase::Handshake(phase) => phase.initial_space.clone(),
         ConnPhase::Mature(phase) => phase.spaces.initial.clone(),
     };
     assert!(initial.crypto.writer().write(&[]).await.is_err());

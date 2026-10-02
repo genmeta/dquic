@@ -60,6 +60,26 @@ async fn old_entry_cannot_remove_a_replacement() {
 }
 
 #[tokio::test]
+async fn retained_route_drops_late_initials_after_the_receiver_closes() {
+    let router = router();
+    let incoming = Arc::new(Mutex::new(0));
+    let observed = incoming.clone();
+    router.on_incoming(move |_, _, _| *observed.lock().unwrap() += 1);
+    let cid = ConnectionId::from_slice(b"original");
+    let (inbox, received) = channel::new();
+    let route = router.insert(cid.into(), inbox);
+    drop(received);
+
+    let (pathway, link) = way();
+    router.deliver(packet(cid), pathway, link);
+    assert_eq!(*incoming.lock().unwrap(), 0);
+
+    drop(route);
+    router.deliver(packet(cid), pathway, link);
+    assert_eq!(*incoming.lock().unwrap(), 1);
+}
+
+#[tokio::test]
 async fn incoming_initial_uses_the_router_callback() {
     let router = router();
     let incoming = Arc::new(Mutex::new(None));

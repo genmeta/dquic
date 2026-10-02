@@ -12,16 +12,17 @@ use qbase::{
     error::Error,
     frame::io::SendFrame,
     packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package},
+    param::{
+        ArcParameters,
+        handy::{client_parameters, server_parameters},
+    },
     role::Role,
-    sid::{Dir, StreamId},
+    sid::handy::DemandConcurrency,
+};
+use qrecovery::{
+    crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::DataStreams,
 };
 use tokio::io::AsyncWriteExt;
-
-use crate::{
-    crypto::CryptoStream,
-    journal::ArcRcvdJournal,
-    send::{ArcSender, CancelStream, Outgoing, Writer},
-};
 
 #[derive(Default)]
 struct Counter(AtomicUsize);
@@ -91,16 +92,25 @@ impl<T> SendFrame<T> for Broker {
 #[tokio::test]
 async fn stream_ready_and_blocked_polls_do_not_subscribe() {
     for quota in [0, 128] {
-        let sender = ArcSender::new(StreamId::new(Role::Client, Dir::Bi, 0), 100, Broker, None);
-        let mut writer = Writer::new(sender.clone());
-        let mut source = Outgoing::new(sender);
-        writer.write_all(b"hello").await.unwrap();
+        let mut source = DataStreams::new(
+            ArcParameters::new(
+                Role::Client,
+                Arc::new(client_parameters()),
+                Arc::new(server_parameters()),
+            ),
+            Box::new(DemandConcurrency),
+            Broker,
+            None,
+        );
+        let (_, mut writer) = source.open_uni().await.unwrap().unwrap();
+        // Keep data queued after assembly so the stream remains ready.
+        writer.write_all(&[0; 128]).await.unwrap();
         let counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        assert_eq!(
+        assert!(matches!(
             poll(&mut source, quota, &waker),
-            Poll::Ready(Ok(usize::from(quota != 0)))
-        );
+            Poll::Ready(Ok(n)) if (n > 0) == (quota != 0)
+        ));
         writer.write_all(b"next").await.unwrap();
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         writer.cancel(0);

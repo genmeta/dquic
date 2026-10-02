@@ -16,7 +16,7 @@ use qbase::{
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 use super::*;
-use crate::{ArcConnPhase, InitialPhase};
+use crate::{ArcConnPhase, MaturePhase};
 
 #[path = "../../tests/common/mod.rs"]
 mod common;
@@ -27,7 +27,10 @@ fn pair() -> [Arc<MaturePhase>; 2] {
     while material.iter().any(Option::is_none) {
         while let Some(event) = client.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
+                qtls::TlsEvent::WriteCrypto {
+                    epoch: level,
+                    bytes,
+                } => {
                     server.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {
@@ -38,7 +41,10 @@ fn pair() -> [Arc<MaturePhase>; 2] {
         }
         while let Some(event) = server.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
+                qtls::TlsEvent::WriteCrypto {
+                    epoch: level,
+                    bytes,
+                } => {
                     client.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {
@@ -60,37 +66,56 @@ fn pair() -> [Arc<MaturePhase>; 2] {
             );
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
-            let initial = InitialPhase::new(
+            let initial = crate::tests::initial_phase(
+                role,
                 scid,
                 ConnectionId::from_slice(b"original"),
                 super::tests::keys(role == Role::Server),
             );
-            let router = Arc::new(qtransport::router::QuicRouter::new());
-            let (inbox, _) = qtransport::packet::channel::new();
-            let registry = crate::CidRegistry::new(
-                role,
-                initial.odcid,
-                crate::ArcLocalCids::new(
-                    scid,
-                    router.registry_on_issuing_scid(inbox, initial.reliable_frames.clone()),
-                ),
-                qbase::cid::ArcRemoteCids::new(2, initial.reliable_frames.clone()),
-            );
-            let dcid = registry.remote.apply_dcid();
-            registry.remote.apply_initial_dcid(peer, &dcid);
-            let phase = MaturePhase::new(
-                &initial,
-                Arc::new(Space::new(
-                    Epoch::Handshake,
-                    ArcKeys::new(Arc::new(super::tests::keys(role == Role::Server))),
+            let registry = initial.cid_registry.clone();
+            let handshake = Arc::new(Space::new(
+                Epoch::Handshake,
+                ArcKeys::new(Arc::new(super::tests::keys(role == Role::Server))),
+            ));
+            let reliable_frames = initial.reliable_frames.clone();
+            let streams = crate::DataStreams::new(
+                parameters.clone(),
+                Box::new(qbase::sid::handy::ConsistentConcurrency::new(
+                    parameters.local(qbase::param::ParameterId::InitialMaxStreamsBidi),
+                    parameters.local(qbase::param::ParameterId::InitialMaxStreamsUni),
                 )),
-                parameters,
-                peer,
-                initial.reliable_frames.clone(),
-                registry,
-                dcid,
-                keys.unwrap().into(),
+                reliable_frames.clone(),
+                None,
             );
+            let flow = crate::FlowController::new(
+                parameters.remote(qbase::param::ParameterId::InitialMaxData),
+                parameters.local(qbase::param::ParameterId::InitialMaxData),
+                reliable_frames.clone(),
+            );
+            let data = Arc::new(qtransport::space::DataSpace::new(
+                keys.unwrap().into(),
+                streams,
+                reliable_frames.clone(),
+            ));
+            let puncher = qtraversal::punch::ArcPuncher::new(
+                reliable_frames,
+                qtraversal::punch::ProbeEncoder::new(data.clone(), peer),
+            );
+            let phase = Arc::new(MaturePhase {
+                spaces: qtransport::space::Spaces {
+                    initial: initial.initial_space.clone(),
+                    handshake,
+                    data,
+                },
+                scid: initial.scid,
+                flow_ctrl: flow,
+                cid_registry: registry,
+                dcid: peer,
+                parameters,
+                puncher,
+                trackers: initial.trackers.clone(),
+                terminator: initial.terminator.clone(),
+            });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
             take_reliable(&phase);
             phase
@@ -101,7 +126,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
 }
 
 fn encoder(phase: &MaturePhase) -> ProbeEncoder {
-    ProbeEncoder::new(phase.spaces.data.clone(), phase.peer_cid)
+    ProbeEncoder::new(phase.spaces.data.clone(), phase.dcid)
 }
 
 fn encode_frame(
@@ -124,7 +149,7 @@ fn encode_frames<const N: usize>(
         .unwrap();
     let mut bytes = BytesMut::with_capacity(1200);
     let packet = crate::send::Packet::new(
-        OneRttHeader::new(Default::default(), phase.peer_cid),
+        OneRttHeader::new(Default::default(), phase.dcid),
         pn,
         &mut bytes,
     )
@@ -155,7 +180,8 @@ fn encode_frames<const N: usize>(
 
 fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
     let role = phase.parameters.role();
-    let snapshot = ArcConnPhase::initial(InitialPhase::new(
+    let snapshot = ArcConnPhase::initial(crate::tests::initial_phase(
+        role,
         phase.scid,
         ConnectionId::from_slice(b"original"),
         super::tests::keys(role == Role::Server),
@@ -185,7 +211,7 @@ async fn receive_on_paths(
     pathway: Pathway,
     link: Link,
     scopes: Scopes,
-) -> ArcHandshake<ArcReliableFrames> {
+) -> ArcHandshake {
     let (tx, rx) = tokio::sync::mpsc::channel(packets.len());
     for bytes in packets {
         let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
@@ -202,13 +228,15 @@ async fn receive_on_paths(
         .unwrap();
     }
     drop(tx);
-    let closed = paths.closed();
+    let closed = paths.close_reason();
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
     let role = phase.parameters.role();
     let handshake = ArcHandshake::new(role, phase.spaces.data.reliable_frames.clone());
-    receive_data(
+    receive_1rtt_pkt_and_deliver_frames(
         (rx, (role == Role::Server).then_some(scopes)),
-        phase.clone(),
+        phase.spaces.data.clone(),
+        phase.flow_ctrl.clone(),
+        phase.puncher.clone(),
         paths.clone(),
         phase.parameters.clone(),
         phase.cid_registry.clone(),
@@ -307,11 +335,11 @@ async fn handshake_done_confirms_the_shared_client_handshake() {
 }
 
 #[tokio::test]
-async fn data_close_takes_priority_and_reception_continues_after_errors() {
+async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
     use tokio::io::AsyncReadExt;
 
     let close = ConnectionCloseFrame::new_app(7u32.into(), "peer closed");
-    for (role, peer_close) in [
+    for (role, bundled_close) in [
         (Role::Client, true),
         (Role::Server, true),
         (Role::Server, false),
@@ -323,8 +351,8 @@ async fn data_close_takes_priority_and_reception_continues_after_errors() {
             (&pair[1], &pair[0])
         };
         let paths = empty_paths(receiver);
-        let closed = paths.closed();
-        let first = if peer_close {
+        let closed = paths.close_reason();
+        let first = if bundled_close {
             encode_frames(sender, [&mut HandshakeDoneFrame, &mut close.clone()])
         } else {
             encode_frame(sender, HandshakeDoneFrame)
@@ -357,9 +385,11 @@ async fn data_close_takes_priority_and_reception_continues_after_errors() {
             receiver.parameters.role(),
             receiver.spaces.data.reliable_frames.clone(),
         );
-        receive_data(
+        receive_1rtt_pkt_and_deliver_frames(
             (rx, Some(Scopes::ALL)),
-            receiver.clone(),
+            receiver.spaces.data.clone(),
+            receiver.flow_ctrl.clone(),
+            receiver.puncher.clone(),
             paths.clone(),
             receiver.parameters.clone(),
             receiver.cid_registry.clone(),
@@ -368,17 +398,17 @@ async fn data_close_takes_priority_and_reception_continues_after_errors() {
         )
         .await;
         let reason = closed.now_or_never().unwrap().unwrap().unwrap();
-        if peer_close {
+        if role == Role::Client {
             assert!(matches!(reason, CloseReason::Peer(frame) if frame == close));
         } else {
             assert!(matches!(reason, CloseReason::Internal(error)
                 if error.kind() == ErrorKind::ProtocolViolation));
         }
         assert!(matches!(
-            &*paths.terminator().lock_guard(),
+            &*paths.phase().terminator().lock_guard(),
             Terminator::Draining { .. }
         ));
-        assert!(!handshake.is_handshake_done());
+        assert_eq!(handshake.is_handshake_done(), role == Role::Client);
         assert!(receiver.spaces.data.streams.accept_uni().await.is_err());
         assert!(receiver.spaces.data.streams.accept_bi().await.is_err());
         assert!(
@@ -528,6 +558,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
             .unwrap();
         paths.select_path(&original);
         paths.handshake_confirmed();
+        paths.activate_paths(&original);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
         let packet = encoder(sender)
             .encode_probe(PunchDoneFrame::new(1, 2, 3))
@@ -585,7 +616,7 @@ fn take_reliable(phase: &MaturePhase) -> Vec<Frame> {
         &mut ConstraintBuffer::new(
             &mut bytes,
             &mut limits,
-            OneRttHeader::new(Default::default(), phase.peer_cid).get_type(),
+            OneRttHeader::new(Default::default(), phase.dcid).get_type(),
             0,
             0,
         ),
