@@ -9,7 +9,7 @@ use bytes::BufMut;
 use qbase::{
     error::Error,
     frame::{EncodeSize, Frame, FrameFeature, io::SendFrame},
-    net::tx::ArcSendWakers,
+    net::tx::{ArcSendWakers, UnregisterWaker},
     packet::{ConstraintBuffer, Package},
 };
 
@@ -97,9 +97,11 @@ impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
         }
         Poll::Ready(Ok(frames.len() - start))
     }
+}
 
-    fn cancel(&mut self, waker: &Waker) {
-        self.tx_wakers.cancel(waker);
+impl<F> UnregisterWaker for ArcReliableFrames<F> {
+    fn unregister(&self, waker: &Waker) {
+        self.tx_wakers.unregister(waker);
     }
 }
 

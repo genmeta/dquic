@@ -1,6 +1,6 @@
 use std::{
     sync::atomic::{AtomicBool, Ordering::*},
-    task::{Context, Poll, ready},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::BufMut;
@@ -11,7 +11,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     metric::ArcConnectionMetrics,
-    net::tx::ArcSendWakers,
+    net::tx::{ArcSendWakers, UnregisterWaker},
     packet::ConstraintBuffer,
     param::{ArcParameters, ParameterId, core::Parameters},
     sid::{
@@ -736,17 +736,16 @@ mod tests {
 
     #[test]
     fn receive_limits_follow_the_local_stream_direction() {
-        use qbase::{
-            error::ErrorKind,
-            frame::StreamFrame,
-            param::ParameterId,
-            sid::StreamId,
-        };
+        use qbase::{error::ErrorKind, frame::StreamFrame, param::ParameterId, sid::StreamId};
 
         use crate::send::CancelStream;
 
         for role in [Role::Client, Role::Server] {
-            for (local, dir, limit) in [(true, Dir::Bi, 3), (false, Dir::Bi, 5), (false, Dir::Uni, 7)] {
+            for (local, dir, limit) in [
+                (true, Dir::Bi, 3),
+                (false, Dir::Bi, 5),
+                (false, Dir::Uni, 7),
+            ] {
                 let mut client = client_parameters();
                 let mut server = server_parameters();
                 for (id, value) in [
@@ -815,9 +814,7 @@ mod tests {
             None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let Poll::Ready(Ok(Some((_, mut writer)))) =
-            streams.poll_open_uni_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, mut writer)))) = streams.poll_open_uni_stream(&mut cx) else {
             panic!("ready parameters must allow opening the stream immediately");
         };
         let ready = writer.poll_ready(&mut cx);
@@ -843,14 +840,10 @@ mod tests {
             None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let Poll::Ready(Ok(Some((_, (_, mut bi))))) =
-            streams.poll_open_bi_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, (_, mut bi))))) = streams.poll_open_bi_stream(&mut cx) else {
             panic!("ready parameters must allow opening the bidirectional stream");
         };
-        let Poll::Ready(Ok(Some((_, mut uni)))) =
-            streams.poll_open_uni_stream(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, mut uni)))) = streams.poll_open_uni_stream(&mut cx) else {
             panic!("ready parameters must allow opening the unidirectional stream");
         };
         let bi_ready = bi.poll_ready(&mut cx);
@@ -925,12 +918,12 @@ mod tests {
         // Re-polling discovers the new stream and subscribes both paths to its state.
         assert!(poll(&wa).is_pending());
         assert!(poll(&wb).is_pending());
-        streams.cancel(&wa);
+        streams.unregister(&wa);
         writer.write_all(b"data").await.unwrap();
         assert_eq!(a.0.load(Ordering::Relaxed), 1);
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         assert!(matches!(poll(&wb), Poll::Ready(Ok(n)) if n > 0));
-        streams.cancel(&wb);
+        streams.unregister(&wb);
         writer.write_all(b"more").await.unwrap();
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         let c = Arc::new(Counter(AtomicUsize::new(0)));
@@ -944,7 +937,7 @@ mod tests {
         assert_eq!(a.0.load(Ordering::Relaxed), 1);
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         assert_eq!(c.0.load(Ordering::Relaxed), 0);
-        streams.cancel(&wc);
+        streams.unregister(&wc);
         use crate::send::CancelStream;
         writer.cancel(0);
         next.cancel(0);
@@ -1087,7 +1080,7 @@ where
 
     pub(crate) fn poll_dump<B: BufMut + ?Sized>(
         &self,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         buffer: &mut ConstraintBuffer<'_, B>,
         frames: &mut Vec<Frame>,
     ) -> Poll<Result<usize, Error>> {
@@ -1112,13 +1105,11 @@ where
         }
     }
 
-    pub(crate) fn cancel(&self, waker: &std::task::Waker) {
-        self.tx_wakers.cancel(waker);
-        if let Ok(output) = self.output.streams().as_mut() {
-            for (outgoing, _) in output.values_mut() {
-                <Outgoing<Ext<TX>> as qbase::packet::Package<bytes::BytesMut>>::cancel(
-                    outgoing, waker,
-                );
+    pub(crate) fn unregister(&self, waker: &Waker) {
+        self.tx_wakers.unregister(waker);
+        if let Ok(output) = self.output.streams().as_ref() {
+            for (outgoing, _) in output.values() {
+                outgoing.unregister(waker);
             }
         }
     }

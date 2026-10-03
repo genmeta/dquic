@@ -8,7 +8,7 @@ use std::{
 use qbase::{
     error::{ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame},
-    net::tx::ArcSendWakers,
+    net::tx::{ArcSendWakers, UnregisterWaker},
     packet::{ConstraintBuffer, Package, Type},
 };
 use tokio::time::Instant;
@@ -247,15 +247,6 @@ impl ArcTerminator {
         self.0.lock().unwrap()
     }
 
-    pub fn cancel(&self, waker: &Waker) {
-        match &*self.lock_guard() {
-            Terminator::NoError(send_wakers) | Terminator::Closing { send_wakers, .. } => {
-                send_wakers.cancel(waker);
-            }
-            Terminator::Draining { .. } | Terminator::Terminated(_) => {}
-        }
-    }
-
     /// Start local Closing, or preserve an earlier peer-initiated Draining state.
     pub(crate) fn on_error(&self, reason: &CloseReason, duration: Duration) {
         self.lock_guard().on_error(reason, duration);
@@ -299,8 +290,15 @@ impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
     ) -> Poll<Result<usize, Error>> {
         self.lock_guard().poll_dump(cx, buffer, frames)
     }
+}
 
-    fn cancel(&mut self, waker: &Waker) {
-        ArcTerminator::cancel(self, waker);
+impl UnregisterWaker for ArcTerminator {
+    fn unregister(&self, waker: &Waker) {
+        match &*self.lock_guard() {
+            Terminator::NoError(send_wakers) | Terminator::Closing { send_wakers, .. } => {
+                send_wakers.unregister(waker);
+            }
+            Terminator::Draining { .. } | Terminator::Terminated(_) => {}
+        }
     }
 }

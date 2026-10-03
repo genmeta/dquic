@@ -638,7 +638,7 @@ impl ArcCC {
     }
 
     pub fn cancel(&self, waker: &std::task::Waker) {
-        self.0.lock().unwrap().tx_waker.cancel(waker);
+        self.0.lock().unwrap().tx_waker.unregister(waker);
     }
 
     pub fn poll_send_quota(&self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {

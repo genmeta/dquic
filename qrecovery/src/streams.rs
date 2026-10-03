@@ -34,6 +34,7 @@ use qbase::{
         Frame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
+    net::tx::UnregisterWaker,
     packet::{ConstraintBuffer, Package},
     param::ArcParameters,
     sid::{ControlStreamsConcurrency, StreamId},
@@ -211,7 +212,13 @@ where
     ) -> Poll<Result<usize, Error>> {
         self.0.poll_dump(cx, buffer, frames)
     }
-    fn cancel(&mut self, waker: &std::task::Waker) {
-        self.0.cancel(waker);
+}
+
+impl<TX> UnregisterWaker for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    fn unregister(&self, waker: &std::task::Waker) {
+        self.0.unregister(waker);
     }
 }

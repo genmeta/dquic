@@ -173,7 +173,7 @@ impl<TX> ArcSendControler<TX> {
 
     pub fn cancel(&self, waker: &std::task::Waker) {
         if let Ok(inner) = self.0.lock().unwrap().as_ref() {
-            inner.tx_wakers.cancel(waker);
+            inner.tx_wakers.unregister(waker);
         }
     }
 
