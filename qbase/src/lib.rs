@@ -59,8 +59,18 @@ pub mod varint;
 
 pub use qtls::Epoch;
 
-pub trait GetEpoch {
-    fn epoch(&self) -> Epoch;
+/// A component that stops serving application work when its connection closes.
+pub trait Close: Send + Sync {
+    fn close_with_error(&self, error: error::Error);
+}
+
+/// Register an owning component without retaining it through the close registry.
+impl<T: Close> Close for std::sync::Weak<T> {
+    fn close_with_error(&self, error: error::Error) {
+        if let Some(component) = self.upgrade() {
+            component.close_with_error(error);
+        }
+    }
 }
 
 #[derive(Debug, Default)]

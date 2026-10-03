@@ -8,7 +8,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use qbase::{
-    ArcReceiving, Epoch,
+    Close, Epoch,
     error::{Error, ErrorKind, QuicError},
     param::{ClientParameters, ServerParameters, WriteParameters},
 };
@@ -16,11 +16,17 @@ use qtls::{HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
 use qtransport::space::Space;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::CloseReason;
+use crate::{CloseReason, Paths};
 
 /// One reader for CRYPTO output, and one growing coroutine for handshake results.
 #[derive(Clone)]
 pub struct TlsContext(Arc<Mutex<Result<Tls, Error>>>);
+
+impl Close for TlsContext {
+    fn close_with_error(&self, error: Error) {
+        self.on_error(error);
+    }
+}
 
 enum Backend {
     Handshake(Box<TlsHandshake>),
@@ -379,8 +385,9 @@ pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
 pub fn read_space_to_tls<K>(
     tls: TlsContext,
     space: &Space<K>,
-    closed: ArcReceiving<CloseReason>,
+    paths: Arc<Paths>,
 ) -> impl Future<Output = ()> + Send + 'static + use<K> {
+    let terminator = paths.phase().terminator();
     let epoch = space.epoch;
     let mut reader = space.crypto.reader();
     async move {
@@ -390,7 +397,7 @@ pub fn read_space_to_tls<K>(
                 break;
             }
             if let Err(error) = tls.write_msg(epoch, &buffer[..length]) {
-                closed.with(error.into());
+                terminator.close(error.into(), paths.closing_pto());
                 break;
             }
         }
@@ -401,8 +408,9 @@ pub fn read_space_to_tls<K>(
 pub(crate) fn read_tls_to_space<K>(
     tls: TlsContext,
     space: &Space<K>,
-    closed: ArcReceiving<CloseReason>,
+    paths: Arc<Paths>,
 ) -> impl Future<Output = ()> + Send + 'static + use<K> {
+    let terminator = paths.phase().terminator();
     let epoch = space.epoch;
     let stream = space.crypto.clone();
     async move {
@@ -410,16 +418,21 @@ pub(crate) fn read_tls_to_space<K>(
             let bytes = match tls.read_msg_at(epoch).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    stream.on_error(&error);
-                    closed.with(error.into());
+                    terminator.close(error.into(), paths.closing_pto());
                     break;
                 }
             };
             if let Err(error) = stream.writer().write_all(&bytes).await {
-                tls.on_error(
-                    QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
+                terminator.close(
+                    CloseReason::Internal(QuicError::with_default_fty(
+                        ErrorKind::Internal,
+                        error.to_string(),
+                    )),
+                    paths.closing_pto(),
                 );
+                break;
             }
         }
+        terminator.await;
     }
 }

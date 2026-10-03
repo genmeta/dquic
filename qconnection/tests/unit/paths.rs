@@ -13,7 +13,7 @@ use qtransport::{
     space::Space,
 };
 
-use crate::{ArcConnPhase, CloseReason, ConnPhase, Paths};
+use crate::{ArcConnPhase, ConnPhase, Paths};
 
 fn paths(role: Role) -> Arc<Paths> {
     paths_with_timeouts(role, Duration::ZERO, Duration::ZERO)
@@ -53,17 +53,16 @@ async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
     let start = tokio::time::Instant::now();
     paths.idle().on_rcvd_at(start).unwrap().unwrap();
-    let reason = paths.close_reason().await.unwrap().unwrap();
-    assert!(matches!(reason, CloseReason::Internal(error)
-        if error.kind() == ErrorKind::NoViablePath && error.reason() == "connection idle timeout"));
-    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(5));
+    let reason = paths.phase().terminator().await;
+    assert!(matches!(reason, crate::Error::Quic(error)
+        if error.kind() == ErrorKind::None && error.reason() == "connection idle timeout"));
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(8));
 }
 
 #[tokio::test(start_paused = true)]
 async fn cancelled_idle_timer_does_not_request_close() {
-    use futures::FutureExt;
-
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
+    let notification = crate::common::observe_close(&paths.phase().terminator());
     let idle = paths.idle();
     idle.on_rcvd_at(tokio::time::Instant::now())
         .unwrap()
@@ -72,7 +71,7 @@ async fn cancelled_idle_timer_does_not_request_close() {
     idle.cancel();
     tokio::time::advance(Duration::from_secs(5)).await;
     tokio::task::yield_now().await;
-    assert!(paths.close_reason().now_or_never().is_none());
+    assert!(notification.notified().is_none());
 }
 
 fn pathway(port: u16) -> Pathway {
@@ -85,11 +84,11 @@ fn pathway(port: u16) -> Pathway {
 #[tokio::test]
 async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard() {
     let paths = paths(Role::Client);
-    let first = paths.add_path(pathway(30002)).unwrap();
-    let second = paths.add_path(pathway(30003)).unwrap();
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
     assert_eq!(first.state(), PathState::ClientHandshaking);
     assert_eq!(second.amplification_credit(), usize::MAX);
-    let incoming = paths.on_incoming_path(pathway(30004)).unwrap();
+    let incoming = paths.on_incoming_path(pathway(30004));
     assert_eq!(incoming.amplification_credit(), 0);
     assert_eq!(first.selected(), u8::MAX);
     assert_eq!(second.selected(), u8::MAX);
@@ -119,14 +118,13 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert_eq!(
         paths
             .add_path(pathway(30005))
-            .unwrap()
             .amplification_credit(),
         0
     );
     paths.handshake_confirmed();
     assert_eq!(first.selected(), Path::SELECTED);
     assert_eq!(second.selected(), Path::SUSPEND);
-    let waiting = paths.add_path(pathway(30007)).unwrap();
+    let waiting = paths.add_path(pathway(30007));
     assert_eq!(waiting.selected(), Path::SUSPEND);
     paths.select_path(&waiting);
     assert_eq!(first.selected(), Path::SELECTED);
@@ -136,7 +134,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert!(!second.is_validated());
     assert_eq!(second.state(), PathState::ClientValidating);
     assert_eq!(second.amplification_credit(), usize::MAX);
-    let added = paths.add_path(pathway(30006)).unwrap();
+    let added = paths.add_path(pathway(30006));
     assert_eq!(added.selected(), 2);
     assert_eq!(added.state(), PathState::ClientValidating);
     paths.select_path(&added);
@@ -147,7 +145,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
             .all(|path| path.selected() == Path::HANDSHAKED)
     );
     let validating = paths.responses.lock().unwrap().len();
-    assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway).unwrap()));
+    assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway)));
     assert_eq!(paths.responses.lock().unwrap().len(), validating);
     tokio::task::yield_now().await;
     assert!(first.challenge().is_none());
@@ -157,7 +155,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     tokio::task::yield_now().await;
     assert!(second.is_validated());
     paths.remove(&first);
-    let after_removal = paths.add_path(pathway(30008)).unwrap();
+    let after_removal = paths.add_path(pathway(30008));
     assert_eq!(after_removal.selected(), Path::HANDSHAKED);
     assert_eq!(after_removal.state(), PathState::ClientValidating);
     paths.retire_all();
@@ -166,8 +164,8 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
 #[tokio::test]
 async fn removed_undecided_path_cannot_override_selection() {
     let paths = paths(Role::Client);
-    let stale = paths.add_path(pathway(30002)).unwrap();
-    let selected = paths.add_path(pathway(30003)).unwrap();
+    let stale = paths.add_path(pathway(30002));
+    let selected = paths.add_path(pathway(30003));
     paths.remove(&stale);
     paths.select_path(&selected);
     paths.select_path(&stale);
@@ -178,11 +176,11 @@ async fn removed_undecided_path_cannot_override_selection() {
 #[tokio::test]
 async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     let paths = paths(Role::Client);
-    let first = paths.add_path(pathway(30002)).unwrap();
-    let second = paths.add_path(pathway(30003)).unwrap();
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
     paths.select_path(&first);
     paths.remove(&first);
-    let added = paths.add_path(pathway(30004)).unwrap();
+    let added = paths.add_path(pathway(30004));
     assert_eq!(added.selected(), Path::SUSPEND);
     paths.select_path(&second);
     paths.select_path(&added);
@@ -198,8 +196,8 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
 #[tokio::test]
 async fn server_paths_start_guarded_and_only_the_correct_path_response_validates() {
     let paths = paths(Role::Server);
-    let first = paths.add_path(pathway(30002)).unwrap();
-    let second = paths.add_path(pathway(30003)).unwrap();
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
     assert_eq!(first.amplification_credit(), 0);
     paths.start_validation(&first);
     assert!(paths.responses.lock().unwrap().is_empty());
@@ -224,7 +222,7 @@ async fn server_paths_start_guarded_and_only_the_correct_path_response_validates
 #[tokio::test(start_paused = true)]
 async fn validation_times_out_after_three_attempts_and_retirement_cancels_waiting() {
     let paths = paths(Role::Server);
-    let path = paths.add_path(pathway(30002)).unwrap();
+    let path = paths.add_path(pathway(30002));
     path.handshake_confirmed();
     paths.start_validation(&path);
     tokio::task::yield_now().await;
@@ -237,9 +235,10 @@ async fn validation_times_out_after_three_attempts_and_retirement_cancels_waitin
     assert!(paths.get(&path.pathway).is_none());
     assert!(paths.responses.lock().unwrap().is_empty());
     assert!(
-        matches!(paths.close_reason().await.unwrap(), Some(CloseReason::Internal(error)) if error.kind() == ErrorKind::NoViablePath)
+        matches!(paths.phase().terminator().await, crate::Error::Quic(error) if error.kind() == ErrorKind::NoViablePath)
     );
-    let replacement = paths.add_path(pathway(30002)).unwrap();
+    let paths = self::paths(Role::Server);
+    let replacement = paths.add_path(pathway(30002));
     replacement.handshake_confirmed();
     paths.start_validation(&replacement);
     tokio::task::yield_now().await;
@@ -266,8 +265,8 @@ async fn paths_have_independent_heartbeats_and_retirement_cancels_only_one() {
         Duration::from_secs(60),
         Duration::from_secs(60),
     );
-    let first = paths.add_path(pathway(30002)).unwrap();
-    let second = paths.add_path(pathway(30003)).unwrap();
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
     first
         .heartbeat
         .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
@@ -310,4 +309,21 @@ async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
             .unwrap()
             .is_err()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminator_does_not_retain_paths() {
+    let paths = paths(Role::Server);
+    let terminator = paths.phase().terminator();
+    let weak = Arc::downgrade(&paths);
+    drop(paths);
+    assert!(weak.upgrade().is_none());
+    terminator.close(
+        qtransport::CloseReason::Internal(qbase::error::QuicError::with_default_fty(
+            ErrorKind::Internal,
+            "closed after owner dropped",
+        )),
+        Duration::from_secs(1),
+    );
+    assert_eq!(terminator.await.kind(), ErrorKind::Internal);
 }

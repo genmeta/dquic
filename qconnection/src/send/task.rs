@@ -28,8 +28,10 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut pns: BurstPns = std::array::from_fn(|_| Vec::with_capacity(MAX_BURST_PACKETS));
     let phase = paths.phase();
     let idle = paths.idle();
+    let terminator = phase.terminator();
     let overhead = QuicProtocol::packet_overhead(path.pathway);
-    let outcome: Result<(), Error> = async {
+    let sending = async {
+        let mut retry_close = false;
         loop {
             let mut collector = burst(
                 &path.cc,
@@ -47,10 +49,39 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                 }
                 result
             })
-            .await?;
+            .await;
+            let count = match count {
+                Ok(count) => count,
+                Err(error) if error.kind() != ErrorKind::NoViablePath => {
+                    terminator.close(error.into(), paths.closing_pto());
+                    if retry_close {
+                        terminator.clone().await;
+                        return Ok(());
+                    }
+                    retry_close = true;
+                    drop(collector);
+                    cancel_pending(&phase.get(), &mut pns);
+                    frames.clear();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let dcid = collector.dcid.take();
             drop(collector);
             let sending_phase = phase.get();
+            let journals = match &sending_phase {
+                ConnPhase::Initial(p) => [Some(&p.initial_space.sent_journal), None, None],
+                ConnPhase::Handshake(p) => [
+                    Some(&p.initial_space.sent_journal),
+                    Some(&p.handshake_space.sent_journal),
+                    None,
+                ],
+                ConnPhase::Mature(p) => [
+                    Some(&p.spaces.initial.sent_journal),
+                    Some(&p.spaces.handshake.sent_journal),
+                    Some(&p.spaces.data.sent_journal),
+                ],
+            };
             let deadlines = Epoch::EPOCHS.map(|epoch| {
                 (
                     path.cc.retransmit_and_expire_time(epoch).0,
@@ -73,14 +104,19 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                                 let submitted = pns[epoch]
                                     .iter()
                                     .filter(|packet| packet.index < first + sent);
-                                sending_phase.on_sent(
-                                    epoch,
-                                    submitted
-                                        .clone()
-                                        .map(|packet| (packet.pn, packet.in_flight)),
-                                    deadlines[epoch].0,
-                                    deadlines[epoch].1,
-                                );
+                                {
+                                    let mut journal = journals[epoch]
+                                        .expect("submitted packets have a space")
+                                        .lock_guard();
+                                    for packet in submitted.clone() {
+                                        journal.on_sent(
+                                            packet.pn,
+                                            packet.in_flight,
+                                            deadlines[epoch].0,
+                                            deadlines[epoch].1,
+                                        );
+                                    }
+                                }
                                 for packet in submitted {
                                     sent_handshake |= epoch == Epoch::Handshake;
                                     let size = datagrams[packet.index].len() + overhead;
@@ -120,15 +156,14 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
             }
             drop(dcid);
         }
-    }
-    .await;
+    };
+    let outcome: Result<(), Error> = tokio::select! {
+        biased;
+        _ = terminator.clone() => Ok(()),
+        result = sending => result,
+    };
     cancel_waiters(&paths, &path);
-    let phase = phase.get();
-    for epoch in Epoch::EPOCHS {
-        for packet in pns[epoch].drain(..) {
-            phase.cancel(epoch, packet.pn);
-        }
-    }
+    cancel_pending(&phase.get(), &mut pns);
     // All burst loans have been released before retiring this path's CID.
     if let Some(dcid) = dcid_cell.into_inner() {
         dcid.retire();
@@ -137,21 +172,43 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     if let Err(error) = outcome
         && (error.kind() != ErrorKind::NoViablePath || paths.snapshot().is_empty())
     {
-        paths.on_error(error);
+        terminator.close(error.into(), paths.closing_pto());
+        terminator.await;
+    }
+}
+
+fn cancel_pending(phase: &ConnPhase, pns: &mut BurstPns) {
+    let (initial, handshake, data) = match phase {
+        ConnPhase::Initial(p) => (&p.initial_space, None, None),
+        ConnPhase::Handshake(p) => (&p.initial_space, Some(&p.handshake_space), None),
+        ConnPhase::Mature(p) => (
+            &p.spaces.initial,
+            Some(&p.spaces.handshake),
+            Some(&p.spaces.data),
+        ),
+    };
+    for packet in pns[Epoch::Initial].drain(..) {
+        initial.cancel(packet.pn);
+    }
+    if let Some(handshake) = handshake {
+        for packet in pns[Epoch::Handshake].drain(..) {
+            handshake.cancel(packet.pn);
+        }
+    }
+    if let Some(data) = data {
+        for packet in pns[Epoch::Data].drain(..) {
+            data.cancel(packet.pn);
+        }
     }
 }
 
 pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
-        path.heartbeat.cancel();
         path.anti_amplifier.cancel(waker);
         let phase = paths.phase();
-        phase.unregister(waker);
-        let terminator = phase.terminator();
-        let phase = phase.lock_guard();
+        let phase = phase.get();
         path.cc.cancel(waker);
-        terminator.unregister(waker);
         fn cancel_space(
             crypto: &qrecovery::crypto::CryptoStream,
             journal: &qrecovery::journal::ArcRcvdJournal,
@@ -160,8 +217,9 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
             crypto.outgoing().unregister(waker);
             journal.unregister(waker);
         }
-        match &*phase {
+        match &phase {
             ConnPhase::Initial(p) => {
+                p.upgrade_wakers.unregister(waker);
                 cancel_space(
                     &p.initial_space.crypto,
                     &p.initial_space.rcvd_journal,
@@ -170,6 +228,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
                 p.reliable_frames.unregister(waker);
             }
             ConnPhase::Handshake(p) => {
+                p.upgrade_wakers.unregister(waker);
                 cancel_space(
                     &p.initial_space.crypto,
                     &p.initial_space.rcvd_journal,
@@ -196,7 +255,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
                 cancel_space(&p.spaces.data.crypto, &p.spaces.data.rcvd_journal, waker);
                 p.spaces.data.reliable_frames.unregister(waker);
                 p.spaces.data.streams.unregister(waker);
-                p.flow_ctrl.sender.cancel(waker);
+                p.flow_ctrl.sender.unregister(waker);
             }
         }
     }

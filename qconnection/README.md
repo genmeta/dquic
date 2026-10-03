@@ -92,7 +92,7 @@ let paths = qconnection::Paths::new(Role::Client, phase, max_idle_timeout, defer
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
 let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
 
-paths.add_path(pathway)?;
+paths.add_path(pathway);
 let tick = qconnection::recv::tick(paths.clone());
 let growing = qconnection::client_growing(
     server_name,

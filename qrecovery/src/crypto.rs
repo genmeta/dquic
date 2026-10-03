@@ -402,7 +402,7 @@ mod recv {
     }
 }
 
-use qbase::error::Error;
+use qbase::{Close, error::Error};
 pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
 pub use send::{ArcSender, CryptoStreamMultiOut, CryptoStreamOutgoing, CryptoStreamWriter};
 
@@ -411,6 +411,12 @@ pub use send::{ArcSender, CryptoStreamMultiOut, CryptoStreamOutgoing, CryptoStre
 pub struct CryptoStream {
     pub sender: ArcSender,
     pub recver: ArcRecver,
+}
+
+impl Close for CryptoStream {
+    fn close_with_error(&self, error: Error) {
+        self.on_error(&error);
+    }
 }
 
 impl CryptoStream {

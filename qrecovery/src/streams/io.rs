@@ -135,10 +135,8 @@ impl<TX> ArcOutputGuard<'_, TX> {
             });
     }
 
-    pub(super) fn on_conn_error(&mut self, error: &QuicError) {
-        self.deref()
-            .values()
-            .for_each(|(o, _)| o.on_conn_error(error));
+    pub(super) fn on_error(&mut self, error: &QuicError) {
+        self.deref().values().for_each(|(o, _)| o.on_error(error));
         *self.0 = Err(error.clone());
     }
 }
@@ -188,9 +186,9 @@ impl<TX> ArcInputGuard<'_, TX> {
         };
     }
 
-    pub(super) fn on_conn_error(&mut self, error: &QuicError) {
+    pub(super) fn on_error(&mut self, error: &QuicError) {
         match self.inner.as_ref() {
-            Ok(set) => set.values().for_each(|(o, _)| o.on_conn_error(error)),
+            Ok(set) => set.values().for_each(|(o, _)| o.on_error(error)),
             Err(e) => unreachable!("output is invalid: {e}"),
         };
         *self.inner = Err(error.clone());

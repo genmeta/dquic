@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use qbase::{
-    ArcReceiving, Epoch,
-    error::{Error, ErrorKind, QuicError},
+    Epoch,
+    error::{ErrorKind, QuicError},
     frame::{Frame, FrameReader, GetFrameType, io::ReceiveFrame},
     net::route::Scopes,
     packet::{GetScid, GetType, OneRttHeader, PacketContent},
@@ -21,10 +21,7 @@ use qtransport::{
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::time::Instant;
 
-use crate::{
-    ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, CloseReason, FlowController,
-    Paths, terminate::Terminator,
-};
+use crate::{ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, FlowController, Paths};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -32,7 +29,6 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     (mut packets, scopes): (PacketReceiver<H>, Option<Scopes>),
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
-    close_reason: ArcReceiving<CloseReason>,
 ) where
     H: GetScid + GetType + RcvdPacketHeader,
 {
@@ -42,7 +38,12 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     let idle = paths.idle();
     let mut initial_scid = None;
     let mut parsed_frames = Vec::with_capacity(8);
-    while let Some((packet, pathway, _)) = packets.recv().await {
+    while let Some((packet, pathway, _)) = tokio::select! {
+        biased;
+        _ = terminator.clone() => None,
+        packet = packets.recv() => packet,
+    } {
+        parsed_frames.clear();
         let received_bytes = packet.payload_len();
         let Ok(keys) = space.keys.get() else {
             break;
@@ -74,9 +75,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 }
             }
             // Admit paths only after authentication and complete frame parsing.
-            let Ok(path) = paths.on_incoming_path(pathway) else {
-                return Ok(());
-            };
+            let path = paths.on_incoming_path(pathway);
             path.on_datagram_received(received_bytes);
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
@@ -109,11 +108,8 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                         }
                     }
                     Frame::Close(frame) => {
-                        terminator.on_rcvd_connection_close_frame(
-                            frame.clone(),
-                            path.cc.pto_base(epoch) * 3,
-                        );
-                        close_reason.set(CloseReason::Peer(frame));
+                        terminator
+                            .recv_conn_close_frame(frame.clone(), path.cc.pto_base(epoch));
                         return Ok(());
                     }
                     _ => {
@@ -134,7 +130,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             Ok(())
         })();
         if let Err(error) = result {
-            close_reason.set(error.into());
+            terminator.close(error.into(), paths.closing_pto());
         }
     }
 }
@@ -152,11 +148,14 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     tokens: ArcTokenRegistry,
     handshake: ArcHandshake,
 ) {
-    let close_reason = paths.close_reason();
     let terminator = paths.phase().terminator();
     let idle = paths.idle();
     let mut parsed_frames = Vec::with_capacity(8);
-    while let Some((packet, pathway, link)) = packets.recv().await {
+    while let Some((packet, pathway, link)) = tokio::select! {
+        biased;
+        _ = terminator.clone() => None,
+        packet = packets.recv() => packet,
+    } {
         parsed_frames.clear();
         let received_bytes = packet.payload_len();
         let Ok(keys) = data.keys.get() else {
@@ -184,9 +183,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                 }
             }
             // Admit paths only after authentication and complete frame parsing.
-            let Ok(path) = paths.on_incoming_path(pathway) else {
-                return Ok(());
-            };
+            let path = paths.on_incoming_path(pathway);
             path.on_datagram_received(received_bytes);
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
@@ -231,15 +228,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                         handshake.recv_frame(frame)?;
                     }
                     Frame::Close(frame) => {
-                        let error = Error::from(frame.clone());
-                        data.crypto.on_error(&error);
-                        data.streams.on_conn_error(&error);
-                        flow.on_conn_error(&error);
-                        terminator.on_rcvd_connection_close_frame(
+                        terminator.recv_conn_close_frame(
                             frame.clone(),
-                            path.cc.pto_base(Epoch::Data) * 3,
+                            path.cc.pto_base(Epoch::Data),
                         );
-                        close_reason.set(CloseReason::Peer(frame));
                         return Ok(());
                     }
                     Frame::AddAddress(frame) => puncher.recv_add_address(frame),
@@ -273,19 +265,17 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             Ok(())
         })();
         if let Err(error) = result {
-            data.streams.on_conn_error(&error);
-            flow.on_conn_error(&error);
-            close_reason.set(error.into());
+            terminator.close(error.into(), paths.closing_pto());
         }
     }
 }
 
 /// Drive connection deadlines alongside its growing future, once per connection.
-/// Path loss does not stop recovery; entering Closing or Draining ends this loop.
+/// Recovery runs until termination.
 pub async fn tick(paths: Arc<Paths>) {
     let phase = paths.phase();
     let terminator = phase.terminator();
-    while matches!(&*terminator.lock_guard(), Terminator::NoError(_)) {
+    loop {
         let now = Instant::now();
         let snapshot = phase.get();
         match &snapshot {
@@ -300,6 +290,10 @@ pub async fn tick(paths: Arc<Paths>) {
                 phase.spaces.data.on_tick(now);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::select! {
+            biased;
+            _ = terminator.clone() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+        }
     }
 }
