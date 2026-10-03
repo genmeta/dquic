@@ -11,7 +11,7 @@ mod send {
     use qbase::{
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, Frame, FrameType},
-        net::tx::ArcSendWakers,
+        net::tx::{ArcSendWakers, UnregisterWaker},
         packet::{ConstraintBuffer, Package},
         varint::{VARINT_MAX, VarInt},
     };
@@ -226,9 +226,12 @@ mod send {
             };
             inner.poll_dump(cx, buffer, frames)
         }
-        fn cancel(&mut self, waker: &Waker) {
+    }
+
+    impl UnregisterWaker for CryptoStreamOutgoing {
+        fn unregister(&self, waker: &Waker) {
             if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
-                inner.tx_wakers.cancel(waker);
+                inner.tx_wakers.unregister(waker);
             }
         }
     }
@@ -250,10 +253,12 @@ mod send {
             inner.sndbuf.resend_flighting();
             result
         }
+    }
 
-        fn cancel(&mut self, waker: &Waker) {
+    impl UnregisterWaker for CryptoStreamMultiOut {
+        fn unregister(&self, waker: &Waker) {
             if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
-                inner.tx_wakers.cancel(waker);
+                inner.tx_wakers.unregister(waker);
             }
         }
     }

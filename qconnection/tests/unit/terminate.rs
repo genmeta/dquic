@@ -6,6 +6,7 @@ use std::{
 use qbase::{
     error::{ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame},
+    net::tx::UnregisterWaker,
     packet::{ConstraintBuffer, Constraints, GetType, Limit, OneRttHeader, Package},
 };
 use tokio::time::Instant;
@@ -210,7 +211,7 @@ fn pending_senders_are_woken_and_can_cancel_in_normal_and_closing() {
                     assert!(poll_close(&terminator, &waker).is_pending());
                 }
                 if cancel {
-                    terminator.cancel(&waker);
+                    terminator.unregister(&waker);
                 }
                 if draining {
                     terminator.on_rcvd_connection_close_frame(

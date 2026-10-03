@@ -10,7 +10,7 @@ use bytes::BytesMut;
 use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
-    packet::assemble::Package,
+    net::tx::UnregisterWaker,
 };
 use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
@@ -144,27 +144,21 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
 pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
-        path.heartbeat.cancel(waker);
+        path.heartbeat.cancel();
         path.anti_amplifier.cancel(waker);
         let phase = paths.phase();
-        phase.cancel(waker);
+        phase.unregister(waker);
         let terminator = phase.terminator();
         let phase = phase.lock_guard();
         path.cc.cancel(waker);
-        terminator.cancel(waker);
+        terminator.unregister(waker);
         fn cancel_space(
             crypto: &qrecovery::crypto::CryptoStream,
             journal: &qrecovery::journal::ArcRcvdJournal,
             waker: &Waker,
         ) {
-            <qrecovery::crypto::CryptoStreamOutgoing as Package<BytesMut>>::cancel(
-                &mut crypto.outgoing(),
-                waker,
-            );
-            <qrecovery::journal::ArcRcvdJournal as Package<BytesMut>>::cancel(
-                &mut journal.clone(),
-                waker,
-            );
+            crypto.outgoing().unregister(waker);
+            journal.unregister(waker);
         }
         match &*phase {
             ConnPhase::Initial(p) => {
@@ -173,10 +167,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
                     &p.initial_space.rcvd_journal,
                     waker,
                 );
-                <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
-                    &mut p.reliable_frames.clone(),
-                    waker,
-                );
+                p.reliable_frames.unregister(waker);
             }
             ConnPhase::Handshake(p) => {
                 cancel_space(
@@ -189,10 +180,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
                     &p.handshake_space.rcvd_journal,
                     waker,
                 );
-                <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
-                    &mut p.reliable_frames.clone(),
-                    waker,
-                );
+                p.reliable_frames.unregister(waker);
             }
             ConnPhase::Mature(p) => {
                 cancel_space(
@@ -206,14 +194,8 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
                     waker,
                 );
                 cancel_space(&p.spaces.data.crypto, &p.spaces.data.rcvd_journal, waker);
-                <crate::ArcReliableFrames as Package<BytesMut>>::cancel(
-                    &mut p.spaces.data.reliable_frames.clone(),
-                    waker,
-                );
-                <crate::DataStreams as Package<BytesMut>>::cancel(
-                    &mut p.spaces.data.streams.clone(),
-                    waker,
-                );
+                p.spaces.data.reliable_frames.unregister(waker);
+                p.spaces.data.streams.unregister(waker);
                 p.flow_ctrl.sender.cancel(waker);
             }
         }

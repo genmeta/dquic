@@ -86,10 +86,8 @@ impl Heartbeat {
             .expires_in(now, self.heartbeat_interval.saturating_mul(next))
     }
 
-    pub fn cancel(&mut self, waker: &Waker) {
-        if self.waker.as_ref().is_some_and(|w| w.will_wake(waker)) {
-            self.waker = None;
-        }
+    pub fn cancel(&mut self) {
+        self.waker = None;
     }
 }
 
@@ -114,12 +112,6 @@ impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
         }
         result
     }
-
-    /// TODO: 这个要拆开，别跟 Package 放在一起，像 Heartbeat 明显不需要这种
-    ///       只有多路径共享的数据源，比如 Terminate DataStreams，才需要实现这个
-    fn cancel(&mut self, waker: &Waker) {
-        Heartbeat::cancel(self, waker);
-    }
 }
 
 impl ArcHeartbeat {
@@ -133,10 +125,10 @@ impl ArcHeartbeat {
         heartbeat
     }
 
-    pub fn cancel(&self, waker: &Waker) {
+    pub fn cancel(&self) {
         let mut guard = self.0.lock().unwrap();
         if let Ok(heartbeat) = guard.as_mut() {
-            heartbeat.cancel(waker);
+            heartbeat.cancel();
             *guard = Err(Cancelled);
         }
     }
@@ -208,10 +200,6 @@ impl<B: BufMut + ?Sized> Package<B> for ArcHeartbeat {
             Ok(heartbeat) => heartbeat.poll_dump(cx, buffer, frames),
             Err(_) => Poll::Pending,
         }
-    }
-
-    fn cancel(&mut self, waker: &Waker) {
-        ArcHeartbeat::cancel(self, waker);
     }
 }
 
@@ -371,20 +359,7 @@ mod tests {
         tokio::time::advance(DEFAULT_HEARTBEAT_INTERVAL).await;
         tokio::task::yield_now().await;
         assert_eq!(current.0.load(Ordering::Relaxed), 2);
-        heartbeat.cancel(&current_waker);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn package_cancellation_unregisters_only_the_matching_sender() {
-        let mut heartbeat = heartbeat(30, 10);
-        heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now());
-        let old = Waker::from(Arc::new(WakeCount::default()));
-        let current = Waker::from(Arc::new(WakeCount::default()));
-        assert!(poll(&mut heartbeat, 1, &current).is_pending());
-        Package::<BytesMut>::cancel(&mut heartbeat, &old);
-        assert!(heartbeat.waker.is_some());
-        Package::<BytesMut>::cancel(&mut heartbeat, &current);
-        assert!(heartbeat.waker.is_none());
+        heartbeat.cancel();
     }
 
     #[tokio::test(start_paused = true)]
@@ -396,8 +371,7 @@ mod tests {
         let state = Arc::downgrade(&heartbeat.0);
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(2)).await;
-        heartbeat.cancel(Waker::noop());
-        heartbeat.cancel(Waker::noop());
+        heartbeat.cancel();
         assert!(
             heartbeat
                 .on_sent_at(PacketContent::EffectivePayload, Instant::now())
