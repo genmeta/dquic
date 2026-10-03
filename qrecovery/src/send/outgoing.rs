@@ -7,6 +7,7 @@ use bytes::BufMut;
 use qbase::{
     error::Error as QuicError,
     frame::{Fin, Frame, FrameType, Len, Offset, PaddingFrame, ResetStreamError, StreamFrame},
+    net::tx::UnregisterWaker,
     packet::{ConstraintBuffer, Package},
     sid::StreamId,
     varint::VarInt,
@@ -311,10 +312,13 @@ impl<TX: Clone, B: BufMut + ?Sized> qbase::packet::Package<B> for Outgoing<TX> {
     ) -> Poll<Result<usize, qbase::error::Error>> {
         self.poll_dump_with_tokens(cx, buffer, frames, usize::MAX)
     }
-    fn cancel(&mut self, waker: &std::task::Waker) {
+}
+
+impl<TX: Clone> UnregisterWaker for Outgoing<TX> {
+    fn unregister(&self, waker: &std::task::Waker) {
         if let Ok(state) = self.0.sender().as_ref() {
             if let Some((_, wakers)) = state.source() {
-                wakers.cancel(waker);
+                wakers.unregister(waker);
             }
         }
     }
@@ -392,7 +396,7 @@ mod poll_tests {
         assert_eq!(b.0.load(Ordering::Relaxed), 1);
         assert_eq!(c.0.load(Ordering::Relaxed), 0);
         assert!(matches!(poll(&mut source, &wa), Poll::Ready(Ok(1))));
-        <Outgoing<Broker> as Package<BytesMut>>::cancel(&mut source, &wa);
+        source.unregister(&wa);
         writer.write_all(b"next").await.unwrap();
         assert_eq!(a.0.load(Ordering::Relaxed), 1);
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
@@ -402,7 +406,7 @@ mod poll_tests {
         let frame = StreamFrame::new(StreamId::new(Role::Client, Dir::Bi, 0), 0, 5);
         source.may_loss_data(&frame);
         assert_eq!(b.0.load(Ordering::Relaxed), before + 1);
-        <Outgoing<Broker> as Package<BytesMut>>::cancel(&mut source, &wb);
+        source.unregister(&wb);
         source.may_loss_data(&frame);
         assert_eq!(b.0.load(Ordering::Relaxed), before + 1);
         other_writer.write_all(b"other").await.unwrap();

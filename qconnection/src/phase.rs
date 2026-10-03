@@ -1,6 +1,7 @@
 //! Shared sending material. Each path reads the current phase for every burst.
 use std::{
     sync::{Arc, Mutex, MutexGuard, RwLock},
+    task::Waker,
     time::Duration,
 };
 
@@ -228,9 +229,9 @@ impl ArcConnPhase {
         phase
     }
 
-    pub(crate) fn cancel(&self, waker: &std::task::Waker) {
+    pub(crate) fn unregister(&self, waker: &Waker) {
         if let Some(wakers) = self.lock_guard().upgrade_wakers() {
-            wakers.cancel(waker);
+            wakers.unregister(waker);
         }
     }
 

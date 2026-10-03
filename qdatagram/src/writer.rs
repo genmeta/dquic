@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes};
 use qbase::{
     error::Error,
     frame::{DatagramFrame, EncodeSize},
-    net::tx::ArcSendWakers,
+    net::tx::{ArcSendWakers, UnregisterWaker},
     varint::VarInt,
 };
 
@@ -462,9 +462,12 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
         }
         result
     }
-    fn cancel(&mut self, waker: &std::task::Waker) {
+}
+
+impl UnregisterWaker for DatagramOutgoing {
+    fn unregister(&self, waker: &std::task::Waker) {
         if let Ok(writer) = self.0.lock().unwrap().as_ref() {
-            writer.tx_wakers.cancel(waker);
+            writer.tx_wakers.unregister(waker);
         }
     }
 }

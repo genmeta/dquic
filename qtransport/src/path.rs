@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU8, AtomicU16, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -300,15 +300,11 @@ impl<B: BufMut + ?Sized> Package<B> for &Path {
             result
         }
     }
-
-    fn cancel(&mut self, waker: &Waker) {
-        self.send_waker.cancel(waker);
-    }
 }
 
 #[cfg(test)]
 mod package_tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::{sync::atomic::AtomicUsize, task::Waker};
 
     use qbase::{
         net::addr::EndpointAddr,

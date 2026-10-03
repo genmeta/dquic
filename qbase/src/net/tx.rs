@@ -3,6 +3,12 @@ use std::{
     task::Waker,
 };
 
+/// Removes a path send task's subscription from a shared data source.
+pub trait UnregisterWaker {
+    /// Unregister this waiter without waking it or affecting other waiters.
+    fn unregister(&self, waker: &Waker);
+}
+
 /// Persistent subscriptions for path send tasks. Readiness does not unregister a path.
 #[derive(Debug, Default, Clone)]
 pub struct ArcSendWakers(Arc<Mutex<Vec<Waker>>>);
@@ -15,7 +21,7 @@ impl ArcSendWakers {
         }
     }
 
-    pub fn cancel(&self, waker: &Waker) {
+    pub fn unregister(&self, waker: &Waker) {
         self.0.lock().unwrap().retain(|old| !old.will_wake(waker));
     }
 
@@ -58,7 +64,7 @@ mod waiter_tests {
         wakers.wake_all();
         assert_eq!(first.0.load(Ordering::Relaxed), 2);
         assert_eq!(second.0.load(Ordering::Relaxed), 2);
-        wakers.cancel(&a);
+        wakers.unregister(&a);
         wakers.wake_all();
         assert_eq!(first.0.load(Ordering::Relaxed), 2);
         assert_eq!(second.0.load(Ordering::Relaxed), 3);

@@ -43,7 +43,7 @@ impl AntiAmplifier {
     }
 
     pub fn cancel(&self, waker: &Waker) {
-        self.wakers.cancel(waker);
+        self.wakers.unregister(waker);
     }
 
     pub(crate) fn retire(&self) {

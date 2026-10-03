@@ -1,5 +1,5 @@
 //! Polling frame sources and packet-wide send limits.
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use bytes::{BufMut, buf::UninitSlice};
 
@@ -57,8 +57,6 @@ pub trait Package<B: BufMut + ?Sized> {
         buffer: &mut ConstraintBuffer<'_, B>,
         frames: &mut Vec<Frame>,
     ) -> Poll<Result<usize, Error>>;
-
-    fn cancel(&mut self, _waker: &Waker) {}
 }
 
 pub trait Assemble<const N: usize> {
@@ -231,10 +229,6 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
     ) -> Poll<Result<usize, Error>> {
         (**self).poll_dump(cx, buffer, frames)
     }
-
-    fn cancel(&mut self, waker: &Waker) {
-        (**self).cancel(waker);
-    }
 }
 
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
@@ -252,12 +246,6 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
             *self = None;
         }
         result
-    }
-
-    fn cancel(&mut self, waker: &Waker) {
-        if let Some(source) = self {
-            source.cancel(waker);
-        }
     }
 }
 
@@ -319,6 +307,8 @@ data_packages!(StreamFrame => Stream, CryptoFrame => Crypto, DatagramFrame => Da
 
 #[cfg(test)]
 mod tests {
+    use std::task::Waker;
+
     use bytes::BytesMut;
 
     use super::*;
