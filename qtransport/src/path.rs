@@ -23,9 +23,6 @@ use crate::Error;
 mod anti_amplifier;
 pub use anti_amplifier::AntiAmplifier;
 
-#[cfg(test)]
-use crate::send::{constraints::Constraints, write::PendingPacket};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
     ClientHandshaking,
@@ -179,6 +176,7 @@ impl Path {
 
     pub fn retire(&self) {
         self.anti_amplifier.retire();
+        self.heartbeat.stop();
         self.clear_challenge();
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_all();
@@ -186,16 +184,6 @@ impl Path {
 
     pub fn amplification_credit(&self) -> usize {
         self.anti_amplifier.balance()
-    }
-
-    #[cfg(test)]
-    pub fn constraints(&self, capacity: usize, probe: bool) -> Constraints {
-        Constraints {
-            flow_ctrl: std::cell::Cell::new(usize::MAX),
-            capacity,
-            congestion: self.cc.send_quota().max(if probe { 1200 } else { 0 }),
-            anti_amplification: self.amplification_credit(),
-        }
     }
 
     pub fn challenge(&self) -> Option<PathChallengeFrame> {
@@ -225,23 +213,6 @@ impl Path {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Confirm only path validation frames whose datagram reached the socket.
-    #[cfg(test)]
-    pub fn on_packet_sent(&self, packet: &PendingPacket) {
-        if let Some(frame) = packet.response {
-            let mut responses = self.responses.lock().unwrap();
-            if responses.front() == Some(&frame) {
-                responses.pop_front();
-            }
-        }
-        if let Some(sent) = packet.challenge
-            && let Some((challenge, submitted)) = self.challenge.lock().unwrap().as_mut()
-            && *challenge == sent
-        {
-            *submitted = true;
         }
     }
 }

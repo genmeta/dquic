@@ -18,10 +18,10 @@ use qtransport::{
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
-use super::{any, close_error, finish};
+use super::{any, finish};
 use crate::{
-    ArcParameters, CloseReason, ConnPhase, Connected, DataStreams, Error, FlowController,
-    MaturePhase, Paths, TlsContext,
+    ArcParameters, ConnPhase, Connected, DataStreams, Error, FlowController, MaturePhase, Paths,
+    TlsContext,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -38,16 +38,16 @@ pub async fn client_growing(
     tls_context: TlsContext,
     token_registry: ArcTokenRegistry,
     established: impl FnOnce(Result<Connected, Error>),
-) -> CloseReason {
+) -> Error {
     let phase = paths.phase();
-    let close_reason = paths.close_reason();
+    let terminator = paths.phase().terminator();
+    terminator.register(Arc::new(tls_context.clone()));
     let ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("client_growing starts with InitialPhase")
     };
 
     let initial = initial_phase.initial_space.clone();
     let reliable_frames = initial_phase.reliable_frames.clone();
-    let terminator = initial_phase.terminator.clone();
     let cid_registry = initial_phase.cid_registry.clone();
     let trackers = initial_phase.trackers.clone();
     let scid = initial_phase.scid;
@@ -56,35 +56,36 @@ pub async fn client_growing(
 
     let discovery = tokio::spawn({
         let paths = paths.clone();
+        let terminator = terminator.clone();
         let addresses = AddressBook::global().clone();
         let resolver = qresolve::Resolver::get();
         async move {
             if let Err(error) = resolve_paths(&paths, &addresses, resolver, &server_name).await {
-                paths.on_error(error);
+                terminator.close(error.into(), paths.closing_pto());
             }
         }
     });
     tokio::spawn(read_tls_to_space(
         tls_context.clone(),
         initial.as_ref(),
-        close_reason.clone(),
+        paths.clone(),
     ));
     tokio::spawn(read_space_to_tls(
         tls_context.clone(),
         initial.as_ref(),
-        close_reason.clone(),
+        paths.clone(),
     ));
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
         initial.clone(),
         paths.clone(),
-        close_reason.clone(),
     ));
 
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            terminator.register(Arc::new(handshake.crypto.clone()));
             paths.handshake.got_handshake_key();
             phase.enter_handshake(handshake.clone());
             initial.crypto.recver.retire();
@@ -93,18 +94,17 @@ pub async fn client_growing(
             tokio::spawn(read_tls_to_space(
                 tls_context.clone(),
                 handshake.as_ref(),
-                close_reason.clone(),
+                paths.clone(),
             ));
             tokio::spawn(read_space_to_tls(
                 tls_context.clone(),
                 handshake.as_ref(),
-                close_reason.clone(),
+                paths.clone(),
             ));
             tokio::spawn(recv_ih_pkt_and_deliver_frames(
                 (rcvd_pkt.handshake, None),
                 handshake.clone(),
                 paths.clone(),
-                close_reason.clone(),
             ));
 
             let parameters = ArcParameters::new(
@@ -112,8 +112,12 @@ pub async fn client_growing(
                 Arc::new(client_params),
                 Arc::new(tls_context.read_server_parameters().await?),
             );
+            let ConnPhase::Handshake(handshake_phase) = phase.get() else {
+                unreachable!("client authenticates CIDs during Handshake")
+            };
             parameters
-                .authenticate_cids(Requirements::require_server(phase.get().dcid(), odcid))?;
+                .authenticate_cids(Requirements::require_server(handshake_phase.dcid, odcid))?;
+            drop(handshake_phase);
             let server_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
             cid_registry.remote.set_initial_dcid(server_scid);
             let keys = ArcOneRttKeys::from(tls_context.read_keys().await?);
@@ -127,12 +131,15 @@ pub async fn client_growing(
                 reliable_frames.clone(),
                 None,
             );
+            terminator.register(Arc::new(streams.clone()));
             let flow_ctrl = FlowController::new(
                 parameters.remote(ParameterId::InitialMaxData),
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
+            terminator.register(Arc::new(flow_ctrl.clone()));
             let data = Arc::new(DataSpace::new(keys, streams, reliable_frames.clone()));
+            terminator.register(Arc::new(data.crypto.clone()));
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data.clone(), server_scid),
@@ -173,12 +180,12 @@ pub async fn client_growing(
             tokio::spawn(read_tls_to_space(
                 tls_context.clone(),
                 data.as_ref(),
-                close_reason.clone(),
+                paths.clone(),
             ));
             tokio::spawn(read_space_to_tls(
                 tls_context.clone(),
                 data.as_ref(),
-                close_reason.clone(),
+                paths.clone(),
             ));
 
             let summary = tls_context.finished().await?;
@@ -194,19 +201,12 @@ pub async fn client_growing(
                     qtransport::ArcConnection::new(
                         summary.alpn.unwrap_or_default(),
                         data.streams.clone(),
-                        close_reason.clone(),
+                        terminator.clone(),
                     )
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
                         move || {
-                            paths.upgrade().map_or_else(Vec::new, |paths| {
-                                paths
-                                    .snapshot()
-                                    .into_iter()
-                                    .filter(|path| path.is_validated())
-                                    .map(|path| path.pathway)
-                                    .collect()
-                            })
+                            paths.upgrade().map_or_else(Vec::new, |paths| paths.snapshot())
                         }
                     }),
                 ),
@@ -215,30 +215,27 @@ pub async fn client_growing(
                 puncher,
             ))
         };
-        any(establish, close_reason.clone())
-            .await
-            .and_then(|result| result.map_err(CloseReason::from))
+        any(establish, terminator.clone()).await.flatten()
     };
 
     let (connected, handshake_done, data, puncher) = match result {
         Ok(established_connection) => established_connection,
         Err(reason) => {
-            established(Err(close_error(&reason)));
-            return shutdown(&paths, &tls_context, &cid_registry.local, reason, discovery).await;
+            established(Err(reason.clone()));
+            return shutdown(&paths, &trackers, &cid_registry.local, reason, discovery).await;
         }
     };
     established(Ok(connected));
 
-    let mut close = close_reason.clone();
     let reason = tokio::select! {
-        Ok(Some(reason)) = &mut close => reason,
+        biased;
+        reason = terminator.clone() => reason,
         () = handshake_done => {
             data.keys
                 .get()
                 .expect("live Data keys")
                 .allow_update();
             paths.handshake_confirmed();
-            // A separate stop channel leaves the connection's close reason to this coroutine.
             // Dropping this coroutine also stops observation by dropping the sender.
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
             let observer = puncher.observe_endpoints(
@@ -246,27 +243,26 @@ pub async fn client_growing(
                 stopped,
                 |_| {},
             );
-            let reason = close_reason.clone().await.expect("growing owns close").expect("first close reason");
+            let reason = terminator.clone().await;
             drop(stop);
             let _ = observer.await;
             reason
         }
     };
-    shutdown(&paths, &tls_context, &cid_registry.local, reason, discovery).await
+    shutdown(&paths, &trackers, &cid_registry.local, reason, discovery).await
 }
 
 async fn shutdown(
     paths: &Paths,
-    tls: &TlsContext,
+    trackers: &crate::ArcTrackers,
     local_cids: &crate::ArcLocalCids,
-    reason: CloseReason,
+    error: Error,
     discovery: tokio::task::JoinHandle<()>,
-) -> CloseReason {
+) -> Error {
     // Stop discovery before path cleanup so late DNS results cannot create senders.
     discovery.abort();
     let _ = discovery.await;
-    tls.on_error(close_error(&reason));
-    finish(paths, &reason).await;
+    let reason = finish(paths, trackers, error).await;
     local_cids.clear();
     reason
 }
@@ -300,7 +296,7 @@ pub(crate) async fn resolve_paths(
             {
                 continue;
             }
-            paths.add_path(pathway)?;
+            paths.add_path(pathway);
         }
     }
     if paths.snapshot().is_empty() {

@@ -208,7 +208,7 @@ where
     }
 
     /// Wake all blocked stream allocation requests after the owner records the connection error.
-    pub fn on_conn_error(&self) {
+    pub fn on_error(&self) {
         let mut guard = self.0.lock().unwrap();
         for waker in guard.wakers.iter_mut().flat_map(|queue| queue.drain(..)) {
             waker.wake();

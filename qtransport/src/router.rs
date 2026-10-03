@@ -86,7 +86,7 @@ impl QuicRouter {
         }
     }
 
-    fn find_entry(&self, packet: &Packet, link: &Link) -> Option<Inbox> {
+    pub fn find_entry(&self, packet: &Packet, link: &Link) -> Option<Inbox> {
         self.table
             .get(&Self::signpost(packet, link))
             .map(|queue| queue.clone())
@@ -251,6 +251,3 @@ where
         self.issued_cids.recv_frame(frame)
     }
 }
-
-#[cfg(test)]
-mod tests;

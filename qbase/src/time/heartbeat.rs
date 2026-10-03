@@ -86,7 +86,7 @@ impl Heartbeat {
             .expires_in(now, self.heartbeat_interval.saturating_mul(next))
     }
 
-    pub fn cancel(&mut self) {
+    pub fn stop(&mut self) {
         self.waker = None;
     }
 }
@@ -125,10 +125,10 @@ impl ArcHeartbeat {
         heartbeat
     }
 
-    pub fn cancel(&self) {
+    pub fn stop(&self) {
         let mut guard = self.0.lock().unwrap();
         if let Ok(heartbeat) = guard.as_mut() {
-            heartbeat.cancel();
+            heartbeat.stop();
             *guard = Err(Cancelled);
         }
     }
@@ -359,7 +359,7 @@ mod tests {
         tokio::time::advance(DEFAULT_HEARTBEAT_INTERVAL).await;
         tokio::task::yield_now().await;
         assert_eq!(current.0.load(Ordering::Relaxed), 2);
-        heartbeat.cancel();
+        heartbeat.stop();
     }
 
     #[tokio::test(start_paused = true)]
@@ -371,7 +371,7 @@ mod tests {
         let state = Arc::downgrade(&heartbeat.0);
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(2)).await;
-        heartbeat.cancel();
+        heartbeat.stop();
         assert!(
             heartbeat
                 .on_sent_at(PacketContent::EffectivePayload, Instant::now())

@@ -14,11 +14,10 @@ use qbase::{
 };
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
-    CloseReason,
     path::{Path, PathState},
 };
 
-use crate::{ArcConnPhase, ConnPhase, Error};
+use crate::{ArcConnPhase, CloseReason, ConnPhase};
 
 /// Connection-level path control. Every path has exactly one sending task.
 pub struct Paths {
@@ -30,7 +29,6 @@ pub struct Paths {
     idle: ArcIdleTimer,
     max_idle_timeout: Mutex<Duration>,
     defer_idle_timeout: Duration,
-    close_reason: ArcReceiving<CloseReason>,
 }
 
 impl Paths {
@@ -45,20 +43,8 @@ impl Paths {
             handshake.got_handshake_key();
         }
         let idle = ArcIdleTimer::new(max_idle_timeout);
-        let close_reason = ArcReceiving::default();
-        tokio::spawn({
-            let idle = idle.clone();
-            let close_reason = close_reason.clone();
-            async move {
-                if idle.timeout().await.is_ok() {
-                    close_reason.set(CloseReason::Internal(QuicError::with_default_fty(
-                        ErrorKind::None,
-                        "connection idle timeout",
-                    )));
-                }
-            }
-        });
-        Arc::new(Self {
+        let terminator = phase.terminator();
+        let paths = Arc::new(Self {
             phase,
             handshake,
             entries: Mutex::new(BTreeMap::new()),
@@ -67,21 +53,43 @@ impl Paths {
             idle,
             max_idle_timeout: Mutex::new(max_idle_timeout),
             defer_idle_timeout,
-            close_reason,
-        })
+        });
+        tokio::spawn({
+            let weak = Arc::downgrade(&paths);
+            let idle = paths.idle.clone();
+            let terminator = terminator.clone();
+            async move {
+                tokio::select! {
+                    result = idle.timeout() => if result.is_ok() {
+                        let Some(paths) = weak.upgrade() else { return };
+                        terminator.close(
+                            CloseReason::Internal(QuicError::with_default_fty(
+                                ErrorKind::None,
+                                "connection idle timeout",
+                            )),
+                            paths.closing_pto(),
+                        );
+                        drop(paths);
+                        terminator.await;
+                    },
+                    _ = terminator.clone() => {},
+                }
+            }
+        });
+        paths
     }
 
     /// Enable a path and start its only sender. After handshake confirmation, also
     /// start validation; existing paths and validation tasks are reused.
-    pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
+    pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
         let handshaking =
             self.role == Role::Client && matches!(self.phase.get(), ConnPhase::Initial(_));
-        let path = self.create_path(pathway, handshaking)?;
+        let path = self.create_path(pathway, handshaking);
         self.start_validation(&path);
-        Ok(path)
+        path
     }
 
-    pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Result<Arc<Path>, Error> {
+    pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
         self.create_path(pathway, false)
     }
 
@@ -103,11 +111,16 @@ impl Paths {
         self: &Arc<Self>,
         pathway: Pathway,
         handshaking: bool,
-    ) -> Result<Arc<Path>, Error> {
+    ) -> Arc<Path> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(path) = entries.get(&pathway) {
-            return Ok(path.clone());
+            return path.clone();
         }
+        let trackers = match self.phase.get() {
+            ConnPhase::Initial(phase) => phase.trackers.clone(),
+            ConnPhase::Handshake(phase) => phase.trackers.clone(),
+            ConnPhase::Mature(phase) => phase.trackers.clone(),
+        };
         let path = Arc::new(Path::new(
             pathway,
             self.handshake.clone(),
@@ -115,7 +128,7 @@ impl Paths {
                 self.defer_idle_timeout,
                 *self.max_idle_timeout.lock().unwrap(),
             ),
-            self.phase.get().trackers(),
+            trackers,
         ));
         if entries
             .values()
@@ -138,7 +151,7 @@ impl Paths {
 
         tokio::spawn(crate::send::sending(self.clone(), path.clone()));
         path.send_waker.wake_all();
-        Ok(path)
+        path
     }
 
     pub(crate) fn select_path(&self, path: &Arc<Path>) {
@@ -185,12 +198,12 @@ impl Paths {
         }
     }
 
-    pub(crate) fn close_reason(&self) -> ArcReceiving<CloseReason> {
-        self.close_reason.clone()
-    }
-
-    pub(crate) fn on_error(&self, error: Error) {
-        self.close_reason.set(error.into());
+    pub(crate) fn closing_pto(&self) -> Duration {
+        self.snapshot()
+            .iter()
+            .map(|path| path.cc.pto_base(Epoch::Data))
+            .max()
+            .unwrap_or(Duration::from_secs(1))
     }
 
     pub(crate) fn on_handshake_sent(&self) {
@@ -212,13 +225,28 @@ impl Paths {
     pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
         {
             let phase = self.phase.lock_guard();
-            match &*phase {
-                ConnPhase::Initial(p) => p.initial_space.retire(),
+            let trackers = match &*phase {
+                ConnPhase::Initial(p) => {
+                    p.initial_space.retire();
+                    &p.trackers
+                }
                 ConnPhase::Handshake(p) => {
                     p.initial_space.retire();
                     p.handshake_space.retire();
+                    &p.trackers
                 }
-                ConnPhase::Mature(p) => p.retire_handshake_spaces(),
+                ConnPhase::Mature(p) => {
+                    p.spaces.initial.retire();
+                    p.spaces.handshake.retire();
+                    &p.trackers
+                }
+            };
+            let mut trackers = trackers.write().unwrap();
+            while trackers
+                .front()
+                .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
+            {
+                trackers.pop_front();
             }
             self.handshake.handshake_confirmed();
         }
@@ -267,6 +295,7 @@ impl Paths {
         let paths = self.clone();
         let path = path.clone();
         tokio::spawn(async move {
+            let terminator = paths.phase().terminator();
             let challenge = PathChallengeFrame::random();
             for _ in 0..3 {
                 if !matches!(
@@ -276,9 +305,11 @@ impl Paths {
                     break;
                 }
                 path.set_challenge(challenge);
-                match tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone())
-                    .await
-                {
+                match tokio::select! {
+                    biased;
+                    _ = terminator.clone() => break,
+                    result = tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone()) => result,
+                } {
                     Ok(Ok(Some(data))) if data == *challenge => {
                         path.validate();
                         break;
@@ -300,12 +331,12 @@ impl Paths {
                 ) {
                     paths.remove(&path);
                     if paths.snapshot().is_empty() {
-                        paths.on_error(
-                            QuicError::with_default_fty(
+                        terminator.close(
+                            CloseReason::Internal(QuicError::with_default_fty(
                                 ErrorKind::NoViablePath,
                                 "path validation timed out",
-                            )
-                            .into(),
+                            )),
+                            paths.closing_pto(),
                         );
                     }
                 }
