@@ -147,7 +147,7 @@ impl DataSpace {
     }
 
     /// Retain a sealed packet's frames before UDP submission.
-    pub fn on_assembled(&self, pn: u64, generation: u64, frames: impl IntoIterator<Item = Frame>) {
+    pub fn on_sealed(&self, pn: u64, generation: u64, frames: impl IntoIterator<Item = Frame>) {
         self.sent_journal.on_assembled(pn, Some(generation), frames);
     }
 
@@ -317,10 +317,9 @@ mod tests {
     async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
         use qbase::frame::MaxDataFrame;
 
-        let [(_connection, transport, _path), _] = crate::tests::pair(1);
-        let data = &transport.data;
+        let data = crate::tests::data();
         let pn = data.next_pn().unwrap().0;
-        data.on_assembled(pn, 7, [Frame::MaxData(MaxDataFrame::new(123u32.into()))]);
+        data.on_sealed(pn, 7, [Frame::MaxData(MaxDataFrame::new(123u32.into()))]);
         let ack = AckFrame::new(
             pn.try_into().unwrap(),
             0u32.into(),
@@ -340,14 +339,13 @@ mod tests {
         use qbase::frame::MaxDataFrame;
         use qcongestion::Resend as _;
 
-        let [(_connection, transport, _path), _] = crate::tests::pair(1);
-        let data = &transport.data;
+        let data = crate::tests::data();
         data.reliable_frames
             .send_frame([MaxDataFrame::new(123u32.into())]);
         let frames = crate::tests::take_frames(&mut data.reliable_frames.clone());
         assert_eq!(frames.len(), 1);
         let (pn, _) = data.next_pn().unwrap();
-        data.on_assembled(pn, 0, frames);
+        data.on_sealed(pn, 0, frames);
         data.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
         data.keys.retire();
         data.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());

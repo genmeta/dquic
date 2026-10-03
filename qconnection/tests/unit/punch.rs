@@ -24,8 +24,8 @@ use qtransport::{keys::ArcKeys, path::Path, space::Space};
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 use crate::{
-    ArcConnPhase, ArcHandshake, ArcParameters, CloseReason, MaturePhase, Paths, Scopes, common,
-    recv::receive_1rtt_pkt_and_deliver_frames, terminate::Terminator,
+    ArcConnPhase, ArcHandshake, ArcParameters, MaturePhase, Paths, Scopes, common,
+    recv::receive_1rtt_pkt_and_deliver_frames,
 };
 
 fn pair() -> [Arc<MaturePhase>; 2] {
@@ -193,21 +193,31 @@ fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
         ConnectionId::from_slice(b"original"),
         common::initial_keys(role == Role::Server),
     ));
-    Paths::new(role, snapshot, Duration::ZERO, Duration::ZERO)
+    let paths = Paths::new(role, snapshot, Duration::ZERO, Duration::ZERO);
+    let terminator = paths.phase().terminator();
+    terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
+    terminator.register(Arc::new(phase.spaces.data.streams.clone()));
+    terminator.register(Arc::new(phase.flow_ctrl.clone()));
+    paths
 }
 
 async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Pathway, link: Link) {
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
+    let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
+        panic!("expected Initial");
+    };
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.phase().get().trackers(),
+        initial.trackers.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
-    paths.retire_all();
+    for path in paths.snapshot() {
+        paths.remove(&path);
+    }
 }
 
 async fn receive_on_paths(
@@ -234,7 +244,8 @@ async fn receive_on_paths(
         .unwrap();
     }
     drop(tx);
-    let closed = paths.close_reason();
+    let closed = paths.phase().terminator();
+    let notification = crate::common::observe_close(&closed);
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
     let role = phase.parameters.role();
     let handshake = ArcHandshake::new(role, phase.spaces.data.reliable_frames.clone());
@@ -251,7 +262,7 @@ async fn receive_on_paths(
     )
     .await;
     assert!(
-        closed.now_or_never().is_none(),
+        notification.notified().is_none(),
         "received frames must not close the connection"
     );
     handshake
@@ -357,7 +368,8 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             (&pair[1], &pair[0])
         };
         let paths = empty_paths(receiver);
-        let closed = paths.close_reason();
+        let closed = paths.phase().terminator();
+        let notification = crate::common::observe_close(&closed);
         let first = if bundled_close {
             encode_frames(sender, [&mut HandshakeDoneFrame, &mut close.clone()])
         } else {
@@ -403,17 +415,14 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             handshake.clone(),
         )
         .await;
-        let reason = closed.now_or_never().unwrap().unwrap().unwrap();
+        let stream_error = receiver.spaces.data.streams.accept_uni().await.unwrap_err();
+        assert_eq!(notification.notified(), Some(stream_error.clone()));
         if role == Role::Client {
-            assert!(matches!(reason, CloseReason::Peer(frame) if frame == close));
+            assert_eq!(stream_error, close.clone().into());
         } else {
-            assert!(matches!(reason, CloseReason::Internal(error)
-                if error.kind() == ErrorKind::ProtocolViolation));
+            assert_eq!(stream_error.kind(), ErrorKind::ProtocolViolation);
         }
-        assert!(matches!(
-            &*paths.phase().terminator().lock_guard(),
-            Terminator::Draining { .. }
-        ));
+        assert!(futures::poll!(std::pin::pin!(closed.clone())).is_pending());
         assert_eq!(handshake.is_handshake_done(), role == Role::Client);
         assert!(receiver.spaces.data.streams.accept_uni().await.is_err());
         assert!(receiver.spaces.data.streams.accept_bi().await.is_err());
@@ -432,8 +441,12 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         for pn in [0, 1] {
             assert_eq!(journal.decode_pn(PacketNumber::encode(pn, 0)), Ok(pn));
         }
-        assert!(journal.decode_pn(PacketNumber::encode(2, 0)).is_err());
+        assert_eq!(
+            journal.decode_pn(PacketNumber::encode(2, 0)),
+            Err(qbase::packet::InvalidPacketNumber::Duplicate)
+        );
         paths.retire_all();
+        assert_eq!(closed.await, close.clone().into());
     }
 }
 
@@ -560,8 +573,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let paths = empty_paths(receiver);
         let local: EndpointAddr = "127.0.0.1:44501".parse().unwrap();
         let original = paths
-            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()))
-            .unwrap();
+            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
         paths.handshake_confirmed();
         paths.activate_paths(&original);
@@ -779,11 +791,14 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             "127.0.0.1:47001".parse().unwrap(),
             "127.0.0.1:47002".parse().unwrap(),
         );
+        let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
+            panic!("expected Initial");
+        };
         let path = Arc::new(Path::new(
             link.into(),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            paths.phase().get().trackers(),
+            initial.trackers.clone(),
         ));
         paths
             .entries
@@ -792,7 +807,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             .insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;
         let pn = data.next_pn().unwrap().0;
-        data.on_assembled(pn, 0, []);
+        data.on_sealed(pn, 0, []);
         data.on_sent(
             [(pn, false)],
             Duration::from_secs(1),
@@ -819,11 +834,12 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             Scopes::ALL,
         )
         .await;
-        let reason = paths.close_reason().await.unwrap().unwrap();
+        let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
+        let reason = paths.phase().terminator().await;
         assert!(
-            matches!(reason, CloseReason::Internal(error) if error.reason() == "connection idle timeout")
+            matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
         );
-        assert_eq!(Instant::now() - start, Duration::from_secs(5));
+        assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
         tokio::time::advance(Duration::from_secs(15)).await;
         assert_eq!(super::take_heartbeat(&path), kind == 2);
         paths.retire_all();

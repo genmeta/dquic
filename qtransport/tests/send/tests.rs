@@ -11,7 +11,7 @@ use qbase::{
 };
 
 use super::{fixture::TestSender as Sender, *};
-use crate::{keys::OpenPacket, tests::Transport};
+use crate::{keys::OpenPacket, transport::Transport};
 
 fn sender(transport: &Arc<Transport>, path: &Path) -> Sender {
     Sender::new(
@@ -55,7 +55,7 @@ fn cx() -> Context<'static> {
 
 #[tokio::test]
 async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
-    let [(_client, transport, path), (_server, peer, _)] = crate::tests::pair(1);
+    let [(_client, transport, path), (_server, peer, _)] = crate::transport::pair(1);
     // Encoding-only sources are not owned by the transport's recovery components.
     let mut sender = Sender::new(
         path.pathway,
@@ -63,7 +63,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         path.anti_amplifier.clone(),
         None,
     );
-    let fixed = crate::tests::fixed_keys();
+    let fixed = crate::transport::fixed_keys();
     let keys = transport.data.keys.get().unwrap();
     let limit = Constraints {
         flow_ctrl: std::cell::Cell::new(usize::MAX),
@@ -171,7 +171,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
 
 #[tokio::test]
 async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() {
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let keys = transport.data.keys.get().unwrap();
     let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
@@ -257,7 +257,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
         Poll::Ready(Err(_))
     ));
     assert_eq!(
-        crate::tests::take_frames(&mut transport.data.reliable_frames.clone()).len(),
+        crate::transport::take_frames(&mut transport.data.reliable_frames.clone()).len(),
         4
     );
     // The successful prefix and early-ACKed packet are not put back into the sources.
@@ -267,7 +267,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
 
 #[tokio::test]
 async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let keys = transport.data.keys.get().unwrap();
     let status = qcongestion::PathStatus::new(
         Arc::new(qcongestion::HandshakeStatus::new(true)),
@@ -311,7 +311,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
 
 #[tokio::test]
 async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data() {
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let keys = transport.data.keys.get().unwrap();
     let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
@@ -361,7 +361,7 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
     assert_eq!(sender.pending().filter(|p| p.response.is_some()).count(), 1);
     drop(sender);
     assert_eq!(
-        crate::tests::take_frames(&mut transport.data.reliable_frames.clone()).len(),
+        crate::transport::take_frames(&mut transport.data.reliable_frames.clone()).len(),
         3
     );
     for pn in 0..3 {
@@ -371,9 +371,9 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
 
 #[tokio::test]
 async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch() {
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let mut sender = sender(&transport, &path);
-    let keys = crate::tests::fixed_keys();
+    let keys = crate::transport::fixed_keys();
     let retired = crate::keys::ArcKeys::new(42u64);
     retired.retire();
     let initial = ArcSentJournal::default();
@@ -426,7 +426,7 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
 
 #[tokio::test]
 async fn sent_callback_can_acknowledge_and_retire_path() {
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let mut sender = sender(&transport, &path);
     let keys = transport.data.keys.get().unwrap();
     let mut ping = Some(PingFrame);
@@ -472,7 +472,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
         datagram::{Datagram, be_datagram},
         net::{addr::EndpointAddr, route::Pathway},
     };
-    let [(_client, transport, path), _peer] = crate::tests::pair(1);
+    let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:30001".parse().unwrap()),
         EndpointAddr::mediate(

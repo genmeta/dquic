@@ -13,9 +13,8 @@ use qbase::{
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, CloseReason,
-    ConnPhase, InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing,
-    server_growing,
+    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, ConnPhase, Error,
+    InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
@@ -68,7 +67,7 @@ struct Peer {
     connection: ArcConnection,
     phase: ArcConnPhase,
     paths: Arc<Paths>,
-    growing: JoinHandle<CloseReason>,
+    growing: JoinHandle<Error>,
 }
 
 impl Peer {

@@ -21,9 +21,6 @@ use crate::Error;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketError {
-    #[cfg(test)]
-    #[error("packet assembly blocked: {0:?}")]
-    Blocked(std::task::Poll<()>),
     #[error(transparent)]
     Connection(#[from] crate::Error),
     #[error("invalid packet layout or capacity")]
@@ -572,49 +569,39 @@ fn open_with(
 
 #[cfg(test)]
 mod tests {
-    use std::task::{Context, Poll};
-
-    use qbase::{
-        cid::ConnectionId,
-        frame::PingFrame,
-        packet::{OneRttHeader, PacketNumber},
-    };
+    use qbase::packet::PacketNumber;
     use qrecovery::journal::ArcRcvdJournal;
 
     use super::*;
-    use crate::send::{constraints::Constraints, write::Packet};
 
     fn ready() -> OneRttKeys {
         let ([client, _], _) = crate::tests::handshake();
         let keys = ArcOneRttKeys::from(client);
         keys.get().unwrap()
     }
-    fn packet(
-        pn: u64,
-        keys: &OneRttKeys,
-    ) -> Result<crate::send::write::PendingPacket, PacketError> {
-        let mut packet = Packet::new(
-            bytes::BytesMut::zeroed(1200),
-            OneRttHeader::new(Default::default(), ConnectionId::default()),
-            16,
-        )?;
-        let mut frames = Vec::new();
-        packet.assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            &mut frames,
-            [&mut PingFrame],
-        )?;
-        crate::tests::seal_packet(
-            packet,
-            keys,
-            &crate::send::records::ArcSentJournal::starting_at(pn),
-            &mut frames,
-        )
+    struct Packet {
+        bytes: bytes::BytesMut,
+        generation: Option<u64>,
+    }
+
+    impl Packet {
+        fn into_buffer(self) -> bytes::BytesMut {
+            self.bytes
+        }
+    }
+
+    fn packet(pn: u64, keys: &OneRttKeys) -> Result<Packet, PacketError> {
+        let (_, key) = keys.reserve(|_| Ok(()))?;
+        let tag_len = key.tag_len();
+        let mut bytes = bytes::BytesMut::zeroed(6 + tag_len);
+        bytes[0] = 0x43;
+        bytes[1..5].copy_from_slice(&(pn as u32).to_be_bytes());
+        bytes[5] = 1; // PING
+        let (generation, _) = key.seal(pn, &mut bytes, 1, 5, tag_len)?;
+        Ok(Packet {
+            bytes,
+            generation: Some(generation),
+        })
     }
 
     #[test]
@@ -758,20 +745,16 @@ mod tests {
                 .0
         };
         keys.allow_update();
-        let records = crate::send::records::ArcSentJournal::default();
+        let records = qrecovery::journal::ArcSentJournal::default();
         let ((earlier, _), old) = keys
             .reserve(|generation| {
-                records
-                    .record_pending(generation, &mut Vec::new())
-                    .map_err(Into::into)
+                Ok(records.record_pending(generation, &mut Vec::new()).unwrap())
             })
             .unwrap();
         keys.update().unwrap();
         let ((later, _), new) = keys
             .reserve(|generation| {
-                records
-                    .record_pending(generation, &mut Vec::new())
-                    .map_err(Into::into)
+                Ok(records.record_pending(generation, &mut Vec::new()).unwrap())
             })
             .unwrap();
         assert_eq!((earlier, later), (0, 1));
@@ -859,7 +842,7 @@ mod tests {
             let low = packet(generation * 10, &sending).unwrap();
             let high = packet(generation * 10 + 1, &sending).unwrap();
             assert_eq!(high.generation, Some(generation));
-            let mut forged = high.datagram.msg.clone();
+            let mut forged = high.bytes.clone();
             *forged.last_mut().unwrap() ^= 1;
             assert_eq!(open(&server, forged, &server_journal), None);
             assert_eq!(
@@ -958,7 +941,7 @@ mod tests {
         sending.update().unwrap();
         let next = packet(102, &sending).unwrap();
         assert_eq!(next.generation, Some(2));
-        let mut forged = next.datagram.msg.clone();
+        let mut forged = next.bytes.clone();
         *forged.last_mut().unwrap() ^= 1;
         assert_eq!(open(&server, forged), None);
         assert_eq!(
@@ -1064,7 +1047,7 @@ mod tests {
             .confidentiality_limit();
         keys.packets.lock().unwrap().sealed_count = limit - 1;
         assert!(
-            keys.reserve::<()>(|_| Err(PacketError::Blocked(Poll::Pending)))
+            keys.reserve::<()>(|_| Err(PacketError::Layout))
                 .is_err()
         );
         keys.reserve(|_| Ok(())).unwrap();
@@ -1120,33 +1103,5 @@ mod tests {
             matches!(receiving.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)), Err(error) if error.kind() == ErrorKind::AeadLimitReached)
         );
         assert_eq!(journal.decode_pn(PacketNumber::encode(0, 0)), Ok(0));
-    }
-
-    #[tokio::test]
-    async fn sealing_does_not_wait_for_socket_submission() {
-        let [(_client, transport, path), _] = crate::tests::pair(1);
-        let keys = transport.data.keys.get().unwrap();
-        let mut sender = crate::tests::Sender::new(keys.clone(), transport, path).unwrap();
-        sender.heartbeat();
-        assert!(sender.prepare().unwrap());
-        let (start, started) = std::sync::mpsc::channel();
-        let (sealed, completed) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            started.recv().unwrap();
-            packet(1, &keys).unwrap();
-            sealed.send(()).unwrap();
-        });
-        assert!(matches!(
-            sender.poll_send_with(
-                &mut Context::from_waker(futures::task::noop_waker_ref()),
-                |_, _, bytes| {
-                    start.send(()).unwrap();
-                    completed.recv_timeout(Duration::from_secs(1)).unwrap();
-                    Poll::Ready(Ok(bytes.len()))
-                },
-            ),
-            Poll::Ready(Ok(true))
-        ));
-        worker.join().unwrap();
     }
 }

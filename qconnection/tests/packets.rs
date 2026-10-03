@@ -15,7 +15,7 @@ use qbase::{
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, CloseReason, ConnPhase, InitialPhase, Paths, TlsContext, client_growing,
+    ArcConnPhase, ConnPhase, Error, InitialPhase, Paths, TlsContext, client_growing,
 };
 use qprotocol::QuicProtocol;
 use qtransport::{packet::channel, router::QuicRouter};
@@ -223,7 +223,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         EndpointAddr::direct(link.src),
         EndpointAddr::direct(link.dst),
     );
-    paths.add_path(pathway).unwrap();
+    paths.add_path(pathway);
     let (delivered, mut delivery) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
@@ -306,7 +306,7 @@ async fn close_at_client_stage(wait: ClientWait) {
                 .expect("growing must reject a CID different from the Initial header");
             assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
             assert!(
-                matches!(growing.await.unwrap(), CloseReason::Internal(error)
+                matches!(growing.await.unwrap(), Error::Quic(error)
                 if error.kind() == qbase::error::ErrorKind::TransportParameter)
             );
             assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
@@ -359,7 +359,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         )
         .into(),
     );
-    assert!(matches!(growing.await.unwrap(), CloseReason::Internal(_)));
+    assert!(matches!(growing.await.unwrap(), Error::Quic(_)));
     if !matches!(wait, ClientWait::HandshakeDone) {
         assert!(delivery.await.unwrap().is_err());
     }

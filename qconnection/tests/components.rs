@@ -7,7 +7,7 @@ extern crate self as qconnection;
 mod implementation;
 
 pub use implementation::*;
-pub(crate) use implementation::{lifecycle, terminate};
+pub(crate) use implementation::lifecycle;
 
 mod common;
 
