@@ -25,6 +25,21 @@
 
 ## 使用
 
+### 具名端点与匿名建连
+
+`QuicEndpoint::new(identity)` 必须提供本端身份，具名端点可连接或监听。匿名客户端
+调用独立函数 `connect_anonymously(server_name, client_parameters, alpn)`，不创建
+无身份的 QuicEndpoint，也没有监听能力。两种入口共用内部建连流程。
+
+匿名连接不提交客户端证书，但仍验证服务器名称、证书及 OCSP。匿名客户端的
+`Connected.0` 为 None，服务端的 `Accepted.0` 为 None；握手失败返回 Err，
+无效凭据不会降级为匿名。连接的身份以握手结果为准。
+
+具名端点的 `alpn` 同时用于客户端和服务端，默认保留 `h3`；匿名函数显式接收
+客户端参数及 ALPN。取消尚未交付的 connect future 会请求连接关闭；客户端
+生命周期停止解析并按现有 Closing/Draining 流程清理路径和 CID。连接交付后
+由连接句柄管理生命周期，包括匿名连接。
+
 ### 本地多流文件传输测试
 
 在 IPv4 loopback 上建立一条 QUIC 连接，同时打开 1024 条双向流，每条流从客户端

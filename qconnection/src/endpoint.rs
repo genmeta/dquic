@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock, OnceLock, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -8,7 +8,7 @@ use bytes::BytesMut;
 use qbase::{
     cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
-    error::{ErrorKind, QuicError},
+    error::{AppError, ErrorKind, QuicError},
     net::route::Scopes,
     packet::{GetDcid, GetScid},
     param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
@@ -24,10 +24,15 @@ use crate::{
     InitialPhase, Paths, TlsContext, client_growing,
 };
 
-static DEFAULT_ALPN: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| vec![b"h3".to_vec()]);
-
+/// A named QUIC endpoint. Listening always requires local credentials.
+///
+/// ```compile_fail
+/// let endpoint = qconnection::QuicEndpoint::new(None);
+/// ```
 pub struct QuicEndpoint {
     pub identity: Arc<Endpoint>,
+    /// Protocols offered by clients and accepted by servers, in preference order.
+    pub alpn: Vec<Vec<u8>>,
     pub client_parameters: ClientParameters,
     pub server_parameters: ServerParameters,
 }
@@ -36,6 +41,7 @@ impl QuicEndpoint {
     pub fn new(identity: Arc<Endpoint>) -> Self {
         Self {
             identity,
+            alpn: vec![b"h3".to_vec()],
             client_parameters: ClientParameters::new(),
             server_parameters: ServerParameters::new(),
         }
@@ -55,10 +61,12 @@ impl QuicEndpoint {
         scopes: impl Into<Scopes>,
         accept_cb: impl Fn(Result<Accepted, Error>) + Send + Sync + 'static,
     ) -> Result<(), Error> {
+        // Validate credentials before initializing the global incoming registry.
+        let tls_server = self.tls_server()?;
         ServerRegistry::global().insert(
             self.identity.name().to_owned(),
             Server {
-                tls_server: self.tls_server()?,
+                tls_server,
                 server_parameters: self.server_parameters.clone(),
                 scopes: scopes.into(),
                 accept_cb: Arc::new(accept_cb),
@@ -68,10 +76,11 @@ impl QuicEndpoint {
     }
 
     fn tls_server(&self) -> Result<qtls::TlsServer, Error> {
+        let local = self.local_authority()?;
         qtls::TlsServer::new(qtls::ServerTlsConfig {
             provider: Arc::new(qtls::default_provider()),
-            alpn: DEFAULT_ALPN.clone(),
-            local: self.local_authority()?,
+            alpn: self.alpn.clone(),
+            local,
             resumption: qtls::ServerResumptionConfig::Disabled,
             limits: Default::default(),
         })
@@ -81,78 +90,15 @@ impl QuicEndpoint {
     /// Resolve the peer in the background and add every usable AddressBook pairing.
     /// Uses the sources registered with [`qresolve::Resolver::add`].
     /// The client lifecycle owns discovery and stops it when the connection closes.
+    /// Dropping this future before delivery closes the pending connection and discovery.
     pub async fn connect(&self, server_name: String) -> Result<Connected, Error> {
-        let tls_name = qresolve::split_host_port(&server_name).0.to_owned();
-        let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
-            provider: Arc::new(qtls::default_provider()),
-            alpn: DEFAULT_ALPN.clone(),
-            local: Some(self.local_authority()?),
-            resumption: qtls::ClientResumptionConfig::Disabled,
-            limits: Default::default(),
-        })
-        .map_err(|error| internal_error(error.to_string()))?;
-        let origin_dcid = ConnectionId::random_gen(8);
-        let initial_keys = identity
-            .initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref())
-            .map_err(|error| internal_error(error.to_string()))?;
-        let reliable_frames = ArcReliableFrames::with_capacity(0);
-        let (inbox, rcvd_pkt) = channel::new();
-        let router_registry =
-            QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
-        let initial_scid = router_registry.gen_unique_cid();
-        let mut client_params = self.client_parameters.clone();
-        client_params
-            .set(ParameterId::InitialSourceConnectionId, initial_scid)
-            .map_err(|error| internal_error(error.to_string()))?;
-        let tls = TlsContext::client(
-            &identity,
-            tls_name
-                .clone()
-                .try_into()
-                .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
-            &client_params,
-        )?;
-        let cid_registry = CidRegistry::new(
-            Role::Client,
-            origin_dcid,
-            ArcLocalCids::new(initial_scid, router_registry),
-            ArcRemoteCids::new(
-                client_params.get::<u64>(ParameterId::ActiveConnectionIdLimit),
-                reliable_frames.clone(),
-            ),
-        );
-        let phase = ArcConnPhase::initial(InitialPhase::new(
-            (initial_scid, origin_dcid),
-            initial_keys,
-            reliable_frames,
-            cid_registry,
-        ));
-        let idle = ArcConnIdle::new(
-            client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
-            Duration::ZERO,
-            DEFAULT_HEARTBEAT_INTERVAL,
-        );
-        let paths = Paths::new(Role::Client, phase, idle);
-        let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
-        let (deliver, connected) = oneshot::channel();
-
-        let tick = crate::recv::tick(paths.clone());
-        let growing = client_growing(
+        connect_with_authority(
+            Some(self.local_authority()?),
             server_name,
-            client_params,
-            paths,
-            rcvd_pkt,
-            tls,
-            token,
-            move |result| {
-                let _ = deliver.send(result);
-            },
-        );
-        tokio::spawn(async move { tokio::join!(growing, tick).0 });
-
-        connected
-            .await
-            .map_err(|error| internal_error(error.to_string()))?
+            self.client_parameters.clone(),
+            self.alpn.clone(),
+        )
+        .await
     }
 
     fn local_authority(&self) -> Result<qtls::LocalAuthority, Error> {
@@ -164,6 +110,127 @@ impl QuicEndpoint {
         )
         .map_err(|error| internal_error(error.to_string()))
     }
+}
+
+/// Connect without client credentials, still verifying the server's identity.
+/// Uses the global Resolver and AddressBook, like [`QuicEndpoint::connect`].
+/// Dropping the future before delivery closes the connection and stops discovery.
+/// Client parameters and ALPN are supplied by the application protocol.
+pub async fn connect_anonymously(
+    server_name: String,
+    client_parameters: ClientParameters,
+    alpn: Vec<Vec<u8>>,
+) -> Result<Connected, Error> {
+    connect_with_authority(None, server_name, client_parameters, alpn).await
+}
+
+async fn connect_with_authority(
+    local: Option<qtls::LocalAuthority>,
+    server_name: String,
+    client_parameters: ClientParameters,
+    alpn: Vec<Vec<u8>>,
+) -> Result<Connected, Error> {
+    let tls_name = qresolve::split_host_port(&server_name).0.to_owned();
+    // Deployed peers bind the TLS client certificate to this transport name.
+    // Derive it from the same authority; anonymous clients do not advertise one.
+    let mut client_parameters = client_parameters;
+    if let Some(authority) = local.as_ref() {
+        client_parameters
+            .set(ParameterId::ClientName, authority.name().to_owned())
+            .map_err(|error| internal_error(error.to_string()))?;
+    }
+    let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
+        provider: Arc::new(qtls::default_provider()),
+        alpn,
+        local,
+        resumption: qtls::ClientResumptionConfig::Disabled,
+        limits: Default::default(),
+    })
+    .map_err(|error| internal_error(error.to_string()))?;
+    let origin_dcid = ConnectionId::random_gen(8);
+    let initial_keys = identity
+        .initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref())
+        .map_err(|error| internal_error(error.to_string()))?;
+    let reliable_frames = ArcReliableFrames::with_capacity(0);
+    let (inbox, rcvd_pkt) = channel::new();
+    let router_registry =
+        QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
+    let initial_scid = router_registry.gen_unique_cid();
+    let mut client_params = client_parameters;
+    client_params
+        .set(ParameterId::InitialSourceConnectionId, initial_scid)
+        .map_err(|error| internal_error(error.to_string()))?;
+    let tls = TlsContext::client(
+        &identity,
+        tls_name
+            .clone()
+            .try_into()
+            .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
+        &client_params,
+    )?;
+    let cid_registry = CidRegistry::new(
+        Role::Client,
+        origin_dcid,
+        ArcLocalCids::new(initial_scid, router_registry),
+        ArcRemoteCids::new(
+            client_params.get::<u64>(ParameterId::ActiveConnectionIdLimit),
+            reliable_frames.clone(),
+        ),
+    );
+    let phase = ArcConnPhase::initial(InitialPhase::new(
+        (initial_scid, origin_dcid),
+        initial_keys,
+        reliable_frames,
+        cid_registry,
+    ));
+    let idle = ArcConnIdle::new(
+        client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
+        Duration::ZERO,
+        DEFAULT_HEARTBEAT_INTERVAL,
+    );
+    let paths = Paths::new(Role::Client, phase, idle);
+    let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
+    let (deliver, connected) = oneshot::channel();
+    let (claim, claimed) = oneshot::channel::<()>();
+    let pending_paths = paths.clone();
+
+    let tick = crate::recv::tick(paths.clone());
+    let growing = client_growing(
+        server_name,
+        client_params,
+        paths,
+        rcvd_pkt,
+        tls,
+        token,
+        move |result| {
+            if let Err(Ok((_, _, connection))) = deliver.send(result) {
+                connection.close(0u32.into(), "connection request cancelled");
+            }
+        },
+    );
+    tokio::spawn(async move {
+        let driving = async { tokio::join!(growing, tick).0 };
+        tokio::pin!(driving);
+        tokio::select! {
+            reason = &mut driving => reason,
+            result = claimed => {
+                if result.is_err() {
+                    pending_paths.on_error(
+                        AppError::new(0u32.into(), "connection request cancelled").into(),
+                    );
+                }
+                // Keep driving Closing/Draining, or the successfully claimed connection.
+                driving.await
+            }
+        }
+    });
+
+    let result = connected
+        .await
+        .map_err(|error| internal_error(error.to_string()))?;
+    // There is no await between receiving the connection and transferring ownership.
+    let _ = claim.send(());
+    result
 }
 
 pub type AcceptCallback = dyn Fn(Result<Accepted, Error>) + Send + Sync;

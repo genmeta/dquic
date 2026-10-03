@@ -19,7 +19,23 @@ async fn connect(identity: Arc<Endpoint>, peer: String) -> Result<Connected, Err
     let endpoint = QuicEndpoint::new(identity);
     endpoint.connect(peer).await
 }
+
+async fn connect_anonymously(peer: String) -> Result<Connected, Error> {
+    dquic::connect_anonymously(
+        peer,
+        dquic::qbase::param::handy::client_parameters(),
+        vec![b"h3".to_vec()],
+    ).await
+}
 ```
+
+`QuicEndpoint` always requires local credentials and supports connecting and listening.
+The independent `connect_anonymously` function only initiates connections; it omits
+client credentials and still verifies the server. Both paths use the same internal
+connection lifecycle. Named endpoints configure `alpn` (default `h3`); anonymous calls
+supply client parameters and ALPN explicitly. `Connected` and `Accepted` report the
+actual handshake identities. Dropping a pending connect future closes its unclaimed
+connection and stops discovery through the normal lifecycle.
 
 Before connecting or listening, configure trust with `qtls::RootCerts`, register
 sockets with `qprotocol::Dock` and `qprotocol::QuicProtocol`, publish local

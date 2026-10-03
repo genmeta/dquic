@@ -182,6 +182,23 @@ impl Resolve for SystemResolver {
         servname: &'l str,
         family: Option<Family>,
     ) -> ResolveFuture<'l> {
+        let host = hostname
+            .rsplit_once(':')
+            .filter(|(host, suffix)| {
+                !host.contains(':')
+                    && !suffix.is_empty()
+                    && suffix.bytes().all(|b| b.is_ascii_digit())
+            })
+            .map_or(hostname, |(host, _)| host)
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host == "dhttp.net" || host.ends_with(".dhttp.net") {
+            return future::ready(Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "DHTTP names require a DHTTP resolver",
+            )))
+            .boxed();
+        }
         let hostname = hostname.to_owned();
         let servname = servname.to_owned();
         async move {
@@ -380,5 +397,36 @@ mod tests {
 
         let addrs = lookup_socket_addrs("::443", "8443", Some(Family::V6)).unwrap();
         assert!(addrs.iter().all(|addr| addr.port() == 8443));
+    }
+}
+
+#[cfg(test)]
+mod dhttp_namespace_tests {
+    use super::*;
+    #[tokio::test]
+    async fn system_dns_never_treats_certificate_sequence_as_a_port() {
+        for name in [
+            "dhttp.net",
+            "alice.dhttp.net",
+            "ALICE.DHTTP.NET.:2",
+            "alice.dhttp.net:999999999999999999999",
+        ] {
+            let result = SystemResolver.lookup(name, "443", None).await;
+            assert!(
+                matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound),
+                "{name}"
+            );
+        }
+        let records = SystemResolver
+            .lookup("127.0.0.1:8080", "443", None)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            records
+                .iter()
+                .any(|(_, endpoint)| endpoint.addr().port() == 8080)
+        );
     }
 }
