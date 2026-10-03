@@ -874,3 +874,48 @@ fn interface_names_are_canonical_identifiers_without_string_guessing() {
             .is_empty()
     );
 }
+
+#[test]
+fn inner_binding_snapshot_filters_and_deduplicates_actual_metadata() {
+    let book = AddressBook::new();
+    let device = qudp::BoundDevice::new("lan0", 7).unwrap();
+    let bound = addr("192.168.1.10:4433");
+    book.insert(
+        bound,
+        direct("192.168.1.10:4433"),
+        Scope::Internal,
+        Some(&device),
+    )
+    .unwrap();
+    book.insert(
+        bound,
+        direct("192.168.1.10:4434"),
+        Scope::Internal,
+        Some(&device),
+    )
+    .unwrap();
+    book.insert(
+        addr("127.0.0.1:4433"),
+        direct("127.0.0.1:4433"),
+        Scope::Loopback,
+        Some(&device),
+    )
+    .unwrap();
+    book.insert(
+        addr("192.168.1.11:4433"),
+        direct("192.168.1.11:4433"),
+        Scope::Internal,
+        None,
+    )
+    .unwrap();
+    book.insert(
+        addr("192.168.1.12:0"),
+        direct("192.168.1.12:0"),
+        Scope::Internal,
+        Some(&device),
+    )
+    .unwrap();
+    assert_eq!(book.inner_bindings(), vec![(bound, device)]);
+    book.remove_bound(bound);
+    assert!(book.inner_bindings().is_empty());
+}

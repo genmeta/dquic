@@ -245,6 +245,27 @@ impl AddressBook {
             .subscribe()
     }
 
+    /// Snapshot internal bindings with their actual interface metadata.
+    pub fn inner_bindings(&self) -> Vec<(SocketAddr, qudp::BoundDevice)> {
+        let state = self.state.lock().unwrap();
+        let mut bounds = state
+            .inner
+            .iter()
+            .filter_map(|(endpoint, bound)| {
+                (endpoint.scope() == Some(Scope::Internal)
+                    && endpoint.addr().port() != 0
+                    && bound.port() != 0)
+                    .then_some(*bound)
+            })
+            .collect::<Vec<_>>();
+        bounds.sort_unstable();
+        bounds.dedup();
+        bounds
+            .into_iter()
+            .filter_map(|bound| Some((bound, state.interfaces.get(&bound)?.as_ref()?.clone())))
+            .collect()
+    }
+
     pub fn ddns_endpoints(&self) -> Arc<[EndpointAddr]> {
         self.state.lock().unwrap().ddns_snapshot()
     }

@@ -509,8 +509,33 @@ impl ServerCertVerifier for ServerVerifier {
             ocsp_response,
             now,
         )?;
+        // Temporary live-DDNS compatibility: a fetched response may supplement
+        // a missing staple only for this origin. It still passes the same
+        // certificate binding, signature, freshness and revocation checks.
+        let fetched_ocsp = if ocsp_response.is_empty()
+            && matches!(server_name, ServerName::DnsName(name) if name.as_ref() == "ddns.genmeta.net")
+        {
+            std::env::var_os("DQUIC_DDNS_OCSP_FILE")
+                .map(|path| {
+                    use std::io::Read as _;
+                    let mut response = Vec::new();
+                    std::fs::File::open(path)
+                        .and_then(|file| {
+                            file.take(self.limits.max_ocsp_bytes as u64 + 1)
+                                .read_to_end(&mut response)
+                        })
+                        .map_err(|_| {
+                            rustls::Error::InvalidCertificate(CertificateError::InvalidOcspResponse)
+                        })?;
+                    validate_peer_limits(&certificates, &response, self.limits)?;
+                    Ok::<_, rustls::Error>(response)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         crate::ocsp::verify(
-            ocsp_response,
+            fetched_ocsp.as_deref().unwrap_or(ocsp_response),
             end_entity,
             intermediates,
             &self.roots,
