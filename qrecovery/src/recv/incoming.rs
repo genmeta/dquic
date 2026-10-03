@@ -101,7 +101,7 @@ impl<TX> Incoming<TX> {
     /// Error.
     ///
     /// [`Reader`]: crate::recv::Reader
-    pub fn on_conn_error(&self, err: &Error) {
+    pub fn on_error(&self, err: &Error) {
         let mut recver = self.0.recver();
         let inner = recver.deref_mut();
         match inner {

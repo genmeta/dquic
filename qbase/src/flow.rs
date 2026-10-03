@@ -1,10 +1,11 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use crate::{
+    Close,
     error::{Error, ErrorFrameType, ErrorKind, QuicError},
     frame::{
         DataBlockedFrame, FrameType, MaxDataFrame,
@@ -171,7 +172,7 @@ impl<TX> ArcSendControler<TX> {
         Poll::Ready(self.credit(quota))
     }
 
-    pub fn cancel(&self, waker: &std::task::Waker) {
+    pub fn unregister(&self, waker: &Waker) {
         if let Ok(inner) = self.0.lock().unwrap().as_ref() {
             inner.tx_wakers.unregister(waker);
         }
@@ -361,6 +362,12 @@ pub struct FlowController<TX> {
     pub recver: ArcRecvController<TX>,
 }
 
+impl<TX: Clone + Send> Close for FlowController<TX> {
+    fn close_with_error(&self, error: Error) {
+        self.on_error(&error);
+    }
+}
+
 impl<TX: Clone> FlowController<TX> {
     /// Creates a new `FlowController` with the specified initial send and receive window sizes.
     ///
@@ -397,7 +404,7 @@ impl<TX: Clone> FlowController<TX> {
     /// It will makes
     /// the connection-level stream flow controller in the sending direction become unavailable,
     /// and the connection-level stream flow controller in the receiving direction terminate.
-    pub fn on_conn_error(&self, error: &Error) {
+    pub fn on_error(&self, error: &Error) {
         self.sender.on_error(error);
     }
 }

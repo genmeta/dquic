@@ -54,8 +54,8 @@ pub(crate) struct Transport {
 impl Transport {
     fn close(&self, error: Error) {
         self.data.crypto.on_error(&error);
-        self.data.streams.on_conn_error(&error);
-        self.flow.on_conn_error(&error);
+        self.data.streams.on_error(&error);
+        self.flow.on_error(&error);
     }
 }
 
@@ -99,10 +99,10 @@ use receive::receive_packets;
 pub(crate) mod sender;
 pub(crate) use sender::Sender;
 
-const CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-const KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-const OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
+const CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.cert");
+const KEY: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/ca.cert");
+const OCSP: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.ocsp");
 
 fn tls_server(provider: Arc<qtls::CryptoProvider>, alpn: Vec<Vec<u8>>) -> qtls::TlsServer {
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();
@@ -218,10 +218,12 @@ pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 
     .zip(summaries)
     .map(|(transport, summary)| {
         let path = path(&transport, 0);
+        let terminator = qtransport::terminate::ArcTerminator::no_error();
+        terminator.register(Arc::new(transport.data.streams.clone()));
         let conn = ArcConnection::new(
             summary.alpn.unwrap(),
             transport.data.streams.clone(),
-            Default::default(),
+            terminator,
         );
         (conn, transport, path)
     })
@@ -381,11 +383,7 @@ pub(crate) fn seal_packet(
     journal: &send::records::ArcSentJournal,
     records: &mut Vec<GuaranteedFrame>,
 ) -> Result<send::write::PendingPacket, PacketError> {
-    let ((pn, encoded), key) = keys.reserve(|generation| {
-        journal
-            .record_pending(generation, records)
-            .map_err(Into::into)
-    })?;
+    let ((pn, encoded), key) = send::records::reserve(keys, journal, records)?;
     send::finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
 }
 
@@ -678,12 +676,13 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
 
 #[tokio::test]
 async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
-    use qbase::{ArcReceiving, net::route::Link};
+    use qbase::net::route::Link;
     use tokio::io::AsyncReadExt;
 
     use crate::router::QuicRouter;
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
-    let close = ArcReceiving::default();
+    let close = qtransport::terminate::ArcTerminator::no_error();
+    close.register(Arc::new(st.data.streams.clone()));
     let server = ArcConnection::new(
         Bytes::from_static(b"h3"),
         st.data.streams.clone(),
@@ -744,12 +743,9 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let mut body = [0; 12];
     reader.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"wired stream");
-    // The lifecycle owner consumes the close reason; the receive engine keeps reporting packets.
+    // Application streams stop immediately; the receive engine still reports packets.
     server.close(VarInt::from_u32(0), "done");
-    assert!(matches!(
-        close.await.unwrap(),
-        Some(crate::CloseReason::App(_))
-    ));
+    assert!(matches!(st.data.streams.accept_uni().await, Err(crate::Error::App(_))));
     router.receive(ping(&keys(&ct), 1), link.into(), link, 8);
     router.receive(close_packet(&keys(&ct), 2), link.into(), link, 8);
     assert!(
@@ -1990,4 +1986,32 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn sealing_does_not_wait_for_socket_submission() {
+    let [(_client, transport, path), _] = pair(1);
+    let keys = transport.data.keys.get().unwrap();
+    let mut sender = Sender::new(keys.clone(), transport, path).unwrap();
+    sender.heartbeat();
+    assert!(sender.prepare().unwrap());
+    let (start, started) = std::sync::mpsc::channel();
+    let (sealed, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started.recv().unwrap();
+        ping(&keys, 1);
+        sealed.send(()).unwrap();
+    });
+    assert!(matches!(
+        sender.poll_send_with(
+            &mut Context::from_waker(futures::task::noop_waker_ref()),
+            |_, _, bytes| {
+                start.send(()).unwrap();
+                completed.recv_timeout(Duration::from_secs(1)).unwrap();
+                Poll::Ready(Ok(bytes.len()))
+            },
+        ),
+        Poll::Ready(Ok(true))
+    ));
+    worker.join().unwrap();
 }

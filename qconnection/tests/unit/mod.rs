@@ -4,7 +4,6 @@ mod paths;
 mod punch;
 mod recv;
 mod send;
-mod terminate;
 mod tls;
 
 use crate::Paths;

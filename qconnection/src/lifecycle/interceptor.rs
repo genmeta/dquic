@@ -9,7 +9,7 @@ use qrecovery::crypto::CryptoStream;
 use qtls::{TlsLimits, incoming::ClientHello};
 use tokio::io::AsyncReadExt;
 
-use crate::{CloseReason, Error};
+use crate::{CloseReason, Error, Paths};
 
 /// Accumulate Initial CRYPTO until a server can be selected from ClientHello.
 #[derive(Clone)]
@@ -100,26 +100,33 @@ impl Default for Interceptor {
 pub(super) async fn read_crypto_stream_to_interceptor(
     interceptor: Interceptor,
     stream: CryptoStream,
-    closed: ArcReceiving<CloseReason>,
+    paths: Arc<Paths>,
 ) {
+    let terminator = paths.phase().terminator();
     let mut reader = stream.reader();
     let mut buffer = [0; 4096];
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => {
-                closed.set(CloseReason::Internal(QuicError::with_default_fty(
-                    ErrorKind::ProtocolViolation,
-                    "Initial CRYPTO ended before ClientHello",
-                )));
+                terminator.close(
+                    CloseReason::Internal(QuicError::with_default_fty(
+                        ErrorKind::ProtocolViolation,
+                        "Initial CRYPTO ended before ClientHello",
+                    )),
+                    paths.closing_pto(),
+                );
                 break;
             }
             Ok(length) if interceptor.write(&buffer[..length]) => break,
             Ok(_) => {}
             Err(error) => {
-                closed.set(CloseReason::Internal(QuicError::with_default_fty(
-                    ErrorKind::Internal,
-                    error.to_string(),
-                )));
+                terminator.close(
+                    CloseReason::Internal(QuicError::with_default_fty(
+                        ErrorKind::Internal,
+                        error.to_string(),
+                    )),
+                    paths.closing_pto(),
+                );
                 break;
             }
         }

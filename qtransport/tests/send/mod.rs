@@ -1,10 +1,7 @@
 //! Historical packet fixtures for receive/recovery regression tests.
 //! Production assembly and submission live in qconnection::send.
-#[path = "send/constraints.rs"]
 pub mod constraints;
-#[path = "send/records.rs"]
 pub mod records;
-#[path = "send/write.rs"]
 pub mod write;
 
 use std::{
@@ -107,11 +104,7 @@ pub fn assemble_1rtt_packet<const N: usize>(
         constraints,
         sources,
         |packet, records| {
-            let ((pn, encoded), key) = keys.reserve(|generation| {
-                journal
-                    .record_pending(generation, records)
-                    .map_err(Into::into)
-            })?;
+            let ((pn, encoded), key) = records::reserve(keys, journal, records)?;
             finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
         },
     )
@@ -396,9 +389,7 @@ fn packet_error(error: PacketError) -> Error {
 pub use crate::recv::acknowledge;
 
 #[cfg(test)]
-#[path = "send/tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "send/fixture.rs"]
 pub(crate) mod fixture;

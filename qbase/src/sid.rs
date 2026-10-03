@@ -280,7 +280,7 @@ where
     }
 
     #[inline]
-    pub fn on_conn_error(&self) {
-        self.local.on_conn_error();
+    pub fn on_error(&self) {
+        self.local.on_error();
     }
 }

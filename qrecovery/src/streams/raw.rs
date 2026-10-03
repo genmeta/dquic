@@ -468,7 +468,7 @@ where
     ///
     /// After the method called, read on [`Reader`] or write on [`Writer`] will return an error,
     /// the resouces will be released.
-    pub fn on_conn_error(&self, error: &Error) {
+    pub fn on_error(&self, error: &Error) {
         let mut output = match self.output.guard() {
             Ok(out) => out,
             Err(_) => return,
@@ -482,10 +482,10 @@ where
             Err(_) => return,
         };
 
-        output.on_conn_error(error);
-        input.on_conn_error(error);
-        listener.on_conn_error(error);
-        self.stream_ids.on_conn_error();
+        output.on_error(error);
+        input.on_error(error);
+        listener.on_error(error);
+        self.stream_ids.on_error();
         self.tx_wakers.wake_all();
     }
 }
@@ -976,7 +976,7 @@ mod tests {
             .recv_data((frame, bytes::Bytes::from_static(b"data")))
             .unwrap();
         let error: Error = QuicError::with_default_fty(ErrorKind::Internal, "closed").into();
-        streams.on_conn_error(&error);
+        streams.on_error(&error);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let mut buf = BytesMut::with_capacity(4);
         assert!(matches!(

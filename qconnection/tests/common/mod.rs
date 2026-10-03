@@ -221,3 +221,48 @@ pub fn initial_keys(server: bool) -> qtls::BidirectionalKeys {
         )
         .into()
 }
+
+/// An isolated connection with no paths or idle expiry for TLS task tests.
+pub fn paths(
+    role: qbase::role::Role,
+) -> (
+    Arc<qconnection::Paths>,
+    qtransport::terminate::ArcTerminator,
+) {
+    let phase = qconnection::ArcConnPhase::initial(initial_phase(
+        role,
+        ConnectionId::from_slice(b"local"),
+        ConnectionId::from_slice(b"original"),
+        initial_keys(role == qbase::role::Role::Server),
+    ));
+    let terminator = phase.terminator();
+    let paths = qconnection::Paths::new(
+        role,
+        phase,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    );
+    (paths, terminator)
+}
+
+/// Records the notification delivered to a registered component.
+#[derive(Default)]
+pub struct CloseObserver(std::sync::Mutex<Option<qconnection::Error>>);
+
+impl qbase::Close for CloseObserver {
+    fn close_with_error(&self, error: qconnection::Error) {
+        *self.0.lock().unwrap() = Some(error);
+    }
+}
+
+impl CloseObserver {
+    pub fn notified(&self) -> Option<qconnection::Error> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+pub fn observe_close(terminator: &qtransport::terminate::ArcTerminator) -> Arc<CloseObserver> {
+    let observer = Arc::new(CloseObserver::default());
+    terminator.register(observer.clone());
+    observer
+}
