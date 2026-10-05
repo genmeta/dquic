@@ -33,7 +33,7 @@ pub type ArcLocalCids =
 pub type CidRegistry =
     qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
 pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
-pub type ArcTrackers = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
+pub type ArcResend = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
 
 pub type Connected = (
     Option<qtls::LocalAuthority>,

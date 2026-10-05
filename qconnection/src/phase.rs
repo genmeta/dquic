@@ -9,7 +9,7 @@ use qtransport::{
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
-use crate::{ArcParameters, ArcReliableFrames, ArcTrackers, CidRegistry, FlowController};
+use crate::{ArcParameters, ArcReliableFrames, ArcResend, CidRegistry, FlowController};
 
 /// Frame sources available before peer transport parameters arrive.
 pub struct InitialPhase {
@@ -19,7 +19,7 @@ pub struct InitialPhase {
     pub odcid: ConnectionId,
     pub reliable_frames: ArcReliableFrames,
     pub cid_registry: CidRegistry,
-    pub(crate) trackers: ArcTrackers,
+    pub(crate) resender: ArcResend,
     pub(crate) terminator: ArcTerminator,
     pub(crate) upgrade_wakers: ArcSendWakers,
 }
@@ -33,8 +33,8 @@ impl InitialPhase {
     ) -> Self {
         let odcid = cid_registry.origin_dcid();
         let initial_space = Arc::new(Space::new(Epoch::Initial, ArcKeys::new(Arc::new(keys))));
-        let mut trackers = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
-        trackers
+        let mut resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
+        resender
             .push_back(initial_space.clone())
             .expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
@@ -46,7 +46,7 @@ impl InitialPhase {
             odcid,
             reliable_frames,
             cid_registry,
-            trackers: Arc::new(RwLock::new(trackers)),
+            resender: Arc::new(RwLock::new(resender)),
             terminator,
             upgrade_wakers: ArcSendWakers::default(),
         }
@@ -65,7 +65,7 @@ pub struct HandshakePhase {
     pub dcid: ConnectionId,
     pub reliable_frames: ArcReliableFrames,
     pub cid_registry: CidRegistry,
-    pub(crate) trackers: ArcTrackers,
+    pub(crate) resender: ArcResend,
     pub(crate) terminator: ArcTerminator,
     pub(crate) upgrade_wakers: ArcSendWakers,
 }
@@ -79,7 +79,7 @@ pub struct MaturePhase {
     pub flow_ctrl: FlowController,
     pub cid_registry: CidRegistry,
     pub puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
-    pub(crate) trackers: ArcTrackers,
+    pub(crate) resender: ArcResend,
     pub(crate) terminator: ArcTerminator,
 }
 
@@ -93,9 +93,9 @@ pub enum ConnPhase {
 impl ConnPhase {
     pub(crate) fn retire_initial(&self) {
         let (initial, trackers) = match self {
-            Self::Initial(phase) => (&phase.initial_space, &phase.trackers),
-            Self::Handshake(phase) => (&phase.initial_space, &phase.trackers),
-            Self::Mature(phase) => (&phase.spaces.initial, &phase.trackers),
+            Self::Initial(phase) => (&phase.initial_space, &phase.resender),
+            Self::Handshake(phase) => (&phase.initial_space, &phase.resender),
+            Self::Mature(phase) => (&phase.spaces.initial, &phase.resender),
         };
         initial.retire();
         let mut trackers = trackers.write().unwrap();
@@ -159,7 +159,7 @@ impl ArcConnPhase {
         };
         let upgrade_wakers = initial.upgrade_wakers.clone();
         initial
-            .trackers
+            .resender
             .write()
             .unwrap()
             .push_back(handshake.clone())
@@ -171,7 +171,7 @@ impl ArcConnPhase {
             dcid: initial.dcid(),
             reliable_frames: initial.reliable_frames.clone(),
             cid_registry: initial.cid_registry.clone(),
-            trackers: initial.trackers.clone(),
+            resender: initial.resender.clone(),
             terminator: initial.terminator.clone(),
             upgrade_wakers: upgrade_wakers.clone(),
         }));
@@ -182,13 +182,13 @@ impl ArcConnPhase {
     pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
         let mut current = self.lock_guard();
         {
-            let mut trackers = phase.trackers.write().unwrap();
+            let mut resender = phase.resender.write().unwrap();
             if matches!(*current, ConnPhase::Initial(_)) {
-                trackers
+                resender
                     .push_back(phase.spaces.handshake.clone())
                     .expect("Handshake epoch");
             }
-            trackers
+            resender
                 .push_back(phase.spaces.data.clone())
                 .expect("Data epoch");
         }
