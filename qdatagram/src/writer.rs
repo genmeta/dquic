@@ -220,7 +220,7 @@ mod tests {
             task::{Context, Wake, Waker},
         };
 
-        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package};
+        use qbase::packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package};
         struct Counter(AtomicUsize);
         impl Wake for Counter {
             fn wake(self: Arc<Self>) {
@@ -249,8 +249,7 @@ mod tests {
                 let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
                 let result = source.poll_dump(
                     &mut Context::from_waker(&waker),
-                    &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
-                    &mut frames,
+                    &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
                 );
                 assert_eq!(result.is_pending(), !queued);
                 if queued {
@@ -362,7 +361,7 @@ mod tests {
     fn package_preserves_datagram_length_and_padding_strategy() {
         use std::task::{Context, Poll, Waker};
 
-        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader};
+        use qbase::packet::{PacketBuffer, Constraints, GetType, OneRttHeader};
         for (length, capacity) in [(11, 12), (64, 66), (64, 100)] {
             let data = Bytes::from(vec![b'a'; length]);
             let expected = DatagramOutgoing::new();
@@ -384,16 +383,17 @@ mod tests {
                 max_size: capacity,
                 ..Default::default()
             };
-            let mut buffer = ConstraintBuffer::new(
+            let mut frames = Vec::new();
+            let mut buffer = PacketBuffer::new(
                 &mut actual,
                 &mut limits,
+                &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
                 0,
             );
-            let mut frames = Vec::new();
             assert!(
-                matches!(qbase::packet::Package::poll_dump(&mut source, &mut Context::from_waker(Waker::noop()), &mut buffer, &mut frames), Poll::Ready(Ok(n)) if n == frames.len() && n > 0)
+                matches!(qbase::packet::Package::poll_dump(&mut source, &mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(Ok(n)) if n == buffer.meta.nframes && n > 0)
             );
             assert_eq!(actual, bytes[..written]);
         }
@@ -427,8 +427,7 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
     fn poll_dump(
         &mut self,
         cx: &mut std::task::Context<'_>,
-        buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
-        frames: &mut Vec<qbase::frame::Frame>,
+        buffer: &mut qbase::packet::PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         use std::task::Poll;
         let mut guard = self.0.lock().unwrap();
@@ -440,8 +439,8 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
             writer.tx_wakers.register(cx.waker());
             return Poll::Pending;
         };
-        let before = frames.len();
-        buffer.for_frame(qbase::frame::FrameType::Datagram(1), frames);
+        let before = buffer.meta.nframes;
+        buffer.for_frame(qbase::frame::FrameType::Datagram(1));
         let length = VarInt::try_from(data.len()).unwrap();
         let mut frame = DatagramFrame::new(true, length);
         if !buffer.can_fit(frame.encoding_size() + data.len()) {
@@ -452,13 +451,13 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
             let padding = buffer.remaining_mut() - frame.encoding_size() - data.len();
             if padding > 0 {
                 buffer.put_bytes(0, padding);
-                frames.push(qbase::frame::Frame::Padding(qbase::frame::PaddingFrame));
+                buffer.record(qbase::frame::Frame::Padding(qbase::frame::PaddingFrame));
             }
         }
-        let result = (frame, data.clone()).poll_dump(cx, buffer, frames);
+        let result = (frame, data.clone()).poll_dump(cx, buffer);
         if matches!(result, Poll::Ready(Ok(1))) {
             writer.datagrams.pop_front();
-            return Poll::Ready(Ok(frames.len() - before));
+            return Poll::Ready(Ok(buffer.meta.nframes - before));
         }
         result
     }

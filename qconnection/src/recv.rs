@@ -278,17 +278,8 @@ pub async fn tick(paths: Arc<Paths>) {
     loop {
         let now = Instant::now();
         let snapshot = phase.get();
-        match &snapshot {
-            crate::ConnPhase::Initial(phase) => phase.initial_space.on_tick(now),
-            crate::ConnPhase::Handshake(phase) => {
-                phase.initial_space.on_tick(now);
-                phase.handshake_space.on_tick(now);
-            }
-            crate::ConnPhase::Mature(phase) => {
-                phase.spaces.initial.on_tick(now);
-                phase.spaces.handshake.on_tick(now);
-                phase.spaces.data.on_tick(now);
-            }
+        for space in snapshot.spaces().read().unwrap().0.iter() {
+            space.on_tick(now);
         }
         tokio::select! {
             biased;

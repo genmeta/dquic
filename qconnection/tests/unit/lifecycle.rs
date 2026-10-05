@@ -7,6 +7,46 @@ use qbase::{
 use crate::{CloseReason, lifecycle::any};
 
 #[tokio::test]
+async fn packet_events_retire_initial_but_leave_queue_removal_to_growing() {
+    use qbase::{Epoch, role::Role};
+
+    for role in [Role::Client, Role::Server] {
+        let initial = crate::common::initial_phase(
+            role,
+            Default::default(),
+            Default::default(),
+            crate::common::initial_keys(role == Role::Server),
+        );
+        let space = crate::common::initial_space(&initial.spaces);
+        let spaces = initial.spaces.clone();
+        let resender = initial.resender.clone();
+        let phase = crate::ArcConnPhase::initial(initial);
+        let paths = crate::Paths::new(role, phase, Duration::ZERO, Duration::ZERO);
+        if role == Role::Client {
+            paths.on_handshake_received();
+        } else {
+            paths.on_handshake_sent();
+        }
+        assert!(space.keys.get().is_ok());
+        if role == Role::Client {
+            paths.on_handshake_sent();
+        } else {
+            paths.on_handshake_received();
+        }
+        assert!(space.keys.get().is_err());
+        paths.handshake_confirmed();
+        assert_eq!(spaces.read().unwrap().0.len(), 1);
+        assert_eq!(resender.read().unwrap().len(), 1);
+
+        super::retire_spaces(&paths, Epoch::Handshake);
+        assert!(spaces.read().unwrap().0.is_empty());
+        assert!(resender.read().unwrap().is_empty());
+        assert!(space.keys.get().is_err());
+        paths.retire_all();
+    }
+}
+
+#[tokio::test]
 async fn any_preserves_future_output() {
     let value = String::from("ready");
     let closed = qtransport::terminate::ArcTerminator::no_error();
@@ -52,7 +92,9 @@ async fn initial_crypto_receives_close_before_paths_are_created() {
         ConnectionId::from_slice(b"original"),
         crate::common::initial_keys(false),
     );
-    let mut reader = initial.initial_space.crypto.reader();
+    let mut reader = crate::common::initial_space(&initial.spaces)
+        .crypto
+        .reader();
     let mut buffer = [0; 1];
     let read = reader.read(&mut buffer);
     tokio::pin!(read);
@@ -67,8 +109,7 @@ async fn initial_crypto_receives_close_before_paths_are_created() {
     );
     assert!(matches!(futures::poll!(&mut read), Poll::Ready(Err(_))));
     assert!(
-        initial
-            .initial_space
+        crate::common::initial_space(&initial.spaces)
             .crypto
             .writer()
             .write_all(b"after close")

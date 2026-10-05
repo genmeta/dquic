@@ -10,9 +10,9 @@ mod send {
     use bytes::{BufMut, Bytes};
     use qbase::{
         error::{Error, ErrorKind, QuicError},
-        frame::{CryptoFrame, Frame, FrameType},
+        frame::{CryptoFrame, FrameType},
         net::tx::{ArcSendWakers, UnregisterWaker},
-        packet::{ConstraintBuffer, Package},
+        packet::{PacketBuffer, Package},
         varint::{VARINT_MAX, VarInt},
     };
     use tokio::io::AsyncWrite;
@@ -32,18 +32,17 @@ mod send {
         fn poll_dump<B: BufMut + ?Sized>(
             &mut self,
             cx: &mut Context<'_>,
-            buffer: &mut ConstraintBuffer<'_, B>,
-            frames: &mut Vec<Frame>,
+            buffer: &mut PacketBuffer<'_, B>,
         ) -> Poll<Result<usize, Error>> {
-            buffer.for_frame(FrameType::Crypto, frames);
-            let start = frames.len();
+            buffer.for_frame(FrameType::Crypto);
+            let start = buffer.meta.nframes;
             loop {
                 let capacity = buffer.remaining_mut();
                 let predicate = |offset| CryptoFrame::estimate_max_capacity(capacity, offset);
                 let (range, _, data) = match self.sndbuf.pick_up(predicate, usize::MAX) {
                     Ok(data) => data,
-                    Err(_) if frames.len() != start => {
-                        return Poll::Ready(Ok(frames.len() - start));
+                    Err(_) if buffer.meta.nframes != start => {
+                        return Poll::Ready(Ok(buffer.meta.nframes - start));
                     }
                     Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
                     Err(Poll::Pending) => {
@@ -55,7 +54,7 @@ mod send {
                     VarInt::from_u64(range.start).unwrap(),
                     VarInt::from_u64(range.end - range.start).unwrap(),
                 );
-                let result = (frame, data.as_slice()).poll_dump(cx, buffer, frames);
+                let result = (frame, data.as_slice()).poll_dump(cx, buffer);
                 debug_assert!(matches!(result, Poll::Ready(Ok(1))));
             }
         }
@@ -215,8 +214,7 @@ mod send {
         fn poll_dump(
             &mut self,
             cx: &mut Context<'_>,
-            buffer: &mut ConstraintBuffer<'_, B>,
-            frames: &mut Vec<Frame>,
+            buffer: &mut PacketBuffer<'_, B>,
         ) -> Poll<Result<usize, Error>> {
             let mut guard = self.0.0.lock().unwrap();
             let inner = match guard.as_mut() {
@@ -224,7 +222,7 @@ mod send {
                 Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
                 Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            inner.poll_dump(cx, buffer, frames)
+            inner.poll_dump(cx, buffer)
         }
     }
 
@@ -240,8 +238,7 @@ mod send {
         fn poll_dump(
             &mut self,
             cx: &mut Context<'_>,
-            buffer: &mut ConstraintBuffer<'_, B>,
-            frames: &mut Vec<Frame>,
+            buffer: &mut PacketBuffer<'_, B>,
         ) -> Poll<Result<usize, Error>> {
             let mut guard = self.0.0.lock().unwrap();
             let inner = match guard.as_mut() {
@@ -249,7 +246,7 @@ mod send {
                 Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
                 Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            let result = inner.poll_dump(cx, buffer, frames);
+            let result = inner.poll_dump(cx, buffer);
             inner.sndbuf.resend_flighting();
             result
         }
@@ -510,7 +507,7 @@ mod tests {
     impl TestPacket {
         fn load(&mut self, source: &mut impl Package<Self>) -> Result<usize, ()> {
             use qbase::packet::{
-                ConstraintBuffer, Constraints, Type,
+                PacketBuffer, Constraints, Type,
                 r#type::long::{Type as Long, Ver1},
             };
             let mut limits = Constraints {
@@ -522,18 +519,16 @@ mod tests {
                 ..Default::default()
             };
             let written = self.0.len();
-            let mut buffer = ConstraintBuffer::new(
+            let mut frames = Vec::new();
+            let mut buffer = PacketBuffer::new(
                 self,
                 &mut limits,
+                &mut frames,
                 Type::Long(Long::V1(Ver1::INITIAL)),
                 written,
                 0,
             );
-            match source.poll_dump(
-                &mut Context::from_waker(Waker::noop()),
-                &mut buffer,
-                &mut Vec::new(),
-            ) {
+            match source.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer) {
                 std::task::Poll::Ready(Ok(n)) if n > 0 => Ok(n),
                 _ => Err(()),
             }
@@ -838,10 +833,7 @@ mod poll_tests {
     use std::task::{Context, Poll, Waker};
 
     use bytes::BytesMut;
-    use qbase::{
-        frame::Frame,
-        packet::{ConstraintBuffer, Constraints, GetType, LongHeaderBuilder, Package},
-    };
+    use qbase::packet::{PacketBuffer, Constraints, GetType, LongHeaderBuilder, Package};
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -866,22 +858,22 @@ mod poll_tests {
                 max_size: 100,
                 ..Default::default()
             };
-            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
             let result = if pass < 2 {
                 stream
                     .multipath()
-                    .poll_dump(&mut cx, &mut buffer, &mut frames)
+                    .poll_dump(&mut cx, &mut buffer)
             } else {
                 stream
                     .outgoing()
-                    .poll_dump(&mut cx, &mut buffer, &mut frames)
+                    .poll_dump(&mut cx, &mut buffer)
             };
             if pass == 3 {
                 assert!(result.is_pending());
                 assert!(frames.is_empty());
             } else {
                 assert!(matches!(result, Poll::Ready(Ok(1))));
-                assert!(matches!(frames.as_slice(), [Frame::Crypto(_, ())]));
+                assert!(matches!(frames.as_slice(), [qbase::frame::GuaranteedFrame::Crypto(_)]));
                 if let Some(previous) = &previous {
                     assert_eq!(&bytes, previous);
                 }

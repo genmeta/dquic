@@ -8,15 +8,15 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     cid::ConnectionId,
-    frame::Frame,
+    frame::GuaranteedFrame,
     packet::{
         OneRttHeader,
         assemble::{Assemble, Constraints, Package},
     },
 };
 use qtransport::{
-    packet::assemble::{Packet, SendingPacket},
-    space::DataSpace,
+    packet::assemble::{Envelope, Packet},
+    space::{DataSpace, Recover},
 };
 
 use super::PunchPacketEncoder;
@@ -58,12 +58,12 @@ impl PunchPacketEncoder for ProbeEncoder {
                 max_size: MAX_PUNCH_PACKET_SIZE,
                 ..Default::default()
             };
-            let mut sending = SendingPacket {
+            let mut sending = Envelope {
                 packet,
                 keys: &key,
                 limits: &mut limits,
             };
-            let mut frames = Vec::<Frame>::with_capacity(1);
+            let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
             match sending.assemble(
                 &mut Context::from_waker(Waker::noop()),
                 [&mut frame],
@@ -83,7 +83,7 @@ impl PunchPacketEncoder for ProbeEncoder {
                 Ok(bytes)
             }
             Err(error) => {
-                space.cancel(pn.0);
+                space.cancel(pn.0, &mut std::iter::empty());
                 Err(error)
             }
         }

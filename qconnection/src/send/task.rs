@@ -3,7 +3,7 @@ use std::{
     io::IoSlice,
     pin::Pin,
     sync::{Arc, OnceLock},
-    task::{Poll, Waker},
+    task::Poll,
 };
 
 use bytes::BytesMut;
@@ -14,7 +14,7 @@ use qbase::{
 };
 use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
-use qtransport::path::Path;
+use qtransport::{path::Path, space::Spaces};
 use tokio::time::Instant;
 
 use super::{BurstPns, MAX_BURST_PACKETS, burst};
@@ -25,7 +25,8 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::with_capacity(256);
-    let mut pns: BurstPns = std::array::from_fn(|_| Vec::with_capacity(MAX_BURST_PACKETS));
+    let mut pns: BurstPns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut sending_spaces = None;
     let phase = paths.phase();
     let idle = paths.idle();
     let terminator = phase.terminator();
@@ -50,6 +51,9 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                 result
             })
             .await;
+            let dcid = collector.dcid.take();
+            sending_spaces = collector.spaces.take();
+            drop(collector);
             let count = match count {
                 Ok(count) => count,
                 Err(error) if error.kind() != ErrorKind::NoViablePath => {
@@ -59,29 +63,13 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                         return Ok(());
                     }
                     retry_close = true;
-                    drop(collector);
-                    cancel_pending(&phase.get(), &mut pns);
+                    cancel_pending(sending_spaces.as_ref(), &mut pns);
                     frames.clear();
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            let dcid = collector.dcid.take();
-            drop(collector);
-            let sending_phase = phase.get();
-            let journals = match &sending_phase {
-                ConnPhase::Initial(p) => [Some(&p.initial_space.sent_journal), None, None],
-                ConnPhase::Handshake(p) => [
-                    Some(&p.initial_space.sent_journal),
-                    Some(&p.handshake_space.sent_journal),
-                    None,
-                ],
-                ConnPhase::Mature(p) => [
-                    Some(&p.spaces.initial.sent_journal),
-                    Some(&p.spaces.handshake.sent_journal),
-                    Some(&p.spaces.data.sent_journal),
-                ],
-            };
+            let spaces = sending_spaces.as_ref().expect("collected spaces");
             let deadlines = Epoch::EPOCHS.map(|epoch| {
                 (
                     path.cc.retransmit_and_expire_time(epoch).0,
@@ -97,43 +85,71 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                         let mut cc = path.cc.lock();
                         let result = submit();
                         if let Poll::Ready(Ok(sent)) = result {
-                            for epoch in Epoch::EPOCHS {
-                                if pns[epoch].is_empty() {
-                                    continue;
-                                }
-                                let submitted = pns[epoch]
-                                    .iter()
-                                    .filter(|packet| packet.index < first + sent);
-                                {
-                                    let mut journal = journals[epoch]
-                                        .expect("submitted packets have a space")
+                            for index in first..first + sent {
+                                path.anti_amplifier
+                                    .on_sent(datagrams[index].len() + overhead);
+                                let overhead_epoch = Epoch::EPOCHS
+                                    .into_iter()
+                                    .find(|&epoch| {
+                                        pns[index][epoch].is_some_and(|pn| {
+                                            spaces
+                                                .0
+                                                .get(epoch as u64)
+                                                .unwrap()
+                                                .sent_journal()
+                                                .lock_guard()
+                                                .packet(pn)
+                                                .unwrap()
+                                                .in_flight
+                                        })
+                                    })
+                                    .or_else(|| {
+                                        Epoch::EPOCHS
+                                            .into_iter()
+                                            .find(|&epoch| pns[index][epoch].is_some())
+                                    });
+                                for epoch in Epoch::EPOCHS {
+                                    let Some(pn) = pns[index][epoch].take() else {
+                                        continue;
+                                    };
+                                    let mut journal = spaces
+                                        .0
+                                        .get(epoch as u64)
+                                        .expect("submitted space")
+                                        .sent_journal()
                                         .lock_guard();
-                                    for packet in submitted.clone() {
-                                        journal.on_sent(
-                                            packet.pn,
-                                            packet.in_flight,
-                                            deadlines[epoch].0,
-                                            deadlines[epoch].1,
-                                        );
-                                    }
-                                }
-                                for packet in submitted {
-                                    sent_handshake |= epoch == Epoch::Handshake;
-                                    let size = datagrams[packet.index].len() + overhead;
-                                    path.anti_amplifier.on_sent(size);
-                                    cc.on_pkt_sent(
-                                        epoch,
-                                        packet.pn,
-                                        packet.content.is_ack_eliciting(),
-                                        size,
+                                    let packet = journal.packet(pn).expect("submission record");
+                                    let (content, flight, ack, size) = (
+                                        packet.content,
                                         packet.in_flight,
                                         packet.ack,
+                                        packet.size
+                                            + if Some(epoch) == overhead_epoch {
+                                                overhead
+                                            } else {
+                                                0
+                                            },
                                     );
+                                    journal.on_sent(
+                                        pn,
+                                        flight,
+                                        deadlines[epoch].0,
+                                        deadlines[epoch].1,
+                                    );
+                                    drop(journal);
+                                    cc.on_pkt_sent(
+                                        epoch,
+                                        pn,
+                                        content.is_ack_eliciting(),
+                                        size,
+                                        flight,
+                                        ack,
+                                    );
+                                    sent_handshake |= epoch == Epoch::Handshake;
                                     let now = Instant::now();
                                     let _ = idle.on_sent_at(now);
-                                    let _ = path.heartbeat.on_sent_at(packet.content, now);
+                                    let _ = path.heartbeat.on_sent_at(content, now);
                                 }
-                                pns[epoch].retain(|packet| packet.index >= first + sent);
                             }
                         }
                         result
@@ -163,7 +179,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
         result = sending => result,
     };
     cancel_waiters(&paths, &path);
-    cancel_pending(&phase.get(), &mut pns);
+    cancel_pending(sending_spaces.as_ref(), &mut pns);
     // All burst loans have been released before retiring this path's CID.
     if let Some(dcid) = dcid_cell.into_inner() {
         dcid.retire();
@@ -177,27 +193,15 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     }
 }
 
-fn cancel_pending(phase: &ConnPhase, pns: &mut BurstPns) {
-    let (initial, handshake, data) = match phase {
-        ConnPhase::Initial(p) => (&p.initial_space, None, None),
-        ConnPhase::Handshake(p) => (&p.initial_space, Some(&p.handshake_space), None),
-        ConnPhase::Mature(p) => (
-            &p.spaces.initial,
-            Some(&p.spaces.handshake),
-            Some(&p.spaces.data),
-        ),
+fn cancel_pending(spaces: Option<&Spaces>, pns: &mut BurstPns) {
+    let Some(spaces) = spaces else {
+        return;
     };
-    for packet in pns[Epoch::Initial].drain(..) {
-        initial.cancel(packet.pn);
-    }
-    if let Some(handshake) = handshake {
-        for packet in pns[Epoch::Handshake].drain(..) {
-            handshake.cancel(packet.pn);
-        }
-    }
-    if let Some(data) = data {
-        for packet in pns[Epoch::Data].drain(..) {
-            data.cancel(packet.pn);
+    for slots in pns {
+        for (epoch, space) in spaces.0.enumerate() {
+            if let Some(pn) = slots[epoch as usize].take() {
+                space.cancel(pn, &mut std::iter::empty());
+            }
         }
     }
 }
@@ -209,54 +213,19 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
         let phase = paths.phase();
         let phase = phase.get();
         path.cc.cancel(waker);
-        fn cancel_space(
-            crypto: &qrecovery::crypto::CryptoStream,
-            journal: &qrecovery::journal::ArcRcvdJournal,
-            waker: &Waker,
-        ) {
-            crypto.outgoing().unregister(waker);
-            journal.unregister(waker);
+        for space in phase.spaces().read().unwrap().0.iter() {
+            space.unregister(waker);
         }
         match &phase {
             ConnPhase::Initial(p) => {
                 p.upgrade_wakers.unregister(waker);
-                cancel_space(
-                    &p.initial_space.crypto,
-                    &p.initial_space.rcvd_journal,
-                    waker,
-                );
                 p.reliable_frames.unregister(waker);
             }
             ConnPhase::Handshake(p) => {
                 p.upgrade_wakers.unregister(waker);
-                cancel_space(
-                    &p.initial_space.crypto,
-                    &p.initial_space.rcvd_journal,
-                    waker,
-                );
-                cancel_space(
-                    &p.handshake_space.crypto,
-                    &p.handshake_space.rcvd_journal,
-                    waker,
-                );
                 p.reliable_frames.unregister(waker);
             }
-            ConnPhase::Mature(p) => {
-                cancel_space(
-                    &p.spaces.initial.crypto,
-                    &p.spaces.initial.rcvd_journal,
-                    waker,
-                );
-                cancel_space(
-                    &p.spaces.handshake.crypto,
-                    &p.spaces.handshake.rcvd_journal,
-                    waker,
-                );
-                cancel_space(&p.spaces.data.crypto, &p.spaces.data.rcvd_journal, waker);
-                p.spaces.data.reliable_frames.unregister(waker);
-                p.spaces.data.streams.unregister(waker);
-                p.flow_ctrl.sender.unregister(waker);
-            }
+            ConnPhase::Mature(p) => p.flow_ctrl.sender.unregister(waker),
         }
     }
 }

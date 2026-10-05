@@ -30,7 +30,12 @@ use qprotocol::protocol::quic::QuicProtocol;
 use records::ArcSentJournal;
 use write::{Packet, PacketError, PendingPacket};
 
-use crate::{Error, GuaranteedFrame, keys::OneRttKeys, path::Path, space::DataSpace};
+use crate::{
+    Error, GuaranteedFrame,
+    keys::OneRttKeys,
+    path::Path,
+    space::{DataSpace, Recover},
+};
 
 /// Maximum number of datagrams prepared in one sending iteration.
 pub const MAX_BURST_PACKETS: usize = 8;

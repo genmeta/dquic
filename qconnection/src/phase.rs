@@ -1,10 +1,10 @@
 //! Shared sending material. Each path reads the current phase for every burst.
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-use qbase::{Epoch, cid::ConnectionId, net::tx::ArcSendWakers, util::IndexDeque};
+use qbase::{cid::ConnectionId, net::tx::ArcSendWakers, util::IndexDeque};
 use qtransport::{
     keys::ArcKeys,
-    space::{Space, Spaces},
+    space::{ArcSpaces, InitialSpace, Spaces},
     terminate::ArcTerminator,
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
@@ -13,7 +13,7 @@ use crate::{ArcParameters, ArcReliableFrames, ArcResend, CidRegistry, FlowContro
 
 /// Frame sources available before peer transport parameters arrive.
 pub struct InitialPhase {
-    pub initial_space: Arc<Space<ArcKeys>>,
+    pub spaces: ArcSpaces,
     pub scid: ConnectionId,
     dcid: Mutex<ConnectionId>,
     pub odcid: ConnectionId,
@@ -32,15 +32,17 @@ impl InitialPhase {
         cid_registry: CidRegistry,
     ) -> Self {
         let odcid = cid_registry.origin_dcid();
-        let initial_space = Arc::new(Space::new(Epoch::Initial, ArcKeys::new(Arc::new(keys))));
+        let initial_space = Arc::new(InitialSpace::new(scid, ArcKeys::new(Arc::new(keys)), None));
         let mut resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
         resender
             .push_back(initial_space.clone())
             .expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
         terminator.register(Arc::new(initial_space.crypto.clone()));
+        let mut spaces = Spaces(IndexDeque::with_capacity(3));
+        spaces.0.push_back(initial_space).expect("Initial epoch");
         Self {
-            initial_space,
+            spaces: Arc::new(RwLock::new(spaces)),
             scid,
             dcid: Mutex::new(dcid),
             odcid,
@@ -59,8 +61,7 @@ impl InitialPhase {
 
 /// Initial and Handshake packet sources available before peer parameters complete Data.
 pub struct HandshakePhase {
-    pub initial_space: Arc<Space<ArcKeys>>,
-    pub handshake_space: Arc<Space<ArcKeys>>,
+    pub spaces: ArcSpaces,
     pub scid: ConnectionId,
     pub dcid: ConnectionId,
     pub reliable_frames: ArcReliableFrames,
@@ -72,7 +73,7 @@ pub struct HandshakePhase {
 
 /// Complete frame sources. Identity verification remains the growing coroutine's job.
 pub struct MaturePhase {
-    pub spaces: Spaces,
+    pub spaces: ArcSpaces,
     pub scid: ConnectionId,
     pub dcid: ConnectionId,
     pub parameters: ArcParameters,
@@ -91,16 +92,19 @@ pub enum ConnPhase {
 }
 
 impl ConnPhase {
-    pub(crate) fn retire_initial(&self) {
-        let (initial, trackers) = match self {
-            Self::Initial(phase) => (&phase.initial_space, &phase.resender),
-            Self::Handshake(phase) => (&phase.initial_space, &phase.resender),
-            Self::Mature(phase) => (&phase.spaces.initial, &phase.resender),
-        };
-        initial.retire();
-        let mut trackers = trackers.write().unwrap();
-        if trackers.offset() == Epoch::Initial as u64 {
-            trackers.pop_front();
+    pub fn spaces(&self) -> &ArcSpaces {
+        match self {
+            Self::Initial(p) => &p.spaces,
+            Self::Handshake(p) => &p.spaces,
+            Self::Mature(p) => &p.spaces,
+        }
+    }
+
+    pub(crate) fn resender(&self) -> &ArcResend {
+        match self {
+            Self::Initial(p) => &p.resender,
+            Self::Handshake(p) => &p.resender,
+            Self::Mature(p) => &p.resender,
         }
     }
 }
@@ -152,21 +156,14 @@ impl ArcConnPhase {
         }
     }
 
-    pub(crate) fn enter_handshake(&self, handshake: Arc<Space<ArcKeys>>) {
+    pub(crate) fn enter_handshake(&self) {
         let mut phase = self.lock_guard();
         let ConnPhase::Initial(initial) = &*phase else {
             unreachable!("enter_handshake starts with InitialPhase")
         };
         let upgrade_wakers = initial.upgrade_wakers.clone();
-        initial
-            .resender
-            .write()
-            .unwrap()
-            .push_back(handshake.clone())
-            .expect("Handshake epoch");
         *phase = ConnPhase::Handshake(Arc::new(HandshakePhase {
-            initial_space: initial.initial_space.clone(),
-            handshake_space: handshake,
+            spaces: initial.spaces.clone(),
             scid: initial.scid,
             dcid: initial.dcid(),
             reliable_frames: initial.reliable_frames.clone(),
@@ -181,17 +178,6 @@ impl ArcConnPhase {
 
     pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
         let mut current = self.lock_guard();
-        {
-            let mut resender = phase.resender.write().unwrap();
-            if matches!(*current, ConnPhase::Initial(_)) {
-                resender
-                    .push_back(phase.spaces.handshake.clone())
-                    .expect("Handshake epoch");
-            }
-            resender
-                .push_back(phase.spaces.data.clone())
-                .expect("Data epoch");
-        }
         let previous = std::mem::replace(&mut *current, ConnPhase::Mature(phase));
         drop(current);
         let wakers = match &previous {
