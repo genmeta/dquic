@@ -12,7 +12,7 @@ use qbase::{
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     packet::channel::RcvdPacket,
-    space::{DataSpace, Space, Spaces},
+    space::{DataSpace, HandshakeSpace, InitialSpace},
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::io::AsyncWriteExt;
@@ -38,7 +38,13 @@ pub async fn server_growing(
         unreachable!("server_growing starts with InitialPhase")
     };
     let terminator = paths.phase().terminator();
-    let initial = initial_phase.initial_space.clone();
+    let spaces = initial_phase.spaces.clone();
+    let initial = spaces
+        .read()
+        .unwrap()
+        .get::<InitialSpace>(Epoch::Initial)
+        .expect("Initial space");
+    let initial = Arc::new(initial.space.clone());
     let reliable_frames = initial_phase.reliable_frames.clone();
     let cid_registry = initial_phase.cid_registry.clone();
     let resender = initial_phase.resender.clone();
@@ -114,10 +120,21 @@ pub async fn server_growing(
             drop(initial_phase);
 
             let handshake_keys = tls_ctx.read_keys().await?;
-            let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            let handshake = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys)));
+            resender
+                .write()
+                .unwrap()
+                .push_back(handshake.clone())
+                .expect("Handshake epoch");
+            spaces
+                .write()
+                .unwrap()
+                .0
+                .push_back(handshake.clone())
+                .expect("Handshake epoch");
             terminator.register(Arc::new(handshake.crypto.clone()));
             paths.handshake.got_handshake_key();
-            phase.enter_handshake(handshake.clone());
+            phase.enter_handshake();
             initial.crypto.recver.retire();
 
             tokio::spawn(read_space_to_tls(
@@ -127,7 +144,7 @@ pub async fn server_growing(
             ));
             tokio::spawn(recv_ih_pkt_and_deliver_frames(
                 (rcvd_pkt.handshake, Some(scopes)),
-                handshake.clone(),
+                Arc::new(handshake.0.clone()),
                 paths.clone(),
             ));
 
@@ -151,7 +168,18 @@ pub async fn server_growing(
                 reliable_frames.clone(),
             );
             terminator.register(Arc::new(flow_ctrl.clone()));
-            let data = Arc::new(DataSpace::new(keys, streams, reliable_frames.clone()));
+            let data = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
+            resender
+                .write()
+                .unwrap()
+                .push_back(data.clone())
+                .expect("Data epoch");
+            spaces
+                .write()
+                .unwrap()
+                .0
+                .push_back(data.clone())
+                .expect("Data epoch");
             terminator.register(Arc::new(data.crypto.clone()));
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
@@ -212,11 +240,7 @@ pub async fn server_growing(
             ));
 
             phase.enter_mature(Arc::new(MaturePhase {
-                spaces: Spaces {
-                    initial: initial.clone(),
-                    handshake: handshake.clone(),
-                    data: data.clone(),
-                },
+                spaces: spaces.clone(),
                 scid,
                 dcid: client_scid,
                 parameters,
@@ -233,6 +257,19 @@ pub async fn server_growing(
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
             handshake_done.done();
+            {
+                let mut spaces = spaces.write().unwrap();
+                let mut resender = resender.write().unwrap();
+                while spaces
+                    .0
+                    .front()
+                    .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
+                {
+                    let (_, space) = spaces.0.pop_front().unwrap();
+                    space.retire();
+                    resender.pop_front();
+                }
+            }
             paths.handshake_confirmed();
 
             Ok::<_, Error>((

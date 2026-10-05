@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use qbase::{
     error::Error,
     frame::io::SendFrame,
-    packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package},
+    packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
     param::{
         ArcParameters,
         handy::{client_parameters, server_parameters},
@@ -51,8 +51,7 @@ fn poll(
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     source.poll_dump(
         &mut Context::from_waker(waker),
-        &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
-        &mut frames,
+        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
     )
 }
 

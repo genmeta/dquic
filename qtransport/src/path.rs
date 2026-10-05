@@ -13,7 +13,7 @@ use bytes::BufMut;
 use qbase::{
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
-    packet::{ConstraintBuffer, Package},
+    packet::{PacketBuffer, Package},
     time::heartbeat::ArcHeartbeat,
     util::IndexDeque,
 };
@@ -238,8 +238,7 @@ impl<B: BufMut + ?Sized> Package<B> for &Path {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         let responses = self.responses.lock().unwrap();
         let challenge = self.challenge.lock().unwrap();
@@ -251,22 +250,27 @@ impl<B: BufMut + ?Sized> Package<B> for &Path {
         }
         drop(challenge);
         drop(responses);
-        let start = frames.len();
+        let start = buffer.meta.nframes;
         let mut result = Poll::Pending;
         if let Some(mut response) = response {
-            result = response.poll_dump(cx, buffer, frames);
-        }
-        if let Some(mut challenge) = challenge_frame {
-            match challenge.poll_dump(cx, buffer, frames) {
-                Poll::Pending => {}
-                ready => result = ready,
+            result = response.poll_dump(cx, buffer);
+            if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                self.on_frame_assembled(&Frame::PathResponse(response));
             }
         }
-        for frame in &frames[start..] {
-            self.on_frame_assembled(frame);
+        if let Some(mut challenge) = challenge_frame {
+            match challenge.poll_dump(cx, buffer) {
+                Poll::Pending => {}
+                ready => {
+                    if matches!(ready, Poll::Ready(Ok(n)) if n > 0) {
+                        self.on_frame_assembled(&Frame::PathChallenge(challenge));
+                    }
+                    result = ready;
+                }
+            }
         }
-        if frames.len() > start {
-            Poll::Ready(Ok(frames.len() - start))
+        if buffer.meta.nframes > start {
+            Poll::Ready(Ok(buffer.meta.nframes - start))
         } else {
             result
         }
@@ -350,8 +354,7 @@ mod package_tests {
                 let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
                 let result = (&path).poll_dump(
                     &mut Context::from_waker(&waker),
-                    &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
-                    &mut frames,
+                    &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
                 );
                 assert_eq!(result.is_pending(), !queued);
                 if queued {

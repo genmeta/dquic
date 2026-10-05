@@ -10,7 +10,7 @@ use qbase::{
 };
 
 use super::{constraints::Constraints, records::ArcSentJournal};
-use crate::{GuaranteedFrame, keys::SealPacket};
+use crate::{GuaranteedFrame, keys::Seal, space::Recover};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketError {
@@ -173,9 +173,10 @@ impl Packet {
         };
         let mut frames = Vec::new();
         let mut bytes = &mut self.datagram.msg[self.cursor..];
-        let mut buffer = qbase::packet::ConstraintBuffer::new(
+        let mut buffer = qbase::packet::PacketBuffer::new(
             &mut bytes,
             &mut limits,
+            &mut frames,
             self.packet_type,
             self.cursor,
             self.tag_len,
@@ -183,13 +184,13 @@ impl Packet {
         let mut blocked = Poll::Pending;
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         for source in sources {
-            match source.poll_dump(&mut cx, &mut buffer, &mut frames) {
+            match source.poll_dump(&mut cx, &mut buffer) {
                 Poll::Ready(Ok(_)) => blocked = Poll::Ready(()),
                 Poll::Ready(Err(error)) => return Err(PacketError::Connection(error)),
                 Poll::Pending => {}
             }
         }
-        if frames.is_empty() {
+        if buffer.meta.nframes == 0 {
             return Err(PacketError::Blocked(blocked));
         }
         let padding = buffer
@@ -198,24 +199,24 @@ impl Packet {
             .saturating_sub(buffer.written() + self.tag_len);
         if padding != 0 {
             buffer.put_bytes(0, padding);
-            frames.push(Frame::Padding(frame::PaddingFrame));
+            buffer.record(Frame::Padding(frame::PaddingFrame));
         }
+        let meta = buffer.meta;
+        let start = self.cursor;
         self.cursor = buffer.written();
         constraints.flow_ctrl.set(limits.flow_ctrl);
-        self.content += qbase::packet::assemble::content(&frames);
-        self.in_flight |= qbase::packet::assemble::in_flight(&frames);
-        for frame in frames {
-            match frame {
-                Frame::Ack(ack) => self.largest_acked = Some(ack.largest()),
-                Frame::Crypto(frame, _) => records.push(GuaranteedFrame::Crypto(frame)),
-                Frame::Stream(frame, _) => records.push(GuaranteedFrame::Stream(frame)),
+        self.content += meta.content;
+        self.in_flight |= meta.in_flight;
+        self.largest_acked = self.largest_acked.max(meta.ack);
+        records.extend(frames);
+        for frame in qbase::frame::FrameReader::new(
+            bytes::Bytes::copy_from_slice(&self.datagram.msg[start..self.cursor]),
+            self.packet_type,
+        ) {
+            match frame.unwrap().0 {
                 Frame::PathChallenge(frame) => self.challenge = Some(frame),
                 Frame::PathResponse(frame) => self.response = Some(frame),
-                frame => {
-                    if let Ok(reliable) = ReliableFrame::try_from(&frame) {
-                        records.push(GuaranteedFrame::Reliable(reliable));
-                    }
-                }
+                _ => {}
             }
         }
         Ok(self.content)
@@ -255,7 +256,7 @@ impl Packet {
     /// The caller owns journal registration and cancellation on failure.
     pub fn seal(
         self,
-        key: &impl SealPacket<Output = (u64, KeyPhaseBit)>,
+        key: &impl Seal<Output = (u64, KeyPhaseBit)>,
         pn: u64,
         encoded_pn: PacketNumber,
     ) -> Result<PendingPacket, PacketError> {
@@ -274,7 +275,7 @@ impl Packet {
             .map(|(packet, ())| packet)
     }
 
-    fn protect<K: SealPacket>(
+    fn protect<K: Seal>(
         mut self,
         key: &K,
         pn: u64,
@@ -368,7 +369,8 @@ mod tests {
                 [&mut frame.clone()],
             )
             .unwrap();
-        let ((pn, encoded), key) = super::super::records::reserve(&keys, &journal, &mut frames).unwrap();
+        let ((pn, encoded), key) =
+            super::super::records::reserve(&keys, &journal, &mut frames).unwrap();
         let result = packet.seal(&key, pn, encoded);
         assert!(result.is_err());
         // Sealing neither drains recovery records nor cancels their journal entry.

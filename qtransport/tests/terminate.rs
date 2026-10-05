@@ -7,7 +7,7 @@ use futures::FutureExt;
 use qbase::{
     error::{ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame},
-    packet::{ConstraintBuffer, Constraints, GetType, Limit, OneRttHeader, Package},
+    packet::{PacketBuffer, Constraints, GetType, Limit, OneRttHeader, Package},
 };
 use qtransport::{
     CloseReason, Error,
@@ -35,14 +35,15 @@ fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, E
     };
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
-    let mut buffer = ConstraintBuffer::new(
+    let mut buffer = PacketBuffer::new(
         &mut bytes,
         &mut limits,
+        &mut frames,
         OneRttHeader::new(Default::default(), Default::default()).get_type(),
         0,
         0,
     );
-    (&*terminator).poll_dump(&mut Context::from_waker(waker), &mut buffer, &mut frames)
+    (&*terminator).poll_dump(&mut Context::from_waker(waker), &mut buffer)
 }
 
 #[tokio::test(start_paused = true)]
@@ -66,9 +67,10 @@ async fn draining_writes_one_close_and_never_schedules_another() {
             };
             let mut bytes = bytes::BytesMut::new();
             let mut frames = Vec::new();
-            let mut buffer = ConstraintBuffer::new(
+            let mut buffer = PacketBuffer::new(
                 &mut bytes,
                 &mut limits,
+                &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
                 0,
@@ -77,12 +79,14 @@ async fn draining_writes_one_close_and_never_schedules_another() {
                 (&terminator).poll_dump(
                     &mut Context::from_waker(Waker::noop()),
                     &mut buffer,
-                    &mut frames,
                 ),
                 Poll::Ready(Ok(n)) if n == expected
             ));
             if expected == 1 {
-                assert!(matches!(frames.as_slice(), [Frame::Close(sent)] if sent == &frame));
+                assert!(frames.is_empty());
+                let decoded = qbase::frame::FrameReader::new(bytes.clone().freeze(), OneRttHeader::new(Default::default(), Default::default()).get_type())
+                    .collect::<Result<Vec<_>, _>>().unwrap();
+                assert!(matches!(decoded.as_slice(), [(Frame::Close(sent), _)] if sent == &frame));
                 assert!(!bytes.is_empty());
             } else {
                 assert!(frames.is_empty());
@@ -114,9 +118,10 @@ async fn closing_without_a_written_frame_preserves_send_budget() {
         };
         let mut bytes = bytes::BytesMut::new();
         let mut frames = Vec::new();
-        let mut buffer = ConstraintBuffer::new(
+        let mut buffer = PacketBuffer::new(
             &mut bytes,
             &mut limits,
+            &mut frames,
             OneRttHeader::new(Default::default(), Default::default()).get_type(),
             0,
             0,
@@ -124,7 +129,6 @@ async fn closing_without_a_written_frame_preserves_send_budget() {
         let result = (&terminator).poll_dump(
             &mut Context::from_waker(Waker::noop()),
             &mut buffer,
-            &mut frames,
         );
         if pending {
             assert!(result.is_pending());

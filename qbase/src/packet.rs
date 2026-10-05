@@ -1,10 +1,9 @@
 use std::{fmt::Debug, ops};
 
-use bytes::{BufMut, BytesMut, buf::UninitSlice};
+use bytes::{BufMut, BytesMut};
 use derive_more::{Deref, DerefMut};
 use enum_dispatch::enum_dispatch;
-use getset::CopyGetters;
-use header::{LongHeader, io::WriteHeader};
+use header::io::WriteHeader;
 
 use crate::{
     cid::ConnectionId,
@@ -40,8 +39,7 @@ pub mod assemble;
 ///
 /// The writing of the QUIC packet is not provided here, they are written in place.
 pub mod io;
-pub use assemble::{Assemble, ConstraintBuffer, Constraints, Limit, Package};
-pub use io::{AssemblePacket, PacketInfo, PacketSpace, PacketWriter, ProductHeader, RecordFrame};
+pub use assemble::{Assemble, PacketBuffer, Constraints, Limit, Package};
 
 /// Encoding and decoding of packet number
 pub mod number;

@@ -116,7 +116,7 @@ async fn queued_output_is_bounded_without_waiting_for_its_reader() {
 #[tokio::test]
 async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
-    let space = Space::new(Epoch::Initial, ());
+    let space = Space::new(Epoch::Initial, Default::default(), ());
     let crypto = &space.crypto;
     let (paths, closed) = common::paths(qbase::role::Role::Server);
     closed.register(Arc::new(space.crypto.clone()));
@@ -181,7 +181,7 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
             reliable.clone(),
             None,
         );
-        let space = DataSpace::new(keys, streams, reliable);
+        let space = DataSpace::new(Default::default(), keys, streams, reliable);
         let (paths, closed) = common::paths(role);
         closed.register(Arc::new(space.crypto.clone()));
         closed.register(Arc::new(tls.clone()));

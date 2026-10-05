@@ -260,7 +260,12 @@ async fn close_at_client_stage(wait: ClientWait) {
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let ConnPhase::Handshake(connecting) = phase.get() {
-                break connecting.handshake_space.clone();
+                break connecting
+                    .spaces
+                    .read()
+                    .unwrap()
+                    .get::<qtransport::space::HandshakeSpace>(qbase::Epoch::Handshake)
+                    .unwrap();
             }
             tokio::task::yield_now().await;
         }
@@ -272,9 +277,9 @@ async fn close_at_client_stage(wait: ClientWait) {
         Err(oneshot::error::TryRecvError::Empty)
     ));
     let initial = match phase.get() {
-        ConnPhase::Initial(phase) => phase.initial_space.clone(),
-        ConnPhase::Handshake(phase) => phase.initial_space.clone(),
-        ConnPhase::Mature(phase) => phase.spaces.initial.clone(),
+        ConnPhase::Initial(phase) => crate::common::initial_space(&phase.spaces),
+        ConnPhase::Handshake(phase) => crate::common::initial_space(&phase.spaces),
+        ConnPhase::Mature(phase) => crate::common::initial_space(&phase.spaces),
     };
     assert!(initial.crypto.writer().write(&[]).await.is_err());
     assert!(matches!(
@@ -342,7 +347,17 @@ async fn close_at_client_stage(wait: ClientWait) {
         let ConnPhase::Mature(material) = phase.get() else {
             panic!()
         };
-        assert!(material.spaces.data.keys.get().is_ok());
+        assert!(
+            material
+                .spaces
+                .read()
+                .unwrap()
+                .get::<qtransport::space::DataSpace>(qbase::Epoch::Data)
+                .unwrap()
+                .keys
+                .get()
+                .is_ok()
+        );
         assert!(matches!(
             handshake.crypto.reader().read(&mut [0; 1]).now_or_never(),
             Some(Err(_))

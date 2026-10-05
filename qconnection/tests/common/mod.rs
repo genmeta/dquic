@@ -152,7 +152,7 @@ where
         max_size: 1200,
         ..Default::default()
     };
-    let mut packet = qconnection::send::SendingPacket {
+    let mut packet = qconnection::send::Envelope {
         packet,
         keys,
         limits: &mut limits,
@@ -163,7 +163,13 @@ where
         matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), std::task::Poll::Ready(Ok(n)) if n > 0)
     );
     packet.seal()?;
-    journal.on_assembled(pn.0, None, frames.drain(..));
+    journal.on_sealed(
+        pn.0,
+        None,
+        packet.packet.buffer.len(),
+        packet.packet.meta,
+        frames.drain(..),
+    );
     Ok(buffer)
 }
 
@@ -265,4 +271,16 @@ pub fn observe_close(terminator: &qtransport::terminate::ArcTerminator) -> Arc<C
     let observer = Arc::new(CloseObserver::default());
     terminator.register(observer.clone());
     observer
+}
+
+/// Hold receiver resources independently of the active sending queue in tests.
+pub fn initial_space(
+    spaces: &qtransport::space::ArcSpaces,
+) -> Arc<qtransport::space::Space<qtransport::keys::ArcKeys>> {
+    let initial = spaces
+        .read()
+        .unwrap()
+        .get::<qtransport::space::InitialSpace>(qbase::Epoch::Initial)
+        .unwrap();
+    Arc::new(initial.space.clone())
 }

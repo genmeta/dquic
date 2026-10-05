@@ -32,12 +32,12 @@ use qbase::{
     Close,
     error::Error,
     frame::{
-        Frame, StreamCtlFrame, StreamFrame,
+        StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
     metric::ArcConnectionMetrics,
     net::tx::UnregisterWaker,
-    packet::{ConstraintBuffer, Package},
+    packet::{PacketBuffer, Package},
     param::ArcParameters,
     sid::{ControlStreamsConcurrency, StreamId},
 };
@@ -218,10 +218,9 @@ where
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
-        self.0.poll_dump(cx, buffer, frames)
+        self.0.poll_dump(cx, buffer)
     }
 }
 
