@@ -15,7 +15,10 @@ use qbase::{
 };
 use qrecovery::journal::ArcSentJournal;
 use qtransport::{
-    keys::ArcKeys, packet::CipherPacket, path::Path, space::Space,
+    keys::ArcKeys,
+    packet::CipherPacket,
+    path::Path,
+    space::{HandshakeSpace, Space},
 };
 
 use crate::{
@@ -44,7 +47,7 @@ where
         max_size: 1200,
         ..Default::default()
     };
-    let mut packet = crate::send::SendingPacket {
+    let mut packet = crate::send::Envelope {
         packet,
         keys,
         limits: &mut limits,
@@ -55,7 +58,13 @@ where
         matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), Poll::Ready(Ok(n)) if n > 0)
     );
     packet.seal()?;
-    journal.on_assembled(pn.0, None, frames.drain(..));
+    journal.on_sealed(
+        pn.0,
+        None,
+        packet.packet.buffer.len(),
+        packet.packet.meta,
+        frames.drain(..),
+    );
     Ok(buffer)
 }
 
@@ -68,6 +77,7 @@ async fn receive_ping(
 ) {
     let space = Arc::new(Space::<ArcKeys>::new(
         epoch,
+        Default::default(),
         ArcKeys::new(Arc::new(keys(role == Role::Server))),
     ));
     let keys = keys(role != Role::Server);
@@ -114,12 +124,7 @@ async fn receive_bytes(
             ))
             .unwrap();
             drop(tx);
-            recv_ih_pkt_and_deliver_frames(
-                (rx, None),
-                space,
-                paths.clone(),
-            )
-            .await;
+            recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }
         DataHeader::Long(long::DataHeader::Handshake(header)) => {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -130,12 +135,7 @@ async fn receive_bytes(
             ))
             .unwrap();
             drop(tx);
-            recv_ih_pkt_and_deliver_frames(
-                (rx, None),
-                space,
-                paths.clone(),
-            )
-            .await;
+            recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }
         _ => panic!(),
     }
@@ -150,16 +150,14 @@ fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
     ));
     let paths = Paths::new(role, phase, Duration::ZERO, Duration::ZERO);
     let local = EndpointAddr::direct("127.0.0.1:30001".parse().unwrap());
-    let first = paths
-        .add_path(Pathway::new(
-            local,
-            EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()),
-        ));
-    let second = paths
-        .add_path(Pathway::new(
-            local,
-            EndpointAddr::direct("127.0.0.1:30003".parse().unwrap()),
-        ));
+    let first = paths.add_path(Pathway::new(
+        local,
+        EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()),
+    ));
+    let second = paths.add_path(Pathway::new(
+        local,
+        EndpointAddr::direct("127.0.0.1:30003".parse().unwrap()),
+    ));
     (paths, first, second)
 }
 
@@ -175,14 +173,18 @@ async fn initial_and_handshake_close_enter_draining_through_phase_terminator() {
                 unreachable!()
             };
             let space = if epoch == Epoch::Initial {
-                initial.initial_space.clone()
+                crate::common::initial_space(&initial.spaces)
             } else {
                 let space = Arc::new(Space::new(
                     Epoch::Handshake,
+                    Default::default(),
                     ArcKeys::new(Arc::new(keys(role == Role::Server))),
                 ));
-                paths.phase().terminator().register(Arc::new(space.crypto.clone()));
-                phase.enter_handshake(space.clone());
+                paths
+                    .phase()
+                    .terminator()
+                    .register(Arc::new(space.crypto.clone()));
+                super::enter_handshake(&phase, Arc::new(HandshakeSpace(space.as_ref().clone())));
                 space
             };
             let peer_keys = keys(role != Role::Server);
@@ -216,7 +218,14 @@ async fn initial_and_handshake_close_enter_draining_through_phase_terminator() {
             .unwrap();
             receive_bytes(bytes, space.clone(), &paths, &path).await;
             let mut received = [0; 4];
-            assert!(space.crypto.reader().read_exact(&mut received).await.is_err());
+            assert!(
+                space
+                    .crypto
+                    .reader()
+                    .read_exact(&mut received)
+                    .await
+                    .is_err()
+            );
             assert!(futures::poll!(std::pin::pin!(initial.terminator.clone())).is_pending());
             paths.retire_all();
             assert_eq!(initial.terminator.clone().await, close.into());
@@ -230,7 +239,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
 
     use qbase::{
         frame::{ConnectionCloseFrame, CryptoFrame},
-        packet::{ConstraintBuffer, Constraints, GetType, Package, PacketNumber},
+        packet::{PacketBuffer, Constraints, GetType, Package, PacketNumber},
     };
     use tokio::io::AsyncReadExt;
 
@@ -242,11 +251,15 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         };
         let terminator = initial.terminator.clone();
         let space = if epoch == Epoch::Initial {
-            initial.initial_space.clone()
+            crate::common::initial_space(&initial.spaces)
         } else {
-            let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(keys(true)))));
+            let space = Arc::new(Space::new(
+                epoch,
+                Default::default(),
+                ArcKeys::new(Arc::new(keys(true))),
+            ));
             terminator.register(Arc::new(space.crypto.clone()));
-            phase.enter_handshake(space.clone());
+            super::enter_handshake(&phase, Arc::new(HandshakeSpace(space.as_ref().clone())));
             space
         };
         terminator.close(
@@ -272,14 +285,14 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             };
             (&terminator).poll_dump(
                 &mut Context::from_waker(Waker::noop()),
-                &mut ConstraintBuffer::new(
+                &mut PacketBuffer::new(
                     &mut bytes,
                     &mut limits,
+                    &mut frames,
                     header().initial(vec![]).get_type(),
                     0,
                     0,
                 ),
-                &mut frames,
             )
         };
         assert!(matches!(poll_close(), Poll::Ready(Ok(n)) if n > 0));
@@ -318,7 +331,12 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed"),
         ));
         let bytes = if epoch == Epoch::Initial {
-            seal(header().initial(vec![]), &peer.sealing, &journal, [&mut close])
+            seal(
+                header().initial(vec![]),
+                &peer.sealing,
+                &journal,
+                [&mut close],
+            )
         } else {
             seal(header().handshake(), &peer.sealing, &journal, [&mut close])
         }
@@ -411,10 +429,7 @@ async fn client_selects_authenticated_initial_or_handshake_instead_of_first_adde
             (Path::SUSPEND, Path::SELECTED)
         );
         if epoch == Epoch::Initial {
-            assert_eq!(
-                initial.dcid(),
-                ConnectionId::from_slice(b"peercid0")
-            );
+            assert_eq!(initial.dcid(), ConnectionId::from_slice(b"peercid0"));
         }
         receive_ping(Role::Client, epoch, false, &paths, &first).await;
         assert_eq!(
@@ -453,6 +468,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     let (paths, first, second) = paths(Role::Server);
     let space = Arc::new(Space::<ArcKeys>::new(
         Epoch::Initial,
+        Default::default(),
         ArcKeys::new(Arc::new(keys(true))),
     ));
     let server_keys = keys(true);
@@ -525,7 +541,11 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
 
 #[tokio::test(start_paused = true)]
 async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_heartbeat() {
-    use qbase::{frame::CryptoFrame, packet::Package, time::heartbeat::ArcHeartbeat};
+    use qbase::{
+        frame::CryptoFrame,
+        packet::{GetType, Package, assemble::Metadata},
+        time::heartbeat::ArcHeartbeat,
+    };
     use tokio::time::Instant;
 
     for epoch in [Epoch::Initial, Epoch::Handshake] {
@@ -560,9 +580,19 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 .lock()
                 .unwrap()
                 .insert(path.pathway, path.clone());
-            let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(keys(true)))));
+            let space = Arc::new(Space::new(
+                epoch,
+                Default::default(),
+                ArcKeys::new(Arc::new(keys(true))),
+            ));
             let pn = space.next_pn().unwrap().0;
-            space.on_assembled(pn, []);
+            let header = LongHeaderBuilder::with_cid(Default::default(), Default::default());
+            let packet_type = if epoch == Epoch::Initial {
+                header.initial(vec![]).get_type()
+            } else {
+                header.handshake().get_type()
+            };
+            space.sent_journal.on_sealed(pn, None, 0, Metadata::new(packet_type), []);
             space.on_sent(
                 [(pn, false)],
                 Duration::from_secs(1),
@@ -595,7 +625,10 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             assert!(
                 matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
             );
-            assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
+            assert_eq!(
+                Instant::now() - start,
+                Duration::from_secs(5) + closing_duration
+            );
             tokio::time::advance(Duration::from_secs(15)).await;
             assert_eq!(super::take_heartbeat(&path), kind == 2);
             paths.retire_all();
@@ -614,7 +647,7 @@ async fn blocked_receivers_and_tick_wait_until_termination() {
     let crate::ConnPhase::Initial(initial) = phase.get() else {
         unreachable!()
     };
-    let space = initial.initial_space.clone();
+    let space = crate::common::initial_space(&initial.spaces);
     let terminator = initial.terminator.clone();
     let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
     let (_initial_tx, initial_rx) = tokio::sync::mpsc::channel(1);
@@ -630,10 +663,10 @@ async fn blocked_receivers_and_tick_wait_until_termination() {
         qbase::packet::HandshakeHeader,
     >((handshake_rx, None), space.clone(), paths.clone()));
     let tick = tokio::spawn(crate::recv::tick(paths));
-    terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(
-        ErrorKind::Internal,
-        "closed",
-    )), Duration::from_secs(1));
+    terminator.close(
+        crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")),
+        Duration::from_secs(1),
+    );
     tokio::task::yield_now().await;
     assert!(!first.is_finished());
     assert!(!second.is_finished());

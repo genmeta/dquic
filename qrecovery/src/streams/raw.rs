@@ -7,12 +7,12 @@ use bytes::BufMut;
 use qbase::{
     error::{Error, ErrorKind, QuicError},
     frame::{
-        Frame, FrameType, GetFrameType, ResetStreamFrame, StreamCtlFrame, StreamFrame,
+        FrameType, GetFrameType, ResetStreamFrame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
     metric::ArcConnectionMetrics,
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::ConstraintBuffer,
+    packet::PacketBuffer,
     param::{ArcParameters, ParameterId, core::Parameters},
     sid::{
         ControlStreamsConcurrency, Dir, StreamId, StreamIds,
@@ -136,26 +136,24 @@ where
         &self,
         output: &mut super::io::Output<Ext<TX>>,
         cx: &mut Context<'_>,
-        buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
-        frames: &mut Vec<qbase::frame::Frame>,
+        buffer: &mut qbase::packet::PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         use core::ops::Bound::*;
         fn poll_streams<'s, TX: 's + Clone, B: BufMut + ?Sized>(
             streams: impl Iterator<Item = (StreamId, &'s (Outgoing<TX>, IOState), usize)>,
             cx: &mut Context<'_>,
-            buffer: &mut qbase::packet::ConstraintBuffer<'_, B>,
-            frames: &mut Vec<qbase::frame::Frame>,
+            buffer: &mut qbase::packet::PacketBuffer<'_, B>,
         ) -> Result<(StreamId, usize, usize), Poll<Result<usize, Error>>> {
             let mut availability = Poll::Pending;
             for (sid, (outgoing, _), tokens) in streams {
-                let start = frames.len();
+                let start = buffer.frames.len();
                 let credit = buffer.limits.flow_ctrl();
-                match outgoing.poll_dump_with_tokens(cx, buffer, frames, tokens) {
+                match outgoing.poll_dump_with_tokens(cx, buffer, tokens) {
                     Poll::Ready(Ok(n)) if n > 0 => {
-                        let length = frames[start..]
+                        let length = buffer.frames[start..]
                             .iter()
                             .filter_map(|f| match f {
-                                qbase::frame::Frame::Stream(f, ()) => Some(f.len()),
+                                qbase::frame::GuaranteedFrame::Stream(f) => Some(f.len()),
                                 _ => None,
                             })
                             .sum::<usize>();
@@ -168,7 +166,7 @@ where
             }
             Err(availability)
         }
-        let start = frames.len();
+        let start = buffer.meta.nframes;
         // 不一定所有流都允许被发送，比如，0rtt被拒绝max_streams会倒缩，此时大于max_streams的流就不允许被发送
         let remote_role = self.stream_ids.remote.role();
         let max_streams_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
@@ -191,7 +189,6 @@ where
                     .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
-                frames,
             ),
             // [sid] + rev([..sid]) + rev([sid+1..])
             Some((sid, tokens)) => poll_streams(
@@ -209,7 +206,6 @@ where
                 .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
-                frames,
             ),
             // rev([..])
             None => poll_streams(
@@ -218,7 +214,6 @@ where
                     .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
-                frames,
             ),
         };
         let (sid, remain_tokens, fresh_bytes) = match result {
@@ -233,7 +228,7 @@ where
         {
             metrics.on_data_sent(fresh_bytes as u64);
         }
-        Poll::Ready(Ok(frames.len() - start))
+        Poll::Ready(Ok(buffer.meta.nframes - start))
     }
 
     /// Called when the stream frame acked.
@@ -713,7 +708,7 @@ mod tests {
 
     use bytes::BytesMut;
     use qbase::{
-        frame::{Frame, io::SendFrame},
+        frame::{GuaranteedFrame, io::SendFrame},
         packet::PacketContent,
         param::{
             ArcParameters,
@@ -737,8 +732,8 @@ mod tests {
     fn packet_frames(
         streams: &DataStreams<MockFrameSender>,
         waker: &std::task::Waker,
-    ) -> Vec<Frame> {
-        use qbase::packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader};
+    ) -> Vec<GuaranteedFrame> {
+        use qbase::packet::{Constraints, GetType, OneRttHeader, PacketBuffer};
 
         let mut bytes = BytesMut::new();
         let mut frames = Vec::new();
@@ -751,14 +746,14 @@ mod tests {
         };
         let result = streams.poll_dump(
             &mut Context::from_waker(waker),
-            &mut ConstraintBuffer::new(
+            &mut PacketBuffer::new(
                 &mut bytes,
                 &mut limits,
+                &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
                 0,
             ),
-            &mut frames,
         );
         assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
         frames
@@ -796,7 +791,7 @@ mod tests {
         assert_eq!(streams.fresh_bytes(), 128 * 1024);
         for _ in 0..10 {
             for frame in packet_frames(&streams, cx.waker()) {
-                if let Frame::Stream(frame, ()) = frame {
+                if let GuaranteedFrame::Stream(frame) = frame {
                     *sent.entry(frame.stream_id()).or_insert(0usize) += frame.len();
                 }
             }
@@ -886,7 +881,7 @@ mod tests {
         };
         writer.write(bytes::Bytes::from_static(b"first")).unwrap();
         let frames = packet_frames(&streams, cx.waker());
-        let Frame::Stream(first, ()) = frames[0] else {
+        let GuaranteedFrame::Stream(first) = frames[0] else {
             panic!("expected stream data")
         };
         assert_eq!(streams.fresh_bytes(), 0);
@@ -898,7 +893,7 @@ mod tests {
             "retransmissions use no new flow credit"
         );
         let frames = packet_frames(&streams, cx.waker());
-        let Frame::Stream(resent, ()) = frames[0] else {
+        let GuaranteedFrame::Stream(resent) = frames[0] else {
             panic!("expected retransmission")
         };
         assert_eq!(resent.range(), first.range());
@@ -907,7 +902,7 @@ mod tests {
         writer.write(bytes::Bytes::from_static(b"next")).unwrap();
         assert_eq!(streams.fresh_bytes(), 4);
         let frames = packet_frames(&streams, cx.waker());
-        let Frame::Stream(next, ()) = frames[0] else {
+        let GuaranteedFrame::Stream(next) = frames[0] else {
             panic!("expected new data")
         };
         assert_eq!(next.range(), 5..9);
@@ -915,14 +910,14 @@ mod tests {
 
         assert!(writer.poll_shutdown(&mut cx).is_pending());
         let frames = packet_frames(&streams, cx.waker());
-        let Frame::Stream(fin, ()) = frames[0] else {
+        let GuaranteedFrame::Stream(fin) = frames[0] else {
             panic!("expected FIN")
         };
         assert!(fin.is_fin());
         assert_eq!(fin.range(), 9..9);
         streams.may_loss_data(&fin);
         let frames = packet_frames(&streams, cx.waker());
-        let Frame::Stream(resent_fin, ()) = frames[0] else {
+        let GuaranteedFrame::Stream(resent_fin) = frames[0] else {
             panic!("expected FIN retransmission")
         };
         assert!(resent_fin.is_fin());
@@ -1093,14 +1088,14 @@ mod tests {
             };
             streams.poll_dump(
                 &mut Context::from_waker(waker),
-                &mut qbase::packet::ConstraintBuffer::new(
+                &mut qbase::packet::PacketBuffer::new(
                     &mut bytes,
                     &mut limits,
+                    &mut frames,
                     OneRttHeader::new(Default::default(), Default::default()).get_type(),
                     0,
                     0,
                 ),
-                &mut frames,
             )
         };
         assert!(poll(&wa).is_pending());
@@ -1227,25 +1222,24 @@ mod tests {
             ..Default::default()
         };
         use qbase::packet::GetType;
-        let mut buffer = qbase::packet::ConstraintBuffer::new(
+        let mut frames = Vec::new();
+        let mut buffer = qbase::packet::PacketBuffer::new(
             &mut packet,
             &mut limits,
+            &mut frames,
             qbase::packet::OneRttHeader::new(Default::default(), Default::default()).get_type(),
             0,
             0,
         );
-        let mut frames = Vec::new();
-        assert!(
-            matches!(streams.poll_dump(&mut cx, &mut buffer, &mut frames), Poll::Ready(Ok(n)) if n > 0)
-        );
+        assert!(matches!(streams.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(n)) if n > 0));
         assert_eq!(
-            qbase::packet::assemble::content(&frames),
+            buffer.meta.content,
             PacketContent::EffectivePayload
         );
         assert!(
             frames
                 .iter()
-                .any(|frame| matches!(frame, Frame::Stream(frame, ()) if frame.is_fin()))
+                .any(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.is_fin()))
         );
     }
 }
@@ -1288,8 +1282,7 @@ where
     pub(crate) fn poll_dump<B: BufMut + ?Sized>(
         &self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         // Keep stream insertion serialized with checking readiness and registering.
         let mut guard = self.output.streams();
@@ -1297,24 +1290,21 @@ where
             Ok(output) => output,
             Err(error) => return Poll::Ready(Err(error.clone())),
         };
-        let start = frames.len();
+        let start = buffer.meta.nframes;
         loop {
             // A full packet or a lengthless STREAM cannot accept another frame.
-            buffer.for_frame(
-                FrameType::Stream(
-                    qbase::frame::Offset::Zero,
-                    qbase::frame::Len::Explicit,
-                    qbase::frame::Fin::No,
-                ),
-                frames,
-            );
+            buffer.for_frame(FrameType::Stream(
+                qbase::frame::Offset::Zero,
+                qbase::frame::Len::Explicit,
+                qbase::frame::Fin::No,
+            ));
             if buffer.remaining_mut() < 2 {
-                return Poll::Ready(Ok(frames.len() - start));
+                return Poll::Ready(Ok(buffer.meta.nframes - start));
             }
-            match self.poll_dump_once(output, cx, buffer, frames) {
+            match self.poll_dump_once(output, cx, buffer) {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(n)) if n > 0 => {}
-                _ if frames.len() != start => return Poll::Ready(Ok(frames.len() - start)),
+                _ if buffer.meta.nframes != start => return Poll::Ready(Ok(buffer.meta.nframes - start)),
                 Poll::Pending => {
                     self.tx_wakers.register(cx.waker());
                     return Poll::Pending;

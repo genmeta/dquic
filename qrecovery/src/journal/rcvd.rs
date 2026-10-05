@@ -7,9 +7,9 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     error::Error,
-    frame::{AckFrame, Ecn, Frame, FrameType},
+    frame::{AckFrame, Ecn, FrameType},
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::{ConstraintBuffer, InvalidPacketNumber, Package, PacketNumber},
+    packet::{PacketBuffer, InvalidPacketNumber, Package, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};
@@ -283,11 +283,10 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         use std::task::Poll;
-        buffer.for_frame(FrameType::Ack(Ecn::None), frames);
+        buffer.for_frame(FrameType::Ack(Ecn::None));
         let journal = self.journal.inner.read().unwrap();
         let ack = match self
             .need_ack
@@ -310,7 +309,7 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
             ack.ranges().clone(),
             ack.ecn(),
         );
-        let result = ack.poll_dump(cx, buffer, frames);
+        let result = ack.poll_dump(cx, buffer);
         if matches!(result, Poll::Ready(Ok(1))) {
             self.need_ack = None;
         }
@@ -327,8 +326,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         let journal = self.inner.read().unwrap();
         let Some(latest) = journal.packets.largest() else {
@@ -336,7 +334,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
             return Poll::Pending;
         };
         drop(journal);
-        self.ack_package(Some(latest)).poll_dump(cx, buffer, frames)
+        self.ack_package(Some(latest)).poll_dump(cx, buffer)
     }
 }
 

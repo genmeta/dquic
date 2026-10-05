@@ -8,7 +8,11 @@ use qbase::{
     varint::{VARINT_MAX, VarInt},
 };
 
-use crate::{ArcParameters, Error, path::Path, space::DataSpace};
+use crate::{
+    ArcParameters, Error,
+    path::Path,
+    space::{DataSpace, Recover},
+};
 
 /// Data ACK pipe target. Capture the original components when wiring reception.
 /// Lock the receiving path CC before the journal, so ACK observes committed sends.

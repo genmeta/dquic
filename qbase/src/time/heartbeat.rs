@@ -10,8 +10,8 @@ use tokio::time::{Instant, sleep};
 use crate::{
     Cancelled,
     error::Error,
-    frame::{Frame, PingFrame},
-    packet::{ConstraintBuffer, Package, PacketContent},
+    frame::PingFrame,
+    packet::{PacketBuffer, Package, PacketContent},
     time::IdleSince,
 };
 
@@ -98,15 +98,14 @@ impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         if !self.time_to_heartbeat().is_zero() {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
         self.waker = None;
-        let result = PingFrame.poll_dump(cx, buffer, frames);
+        let result = PingFrame.poll_dump(cx, buffer);
         if matches!(result, Poll::Ready(Ok(1))) {
             self.counter += 1;
         }
@@ -192,12 +191,11 @@ impl<B: BufMut + ?Sized> Package<B> for ArcHeartbeat {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         let mut guard = self.0.lock().unwrap();
         match guard.as_mut() {
-            Ok(heartbeat) => heartbeat.poll_dump(cx, buffer, frames),
+            Ok(heartbeat) => heartbeat.poll_dump(cx, buffer),
             Err(_) => Poll::Pending,
         }
     }
@@ -237,12 +235,11 @@ mod tests {
         let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
         let result = heartbeat.poll_dump(
             &mut Context::from_waker(waker),
-            &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
-            &mut frames,
+            &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
         );
         if matches!(result, Poll::Ready(Ok(1))) {
             assert_eq!(&bytes[..], &[0x01]);
-            assert!(matches!(&frames[..], [Frame::Ping(_)]));
+            assert!(frames.is_empty());
         } else {
             assert!(bytes.is_empty());
             assert!(frames.is_empty());

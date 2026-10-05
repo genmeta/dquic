@@ -10,9 +10,9 @@ use std::{
 use qbase::{
     Close,
     error::{AppError, ErrorKind, QuicError},
-    frame::{ConnectionCloseFrame, Frame},
+    frame::ConnectionCloseFrame,
     net::tx::ArcSendWakers,
-    packet::{ConstraintBuffer, Package, Type},
+    packet::{PacketBuffer, Package, Type},
     util::Wakers,
 };
 use tokio::time::Instant;
@@ -129,17 +129,16 @@ impl Terminator {
     fn poll_dump<B: bytes::BufMut + ?Sized>(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
-        let mut dump_ccf = |frame: &ConnectionCloseFrame, buffer: &mut ConstraintBuffer<'_, B>| {
-            let mut frame = match (buffer.packet_type, frame) {
+        let mut dump_ccf = |frame: &ConnectionCloseFrame, buffer: &mut PacketBuffer<'_, B>| {
+            let mut frame = match (buffer.meta.packet_type, frame) {
                 (Type::Long(_), ConnectionCloseFrame::App(frame)) => {
                     ConnectionCloseFrame::Quic(frame.conceal())
                 }
                 (_, frame) => frame.clone(),
             };
-            frame.poll_dump(cx, buffer, frames)
+            frame.poll_dump(cx, buffer)
         };
         match self {
             Self::NoError { tx_wakers, .. } => {
@@ -366,9 +365,8 @@ impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
-        self.0.lock().unwrap().poll_dump(cx, buffer, frames)
+        self.0.lock().unwrap().poll_dump(cx, buffer)
     }
 }

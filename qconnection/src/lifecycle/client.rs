@@ -14,7 +14,7 @@ use qprotocol::{AddressBook, Dock, QuicProtocol};
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     packet::channel::RcvdPacket,
-    space::{DataSpace, Space, Spaces},
+    space::{DataSpace, HandshakeSpace, InitialSpace},
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
@@ -46,7 +46,13 @@ pub async fn client_growing(
         unreachable!("client_growing starts with InitialPhase")
     };
 
-    let initial = initial_phase.initial_space.clone();
+    let spaces = initial_phase.spaces.clone();
+    let initial = spaces
+        .read()
+        .unwrap()
+        .get::<InitialSpace>(Epoch::Initial)
+        .expect("Initial space");
+    let initial = Arc::new(initial.space.clone());
     let reliable_frames = initial_phase.reliable_frames.clone();
     let cid_registry = initial_phase.cid_registry.clone();
     let resender = initial_phase.resender.clone();
@@ -84,10 +90,21 @@ pub async fn client_growing(
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
-            let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            let handshake = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys)));
+            resender
+                .write()
+                .unwrap()
+                .push_back(handshake.clone())
+                .expect("Handshake epoch");
+            spaces
+                .write()
+                .unwrap()
+                .0
+                .push_back(handshake.clone())
+                .expect("Handshake epoch");
             terminator.register(Arc::new(handshake.crypto.clone()));
             paths.handshake.got_handshake_key();
-            phase.enter_handshake(handshake.clone());
+            phase.enter_handshake();
             initial.crypto.recver.retire();
             initial.crypto.sender.retire();
 
@@ -103,7 +120,7 @@ pub async fn client_growing(
             ));
             tokio::spawn(recv_ih_pkt_and_deliver_frames(
                 (rcvd_pkt.handshake, None),
-                handshake.clone(),
+                Arc::new(handshake.0.clone()),
                 paths.clone(),
             ));
 
@@ -138,18 +155,25 @@ pub async fn client_growing(
                 reliable_frames.clone(),
             );
             terminator.register(Arc::new(flow_ctrl.clone()));
-            let data = Arc::new(DataSpace::new(keys, streams, reliable_frames.clone()));
+            let data = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
+            resender
+                .write()
+                .unwrap()
+                .push_back(data.clone())
+                .expect("Data epoch");
+            spaces
+                .write()
+                .unwrap()
+                .0
+                .push_back(data.clone())
+                .expect("Data epoch");
             terminator.register(Arc::new(data.crypto.clone()));
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data.clone(), server_scid),
             );
             phase.enter_mature(Arc::new(MaturePhase {
-                spaces: Spaces {
-                    initial: initial.clone(),
-                    handshake: handshake.clone(),
-                    data: data.clone(),
-                },
+                spaces: spaces.clone(),
                 scid,
                 dcid: server_scid,
                 parameters: parameters.clone(),
@@ -237,6 +261,15 @@ pub async fn client_growing(
                 .get()
                 .expect("live Data keys")
                 .allow_update();
+            {
+                let mut spaces = spaces.write().unwrap();
+                let mut resender = resender.write().unwrap();
+                while spaces.0.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
+                    let (_, space) = spaces.0.pop_front().unwrap();
+                    space.retire();
+                    resender.pop_front();
+                }
+            }
             paths.handshake_confirmed();
             // Dropping this coroutine also stops observation by dropping the sender.
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
