@@ -13,9 +13,7 @@ use qbase::{
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
 };
 use qcongestion::{HandshakeStatus, Transport as _};
-use qtransport::{
-    path::{Path, PathState},
-};
+use qtransport::path::{Path, PathState};
 
 use crate::{ArcConnPhase, CloseReason, ConnPhase};
 
@@ -107,19 +105,15 @@ impl Paths {
             .unwrap_or(Duration::from_secs(1))
     }
 
-    fn create_path(
-        self: &Arc<Self>,
-        pathway: Pathway,
-        handshaking: bool,
-    ) -> Arc<Path> {
+    fn create_path(self: &Arc<Self>, pathway: Pathway, handshaking: bool) -> Arc<Path> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(path) = entries.get(&pathway) {
             return path.clone();
         }
-        let trackers = match self.phase.get() {
-            ConnPhase::Initial(phase) => phase.trackers.clone(),
-            ConnPhase::Handshake(phase) => phase.trackers.clone(),
-            ConnPhase::Mature(phase) => phase.trackers.clone(),
+        let resender = match self.phase.get() {
+            ConnPhase::Initial(phase) => phase.resender.clone(),
+            ConnPhase::Handshake(phase) => phase.resender.clone(),
+            ConnPhase::Mature(phase) => phase.resender.clone(),
         };
         let path = Arc::new(Path::new(
             pathway,
@@ -128,7 +122,7 @@ impl Paths {
                 self.defer_idle_timeout,
                 *self.max_idle_timeout.lock().unwrap(),
             ),
-            trackers,
+            resender,
         ));
         if entries
             .values()
@@ -228,17 +222,17 @@ impl Paths {
             let trackers = match &*phase {
                 ConnPhase::Initial(p) => {
                     p.initial_space.retire();
-                    &p.trackers
+                    &p.resender
                 }
                 ConnPhase::Handshake(p) => {
                     p.initial_space.retire();
                     p.handshake_space.retire();
-                    &p.trackers
+                    &p.resender
                 }
                 ConnPhase::Mature(p) => {
                     p.spaces.initial.retire();
                     p.spaces.handshake.retire();
-                    &p.trackers
+                    &p.resender
                 }
             };
             let mut trackers = trackers.write().unwrap();

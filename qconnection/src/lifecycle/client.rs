@@ -49,7 +49,7 @@ pub async fn client_growing(
     let initial = initial_phase.initial_space.clone();
     let reliable_frames = initial_phase.reliable_frames.clone();
     let cid_registry = initial_phase.cid_registry.clone();
-    let trackers = initial_phase.trackers.clone();
+    let resender = initial_phase.resender.clone();
     let scid = initial_phase.scid;
     let odcid = initial_phase.odcid;
     drop(initial_phase);
@@ -156,7 +156,7 @@ pub async fn client_growing(
                 flow_ctrl: flow_ctrl.clone(),
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
-                trackers: trackers.clone(),
+                resender: resender.clone(),
                 terminator: terminator.clone(),
             }));
             cid_registry
@@ -206,7 +206,9 @@ pub async fn client_growing(
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
                         move || {
-                            paths.upgrade().map_or_else(Vec::new, |paths| paths.snapshot())
+                            paths
+                                .upgrade()
+                                .map_or_else(Vec::new, |paths| paths.snapshot())
                         }
                     }),
                 ),
@@ -222,7 +224,7 @@ pub async fn client_growing(
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(reason.clone()));
-            return shutdown(&paths, &trackers, &cid_registry.local, reason, discovery).await;
+            return shutdown(&paths, &resender, &cid_registry.local, reason, discovery).await;
         }
     };
     established(Ok(connected));
@@ -249,12 +251,12 @@ pub async fn client_growing(
             reason
         }
     };
-    shutdown(&paths, &trackers, &cid_registry.local, reason, discovery).await
+    shutdown(&paths, &resender, &cid_registry.local, reason, discovery).await
 }
 
 async fn shutdown(
     paths: &Paths,
-    trackers: &crate::ArcTrackers,
+    resender: &crate::ArcResend,
     local_cids: &crate::ArcLocalCids,
     error: Error,
     discovery: tokio::task::JoinHandle<()>,
@@ -262,7 +264,7 @@ async fn shutdown(
     // Stop discovery before path cleanup so late DNS results cannot create senders.
     discovery.abort();
     let _ = discovery.await;
-    let reason = finish(paths, trackers, error).await;
+    let reason = finish(paths, resender, error).await;
     local_cids.clear();
     reason
 }

@@ -19,8 +19,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcParameters, DataStreams, Error, FlowController, Interceptor, MaturePhase, Paths,
-    ServerRegistry,
+    ArcLocalCids, ArcParameters, ArcResend, DataStreams, Error, FlowController, Interceptor,
+    MaturePhase, Paths, ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -41,7 +41,7 @@ pub async fn server_growing(
     let initial = initial_phase.initial_space.clone();
     let reliable_frames = initial_phase.reliable_frames.clone();
     let cid_registry = initial_phase.cid_registry.clone();
-    let trackers = initial_phase.trackers.clone();
+    let resender = initial_phase.resender.clone();
     let scid = initial_phase.scid;
     let origin_dcid = initial_phase.odcid;
 
@@ -62,13 +62,13 @@ pub async fn server_growing(
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
-            return shutdown(&paths, &trackers, &cid_registry.local, reason).await;
+            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
         }
     };
     let Some(server_name) = hello.server_name() else {
         return shutdown(
             &paths,
-            &trackers,
+            &resender,
             &cid_registry.local,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
@@ -80,7 +80,7 @@ pub async fn server_growing(
     let Some(server) = ServerRegistry::global().get(server_name) else {
         return shutdown(
             &paths,
-            &trackers,
+            &resender,
             &cid_registry.local,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
@@ -99,7 +99,7 @@ pub async fn server_growing(
             Ok(ready) => ready,
             Err(error) => {
                 (server.accept_cb)(Err(error.clone()));
-                return shutdown(&paths, &trackers, &cid_registry.local, error.into()).await;
+                return shutdown(&paths, &resender, &cid_registry.local, error.into()).await;
             }
         };
     terminator.register(Arc::new(tls_ctx.clone()));
@@ -223,7 +223,7 @@ pub async fn server_growing(
                 flow_ctrl,
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
-                trackers: trackers.clone(),
+                resender: resender.clone(),
                 terminator: terminator.clone(),
             }));
 
@@ -247,7 +247,9 @@ pub async fn server_growing(
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
                         move || {
-                            paths.upgrade().map_or_else(Vec::new, |paths| paths.snapshot())
+                            paths
+                                .upgrade()
+                                .map_or_else(Vec::new, |paths| paths.snapshot())
                         }
                     }),
                 ),
@@ -261,7 +263,7 @@ pub async fn server_growing(
         Ok(connection) => connection,
         Err(reason) => {
             (server.accept_cb)(Err(reason.clone()));
-            return shutdown(&paths, &trackers, &cid_registry.local, reason).await;
+            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
         }
     };
 
@@ -275,16 +277,16 @@ pub async fn server_growing(
     let reason = terminator.await;
     drop(stop);
     let _ = observer.await;
-    shutdown(&paths, &trackers, &cid_registry.local, reason).await
+    shutdown(&paths, &resender, &cid_registry.local, reason).await
 }
 
 async fn shutdown(
     paths: &Paths,
-    trackers: &crate::ArcTrackers,
-    local_cids: &crate::ArcLocalCids,
+    resender: &ArcResend,
+    local_cids: &ArcLocalCids,
     reason: Error,
 ) -> Error {
-    let reason = finish(paths, trackers, reason).await;
+    let reason = finish(paths, resender, reason).await;
     local_cids.clear();
     reason
 }
