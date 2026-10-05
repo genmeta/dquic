@@ -14,7 +14,7 @@ pub use interceptor::Interceptor;
 use qtransport::terminate::ArcTerminator;
 pub use server::server_growing;
 
-use crate::{ArcResend, ConnPhase, Error, Paths};
+use crate::{ArcResend, Error, Paths};
 
 /// Wait for a future's output or the connection's terminal error.
 pub(crate) async fn any<T>(
@@ -40,18 +40,10 @@ async fn finish(paths: &Paths, resender: &ArcResend, error: Error) -> Error {
             path.cc.discard_epoch(epoch);
         }
     }
-    match &snapshot {
-        ConnPhase::Initial(phase) => {
-            phase.initial_space.retire();
-        }
-        ConnPhase::Handshake(phase) => {
-            phase.initial_space.retire();
-            phase.handshake_space.retire();
-        }
-        ConnPhase::Mature(phase) => {
-            phase.spaces.initial.retire();
-            phase.spaces.handshake.retire();
-            phase.spaces.data.keys.retire();
+    {
+        let mut spaces = snapshot.spaces().write().unwrap();
+        while let Some((_, space)) = spaces.0.pop_front() {
+            space.retire();
         }
     }
     {

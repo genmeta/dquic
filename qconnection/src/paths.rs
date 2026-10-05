@@ -110,11 +110,7 @@ impl Paths {
         if let Some(path) = entries.get(&pathway) {
             return path.clone();
         }
-        let resender = match self.phase.get() {
-            ConnPhase::Initial(phase) => phase.resender.clone(),
-            ConnPhase::Handshake(phase) => phase.resender.clone(),
-            ConnPhase::Mature(phase) => phase.resender.clone(),
-        };
+        let resender = self.phase.get().resender().clone();
         let path = Arc::new(Path::new(
             pathway,
             self.handshake.clone(),
@@ -201,49 +197,29 @@ impl Paths {
     }
 
     pub(crate) fn on_handshake_sent(&self) {
-        let phase = self.phase.lock_guard();
-        if self.role == Role::Client {
-            phase.retire_initial();
-        }
         self.handshake.on_handshake_sent();
+        if self.role == Role::Client {
+            let phase = self.phase.get();
+            let spaces = phase.spaces().read().unwrap();
+            if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
+                initial.retire();
+            }
+        }
     }
 
     pub(crate) fn on_handshake_received(&self) {
-        let phase = self.phase.lock_guard();
-        if self.role == Role::Server {
-            phase.retire_initial();
-        }
         self.handshake.on_handshake_received();
+        if self.role == Role::Server {
+            let phase = self.phase.get();
+            let spaces = phase.spaces().read().unwrap();
+            if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
+                initial.retire();
+            }
+        }
     }
 
     pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
-        {
-            let phase = self.phase.lock_guard();
-            let trackers = match &*phase {
-                ConnPhase::Initial(p) => {
-                    p.initial_space.retire();
-                    &p.resender
-                }
-                ConnPhase::Handshake(p) => {
-                    p.initial_space.retire();
-                    p.handshake_space.retire();
-                    &p.resender
-                }
-                ConnPhase::Mature(p) => {
-                    p.spaces.initial.retire();
-                    p.spaces.handshake.retire();
-                    &p.resender
-                }
-            };
-            let mut trackers = trackers.write().unwrap();
-            while trackers
-                .front()
-                .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
-            {
-                trackers.pop_front();
-            }
-            self.handshake.handshake_confirmed();
-        }
+        self.handshake.handshake_confirmed();
         // The selected sender releases paths after it has requested its CID cell.
         for path in self.entries.lock().unwrap().values() {
             if path.selected() == Path::SELECTED {

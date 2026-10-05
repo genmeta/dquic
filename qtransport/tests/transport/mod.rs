@@ -33,7 +33,7 @@ use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
-    keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, OpenPacket, SealPacket},
+    keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, Open, Seal},
     packet::channel,
     path::Path,
     send::{
@@ -60,7 +60,7 @@ impl Transport {
 }
 
 pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
-    use qbase::packet::{ConstraintBuffer, Constraints, GetType};
+    use qbase::packet::{PacketBuffer, Constraints, GetType};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();
     let mut limits = Constraints {
@@ -73,11 +73,10 @@ pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) ->
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let result = source.poll_dump(
         &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        &mut ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0),
-        &mut frames,
+        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
     );
     assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
-    frames
+    frames.into_iter().map(Into::into).collect()
 }
 
 fn packet_way() -> (Pathway, Link) {
@@ -199,7 +198,12 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         params.local(ParameterId::InitialMaxData),
         reliable.clone(),
     );
-    let data = Arc::new(DataSpace::new(ArcOneRttKeys::from(keys), streams, reliable));
+    let data = Arc::new(DataSpace::new(
+        Default::default(),
+        ArcOneRttKeys::from(keys),
+        streams,
+        reliable,
+    ));
     data.keys.get().unwrap().allow_update();
     Arc::new(Transport {
         data,
@@ -567,7 +571,11 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 material.opening.packet.tag_len(),
             )
             .unwrap();
-        let space = Arc::new(Space::new(epoch, ArcKeys::new(Arc::new(material))));
+        let space = Arc::new(Space::new(
+            epoch,
+            Default::default(),
+            ArcKeys::new(Arc::new(material)),
+        ));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
         let (inbox, rcvd_pkt) = channel::new();
@@ -745,7 +753,10 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     assert_eq!(&body, b"wired stream");
     // Application streams stop immediately; the receive engine still reports packets.
     server.close(VarInt::from_u32(0), "done");
-    assert!(matches!(st.data.streams.accept_uni().await, Err(crate::Error::App(_))));
+    assert!(matches!(
+        st.data.streams.accept_uni().await,
+        Err(crate::Error::App(_))
+    ));
     router.receive(ping(&keys(&ct), 1), link.into(), link, 8);
     router.receive(close_packet(&keys(&ct), 2), link.into(), link, 8);
     assert!(
@@ -1613,6 +1624,7 @@ async fn retired_path_replacement_has_its_own_sender_and_waiter() {
 
 #[tokio::test(start_paused = true)]
 async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped() {
+    use crate::space::Recover as _;
     use qcongestion::Transport as _;
 
     let [(client, transport, original), (server, peer, peer_path)] = pair(1);
@@ -1961,6 +1973,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     let (retained, rcvd_pkt) = channel::new();
     let space = Arc::new(Space::<crate::keys::ArcKeys>::new(
         Epoch::Initial,
+        Default::default(),
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
     ));
     let mut task = tokio::spawn(receive_packets(

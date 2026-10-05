@@ -20,7 +20,7 @@ use qbase::{
     time::heartbeat::ArcHeartbeat,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qtransport::{keys::ArcKeys, path::Path, space::Space};
+use qtransport::{keys::ArcKeys, path::Path, space::HandshakeSpace};
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 use crate::{
@@ -28,7 +28,7 @@ use crate::{
     recv::receive_1rtt_pkt_and_deliver_frames,
 };
 
-fn pair() -> [Arc<MaturePhase>; 2] {
+pub(super) fn pair() -> [Arc<super::MatureFixture>; 2] {
     let [mut client, mut server] = common::backends(false);
     let mut material = [None, None];
     while material.iter().any(Option::is_none) {
@@ -80,8 +80,8 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 common::initial_keys(role == Role::Server),
             );
             let registry = initial.cid_registry.clone();
-            let handshake = Arc::new(Space::new(
-                Epoch::Handshake,
+            let handshake = Arc::new(HandshakeSpace::new(
+                Default::default(),
                 ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
             ));
             let reliable_frames = initial.reliable_frames.clone();
@@ -100,6 +100,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 reliable_frames.clone(),
             );
             let data = Arc::new(qtransport::space::DataSpace::new(
+                Default::default(),
                 keys.unwrap().into(),
                 streams,
                 reliable_frames.clone(),
@@ -108,12 +109,13 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 reliable_frames,
                 qtraversal::punch::ProbeEncoder::new(data.clone(), peer),
             );
+            let concrete = super::SpaceFixture {
+                initial: crate::common::initial_space(&initial.spaces),
+                handshake,
+                data,
+            };
             let phase = Arc::new(MaturePhase {
-                spaces: qtransport::space::Spaces {
-                    initial: initial.initial_space.clone(),
-                    handshake,
-                    data,
-                },
+                spaces: initial.spaces.clone(),
                 scid: initial.scid,
                 flow_ctrl: flow,
                 cid_registry: registry,
@@ -122,6 +124,10 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 puncher,
                 resender: initial.resender.clone(),
                 terminator: initial.terminator.clone(),
+            });
+            let phase = Arc::new(super::MatureFixture {
+                phase,
+                spaces: concrete,
             });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
             take_reliable(&phase);
@@ -132,19 +138,19 @@ fn pair() -> [Arc<MaturePhase>; 2] {
         .unwrap_or_else(|_| unreachable!())
 }
 
-fn encoder(phase: &MaturePhase) -> ProbeEncoder {
+fn encoder(phase: &super::MatureFixture) -> ProbeEncoder {
     ProbeEncoder::new(phase.spaces.data.clone(), phase.dcid)
 }
 
 fn encode_frame(
-    phase: &MaturePhase,
+    phase: &super::MatureFixture,
     mut frame: impl for<'b> qbase::packet::Package<&'b mut BytesMut>,
 ) -> BytesMut {
     encode_frames(phase, [&mut frame])
 }
 
 fn encode_frames<const N: usize>(
-    phase: &MaturePhase,
+    phase: &super::MatureFixture,
     frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut BytesMut>; N],
 ) -> BytesMut {
     use qbase::packet::{Constraints, assemble::Assemble};
@@ -168,7 +174,7 @@ fn encode_frames<const N: usize>(
         max_size: 1200,
         ..Default::default()
     };
-    let mut sending = crate::send::SendingPacket {
+    let mut sending = crate::send::Envelope {
         packet,
         keys: &key,
         limits: &mut limits,
@@ -185,7 +191,7 @@ fn encode_frames<const N: usize>(
     bytes
 }
 
-fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
+fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
     let role = phase.parameters.role();
     let snapshot = ArcConnPhase::initial(crate::common::initial_phase(
         role,
@@ -201,7 +207,12 @@ fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
     paths
 }
 
-async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Pathway, link: Link) {
+async fn receive(
+    phase: &Arc<super::MatureFixture>,
+    packets: Vec<BytesMut>,
+    pathway: Pathway,
+    link: Link,
+) {
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
     let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
@@ -221,7 +232,7 @@ async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Path
 }
 
 async fn receive_on_paths(
-    phase: &Arc<MaturePhase>,
+    phase: &Arc<super::MatureFixture>,
     paths: &Arc<Paths>,
     packets: Vec<BytesMut>,
     pathway: Pathway,
@@ -298,7 +309,7 @@ async fn data_reception_delivers_crypto_and_streams_to_the_data_space() {
             .unwrap()
             .unwrap();
         assert_eq!(&body, b"ticket");
-        for space in [&receiver.spaces.initial, &receiver.spaces.handshake] {
+        for space in [receiver.spaces.initial.as_ref(), &receiver.spaces.handshake.0] {
             assert!(
                 space
                     .crypto
@@ -575,7 +586,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let original = paths
             .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
-        paths.handshake_confirmed();
+        super::confirm_handshake(&paths);
         paths.activate_paths(&original);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
         let packet = encoder(sender)
@@ -618,8 +629,8 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
     }
 }
 
-fn take_reliable(phase: &MaturePhase) -> Vec<Frame> {
-    use qbase::packet::{ConstraintBuffer, Constraints, GetType, Package};
+fn take_reliable(phase: &super::MatureFixture) -> Vec<Frame> {
+    use qbase::packet::{PacketBuffer, Constraints, GetType, Package};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut limits = Constraints {
         flow_ctrl: usize::MAX,
@@ -631,16 +642,16 @@ fn take_reliable(phase: &MaturePhase) -> Vec<Frame> {
     let mut frames = Vec::new();
     let _ = phase.spaces.data.reliable_frames.clone().poll_dump(
         &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        &mut ConstraintBuffer::new(
+        &mut PacketBuffer::new(
             &mut bytes,
             &mut limits,
+            &mut frames,
             OneRttHeader::new(Default::default(), phase.dcid).get_type(),
             0,
             0,
         ),
-        &mut frames,
     );
-    frames
+    frames.into_iter().map(Into::into).collect()
 }
 
 #[tokio::test]
@@ -727,7 +738,11 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
     );
     let hello = PunchHelloFrame::new(1, 2, 3);
     let prior = receiver.spaces.data.next_pn().unwrap().0;
-    receiver.spaces.data.cancel(prior);
+    qtransport::space::Recover::cancel(
+        receiver.spaces.data.as_ref(),
+        prior,
+        &mut std::iter::empty(),
+    );
     receive(
         &receiver,
         vec![encoder(&sender).encode_probe(hello).unwrap()],
@@ -807,7 +822,9 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             .insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;
         let pn = data.next_pn().unwrap().0;
-        data.on_sealed(pn, 0, []);
+        qtransport::space::Transmit::on_sealed(data.as_ref(), pn, Some(0), 0,
+            qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(&OneRttHeader::new(Default::default(), Default::default()))),
+            &mut std::iter::empty());
         data.on_sent(
             [(pn, false)],
             Duration::from_secs(1),

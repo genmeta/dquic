@@ -1,33 +1,48 @@
 //! Packet-number spaces and recovery feedback. No parent connection back-reference.
-use std::{sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    ops::Deref,
+    sync::Arc,
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
 
-use derive_more::Deref;
+use bytes::BufMut;
 use qbase::{
     Epoch,
-    frame::{AckFrame, Frame, ReliableFrame, StreamCtlFrame, io::SendFrame},
-    packet::PacketNumber,
+    cid::ConnectionId,
+    frame::AckFrame,
+    net::tx::UnregisterWaker,
+    packet::{
+        LongSpecificBits, PacketNumber, ShortSpecificBits,
+        assemble::{Metadata, Package, PacketBuffer},
+    },
 };
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
     journal::{ArcRcvdJournal, ArcSentJournal},
-    streams::DataStreams,
 };
 use tokio::time::Instant;
 
 use crate::{
-    ArcReliableFrames, Error, GuaranteedFrame,
-    keys::{ArcKeys, ArcOneRttKeys},
+    Error, GuaranteedFrame,
+    keys::{ArcKeys, ArcOneRttKeys, OneRttSealingKey, Seal},
 };
 
-/// The complete set of packet-number spaces, sharing the already running early spaces.
-pub struct Spaces {
-    pub initial: Arc<Space<ArcKeys>>,
-    pub handshake: Arc<Space<ArcKeys>>,
-    pub data: Arc<DataSpace>,
-}
+pub mod assemble;
+pub mod data;
+pub mod handshake;
+pub mod initial;
 
+pub use assemble::{ArcSpaces, Spaces};
+pub use data::DataSpace;
+pub use handshake::HandshakeSpace;
+pub use initial::InitialSpace;
+
+#[derive(Clone)]
 pub struct Space<K> {
+    pub initial_scid: ConnectionId,
     pub epoch: Epoch,
     pub keys: K,
     pub crypto: CryptoStream,
@@ -37,8 +52,9 @@ pub struct Space<K> {
 
 impl<K> Space<K> {
     /// Create a packet-number space with ready keys.
-    pub fn new(epoch: Epoch, keys: K) -> Self {
+    pub fn new(epoch: Epoch, initial_scid: ConnectionId, keys: K) -> Self {
         Self {
+            initial_scid,
             epoch,
             keys,
             crypto: CryptoStream::new(),
@@ -50,11 +66,6 @@ impl<K> Space<K> {
     /// Reserve a packet number before assembly.
     pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
         self.sent_journal.next_pn()
-    }
-
-    /// Retain a sealed packet's frames before UDP submission.
-    pub fn on_assembled(&self, pn: u64, frames: impl IntoIterator<Item = Frame>) {
-        self.sent_journal.on_assembled(pn, None, frames);
     }
 
     /// Start timers for a successfully submitted batch, locking the journal once.
@@ -119,237 +130,250 @@ impl<K: Clone + Send> qcongestion::Resend for Space<ArcKeys<K>> {
     }
 }
 
-/// Application-data space and all of its retransmittable frame sources.
-#[derive(Deref)]
-pub struct DataSpace {
-    #[deref]
-    pub space: Space<ArcOneRttKeys>,
-    pub streams: DataStreams<ArcReliableFrames>,
-    pub reliable_frames: ArcReliableFrames,
+impl Allocate for Space<ArcKeys> {
+    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+        let Ok(keys) = self.keys.get() else {
+            return Ok(None);
+        };
+        Ok(Some((self.next_pn()?, Keys::Long(keys))))
+    }
 }
 
-impl DataSpace {
-    pub fn new(
-        keys: ArcOneRttKeys,
-        streams: DataStreams<ArcReliableFrames>,
-        reliable_frames: ArcReliableFrames,
-    ) -> Self {
-        Self {
-            space: Space::new(Epoch::Data, keys),
-            streams,
-            reliable_frames,
-        }
+impl Allocate for Space<ArcOneRttKeys> {
+    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+        let Ok(keys) = self.keys.get() else {
+            return Ok(None);
+        };
+        let (pn, keys) = keys
+            .reserve(|_| self.next_pn().map_err(Into::into))
+            .map_err(packet_error)?;
+        Ok(Some((pn, Keys::Short(keys))))
     }
+}
 
-    /// Reserve a packet number before assembly.
-    pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
-        self.sent_journal.next_pn()
+impl<K> UnregisterWaker for Space<K> {
+    fn unregister(&self, waker: &Waker) {
+        self.crypto.outgoing().unregister(waker);
+        self.rcvd_journal.unregister(waker);
     }
+}
 
-    /// Retain a sealed packet's frames before UDP submission.
-    pub fn on_sealed(&self, pn: u64, generation: u64, frames: impl IntoIterator<Item = Frame>) {
-        self.sent_journal.on_assembled(pn, Some(generation), frames);
-    }
-
-    /// Start timers for a successfully submitted batch, locking the journal once.
-    pub fn on_sent(
-        &self,
-        packets: impl IntoIterator<Item = (u64, bool)>,
-        retransmit_after: Duration,
-        retention: Duration,
-    ) {
-        let mut journal = self.sent_journal.lock_guard();
-        for (pn, in_flight) in packets {
-            journal.on_sent(pn, in_flight, retransmit_after, retention);
-        }
-    }
-
-    /// Release acknowledged data and return the highest newly acknowledged key generation.
-    pub fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
-        self.sent_journal.on_acked(ack, |frame| match frame {
-            GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().on_data_acked(frame),
-            GuaranteedFrame::Stream(frame) => self.streams.on_data_acked(*frame),
-            GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::ResetStream(
-                frame,
-            ))) => self.streams.on_reset_acked(*frame),
-            _ => {}
+impl<K: Clone> Recover for Space<ArcKeys<K>> {
+    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
+        self.sent_journal.on_acked(ack, |frame| {
+            if let GuaranteedFrame::Crypto(frame) = frame {
+                self.crypto.outgoing().on_data_acked(frame);
+            }
         })
     }
 
-    /// Cancel an unsubmitted packet and return its data to the frame sources.
-    pub fn cancel(&self, pn: u64) {
-        self.sent_journal.cancel(pn, |frame| self.recover(&frame));
+    fn recover(&self, frame: &GuaranteedFrame) {
+        Space::recover(self, frame);
     }
 
-    /// Return lost or unsubmitted data to the components that own it.
-    pub fn recover(&self, frame: &GuaranteedFrame) {
-        match frame {
-            GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().may_loss_data(frame),
-            GuaranteedFrame::Stream(frame) => self.streams.may_loss_data(frame),
-            GuaranteedFrame::Reliable(frame) => self.reliable_frames.send_frame([frame.clone()]),
+    fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>) {
+        for frame in frames {
+            self.recover(&frame);
         }
+        Space::cancel(self, pn);
     }
 
-    /// Keep recovering while Data keys remain live, even without a path sender.
-    pub fn on_tick(&self, now: Instant) {
-        if self.keys.get().is_ok() {
-            self.sent_journal.on_tick(now, |frame| self.recover(frame));
-        }
+    fn on_tick(&self, now: Instant) {
+        Space::on_tick(self, now);
+    }
+
+    fn retire(&self) {
+        Space::retire(self);
     }
 }
 
-impl qcongestion::Resend for DataSpace {
-    fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        if self.keys.get().is_ok() {
-            self.sent_journal.resend(pns, |frame| self.recover(frame));
-        }
+/// Recovery and retirement of a space's own frame sources.
+pub trait Recover {
+    /// Release acknowledged frames and return the highest acknowledged key generation.
+    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error>;
+    fn recover(&self, frame: &GuaranteedFrame);
+    fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>);
+    fn on_tick(&self, now: Instant);
+    fn retire(&self);
+    fn fresh_bytes(&self) -> usize {
+        0
+    }
+
+    /// Count at most the fresh bytes that fit the caller's send allowance.
+    fn fresh_bytes_up_to(&self, limit: usize) -> usize {
+        self.fresh_bytes().min(limit)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
+/// Reserve a packet number together with its sealing-key snapshot.
+pub trait Allocate {
+    /// Returns `None` when the space's keys have been retired.
+    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error>;
+}
 
-    use tokio::io::AsyncWriteExt;
+impl<T: Deref> Allocate for T
+where
+    T::Target: Allocate,
+{
+    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+        self.deref().pn_and_keys()
+    }
+}
 
-    use super::*;
-
-    fn record(space: &Space<ArcKeys<()>>) -> u64 {
-        let frames = crate::tests::take_frames(&mut space.crypto.outgoing());
-        assert_eq!(frames.len(), 1);
-        let (pn, _) = space.next_pn().unwrap();
-        space.on_assembled(pn, frames);
-        space.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
-        pn
+impl<K> Transmit for Space<K>
+where
+    K: Any + Send + Sync,
+    Self: Allocate + Recover,
+{
+    fn epoch(&self) -> Epoch {
+        self.epoch
     }
 
-    #[tokio::test]
-    async fn shared_space_recovers_once_and_stops_after_key_retirement() {
-        let space = Arc::new(Space::new(Epoch::Initial, ArcKeys::new(())));
-        let paths: [Arc<dyn qcongestion::Resend>; 2] = [space.clone(), space.clone()];
-        space.crypto.writer().write_all(b"first").await.unwrap();
-        let first = record(&space);
-        paths[0].resend(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());
-        paths[1].resend(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());
-        assert_eq!(
-            crate::tests::take_frames(&mut space.crypto.outgoing()).len(),
-            1
-        );
-        assert!(crate::tests::take_frames(&mut space.crypto.outgoing()).is_empty());
-
-        space.crypto.writer().write_all(b"second").await.unwrap();
-        record(&space);
-        space.on_tick(Instant::now() + Duration::from_secs(2));
-        assert_eq!(
-            crate::tests::take_frames(&mut space.crypto.outgoing()).len(),
-            1
-        );
-
-        space.crypto.writer().write_all(b"third").await.unwrap();
-        let third = record(&space);
-        space.keys.retire();
-        paths[0].resend(PacketLostTrigger::TimeThreshold, &mut [third].into_iter());
-        space.on_tick(Instant::now() + Duration::from_secs(2));
-        assert!(crate::tests::take_frames(&mut space.crypto.outgoing()).is_empty());
+    fn crypto(&self) -> &CryptoStream {
+        &self.crypto
     }
 
-    #[tokio::test]
-    async fn late_ack_cancels_crypto_recovery() {
-        use qcongestion::Resend as _;
-
-        let space = Space::new(Epoch::Handshake, ArcKeys::new(()));
-        space.crypto.writer().write_all(b"crypto").await.unwrap();
-        let pn = record(&space);
-        space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
-        let ack = AckFrame::new(
-            pn.try_into().unwrap(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        );
-        assert!(space.on_acked(&ack).unwrap());
-        space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
-        space.on_tick(Instant::now() + Duration::from_secs(2));
-        assert!(crate::tests::take_frames(&mut space.crypto.outgoing()).is_empty());
-        assert!(!space.on_acked(&ack).unwrap());
+    fn sent_journal(&self) -> &ArcSentJournal {
+        &self.sent_journal
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
-        for epoch in [Epoch::Initial, Epoch::Handshake] {
-            let space = Space::new(epoch, ArcKeys::new(()));
-            let mut pns = Vec::new();
-            for bytes in [b"first".as_slice(), b"second", b"third"] {
-                space.crypto.writer().write_all(bytes).await.unwrap();
-                let pn = space.next_pn().unwrap().0;
-                space.on_assembled(pn, crate::tests::take_frames(&mut space.crypto.outgoing()));
-                pns.push(pn);
-            }
-            let ack = AckFrame::new(
-                pns[0].try_into().unwrap(),
-                0u32.into(),
-                0u32.into(),
-                vec![],
-                None,
-            );
-            assert!(space.on_acked(&ack).unwrap());
-            space.on_sent(
-                pns[..2].iter().map(|&pn| (pn, true)),
-                Duration::from_secs(1),
-                Duration::from_secs(3),
-            );
-            space.on_tick(Instant::now() + Duration::from_secs(2));
-            let recovered = crate::tests::take_frames(&mut space.crypto.outgoing());
-            assert!(
-                matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 5 && frame.len() == 6)
-            );
-            space.cancel(pns[2]);
-            let recovered = crate::tests::take_frames(&mut space.crypto.outgoing());
-            assert!(
-                matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 11 && frame.len() == 5)
-            );
-            assert!(!space.on_acked(&ack).unwrap());
+    fn rcvd_journal(&self) -> &ArcRcvdJournal {
+        &self.rcvd_journal
+    }
+}
+
+/// Shared packet-number, key reservation and journal operations.
+pub trait Transmit: Allocate + Recover + UnregisterWaker + Any + Send + Sync {
+    fn epoch(&self) -> Epoch;
+
+    fn crypto(&self) -> &CryptoStream;
+
+    fn sent_journal(&self) -> &ArcSentJournal;
+
+    fn rcvd_journal(&self) -> &ArcRcvdJournal;
+
+    fn on_sealed(
+        &self,
+        pn: u64,
+        generation: Option<u64>,
+        pktlen: usize,
+        meta: Metadata,
+        frames: &mut dyn Iterator<Item = GuaranteedFrame>,
+    ) {
+        self.sent_journal()
+            .on_sealed(pn, generation, pktlen, meta, frames);
+    }
+}
+
+impl<T> Transmit for T
+where
+    T: Deref + Recover + UnregisterWaker + Any + Send + Sync,
+    T::Target: Transmit,
+{
+    fn epoch(&self) -> Epoch {
+        self.deref().epoch()
+    }
+
+    fn crypto(&self) -> &CryptoStream {
+        self.deref().crypto()
+    }
+
+    fn sent_journal(&self) -> &ArcSentJournal {
+        self.deref().sent_journal()
+    }
+
+    fn rcvd_journal(&self) -> &ArcRcvdJournal {
+        self.deref().rcvd_journal()
+    }
+}
+
+/// Space-specific packet header and frame assembly.
+pub trait Encapsulate: Transmit {
+    fn encapsulate(
+        &self,
+        cx: &mut Context<'_>,
+        dcid: ConnectionId,
+        pn: (u64, PacketNumber),
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        buffer: &mut PacketBuffer<'_, &mut [u8]>,
+        min_size: Option<usize>,
+        multipath: bool,
+    ) -> Poll<Result<usize, Error>>;
+}
+
+pub enum Keys {
+    Long(Arc<qtls::BidirectionalKeys>),
+    Short(OneRttSealingKey),
+}
+
+impl Keys {
+    fn tag_len(&self) -> usize {
+        match self {
+            Self::Long(keys) => keys.sealing.tag_len(),
+            Self::Short(keys) => keys.tag_len(),
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
-        use qbase::frame::MaxDataFrame;
-
-        let data = crate::tests::data();
-        let pn = data.next_pn().unwrap().0;
-        data.on_sealed(pn, 7, [Frame::MaxData(MaxDataFrame::new(123u32.into()))]);
-        let ack = AckFrame::new(
-            pn.try_into().unwrap(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        );
-        assert_eq!(data.on_acked(&ack).unwrap(), Some(7));
-        data.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
-        data.on_tick(Instant::now() + Duration::from_secs(2));
-        assert!(crate::tests::take_frames(&mut data.reliable_frames.clone()).is_empty());
-        assert!(data.on_acked(&ack).unwrap().is_none());
+    fn seal(
+        &self,
+        pn: (u64, PacketNumber),
+        pn_offset: usize,
+        bytes: &mut [u8],
+        long: bool,
+    ) -> Result<Option<u64>, Error> {
+        bytes[0] |= if long {
+            *LongSpecificBits::from_pn(&pn.1)
+        } else {
+            *ShortSpecificBits::from_pn(&pn.1)
+        };
+        if long {
+            let length = bytes.len() - pn_offset;
+            (&mut bytes[pn_offset - 2..pn_offset]).put_u16(0x4000 | length as u16);
+        }
+        let body_offset = pn_offset + pn.1.size();
+        match self {
+            Self::Long(keys) => keys
+                .sealing
+                .seal(pn.0, bytes, pn_offset, body_offset, self.tag_len())
+                .map(|()| None),
+            Self::Short(keys) => keys
+                .seal(pn.0, bytes, pn_offset, body_offset, self.tag_len())
+                .map(|(generation, _)| Some(generation)),
+        }
+        .map_err(packet_error)
     }
+}
 
-    #[tokio::test]
-    async fn retired_data_keys_stop_loss_and_timer_recovery() {
-        use qbase::frame::MaxDataFrame;
-        use qcongestion::Resend as _;
+fn packet_error(error: crate::keys::PacketError) -> Error {
+    match error {
+        crate::keys::PacketError::Connection(error) => error,
+        error => qbase::error::QuicError::with_default_fty(
+            qbase::error::ErrorKind::Internal,
+            error.to_string(),
+        )
+        .into(),
+    }
+}
 
-        let data = crate::tests::data();
-        data.reliable_frames
-            .send_frame([MaxDataFrame::new(123u32.into())]);
-        let frames = crate::tests::take_frames(&mut data.reliable_frames.clone());
-        assert_eq!(frames.len(), 1);
-        let (pn, _) = data.next_pn().unwrap();
-        data.on_sealed(pn, 0, frames);
-        data.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
-        data.keys.retire();
-        data.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
-        data.on_tick(Instant::now() + Duration::from_secs(2));
-        assert!(crate::tests::take_frames(&mut data.reliable_frames.clone()).is_empty());
+fn dump_sources(
+    cx: &mut Context<'_>,
+    buffer: &mut PacketBuffer<'_, &mut [u8]>,
+    sources: &mut [&mut dyn for<'a> Package<&'a mut [u8]>],
+    start: usize,
+) -> Poll<Result<usize, Error>> {
+    let mut result = Poll::Pending;
+    for source in sources {
+        if buffer.limits.max_size() == 0 || buffer.is_finished() {
+            break;
+        }
+        if let Poll::Ready(value) = source.poll_dump(cx, buffer) {
+            value?;
+            result = Poll::Ready(Ok(0));
+        }
+    }
+    if buffer.meta.nframes > start {
+        Poll::Ready(Ok(buffer.written()))
+    } else {
+        result
     }
 }

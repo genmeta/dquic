@@ -10,7 +10,7 @@ use qbase::{
 };
 use qtransport::{
     path::{Path, PathState},
-    space::Space,
+    space::HandshakeSpace,
 };
 
 use crate::{ArcConnPhase, ConnPhase, Paths};
@@ -111,9 +111,9 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     let ConnPhase::Initial(initial) = paths.phase().get() else {
         panic!()
     };
-    paths.phase().enter_handshake(Arc::new(Space::new(
-        Epoch::Handshake,
-        initial.initial_space.keys.clone(),
+    super::enter_handshake(&paths.phase(), Arc::new(HandshakeSpace::new(
+        Default::default(),
+        crate::common::initial_space(&initial.spaces).keys.clone(),
     )));
     assert_eq!(
         paths
@@ -121,7 +121,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
             .amplification_credit(),
         0
     );
-    paths.handshake_confirmed();
+    super::confirm_handshake(&paths);
     assert_eq!(first.selected(), Path::SELECTED);
     assert_eq!(second.selected(), Path::SUSPEND);
     let waiting = paths.add_path(pathway(30007));

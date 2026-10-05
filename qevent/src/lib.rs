@@ -6,7 +6,6 @@ pub mod telemetry;
 #[doc(hidden)]
 pub mod macro_support;
 mod macros;
-pub mod packet;
 
 use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 

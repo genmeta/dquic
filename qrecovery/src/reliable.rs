@@ -8,9 +8,9 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     error::Error,
-    frame::{EncodeSize, Frame, FrameFeature, io::SendFrame},
+    frame::{EncodeSize, FrameFeature, io::SendFrame},
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::{ConstraintBuffer, Package},
+    packet::{PacketBuffer, Package},
 };
 
 /// A deque for data space to send reliable frames.
@@ -73,29 +73,28 @@ impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut ConstraintBuffer<'_, B>,
-        frames: &mut Vec<Frame>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         let mut queue = self.frames_guard();
         if queue.is_empty() {
             self.tx_wakers.register(cx.waker());
             return Poll::Pending;
         }
-        let start = frames.len();
+        let start = buffer.meta.nframes;
         while let Some(frame) = queue.front_mut() {
-            match frame.poll_dump(cx, buffer, frames) {
+            match frame.poll_dump(cx, buffer) {
                 Poll::Ready(Ok(n)) if n > 0 => {
                     queue.pop_front();
                 }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Pending if frames.len() == start => {
+                Poll::Pending if buffer.meta.nframes == start => {
                     self.tx_wakers.register(cx.waker());
                     return Poll::Pending;
                 }
                 _ => break,
             }
         }
-        Poll::Ready(Ok(frames.len() - start))
+        Poll::Ready(Ok(buffer.meta.nframes - start))
     }
 }
 
@@ -118,7 +117,7 @@ mod tests {
     use bytes::BytesMut;
     use qbase::{
         frame::{HandshakeDoneFrame, ReliableFrame, io::SendFrame},
-        packet::{ConstraintBuffer, Constraints, GetType, OneRttHeader, Package},
+        packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
     };
 
     use super::ArcReliableFrames;
@@ -154,9 +153,9 @@ mod tests {
                 ..Default::default()
             };
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
-            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
             let result =
-                queue.poll_dump(&mut Context::from_waker(&waker), &mut buffer, &mut frames);
+                queue.poll_dump(&mut Context::from_waker(&waker), &mut buffer);
             assert_eq!(result, expected);
             queue.send_frame([HandshakeDoneFrame]);
             assert_eq!(
@@ -182,18 +181,19 @@ mod tests {
                 max_size: 1,
                 ..Default::default()
             };
-            let mut buffer = ConstraintBuffer::new(
+            let mut buffer = PacketBuffer::new(
                 &mut bytes,
                 &mut limits,
+                &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
                 0,
             );
             assert!(matches!(
-                queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+                queue.poll_dump(&mut cx, &mut buffer),
                 Poll::Ready(Ok(1))
             ));
-            assert_eq!(frames.len(), 1);
+            assert_eq!(buffer.meta.nframes, 1);
             assert_eq!(&bytes[..], &[0x1e]);
         }
         assert!(queue.frames_guard().is_empty());
@@ -215,26 +215,22 @@ mod tests {
             ..Default::default()
         };
         {
-            let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+            let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
             assert!(matches!(
-                queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+                queue.poll_dump(&mut cx, &mut buffer),
                 Poll::Ready(Ok(0))
             ));
         }
         assert!(bytes.is_empty());
         assert!(frames.is_empty());
         limits.send_quota = 1;
-        let mut buffer = ConstraintBuffer::new(&mut bytes, &mut limits, ty, 0, 0);
+        let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
         assert!(matches!(
-            queue.poll_dump(&mut cx, &mut buffer, &mut frames),
+            queue.poll_dump(&mut cx, &mut buffer),
             Poll::Ready(Ok(1))
         ));
-        assert!(
-            queue
-                .poll_dump(&mut cx, &mut buffer, &mut frames)
-                .is_pending()
-        );
-        assert_eq!(frames.len(), 1);
+        assert!(queue.poll_dump(&mut cx, &mut buffer).is_pending());
+        assert_eq!(buffer.meta.nframes, 1);
         assert_eq!(&bytes[..], &[0x1e]);
     }
 }

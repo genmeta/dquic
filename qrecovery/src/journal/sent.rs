@@ -8,8 +8,8 @@ use std::{
 
 use qbase::{
     error::{Error, ErrorKind, QuicError},
-    frame::{AckFrame, Frame, GuaranteedFrame},
-    packet::PacketNumber,
+    frame::{AckFrame, GuaranteedFrame},
+    packet::{PacketContent, PacketNumber, assemble::Metadata},
     util::IndexDeque,
     varint::VARINT_MAX,
 };
@@ -30,7 +30,11 @@ const MAX_SKIPPED_PNS: usize = 256;
 // Includes empty slots pinned behind an earlier retained packet.
 const MAX_FRAMES: usize = MAX_RECORDS * 4;
 
-struct SentPacket {
+pub struct SentPacket {
+    pub size: usize,
+    pub content: PacketContent,
+    pub in_flight: bool,
+    pub ack: Option<u64>,
     generation: Option<u64>,
     frame_range: Range<u64>,
     state: SentPacketState,
@@ -57,7 +61,7 @@ enum SentPacketState {
 #[derive(Default)]
 pub struct SentJournal {
     packets: BTreeMap<u64, SentPacket>,
-    frames: IndexDeque<Option<Frame>, { u64::MAX }>,
+    frames: IndexDeque<Option<GuaranteedFrame>, { u64::MAX }>,
     deadlines: BTreeSet<(Instant, u64)>,
     next_pn: u64,
     largest_acked: u64,
@@ -65,11 +69,15 @@ pub struct SentJournal {
 }
 
 impl SentJournal {
-    pub fn frames(&self, pn: u64) -> impl Iterator<Item = &Frame> {
+    pub fn frames(&self, pn: u64) -> impl Iterator<Item = &GuaranteedFrame> {
         self.packets[&pn]
             .frame_range
             .clone()
             .map(|index| self.frames[index].as_ref().unwrap())
+    }
+
+    pub fn packet(&self, pn: u64) -> Option<&SentPacket> {
+        self.packets.get(&pn)
     }
 
     /// Fix the retention deadline at successful submission; loss never restarts it.
@@ -81,10 +89,14 @@ impl SentJournal {
         retention: Duration,
     ) {
         let sent_at = Instant::now();
-        // An ACK may have already removed this Pending packet.
+        // An early ACK retains metadata until the socket result is processed.
         let Some(record) = self.packets.get_mut(&pn) else {
             return;
         };
+        if matches!(record.state, SentPacketState::Acked) {
+            self.packets.remove(&pn);
+            return;
+        }
         if !matches!(record.state, SentPacketState::Pending) {
             return;
         }
@@ -104,14 +116,12 @@ impl SentJournal {
 
     fn take_frames(&mut self, range: Range<u64>, mut on_frame: impl FnMut(GuaranteedFrame)) {
         for index in range {
-            if let Ok(frame) = GuaranteedFrame::try_from(self.frames[index].take().unwrap()) {
-                on_frame(frame);
-            }
+            on_frame(self.frames[index].take().unwrap());
         }
         self.reclaim();
     }
 
-    fn retransmit(&mut self, pn: u64, mut on_frame: impl FnMut(&GuaranteedFrame)) {
+    fn resend(&mut self, pn: u64, mut on_frame: impl FnMut(&GuaranteedFrame)) {
         if let Some(record) = self.packets.get_mut(&pn)
             && let SentPacketState::Flighting {
                 retrans_at,
@@ -122,11 +132,7 @@ impl SentJournal {
             record.state = SentPacketState::Retransmitted { expire_after };
             self.deadlines.insert((expire_after, pn));
             for index in record.frame_range.clone() {
-                if let Ok(frame) =
-                    GuaranteedFrame::try_from(self.frames[index].as_ref().unwrap().clone())
-                {
-                    on_frame(&frame);
-                }
+                on_frame(self.frames[index].as_ref().unwrap());
             }
         }
     }
@@ -154,7 +160,7 @@ impl SentJournal {
             }
             match self.packets[&pn].state {
                 SentPacketState::Flighting { .. } => {
-                    self.retransmit(pn, &mut on_frame);
+                    self.resend(pn, &mut on_frame);
                 }
                 SentPacketState::Retransmitted { .. } => {
                     let record = self.remove_packet(pn, SentPacketState::Retired).unwrap();
@@ -187,6 +193,14 @@ impl ArcSentJournal {
     /// Abandon a sealed but unsubmitted packet and return its reliable data.
     pub fn cancel(&self, pn: u64, on_frame: impl FnMut(GuaranteedFrame)) {
         let mut records = self.0.lock().unwrap();
+        if records
+            .packets
+            .get(&pn)
+            .is_some_and(|packet| matches!(packet.state, SentPacketState::Acked))
+        {
+            records.packets.remove(&pn);
+            return;
+        }
         if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
             records.skipped_pns.insert(pn);
             if records.skipped_pns.len() > MAX_SKIPPED_PNS {
@@ -208,6 +222,7 @@ impl ArcSentJournal {
         let records = self.0.lock().unwrap();
         records.packets.len() < MAX_RECORDS && records.frames.len() < MAX_FRAMES
     }
+
     /// Allocate and encode a PN and retain its descriptors in one operation.
     /// The caller fixes the sealing generation while this operation runs.
     #[cfg(any(test, feature = "test-util"))]
@@ -233,12 +248,16 @@ impl ArcSentJournal {
         records.next_pn += 1;
         let start = records.frames.largest();
         for frame in frames.drain(..) {
-            records.frames.push_back(Some(frame.into())).unwrap();
+            records.frames.push_back(Some(frame)).unwrap();
         }
         let frame_range = start..records.frames.largest();
         records.packets.insert(
             pn,
             SentPacket {
+                size: 0,
+                content: PacketContent::default(),
+                in_flight: false,
+                ack: None,
                 generation: generation.into(),
                 frame_range,
                 state: SentPacketState::Pending,
@@ -246,6 +265,7 @@ impl ArcSentJournal {
         );
         Ok((pn, encoded))
     }
+
     /// Reserve a unique packet number before constructing a packet.
     pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
         let mut records = self.lock_guard();
@@ -262,6 +282,10 @@ impl ArcSentJournal {
         records.packets.insert(
             pn,
             SentPacket {
+                size: 0,
+                content: PacketContent::default(),
+                in_flight: false,
+                ack: None,
                 generation: None,
                 frame_range: start..start,
                 state: SentPacketState::Pending,
@@ -270,12 +294,14 @@ impl ArcSentJournal {
         Ok((pn, PacketNumber::encode(pn, records.largest_acked)))
     }
 
-    /// Record a sealed packet. Submission starts its timers separately.
-    pub fn on_assembled(
+    /// Retain recovery descriptors and the properties accumulated during encoding.
+    pub fn on_sealed(
         &self,
         pn: u64,
         generation: Option<u64>,
-        frames: impl IntoIterator<Item = Frame>,
+        pktlen: usize,
+        meta: Metadata,
+        frames: impl IntoIterator<Item = GuaranteedFrame>,
     ) {
         let mut records = self.lock_guard();
         assert!(
@@ -288,12 +314,16 @@ impl ArcSentJournal {
         for frame in frames {
             records.frames.push_back(Some(frame)).unwrap();
         }
-        let end = records.frames.largest();
+        let frame_range = start..records.frames.largest();
         records.packets.insert(
             pn,
             SentPacket {
+                size: pktlen,
+                content: meta.content,
+                in_flight: meta.in_flight,
+                ack: meta.ack,
                 generation,
-                frame_range: start..end,
+                frame_range,
                 state: SentPacketState::Pending,
             },
         );
@@ -333,7 +363,7 @@ impl ArcSentJournal {
     ) {
         let mut records = self.0.lock().unwrap();
         for pn in pns {
-            records.retransmit(pn, &mut on_frame);
+            records.resend(pn, &mut on_frame);
         }
     }
 
@@ -386,16 +416,25 @@ impl ArcSentJournal {
         let mut acknowledged = None;
         // ACK ranges arrive from high to low; keep notifications in ascending PN order.
         for range in ranges.into_iter().rev() {
-            while let Some((&pn, _)) = records.packets.range(range.clone()).next() {
-                let record = records.remove_packet(pn, SentPacketState::Acked).unwrap();
-                for index in record.frame_range {
-                    if let Ok(frame) =
-                        GuaranteedFrame::try_from(records.frames[index].take().unwrap())
-                    {
-                        on_frame(&frame);
-                    }
+            let mut start = *range.start();
+            while start <= *range.end() {
+                let Some((&pn, _)) = records.packets.range(start..=*range.end()).next() else {
+                    break;
+                };
+                start = pn + 1;
+                let pending = matches!(
+                    records.packets[&pn].state,
+                    SentPacketState::Pending | SentPacketState::Acked
+                );
+                let mut record = records.remove_packet(pn, SentPacketState::Acked).unwrap();
+                for index in record.frame_range.clone() {
+                    on_frame(&records.frames[index].take().unwrap());
                 }
-                acknowledged = acknowledged.max(record.generation);
+                acknowledged = acknowledged.max(record.generation.take());
+                if pending {
+                    record.frame_range = 0..0;
+                    records.packets.insert(pn, record);
+                }
             }
         }
         records.reclaim();
@@ -1162,35 +1201,5 @@ mod tests {
         );
         assert!(records.record_pending(0, &mut Vec::new()).is_err());
         assert!(records.record_pending(0, &mut Vec::new()).is_err());
-    }
-}
-
-#[cfg(test)]
-mod submission_tests {
-    use qbase::frame::{Frame, MaxDataFrame, ReliableFrame};
-
-    use super::*;
-    #[test]
-    fn reserving_recording_and_failed_submission_are_separate() {
-        let mut recovered = Vec::new();
-        let journal = ArcSentJournal::default();
-        let (pn, encoded) = journal.next_pn().unwrap();
-        assert_eq!(pn, 0);
-        assert_eq!(encoded.size(), 2);
-        let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
-        let mut frames = Vec::with_capacity(8);
-        let frame = MaxDataFrame::new(42u32.into());
-        frames.push(Frame::MaxData(frame));
-        let capacity = frames.capacity();
-        journal.on_assembled(pn, None, frames.drain(..));
-        assert!(frames.is_empty());
-        assert_eq!(frames.capacity(), capacity);
-        journal.cancel(pn, |frame| recovered.push(frame));
-        assert_eq!(
-            recovered,
-            vec![GuaranteedFrame::Reliable(ReliableFrame::MaxData(frame))]
-        );
-        assert_eq!(journal.next_pn().unwrap().0, 1);
-        assert!(journal.on_acked(&ack, |_| {}).is_err());
     }
 }

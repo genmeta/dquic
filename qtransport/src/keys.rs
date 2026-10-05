@@ -354,7 +354,7 @@ impl OneRttKeys {
 }
 
 /// Remove packet protection and decode its packet number.
-pub trait OpenPacket {
+pub trait Open {
     /// PTO determines old 1-RTT key retention; fixed directional keys ignore it.
     fn open(
         &self,
@@ -365,7 +365,7 @@ pub trait OpenPacket {
 }
 
 /// Protect an assembled packet in place.
-pub trait SealPacket {
+pub trait Seal {
     /// Fixed keys return (); 1-RTT keys return the sending generation and Key Phase.
     type Output;
 
@@ -383,7 +383,7 @@ pub trait SealPacket {
     ) -> Result<Self::Output, PacketError>;
 }
 
-impl OpenPacket for qtls::DirectionalKeys {
+impl Open for qtls::DirectionalKeys {
     fn open(
         &self,
         packet: DataPacket,
@@ -400,7 +400,7 @@ impl OpenPacket for qtls::DirectionalKeys {
     }
 }
 
-impl SealPacket for qtls::DirectionalKeys {
+impl Seal for qtls::DirectionalKeys {
     type Output = ();
 
     fn tag_len(&self) -> usize {
@@ -430,7 +430,7 @@ impl SealPacket for qtls::DirectionalKeys {
     }
 }
 
-impl SealPacket for OneRttKeys {
+impl Seal for OneRttKeys {
     type Output = (u64, KeyPhaseBit);
 
     fn tag_len(&self) -> usize {
@@ -450,7 +450,7 @@ impl SealPacket for OneRttKeys {
     }
 }
 
-impl SealPacket for OneRttSealingKey {
+impl Seal for OneRttSealingKey {
     type Output = (u64, KeyPhaseBit);
 
     fn tag_len(&self) -> usize {
@@ -485,7 +485,7 @@ impl SealPacket for OneRttSealingKey {
     }
 }
 
-impl OpenPacket for OneRttKeys {
+impl Open for OneRttKeys {
     fn open(
         &self,
         packet: DataPacket,
@@ -747,15 +747,11 @@ mod tests {
         keys.allow_update();
         let records = qrecovery::journal::ArcSentJournal::default();
         let ((earlier, _), old) = keys
-            .reserve(|generation| {
-                Ok(records.record_pending(generation, &mut Vec::new()).unwrap())
-            })
+            .reserve(|generation| Ok(records.record_pending(generation, &mut Vec::new()).unwrap()))
             .unwrap();
         keys.update().unwrap();
         let ((later, _), new) = keys
-            .reserve(|generation| {
-                Ok(records.record_pending(generation, &mut Vec::new()).unwrap())
-            })
+            .reserve(|generation| Ok(records.record_pending(generation, &mut Vec::new()).unwrap()))
             .unwrap();
         assert_eq!((earlier, later), (0, 1));
         let mut bytes = [0; 22];
@@ -1046,10 +1042,7 @@ mod tests {
             .sealing
             .confidentiality_limit();
         keys.packets.lock().unwrap().sealed_count = limit - 1;
-        assert!(
-            keys.reserve::<()>(|_| Err(PacketError::Layout))
-                .is_err()
-        );
+        assert!(keys.reserve::<()>(|_| Err(PacketError::Layout)).is_err());
         keys.reserve(|_| Ok(())).unwrap();
         assert_eq!(keys.packets.lock().unwrap().sealed_count, limit);
         assert!(
