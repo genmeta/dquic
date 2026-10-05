@@ -14,7 +14,7 @@ pub use interceptor::Interceptor;
 use qtransport::terminate::ArcTerminator;
 pub use server::server_growing;
 
-use crate::{ConnPhase, Error, Paths};
+use crate::{ArcResend, ConnPhase, Error, Paths};
 
 /// Wait for a future's output or the connection's terminal error.
 pub(crate) async fn any<T>(
@@ -28,7 +28,7 @@ pub(crate) async fn any<T>(
     }
 }
 
-async fn finish(paths: &Paths, trackers: &crate::ArcTrackers, error: Error) -> Error {
+async fn finish(paths: &Paths, resender: &ArcResend, error: Error) -> Error {
     let terminator = paths.phase().terminator();
     terminator.close(error.into(), paths.closing_pto());
     let error = terminator.await;
@@ -55,9 +55,9 @@ async fn finish(paths: &Paths, trackers: &crate::ArcTrackers, error: Error) -> E
         }
     }
     {
-        let mut trackers = trackers.write().unwrap();
-        let end = trackers.largest();
-        trackers.drain_to(end).for_each(drop);
+        let mut resender = resender.write().unwrap();
+        let end = resender.largest();
+        resender.drain_to(end).for_each(drop);
     }
     for path in active_paths {
         paths.remove(&path);
