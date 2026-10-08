@@ -1,9 +1,9 @@
 pub use qtransport::packet::assemble as packet;
 pub(crate) mod task;
 use std::{
-    future::Future,
-    pin::Pin,
-    sync::{Arc, OnceLock},
+    future::poll_fn,
+    io::IoSlice,
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
@@ -11,17 +11,17 @@ use bytes::BytesMut;
 pub use packet::{Envelope, Packet};
 use qbase::{
     Epoch,
-    cid::{ArcCidCell, BorrowedCid, ConnectionId},
+    cid::{BorrowedCid, ConnectionId},
     error::{ErrorKind, QuicError},
     frame::{GuaranteedFrame, PingFrame},
-    packet::Package,
+    packet::{Package, assemble::Metadata},
     param::ParameterId,
     role::Role,
 };
-use qcongestion::{ArcCC, Transport as _};
+use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
 use qtransport::{
-    path::{AntiAmplifier, Path},
+    path::Path,
     space::{Spaces, assemble::Constraints},
 };
 pub(crate) use task::sending;
@@ -29,280 +29,258 @@ pub(crate) use task::sending;
 use crate::{ArcReliableFrames, ConnPhase, Error, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
-/// One slot per epoch in each UDP datagram. Packet properties live in the journals.
-pub type BurstPns = [[Option<u64>; 3]; MAX_BURST_PACKETS];
+/// Sealed packet metadata, indexed by datagram and epoch.
+pub type BurstPackets = [[Option<Metadata>; 3]; MAX_BURST_PACKETS];
 
-pub struct Burst<'a> {
-    cc: &'a ArcCC,
-    anti_amplifier: &'a AntiAmplifier,
-    pub(crate) datagrams: &'a mut [BytesMut],
-    pub(crate) frames: &'a mut Vec<GuaranteedFrame>,
-    pub(crate) pns: &'a mut BurstPns,
-}
-
-pub fn burst<'a>(
-    cc: &'a ArcCC,
-    anti_amplifier: &'a AntiAmplifier,
-    datagrams: &'a mut [BytesMut],
-    frames: &'a mut Vec<GuaranteedFrame>,
-    pns: &'a mut BurstPns,
-) -> Burst<'a> {
-    Burst {
-        cc,
-        anti_amplifier,
-        datagrams,
-        frames,
-        pns,
-    }
-}
-
-pub struct Collector<'a, 'path> {
-    pub(crate) burst: Burst<'a>,
+/// Owns collection and submission state until every pending packet is sent or cancelled.
+pub struct Burst<'a, 'path> {
     paths: &'path Arc<Paths>,
     path: &'path Arc<Path>,
-    dcid_cell: &'path OnceLock<ArcCidCell<ArcReliableFrames>>,
-    pub(crate) dcid: Option<BorrowedCid<'path, ArcReliableFrames>>,
-    pub(crate) spaces: Option<Spaces>,
+    pub(crate) datagrams: &'a mut [BytesMut],
+    frames: &'a mut Vec<GuaranteedFrame>,
+    pub(crate) packets: &'a mut BurstPackets,
+    pub(crate) dcid: Option<BorrowedCid<ArcReliableFrames>>,
+    spaces: Option<Spaces>,
 }
 
-impl<'a> Burst<'a> {
-    pub fn collect<'path>(
-        self,
+impl<'a, 'path> Burst<'a, 'path> {
+    pub fn new(
         paths: &'path Arc<Paths>,
         path: &'path Arc<Path>,
-        dcid_cell: &'path OnceLock<ArcCidCell<ArcReliableFrames>>,
-    ) -> Collector<'a, 'path> {
-        Collector {
-            burst: self,
+        datagrams: &'a mut [BytesMut],
+        frames: &'a mut Vec<GuaranteedFrame>,
+        packets: &'a mut BurstPackets,
+    ) -> Self {
+        Self {
             paths,
             path,
-            dcid_cell,
+            datagrams,
+            frames,
+            packets,
             dcid: None,
             spaces: None,
         }
     }
+
+    pub fn cancel(&mut self) {
+        if let Some(spaces) = &self.spaces {
+            for slots in self.packets.iter_mut() {
+                for (epoch, space) in spaces.0.enumerate() {
+                    if let Some(meta) = slots[epoch as usize].take() {
+                        space.cancel(meta.pn, &mut std::iter::empty());
+                    }
+                }
+            }
+        }
+        self.frames.clear();
+        self.dcid.take();
+    }
+
+    pub async fn batch(&mut self) -> Result<(), Error> {
+        let count = self.collect().await?;
+        self.submit(count).await?;
+        Ok(())
+    }
+
+    pub async fn submit(&mut self, count: usize) -> Result<(), Error> {
+        let spaces = self.spaces.as_ref().expect("collected spaces");
+        let path = self.path;
+        let idle = self.paths.idle();
+        let deadlines = Epoch::EPOCHS.map(|epoch| {
+            (
+                path.cc.retransmit_and_expire_time(epoch).0,
+                path.cc.pto_base(epoch) * 3,
+            )
+        });
+        let datagrams: [_; MAX_BURST_PACKETS] = std::array::from_fn(|i| {
+            IoSlice::new(self.datagrams.get(i).map_or(&[], |bytes| &bytes[..]))
+        });
+        let mut first = 0;
+        while first < count {
+            let mut sent_handshake = false;
+            let sent = poll_fn(|cx| -> Poll<std::io::Result<usize>> {
+                // ACK handling takes the same lock as submission and completion.
+                let mut cc = path.cc.lock();
+                let sent = ready!(QuicProtocol::global().poll_send(
+                    cx,
+                    path.pathway,
+                    &datagrams[first..count]
+                ))?;
+                for index in first..first + sent {
+                    let packets = Epoch::EPOCHS.map(|epoch| {
+                        let meta = self.packets[index][epoch].take()?;
+                        let space = spaces.0.get(epoch as u64).unwrap();
+                        space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
+                        Some(meta)
+                    });
+                    sent_handshake |= packets[Epoch::Handshake].is_some();
+                    path.on_sent(&mut cc, self.datagrams[index].len(), packets, &idle);
+                }
+                Poll::Ready(Ok(sent))
+            })
+            .await
+            .map_err(no_viable_path)?;
+            if sent_handshake {
+                self.paths.on_handshake_sent();
+            }
+            if sent == 0 {
+                return Err(no_viable_path("UDP submitted zero datagrams"));
+            }
+            first += sent;
+        }
+        self.dcid.take();
+        Ok(())
+    }
 }
 
-impl Future for Collector<'_, '_> {
-    type Output = Result<usize, Error>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let phase = this.paths.phase().poll_phase(cx).clone();
+impl Burst<'_, '_> {
+    pub async fn collect(&mut self) -> Result<usize, Error> {
+        poll_fn(|cx| self.poll_collect(cx)).await
+    }
+
+    pub(crate) fn poll_collect(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, Error>> {
+        let phase = self.paths.phase().poll_phase(cx).clone();
+        let path = self.path;
         let mut limits = Constraints {
-            send_quota: ready!(this.burst.cc.poll_send_quota(cx)).map_err(|error| {
-                QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
-            })?,
-            credit: ready!(this.burst.anti_amplifier.poll_credit(cx))?,
+            send_quota: ready!(path.cc.poll_send_quota(cx)).map_err(no_viable_path)?,
+            credit: ready!(path.anti_amplifier.poll_credit(cx))?,
             probe_quota: Epoch::EPOCHS.map(|epoch| {
-                if this.burst.cc.need_send_ack_eliciting(epoch) > 0 {
+                if path.cc.need_send_ack_eliciting(epoch) > 0 {
                     1200
                 } else {
                     0
                 }
             }),
             flow_ctrl: 0,
+            overhead: QuicProtocol::packet_overhead(path.pathway),
         };
-        if this.path.selected() == Path::SUSPEND {
+        if path.selected() == Path::SUSPEND {
             return Poll::Pending;
         }
-        this.spaces = Some(phase.spaces().read().unwrap().snapshot());
-        let spaces = this.spaces.as_ref().unwrap();
-        let mut flow = None;
-        let data_cid = if let ConnPhase::Mature(phase) = &phase {
-            if this.path.selected() != Path::MP_INITIAL
-                && spaces.0.get(Epoch::Data as u64).is_some()
-            {
-                if this.dcid.is_none() {
-                    this.path.send_waker.register(cx.waker());
-                    let cell = this
-                        .dcid_cell
-                        .get_or_init(|| phase.cid_registry.remote.apply_dcid());
-                    match cell.borrow_cid(this.path.send_waker.clone()) {
-                        Poll::Ready(Some(dcid)) => this.dcid = Some(dcid),
-                        Poll::Ready(None) => {
-                            return Poll::Ready(Err(QuicError::with_default_fty(
-                                ErrorKind::NoViablePath,
-                                "path CID retired",
-                            )
-                            .into()));
-                        }
-                        Poll::Pending => {}
-                    }
+        self.spaces = Some(self.paths.spaces.read().unwrap().snapshot());
+        match phase {
+            ConnPhase::Initial(phase) => self.collect_depth(
+                cx,
+                1,
+                phase.dcid(),
+                &mut limits,
+                0,
+                path.selected() == Path::MP_INITIAL && self.paths.role() == Role::Client,
+            ),
+            ConnPhase::Handshake(phase) => {
+                self.collect_depth(cx, 2, phase.dcid, &mut limits, 0, false)
+            }
+            ConnPhase::Mature(phase) => {
+                if self.dcid.is_none() {
+                    path.send_waker.register(cx.waker());
+                    let cell = path.dcid_cell.read().unwrap();
+                    let Some(cell) = cell.as_ref() else {
+                        return Poll::Pending;
+                    };
+                    self.dcid = Some(
+                        ready!(cell.borrow_cid(path.send_waker.clone()))
+                            .ok_or_else(|| no_viable_path("path CID retired"))?,
+                    );
                 }
-                let requested = if limits.send_quota >= 1200 {
-                    spaces
-                        .0
-                        .get(Epoch::Data as u64)
-                        .unwrap()
-                        .fresh_bytes_up_to(limits.send_quota)
-                } else {
-                    0
-                };
-                flow = ready!(phase.flow_ctrl.sender.poll_credit(cx, requested)).ok();
+                let requested = self
+                    .spaces
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .get(Epoch::Data as u64)
+                    .filter(|_| limits.send_quota >= 1200)
+                    .map_or(0, |data| data.fresh_bytes_up_to(limits.send_quota));
+                let mut flow = ready!(phase.flow_ctrl.sender.poll_credit(cx, requested)).ok();
                 limits.flow_ctrl = flow.as_ref().map_or(0, |credit| credit.available());
-                this.dcid.as_ref().map(|cid| **cid)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let mut count = 0;
-        let mut acked = [None; 3];
-        let overhead = QuicProtocol::packet_overhead(this.path.pathway);
-        let multipath = this.path.selected() == Path::MP_INITIAL
-            && this.paths.role() == Role::Client
-            && matches!(phase, ConnPhase::Initial(_));
-        let result = (|| {
-            for (buffer, pns) in this
-                .burst
-                .datagrams
-                .iter_mut()
-                .zip(this.burst.pns.iter_mut())
-            {
-                if limits.credit <= overhead {
-                    break;
-                }
-                let before = limits.clone();
-                limits.credit -= overhead;
-                limits.send_quota = limits.send_quota.saturating_sub(overhead);
-                limits
-                    .probe_quota
-                    .iter_mut()
-                    .for_each(|quota| *quota = quota.saturating_sub(overhead));
-                buffer.resize(1200, 0);
-                let (size, _) = phase.package(
+                let result = self.collect_depth(
                     cx,
-                    spaces,
-                    this.path,
-                    data_cid,
-                    multipath,
+                    3,
+                    **self.dcid.as_ref().unwrap(),
                     &mut limits,
-                    buffer,
-                    this.burst.frames,
-                    pns,
-                    &acked,
-                )?;
-                buffer.truncate(size);
-                if size == 0 {
-                    limits = before;
-                    break;
+                    phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
+                    false,
+                );
+                if let Some(flow) = &mut flow {
+                    flow.post_sent(flow.available() - limits.flow_ctrl);
                 }
-                let mut flight = false;
-                for epoch in Epoch::EPOCHS {
-                    if let Some(pn) = pns[epoch] {
-                        let journal = spaces
-                            .0
-                            .get(epoch as u64)
-                            .unwrap()
-                            .sent_journal()
-                            .lock_guard();
-                        let packet = journal.packet(pn).expect("sealed packet");
-                        flight |= packet.in_flight;
-                        acked[epoch] = acked[epoch].max(packet.ack);
-                        // PTO permits the first packet in this epoch, not more PINGs
-                        // just because its packet was smaller than the allowance.
-                        limits.probe_quota[epoch] = 0;
-                    }
+                if result.is_pending() {
+                    self.dcid.take();
                 }
-                if !flight {
-                    limits.send_quota = before.send_quota;
-                }
-                count += 1;
+                result
             }
-            Ok(count)
-        })();
-        if let Some(flow) = &mut flow {
-            flow.post_sent(flow.available() - limits.flow_ctrl);
         }
-        match result {
-            Err(error) => Poll::Ready(Err(error)),
-            Ok(0) => {
-                this.dcid.take();
-                Poll::Pending
+    }
+
+    fn collect_depth(
+        &mut self,
+        cx: &mut Context<'_>,
+        depth: usize,
+        dcid: ConnectionId,
+        limits: &mut Constraints,
+        exponent: u32,
+        multipath: bool,
+    ) -> Poll<Result<usize, Error>> {
+        let path = self.path;
+        let spaces = self.spaces.as_ref().unwrap();
+        let mut acks = Epoch::EPOCHS.map(|epoch| {
+            (
+                epoch,
+                spaces.0.get(epoch as u64).map(|space| {
+                    let mut ack = space.rcvd_journal().ack_package(path.cc.need_ack(epoch));
+                    if epoch == Epoch::Data {
+                        ack.exponent = exponent;
+                    }
+                    ack
+                }),
+            )
+        });
+        let mut terminator = &self.paths.terminator;
+        let mut heartbeat = path.heartbeat.clone();
+        let mut validation = path.as_ref();
+        let dcids = std::array::from_fn(|epoch| (epoch < depth).then_some(dcid));
+        let mut count = 0;
+        for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
+            // A sealed packet consumes its epoch's PTO allowance, even without a PING.
+            let mut probes = Epoch::EPOCHS
+                .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
+            let [a0, a1, a2] = &mut acks;
+            let [p0, p1, p2] = &mut probes;
+            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
+                &mut terminator,
+                a0,
+                a1,
+                a2,
+                &mut validation,
+                &mut heartbeat,
+                p0,
+                p1,
+                p2,
+            ];
+            buffer.resize(1200, 0);
+            let (size, _) = spaces.package(
+                cx,
+                dcids,
+                &mut sources,
+                buffer,
+                limits,
+                self.frames,
+                packets,
+                multipath,
+            )?;
+            buffer.truncate(size);
+            if size == 0 {
+                break;
             }
-            Ok(count) => Poll::Ready(Ok(count)),
+            count += 1;
+        }
+        if count == 0 {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(count))
         }
     }
 }
 
-impl ConnPhase {
-    /// Prepare path-local sources; the ordered spaces own all packet assembly and sealing.
-    fn package(
-        &self,
-        cx: &mut Context<'_>,
-        spaces: &Spaces,
-        path: &Path,
-        data_cid: Option<ConnectionId>,
-        multipath: bool,
-        limits: &mut Constraints,
-        buffer: &mut [u8],
-        frames: &mut Vec<GuaranteedFrame>,
-        pns: &mut [Option<u64>; 3],
-        acked: &[Option<u64>; 3],
-    ) -> Result<(usize, usize), Error> {
-        let (dcid, terminator, exponent) = match self {
-            Self::Initial(p) => (p.dcid(), &p.terminator, 0),
-            Self::Handshake(p) => (p.dcid, &p.terminator, 0),
-            Self::Mature(p) => (
-                p.dcid,
-                &p.terminator,
-                p.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-            ),
-        };
-        let mut acks = Epoch::EPOCHS.map(|epoch| {
-            spaces.0.get(epoch as u64).map(|space| {
-                let mut ack = space.rcvd_journal().ack_package(
-                    path.cc
-                        .need_ack(epoch)
-                        .filter(|(pn, _)| acked[epoch].is_none_or(|sent| *pn > sent)),
-                );
-                if epoch == Epoch::Data {
-                    ack.exponent = exponent;
-                }
-                ack
-            })
-        });
-        let [a0, a1, a2] = &mut acks;
-        let mut probes = limits
-            .probe_quota
-            .map(|quota| (quota > 0).then_some(PingFrame));
-        let [p0, p1, p2] = &mut probes;
-        let mut t0 = terminator;
-        let mut t1 = terminator;
-        let mut t2 = terminator;
-        let mut h0 = path.heartbeat.clone();
-        let mut h1 = path.heartbeat.clone();
-        let mut h2 = path.heartbeat.clone();
-        let mut validation = path;
-        let mut initial: [&mut dyn for<'b> Package<&'b mut [u8]>; 4] = [&mut t0, a0, &mut h0, p0];
-        let mut handshake: [&mut dyn for<'b> Package<&'b mut [u8]>; 4] = [&mut t1, a1, &mut h1, p1];
-        let mut data: [&mut dyn for<'b> Package<&'b mut [u8]>; 5] =
-            [&mut t2, a2, &mut validation, &mut h2, p2];
-        let mut external = [&mut initial[..], &mut handshake[..], &mut data[..]];
-        let compatible = data_cid.filter(|cid| *cid == dcid);
-        let result = spaces.package(
-            cx,
-            [Some(dcid), Some(dcid), compatible],
-            &mut external,
-            buffer,
-            limits,
-            frames,
-            pns,
-            multipath,
-        )?;
-        if result.0 == 0 && data_cid.is_some() && compatible.is_none() {
-            return spaces.package(
-                cx,
-                [None, None, data_cid],
-                &mut external,
-                buffer,
-                limits,
-                frames,
-                pns,
-                multipath,
-            );
-        }
-        Ok(result)
-    }
+fn no_viable_path(error: impl std::fmt::Display) -> Error {
+    QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()).into()
 }

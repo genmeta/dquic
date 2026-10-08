@@ -21,7 +21,9 @@ use qtransport::{
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::time::Instant;
 
-use crate::{ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, FlowController, Paths};
+use crate::{
+    ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, ConnPhase, FlowController, Paths,
+};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -34,7 +36,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
 {
     let epoch = space.epoch;
     let role = paths.role();
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let idle = paths.idle();
     let mut initial_scid = None;
     let mut parsed_frames = Vec::with_capacity(8);
@@ -81,9 +83,11 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
             let _ = path.heartbeat.on_rcvd_at(content, now);
-            if let Some(dcid) = initial_scid {
+            if let Some(dcid) = initial_scid
+                && let ConnPhase::Initial(initial) = paths.phase().get()
+            {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
-                paths.phase().set_dcid(dcid);
+                initial.set_dcid(dcid);
             }
             if role == Role::Client || epoch == Epoch::Handshake {
                 paths.select_path(&path);
@@ -147,7 +151,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     tokens: ArcTokenRegistry,
     handshake: ArcHandshake,
 ) {
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let idle = paths.idle();
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = tokio::select! {
@@ -270,12 +274,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
 /// Drive connection deadlines alongside its growing future, once per connection.
 /// Recovery runs until termination.
 pub async fn tick(paths: Arc<Paths>) {
-    let phase = paths.phase();
-    let terminator = phase.terminator();
+    let terminator = paths.terminator.clone();
     loop {
         let now = Instant::now();
-        let snapshot = phase.get();
-        for space in snapshot.spaces().read().unwrap().0.iter() {
+        for space in paths.spaces.read().unwrap().0.iter() {
             space.on_tick(now);
         }
         tokio::select! {

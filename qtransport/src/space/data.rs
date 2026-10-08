@@ -9,14 +9,15 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         OneRttHeader, PacketNumber,
-        assemble::{PacketBuffer, Package},
+        assemble::{Assemble, PacketBuffer, Package},
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::streams::DataStreams;
+use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use super::{Encapsulate, Recover, Space, dump_sources};
+use super::{Encapsulate, Recover, Space};
 use crate::{ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys};
 
 /// Application-data space and all of its retransmittable frame sources.
@@ -121,15 +122,16 @@ impl Encapsulate for DataSpace {
         if !buffer.begin(&header, pn.1, min_size) {
             return Poll::Ready(Ok(0));
         }
-        let start = buffer.meta.nframes;
-        if let Poll::Ready(Err(error)) = dump_sources(cx, buffer, external, start) {
-            return Poll::Ready(Err(error));
-        }
         let mut crypto = self.crypto.outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
-        let mut internal: [&mut dyn for<'b> Package<&'b mut [u8]>; 3] =
+        let internal: [&mut dyn Package<&mut [u8]>; 3] =
             [&mut crypto, &mut reliable, &mut streams];
-        dump_sources(cx, buffer, &mut internal, start)
+        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
+            .iter_mut()
+            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
+            .chain(internal)
+            .collect();
+        buffer.assemble(cx, &mut sources)
     }
 }

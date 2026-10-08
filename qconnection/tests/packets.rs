@@ -9,14 +9,12 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    cid::ConnectionId,
+    cid::{ConnectionId, RetireCid},
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qconnection::{
-    ArcConnPhase, ConnPhase, Error, InitialPhase, Paths, TlsContext, client_growing,
-};
+use qconnection::{ConnPhase, Error, Paths, TlsContext, client_growing};
 use qprotocol::QuicProtocol;
 use qtransport::{packet::channel, router::QuicRouter};
 use tokio::{
@@ -73,16 +71,16 @@ async fn route_exists(router: &QuicRouter, cid: ConnectionId) -> bool {
 }
 
 #[tokio::test]
-async fn dropping_old_client_route_preserves_replacement() {
+async fn retiring_old_client_route_preserves_replacement() {
     let router = Arc::new(QuicRouter::new());
     let cid = ConnectionId::random_gen(8);
     let (first_inbox, _) = channel::new();
-    let first = router.insert(cid.into(), first_inbox);
+    let first = router.insert(cid.into(), first_inbox, ());
     let (replacement_inbox, _) = channel::new();
-    let replacement = router.insert(cid.into(), replacement_inbox);
-    drop(first);
+    let replacement = router.insert(cid.into(), replacement_inbox, ());
+    first.retire_cid(cid);
     assert!(route_exists(&router, cid).await);
-    drop(replacement);
+    replacement.retire_cid(cid);
     assert!(!route_exists(&router, cid).await);
 }
 
@@ -93,40 +91,32 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let cid = ConnectionId::random_gen(8);
     let router = QuicRouter::global().clone();
     let (inbox, rcvd_pkt) = channel::new();
-    let route = router.insert(cid.into(), inbox.clone());
     let (parameters, _) = common::parameters();
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
-    let cid_registry = qconnection::CidRegistry::new(
+    let local_cids = qconnection::ArcLocalCids::new(
         Role::Client,
         ConnectionId::from_slice(b"original"),
-        qconnection::ArcLocalCids::new(
-            cid,
-            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
-        ),
-        qbase::cid::ArcRemoteCids::new(
-            parameters.get::<u64>(qbase::param::ParameterId::ActiveConnectionIdLimit),
-            reliable_frames.clone(),
-        ),
+        cid,
+        router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
-    let phase = ArcConnPhase::initial(InitialPhase::new(
+    let paths = Paths::new(
+        Role::Client,
         (cid, ConnectionId::from_slice(b"original")),
         initial_keys(false),
         reliable_frames,
-        cid_registry,
-    ));
-    let (endpoint, _) = common::endpoints(false);
-    let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
-    let paths = Paths::new(
-        Role::Client,
-        phase.clone(),
+        local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
     );
+    let phase = paths.phase();
+    let (endpoint, _) = common::endpoints(false);
+    let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
+
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
         "localhost".into(),
         parameters,
-        paths,
+        paths.clone(),
         rcvd_pkt,
         tls.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
@@ -145,7 +135,6 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     );
     growing.await;
     assert!(!route_exists(QuicRouter::global(), cid).await);
-    drop(route);
     assert!(tls.read_keys().await.is_err());
     assert!(
         initial_only,
@@ -185,33 +174,25 @@ async fn close_at_client_stage(wait: ClientWait) {
     let cid = ConnectionId::random_gen(8);
     let router = Arc::new(QuicRouter::new());
     let (inbox, rcvd_pkt) = channel::new();
-    let route = router.insert(cid.into(), inbox.clone());
     let (parameters, _) = common::parameters();
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
-    let cid_registry = qconnection::CidRegistry::new(
+    let local_cids = qconnection::ArcLocalCids::new(
         Role::Client,
         ConnectionId::from_slice(b"original"),
-        qconnection::ArcLocalCids::new(
-            cid,
-            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
-        ),
-        qbase::cid::ArcRemoteCids::new(
-            parameters.get::<u64>(qbase::param::ParameterId::ActiveConnectionIdLimit),
-            reliable_frames.clone(),
-        ),
+        cid,
+        router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
-    let phase = ArcConnPhase::initial(InitialPhase::new(
+    let paths = Paths::new(
+        Role::Client,
         (cid, ConnectionId::from_slice(b"original")),
         initial_keys(false),
         reliable_frames,
-        cid_registry,
-    ));
-    let paths = Paths::new(
-        Role::Client,
-        phase.clone(),
+        local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
     );
+    let phase = paths.phase();
+
     let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
@@ -259,8 +240,8 @@ async fn close_at_client_stage(wait: ClientWait) {
     router.receive(BytesMut::from(packet.as_ref()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let ConnPhase::Handshake(connecting) = phase.get() {
-                break connecting
+            if matches!(phase.get(), ConnPhase::Handshake(_)) {
+                break paths
                     .spaces
                     .read()
                     .unwrap()
@@ -276,11 +257,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         delivery.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    let initial = match phase.get() {
-        ConnPhase::Initial(phase) => crate::common::initial_space(&phase.spaces),
-        ConnPhase::Handshake(phase) => crate::common::initial_space(&phase.spaces),
-        ConnPhase::Mature(phase) => crate::common::initial_space(&phase.spaces),
-    };
+    let initial = crate::common::initial_space(&paths.spaces);
     assert!(initial.crypto.writer().write(&[]).await.is_err());
     assert!(matches!(
         handshake.crypto.writer().write(&[]).now_or_never(),
@@ -316,7 +293,6 @@ async fn close_at_client_stage(wait: ClientWait) {
             assert!(paths.snapshot().is_empty());
             assert!(!route_exists(&router, cid).await);
             QuicProtocol::global().unregister(socket.local_addr().unwrap());
-            drop(route);
             return;
         }
         tokio::task::yield_now().await;
@@ -342,11 +318,11 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        let ConnPhase::Mature(material) = phase.get() else {
+        let ConnPhase::Mature(_) = phase.get() else {
             panic!()
         };
         assert!(
-            material
+            paths
                 .spaces
                 .read()
                 .unwrap()
@@ -382,7 +358,6 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert!(paths.snapshot().is_empty());
     assert!(!route_exists(&router, cid).await);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
-    drop(route);
     drop(connection);
 }
 

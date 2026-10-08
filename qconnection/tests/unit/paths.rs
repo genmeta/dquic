@@ -10,10 +10,9 @@ use qbase::{
 };
 use qtransport::{
     path::{Path, PathState},
-    space::HandshakeSpace,
 };
 
-use crate::{ArcConnPhase, ConnPhase, Paths};
+use crate::Paths;
 
 fn paths(role: Role) -> Arc<Paths> {
     paths_with_timeouts(role, Duration::ZERO, Duration::ZERO)
@@ -35,14 +34,11 @@ fn paths_with_timeouts(role: Role, max: Duration, defer: Duration) -> Arc<Paths>
             tls_backend::quic::Version::V1,
         )
         .into();
-    Paths::new(
+    crate::common::initial_paths_with_timeouts(
         role,
-        ArcConnPhase::initial(crate::common::initial_phase(
-            role,
-            ConnectionId::from_slice(b"localcid"),
-            ConnectionId::from_slice(b"original"),
-            keys,
-        )),
+        ConnectionId::from_slice(b"localcid"),
+        ConnectionId::from_slice(b"original"),
+        keys,
         max,
         defer,
     )
@@ -53,7 +49,7 @@ async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
     let start = tokio::time::Instant::now();
     paths.idle().on_rcvd_at(start).unwrap().unwrap();
-    let reason = paths.phase().terminator().await;
+    let reason = paths.terminator.clone().await;
     assert!(matches!(reason, crate::Error::Quic(error)
         if error.kind() == ErrorKind::None && error.reason() == "connection idle timeout"));
     assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(8));
@@ -62,7 +58,7 @@ async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
 #[tokio::test(start_paused = true)]
 async fn cancelled_idle_timer_does_not_request_close() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
-    let notification = crate::common::observe_close(&paths.phase().terminator());
+    let notification = crate::common::observe_close(&paths.terminator.clone());
     let idle = paths.idle();
     idle.on_rcvd_at(tokio::time::Instant::now())
         .unwrap()
@@ -83,7 +79,7 @@ fn pathway(port: u16) -> Pathway {
 
 #[tokio::test]
 async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard() {
-    let paths = paths(Role::Client);
+    let (paths, mature) = super::send::mature_phase(Role::Client, Duration::ZERO);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
     assert_eq!(first.state(), PathState::ClientHandshaking);
@@ -108,27 +104,11 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     second.on_datagram_received(100);
     second.anti_amplifier.on_sent(200);
     assert_eq!(second.amplification_credit(), 100);
-    let ConnPhase::Initial(initial) = paths.phase().get() else {
-        panic!()
-    };
-    super::enter_handshake(&paths.phase(), Arc::new(HandshakeSpace::new(
-        Default::default(),
-        crate::common::initial_space(&initial.spaces).keys.clone(),
-    )));
-    assert_eq!(
-        paths
-            .add_path(pathway(30005))
-            .amplification_credit(),
-        0
-    );
+    super::enter_mature(&paths, &mature);
+    assert_eq!(paths.add_path(pathway(30005)).amplification_credit(), 0);
+    assert!(first.dcid_cell.read().unwrap().is_some());
+    assert!(second.dcid_cell.read().unwrap().is_none());
     super::confirm_handshake(&paths);
-    assert_eq!(first.selected(), Path::SELECTED);
-    assert_eq!(second.selected(), Path::SUSPEND);
-    let waiting = paths.add_path(pathway(30007));
-    assert_eq!(waiting.selected(), Path::SUSPEND);
-    paths.select_path(&waiting);
-    assert_eq!(first.selected(), Path::SELECTED);
-    paths.activate_paths(&first);
     assert!(paths.snapshot().iter().all(|path| path.selected() == 2));
     assert!(first.is_validated());
     assert!(!second.is_validated());
@@ -235,7 +215,7 @@ async fn validation_times_out_after_three_attempts_and_retirement_cancels_waitin
     assert!(paths.get(&path.pathway).is_none());
     assert!(paths.responses.lock().unwrap().is_empty());
     assert!(
-        matches!(paths.phase().terminator().await, crate::Error::Quic(error) if error.kind() == ErrorKind::NoViablePath)
+        matches!(paths.terminator.clone().await, crate::Error::Quic(error) if error.kind() == ErrorKind::NoViablePath)
     );
     let paths = self::paths(Role::Server);
     let replacement = paths.add_path(pathway(30002));
@@ -314,7 +294,7 @@ async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
 #[tokio::test(start_paused = true)]
 async fn terminator_does_not_retain_paths() {
     let paths = paths(Role::Server);
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let weak = Arc::downgrade(&paths);
     drop(paths);
     assert!(weak.upgrade().is_none());

@@ -9,13 +9,14 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         LongHeaderBuilder, PacketNumber,
-        assemble::{PacketBuffer, Package},
+        assemble::{Assemble, PacketBuffer, Package},
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;
+use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use super::{Encapsulate, Recover, Space, dump_sources};
+use super::{Encapsulate, Recover, Space};
 use crate::{Error, GuaranteedFrame, keys::ArcKeys};
 
 /// Initial headers retain their token across every packet in this space.
@@ -85,10 +86,6 @@ impl Encapsulate for InitialSpace {
         if !buffer.begin(&header, pn.1, min_size) {
             return Poll::Ready(Ok(0));
         }
-        let start = buffer.meta.nframes;
-        if let Poll::Ready(Err(error)) = dump_sources(cx, buffer, external, start) {
-            return Poll::Ready(Err(error));
-        }
         let mut outgoing = self.crypto.outgoing();
         let mut replay = self.crypto.multipath();
         let crypto: &mut dyn for<'b> Package<&'b mut [u8]> = if multipath {
@@ -96,6 +93,11 @@ impl Encapsulate for InitialSpace {
         } else {
             &mut outgoing
         };
-        dump_sources(cx, buffer, &mut [crypto], start)
+        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
+            .iter_mut()
+            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
+            .chain([crypto as &mut dyn Package<&mut [u8]>])
+            .collect();
+        buffer.assemble(cx, &mut sources)
     }
 }
