@@ -11,6 +11,36 @@ use x509_cert::Certificate;
 
 use crate::root::RootCertsSnapshot;
 
+/// Validate a fetched local staple using the same issuer/signature/status/time checks as TLS.
+/// Daily fetching is the caller's policy; no renewal deadline is returned.
+pub fn validate_ocsp(
+    response: &[u8],
+    certificates: &[CertificateDer<'_>],
+    now: UnixTime,
+) -> Result<(), rustls::Error> {
+    if response.len() > crate::TlsLimits::default().max_ocsp_bytes {
+        return Err(invalid());
+    }
+    let (leaf, intermediates) = certificates.split_first().ok_or_else(invalid)?;
+    let certificate = Certificate::from_der(leaf.as_ref()).map_err(|_| invalid())?;
+    let validity = &certificate.tbs_certificate.validity;
+    if now.as_secs() < validity.not_before.to_unix_duration().as_secs()
+        || now.as_secs() > validity.not_after.to_unix_duration().as_secs()
+    {
+        return Err(rustls::Error::InvalidCertificate(CertificateError::Expired));
+    }
+    let roots =
+        crate::RootCerts::get().map_err(|error| rustls::Error::General(error.to_string()))?;
+    verify(
+        response,
+        leaf,
+        intermediates,
+        &roots,
+        now,
+        crate::default_provider().signature_verification_algorithms,
+    )
+}
+
 pub(crate) fn verify(
     response: &[u8],
     end_entity: &CertificateDer<'_>,
@@ -25,7 +55,10 @@ pub(crate) fn verify(
 
     let certificate = Certificate::from_der(end_entity.as_ref()).map_err(|_| invalid())?;
     let verifier = ProviderVerifier { algorithms };
-    let checker = OcspChecker::new(response, now.as_secs(), verifier).map_err(|_| invalid())?;
+    let checker = OcspChecker::new(response, now.as_secs(), verifier).map_err(|error| {
+        eprintln!("OCSP diagnostic: parsing/time: {error:?}");
+        invalid()
+    })?;
 
     for issuer in intermediates.iter().chain(roots.certificates.iter()) {
         let Ok(issuer) = Certificate::from_der(issuer.as_ref()) else {
@@ -36,9 +69,13 @@ pub(crate) fn verify(
         }
         return checker
             .check_revocation(&certificate, &issuer)
-            .map_err(|_| invalid());
+            .map_err(|error| {
+                eprintln!("OCSP diagnostic: status/signature: {error:?}");
+                invalid()
+            });
     }
 
+    eprintln!("OCSP diagnostic: no valid issuer matched certificate");
     Err(invalid())
 }
 

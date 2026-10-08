@@ -66,8 +66,8 @@ struct State {
     punch_subscribers: Vec<Subscriber>,
 }
 
-/// Shared local Direct endpoint directory. Socket registration, reception and STUN tasks belong to
-/// the network owner. Register communication addresses before publishing them here, and
+/// Shared local endpoint directory, including external relay endpoints.
+/// Socket registration, reception and STUN tasks belong to the network owner. Register communication addresses before publishing them here, and
 /// finish old measurement tasks before removing or reusing a binding.
 ///
 /// Directory changes, DNS snapshots and punch replay/subscription share one lock. All sends
@@ -120,7 +120,7 @@ impl AddressBook {
         )
     }
 
-    /// Publish an outer alias, sharing its binding's interface metadata.
+    /// Publish a Direct or Mediate outer alias, sharing its binding's interface metadata.
     pub fn insert_outer(
         &self,
         socket: &UdpSocket,
@@ -143,7 +143,7 @@ impl AddressBook {
         if old == new {
             return Ok(());
         }
-        ensure_direct(new)?;
+        ensure_published(new, scope)?;
         state.ensure_absent(new)?;
         let addresses = state.addresses_mut(scope);
         addresses.remove(&old);
@@ -401,7 +401,7 @@ impl AddressBook {
         scope: Scope,
         interface: Option<&qudp::BoundDevice>,
     ) -> Result<(), AddressBookError> {
-        ensure_direct(endpoint)?;
+        ensure_published(endpoint, scope)?;
         let mut state = self.state.lock().unwrap();
         state.ensure_absent(endpoint)?;
         state.set_interface(bound, interface)?;
@@ -540,8 +540,8 @@ impl State {
     }
 }
 
-fn ensure_direct(endpoint: EndpointAddr) -> Result<(), AddressBookError> {
-    if endpoint.kind() == Kind::Direct {
+fn ensure_published(endpoint: EndpointAddr, scope: Scope) -> Result<(), AddressBookError> {
+    if endpoint.kind() == Kind::Direct || (scope == Scope::External && usable_endpoint(endpoint)) {
         Ok(())
     } else {
         Err(AddressBookError::ExpectedDirect)

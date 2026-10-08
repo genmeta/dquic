@@ -26,6 +26,7 @@ pub use keys::{
     BidirectionalKeys, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial, PacketKey,
     PacketKeys, Secrets,
 };
+pub use ocsp::validate_ocsp;
 pub use resumption::{
     ClientResumptionConfig, MemoryResumptionStore, ResumptionKey, ResumptionStore,
     ServerResumptionConfig, SessionSealKeyRing, StoredSession, TicketKeyRing,
