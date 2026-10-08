@@ -586,6 +586,7 @@ pub(crate) struct ClientVerifier {
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
     peer: PeerState,
     limits: TlsLimits,
+    require_ocsp: bool,
 }
 
 impl ClientVerifier {
@@ -605,7 +606,13 @@ impl ClientVerifier {
             algorithms,
             peer,
             limits,
+            require_ocsp: true,
         })
+    }
+
+    pub(crate) fn with_optional_ocsp(mut self) -> Self {
+        self.require_ocsp = false;
+        self
     }
 }
 
@@ -654,14 +661,16 @@ impl ClientCertVerifier for ClientVerifier {
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
         self.inner
             .verify_client_cert_with_ocsp(end_entity, intermediates, ocsp_response, now)?;
-        crate::ocsp::verify(
-            ocsp_response,
-            end_entity,
-            intermediates,
-            &self.roots,
-            now,
-            self.algorithms,
-        )?;
+        if self.require_ocsp || !ocsp_response.is_empty() {
+            crate::ocsp::verify(
+                ocsp_response,
+                end_entity,
+                intermediates,
+                &self.roots,
+                now,
+                self.algorithms,
+            )?;
+        }
         let name = certificate_name(end_entity)?;
         let authority = RemoteAuthority::new(name, &certificates)
             .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
@@ -774,6 +783,67 @@ mod client_ocsp_tests {
         )
         .unwrap();
         (verifier, peer)
+    }
+
+    #[test]
+    fn optional_client_ocsp_accepts_missing_and_valid_staples() {
+        let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
+        for staple in [&[][..], CLIENT_OCSP] {
+            let (verifier, peer) = verifier();
+            let verifier = verifier.with_optional_ocsp();
+            verifier
+                .verify_client_cert_with_ocsp(&certificate, &[], staple, UnixTime::now())
+                .unwrap();
+            assert_eq!(
+                peer.authorities
+                    .lock()
+                    .unwrap()
+                    .remote
+                    .as_ref()
+                    .unwrap()
+                    .name(),
+                "client"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_client_ocsp_still_rejects_invalid_supplied_staples() {
+        let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
+        for staple in [&[1_u8][..], SERVER_OCSP] {
+            let (verifier, peer) = verifier();
+            let verifier = verifier.with_optional_ocsp();
+            assert!(
+                verifier
+                    .verify_client_cert_with_ocsp(&certificate, &[], staple, UnixTime::now())
+                    .is_err()
+            );
+            assert!(peer.authorities.lock().unwrap().remote.is_none());
+        }
+    }
+
+    #[test]
+    fn optional_client_ocsp_preserves_certificate_signature_and_validity_checks() {
+        let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
+        let mut damaged = certificate.as_ref().to_vec();
+        *damaged.last_mut().unwrap() ^= 1;
+        let (verifier, peer) = verifier();
+        let verifier = verifier.with_optional_ocsp();
+        assert!(
+            verifier
+                .verify_client_cert(&CertificateDer::from(damaged), &[], UnixTime::now())
+                .is_err()
+        );
+        assert!(
+            verifier
+                .verify_client_cert(
+                    &certificate,
+                    &[],
+                    UnixTime::since_unix_epoch(std::time::Duration::from_secs(16_000_000_000))
+                )
+                .is_err()
+        );
+        assert!(peer.authorities.lock().unwrap().remote.is_none());
     }
 
     #[test]

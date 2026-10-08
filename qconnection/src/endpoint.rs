@@ -60,8 +60,27 @@ impl QuicEndpoint {
         scopes: impl Into<Scopes>,
         accept_cb: impl Fn(Result<Accepted, Error>) + Send + Sync + 'static,
     ) -> Result<(), Error> {
+        self.listen_with_client_ocsp(scopes, accept_cb, true)
+    }
+
+    /// Listen during a rollout where older authenticated clients do not staple OCSP.
+    /// Client certificates and any supplied OCSP remain verified. Local OCSP is required.
+    pub fn listen_with_optional_client_ocsp(
+        &self,
+        scopes: impl Into<Scopes>,
+        accept_cb: impl Fn(Result<Accepted, Error>) + Send + Sync + 'static,
+    ) -> Result<(), Error> {
+        self.listen_with_client_ocsp(scopes, accept_cb, false)
+    }
+
+    fn listen_with_client_ocsp(
+        &self,
+        scopes: impl Into<Scopes>,
+        accept_cb: impl Fn(Result<Accepted, Error>) + Send + Sync + 'static,
+        require_client_ocsp: bool,
+    ) -> Result<(), Error> {
         // Validate credentials before initializing the global incoming registry.
-        let tls_server = self.tls_server()?;
+        let tls_server = self.tls_server(require_client_ocsp)?;
         ServerRegistry::global().insert(
             self.identity.name().to_owned(),
             Server {
@@ -74,7 +93,7 @@ impl QuicEndpoint {
         Ok(())
     }
 
-    fn tls_server(&self) -> Result<qtls::TlsServer, Error> {
+    fn tls_server(&self, require_client_ocsp: bool) -> Result<qtls::TlsServer, Error> {
         let local = self.local_authority()?;
         qtls::TlsServer::new(qtls::ServerTlsConfig {
             provider: Arc::new(qtls::default_provider()),
@@ -82,6 +101,13 @@ impl QuicEndpoint {
             local,
             resumption: qtls::ServerResumptionConfig::Disabled,
             limits: Default::default(),
+        })
+        .map(|server| {
+            if require_client_ocsp {
+                server
+            } else {
+                server.with_optional_client_ocsp()
+            }
         })
         .map_err(|error| internal_error(error.to_string()))
     }
