@@ -1,11 +1,9 @@
 use std::{
-    ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
 };
 
 use crate::{
-    Close,
     error::{Error, ErrorFrameType, ErrorKind, QuicError},
     frame::{
         DataBlockedFrame, FrameType, MaxDataFrame,
@@ -106,7 +104,7 @@ impl<TX> SendControler<TX> {
 /// causing the connection-level flow control to never reach its limit,
 /// effectively rendering it useless.
 #[derive(Clone, Debug)]
-pub struct ArcSendControler<TX>(Arc<Mutex<Result<SendControler<TX>, Error>>>);
+pub struct ArcSendControler<TX>(Arc<Mutex<SendControler<TX>>>);
 
 impl<TX> ArcSendControler<TX> {
     /// Creates a new [`ArcSendControler`] with `initial_max_data`.
@@ -118,22 +116,18 @@ impl<TX> ArcSendControler<TX> {
     /// `initial_max_data` is allowed to be 0, which is reasonable when creating a
     /// connection without knowing the peer's `iniitial_max_data` setting.
     pub fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self(Arc::new(Mutex::new(Ok(SendControler::new(
+        Self(Arc::new(Mutex::new(SendControler::new(
             initial_max_data,
             broker,
-        )))))
+        ))))
     }
 
     fn increase_limit(&self, max_data: u64) {
-        let mut guard = self.0.lock().unwrap();
-        if let Ok(inner) = guard.deref_mut() {
-            inner.increase_limit(max_data);
-        }
+        self.0.lock().unwrap().increase_limit(max_data);
     }
 
     // Get some flow control credit to send fresh flow data.
     /// The returned value may be smaller than the parameter's intended value.
-    /// If some QUIC error occured, it would return the error directly.
     ///
     /// # Note
     ///
@@ -141,60 +135,36 @@ impl<TX> ArcSendControler<TX> {
     /// the traffic credit is considered to be consumed immediately.
     /// The unused flow control quota for this send will be returned to the sending controller.
     /// This design avoids the sending task’s exclusive access to the sending controller.
-    pub fn credit(&self, quota: usize) -> Result<Credit<'_, TX>, Error>
+    pub fn credit(&self, quota: usize) -> Credit<'_, TX>
     where
         TX: SendFrame<DataBlockedFrame>,
     {
-        match self.0.lock().unwrap().as_mut() {
-            Ok(inner) => {
-                let avaliable = inner.avaliable().min(quota as u64);
-                inner.commit(avaliable);
-                Ok(Credit {
-                    available: avaliable as usize,
-                    controller: self,
-                })
-            }
-            Err(e) => Err(e.clone()),
+        let mut inner = self.0.lock().unwrap();
+        let avaliable = inner.avaliable().min(quota as u64);
+        inner.commit(avaliable);
+        Credit {
+            available: avaliable as usize,
+            controller: self,
         }
     }
 
-    pub fn poll_credit(
-        &self,
-        cx: &mut Context<'_>,
-        quota: usize,
-    ) -> Poll<Result<Credit<'_, TX>, Error>>
+    pub fn poll_credit(&self, cx: &mut Context<'_>, quota: usize) -> Poll<Credit<'_, TX>>
     where
         TX: SendFrame<DataBlockedFrame>,
     {
-        if let Ok(inner) = self.0.lock().unwrap().as_ref() {
-            inner.tx_wakers.register(cx.waker());
-        }
+        self.0.lock().unwrap().tx_wakers.register(cx.waker());
         Poll::Ready(self.credit(quota))
     }
 
     pub fn unregister(&self, waker: &Waker) {
-        if let Ok(inner) = self.0.lock().unwrap().as_ref() {
-            inner.tx_wakers.unregister(waker);
-        }
+        self.0.lock().unwrap().tx_wakers.unregister(waker);
     }
 
     pub fn revise_max_data(&self, zero_rtt_rejected: bool, max_data: u64) {
-        if let Ok(inner) = self.0.lock().unwrap().deref_mut() {
-            inner.revise_max_data(zero_rtt_rejected, max_data);
-        }
-    }
-
-    /// Connection-level Stream Flow Control can only be terminated
-    /// if the connection encounters an error
-    pub fn on_error(&self, error: &Error) {
-        let mut guard = self.0.lock().unwrap();
-        if guard.deref().is_err() {
-            return;
-        }
-        if let Ok(inner) = guard.as_ref() {
-            inner.tx_wakers.wake_all();
-        }
-        *guard = Err(error.clone());
+        self.0
+            .lock()
+            .unwrap()
+            .revise_max_data(zero_rtt_rejected, max_data);
     }
 }
 
@@ -241,9 +211,11 @@ impl<TX> Drop for Credit<'_, TX> {
         if self.available == 0 {
             return;
         }
-        if let Ok(inner) = self.controller.0.lock().unwrap().as_mut() {
-            inner.return_back(self.available as u64);
-        }
+        self.controller
+            .0
+            .lock()
+            .unwrap()
+            .return_back(self.available as u64);
     }
 }
 
@@ -365,12 +337,6 @@ pub struct FlowController<TX> {
     pub recver: ArcRecvController<TX>,
 }
 
-impl<TX: Clone + Send> Close for FlowController<TX> {
-    fn close_with_error(&self, error: Error) {
-        self.on_error(&error);
-    }
-}
-
 impl<TX: Clone> FlowController<TX> {
     /// Creates a new `FlowController` with the specified initial send and receive window sizes.
     ///
@@ -394,21 +360,11 @@ impl<TX: Clone> FlowController<TX> {
 
     /// Get some flow control credit to send fresh flow data.
     /// The returned value may be smaller than the parameter's intended value.
-    /// If some QUIC error occured, it would return the error directly.
-    pub fn send_limit(&self, quota: usize) -> Result<Credit<'_, TX>, Error>
+    pub fn send_limit(&self, quota: usize) -> Credit<'_, TX>
     where
         TX: SendFrame<DataBlockedFrame>,
     {
         self.sender.credit(quota)
-    }
-
-    /// Handles the error event of the QUIC connection.
-    ///
-    /// It will makes
-    /// the connection-level stream flow controller in the sending direction become unavailable,
-    /// and the connection-level stream flow controller in the receiving direction terminate.
-    pub fn on_error(&self, error: &Error) {
-        self.sender.on_error(error);
     }
 }
 
@@ -456,13 +412,13 @@ mod tests {
         let counter = Arc::new(Counter(AtomicUsize::new(0)));
         let waker = Waker::from(counter.clone());
         let mut cx = Context::from_waker(&waker);
-        let Poll::Ready(Ok(credit)) = controller.poll_credit(&mut cx, 0) else {
+        let Poll::Ready(credit) = controller.poll_credit(&mut cx, 0) else {
             panic!("zero credit must be available");
         };
         drop(credit);
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
 
-        let Poll::Ready(Ok(mut credit)) = controller.poll_credit(&mut cx, 10) else {
+        let Poll::Ready(mut credit) = controller.poll_credit(&mut cx, 10) else {
             panic!("credit must be available");
         };
         credit.post_sent(10);
@@ -470,8 +426,8 @@ mod tests {
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
 
         // Returning actual credit must still wake another blocked sender.
-        let credit = controller.credit(90).unwrap();
-        assert_eq!(controller.credit(1).unwrap().available(), 0);
+        let credit = controller.credit(90);
+        assert_eq!(controller.credit(1).available(), 0);
         drop(credit);
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     }
@@ -481,7 +437,7 @@ mod tests {
         let broker = SendControllerBroker::default();
         let controler = ArcSendControler::new(0, broker.clone());
         controler.increase_limit(100);
-        let mut credit = controler.credit(200).unwrap();
+        let mut credit = controler.credit(200);
         assert_eq!(credit.available(), 100);
         credit.post_sent(50);
         assert_eq!(credit.available(), 50);
@@ -493,13 +449,13 @@ mod tests {
         assert_eq!(broker.lock().unwrap().len(), 1);
         assert_eq!(broker.lock().unwrap()[0].limit(), 100);
 
-        let credit = controler.credit(1).unwrap();
+        let credit = controler.credit(1);
         assert_eq!(credit.available(), 0);
         drop(credit);
 
         controler.increase_limit(200);
 
-        let mut credit = controler.credit(200).unwrap();
+        let mut credit = controler.credit(200);
         assert_eq!(credit.available(), 100);
         credit.post_sent(50);
         assert_eq!(credit.available(), 50);

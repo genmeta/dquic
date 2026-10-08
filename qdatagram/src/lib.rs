@@ -74,3 +74,61 @@ impl ReceiveFrame<(DatagramFrame, Bytes)> for DatagramFlow {
         self.incoming.recv_datagram(frame, body)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::task::{Context, Poll, Waker};
+
+    use qbase::{
+        error::AppError,
+        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    };
+
+    use super::*;
+
+    #[test]
+    fn closed_datagrams_ignore_transport_io_but_fail_application_io() {
+        let mut flow = DatagramFlow::new(64);
+        let reader = flow.reader().unwrap();
+        let writer = flow.writer(64).unwrap();
+        writer.send_bytes(Bytes::from_static(b"queued")).unwrap();
+        let error = AppError::new(42u32.into(), "closed").into();
+        flow.on_conn_error(&error);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut bytes = Vec::new();
+        let mut frames = Vec::new();
+        let mut limits = Constraints {
+            send_quota: 128,
+            credit: 128,
+            max_size: 128,
+            ..Default::default()
+        };
+        let packet_type = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        for _ in 0..2 {
+            let mut buffer =
+                PacketBuffer::new(&mut bytes, &mut limits, &mut frames, packet_type, 0, 0);
+            assert_eq!(
+                flow.outgoing.poll_dump(&mut cx, &mut buffer),
+                Poll::Ready(Ok(0))
+            );
+        }
+        assert!(bytes.is_empty());
+        assert!(frames.is_empty());
+        // Even an oversized datagram is ignored after close.
+        assert_eq!(
+            flow.recv_frame((
+                DatagramFrame::new(true, 128u32.into()),
+                Bytes::from(vec![0; 128])
+            )),
+            Ok(())
+        );
+        assert!(matches!(reader.poll_recv(&mut cx), Poll::Ready(Err(_))));
+        let failure = writer.send_bytes(Bytes::from_static(b"late")).unwrap_err();
+        assert_eq!(
+            failure.get_ref().unwrap().downcast_ref::<Error>(),
+            Some(&error)
+        );
+        assert!(flow.reader().is_err());
+        assert!(flow.writer(64).is_err());
+    }
+}

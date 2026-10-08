@@ -140,7 +140,7 @@ pub(crate) fn assemble_data(
     let mut crypto = transport.data.crypto.outgoing();
     let mut reliable = transport.data.reliable_frames.clone();
     let mut streams = transport.data.streams.clone();
-    let mut credit = transport.flow.sender.credit(streams.fresh_bytes())?;
+    let mut credit = transport.flow.sender.credit(streams.fresh_bytes());
     constraints.flow_ctrl.set(credit.available());
     for packet in sender.pending() {
         if packet.epoch() == Epoch::Data

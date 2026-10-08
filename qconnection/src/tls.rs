@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::{CloseReason, Paths};
 
 /// One reader for CRYPTO output, and one growing coroutine for handshake results.
+/// Closing discards further input and wakes output/result consumers with the close error.
+/// Packet tasks retain their keys and run until the connection's terminator completes.
 #[derive(Clone)]
 pub struct TlsContext(Arc<Mutex<Result<Tls, Error>>>);
 
@@ -171,9 +173,12 @@ impl TlsContext {
     }
 
     /// Feed contiguous CRYPTO input and publish all resulting facts without awaiting consumers.
+    /// Input received after closing is ignored; a new TLS failure is still reported.
     pub fn write_msg(&self, level: Epoch, bytes: &[u8]) -> Result<(), Error> {
         let mut guard = self.0.lock().unwrap();
-        let tls = guard.as_mut().map_err(|error| error.clone())?;
+        let Ok(tls) = guard.as_mut() else {
+            return Ok(());
+        };
         let result = tls.write(level, bytes);
         if let Err(error) = &result {
             tls.wake_all();

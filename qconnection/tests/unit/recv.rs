@@ -314,21 +314,34 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             }
         }
         assert!(matches!(poll_close(), Poll::Ready(Ok(n)) if n > 0));
+        let local = keys(true);
+        let mut ping = PingFrame;
+        if epoch == Epoch::Initial {
+            seal(header().initial(vec![]), &local.sealing, &space.sent_journal, [&mut ping])
+        } else {
+            seal(header().handshake(), &local.sealing, &space.sent_journal, [&mut ping])
+        }
+        .unwrap();
+        space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+        assert!(space.sent_journal.lock_guard().packet(0).is_some());
         let mut close = ConnectionCloseFrame::from(crate::Error::from(
             QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed"),
         ));
+        // Closing still delivers valid ACKs before processing the peer CLOSE.
+        let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
         let bytes = if epoch == Epoch::Initial {
             seal(
                 header().initial(vec![]),
                 &peer.sealing,
                 &journal,
-                [&mut close],
+                [&mut ack, &mut close],
             )
         } else {
-            seal(header().handshake(), &peer.sealing, &journal, [&mut close])
+            seal(header().handshake(), &peer.sealing, &journal, [&mut ack, &mut close])
         }
         .unwrap();
-        receive_bytes(bytes, space, &paths, &path).await;
+        receive_bytes(bytes, space.clone(), &paths, &path).await;
+        assert!(space.sent_journal.lock_guard().packet(0).is_none());
         assert_eq!(poll_close(), Poll::Ready(Ok(0)));
         assert!(futures::poll!(std::pin::pin!(terminator.clone())).is_pending());
         paths.retire_all();

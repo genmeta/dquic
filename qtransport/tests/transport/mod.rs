@@ -55,7 +55,6 @@ impl Transport {
     fn close(&self, error: Error) {
         self.data.crypto.on_error(&error);
         self.data.streams.on_error(&error);
-        self.flow.on_error(&error);
     }
 }
 
@@ -1589,14 +1588,14 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
     writer.write(Bytes::from_static(b"lost once")).unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     let dropped = emit(&mut sender);
-    let credit = ct.flow.sender.credit(usize::MAX).unwrap().available();
+    let credit = ct.flow.sender.credit(usize::MAX).available();
     ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
     let retry = emit(&mut sender);
     assert_eq!(
-        ct.flow.sender.credit(usize::MAX).unwrap().available(),
+        ct.flow.sender.credit(usize::MAX).available(),
         credit
     );
     assert_eq!(receive(&st, &sp, &retry), Some(1));
@@ -1640,7 +1639,6 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
         .flow
         .sender
         .credit(usize::MAX)
-        .unwrap()
         .available();
     original.retire();
     drop(sender);
@@ -1682,7 +1680,6 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
             .flow
             .sender
             .credit(usize::MAX)
-            .unwrap()
             .available(),
         credit
     );

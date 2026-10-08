@@ -219,8 +219,7 @@ mod send {
             let mut guard = self.0.0.lock().unwrap();
             let inner = match guard.as_mut() {
                 Ok(inner) => inner,
-                Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
-                Err(error) => return Poll::Ready(Err(error.clone())),
+                Err(_) => return Poll::Ready(Ok(0)),
             };
             inner.poll_dump(cx, buffer)
         }
@@ -243,8 +242,7 @@ mod send {
             let mut guard = self.0.0.lock().unwrap();
             let inner = match guard.as_mut() {
                 Ok(inner) => inner,
-                Err(error) if error.kind() == ErrorKind::None => return Poll::Pending,
-                Err(error) => return Poll::Ready(Err(error.clone())),
+                Err(_) => return Poll::Ready(Ok(0)),
             };
             let result = inner.poll_dump(cx, buffer);
             inner.sndbuf.resend_flighting();

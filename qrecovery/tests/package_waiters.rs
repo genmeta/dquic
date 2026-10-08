@@ -116,6 +116,75 @@ async fn stream_ready_and_blocked_polls_do_not_subscribe() {
     }
 }
 
+#[tokio::test]
+async fn closed_crypto_sources_are_empty_for_every_close_reason() {
+    use qbase::error::{AppError, ErrorKind, QuicError};
+    for error in [
+        QuicError::with_default_fty(ErrorKind::None, "retired").into(),
+        QuicError::with_default_fty(ErrorKind::Internal, "failed").into(),
+        AppError::new(42u32.into(), "application close").into(),
+    ] {
+        let stream = CryptoStream::new();
+        stream.writer().write_all(b"queued").await.unwrap();
+        stream.on_error(&error);
+        for _ in 0..2 {
+            assert_eq!(
+                poll(&mut stream.outgoing(), 128, Waker::noop()),
+                Poll::Ready(Ok(0))
+            );
+            assert_eq!(
+                poll(&mut stream.multipath(), 128, Waker::noop()),
+                Poll::Ready(Ok(0))
+            );
+        }
+        assert!(stream.writer().write_all(b"late").await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn closed_data_streams_ignore_transport_input_and_output() {
+    use bytes::Bytes;
+    use qbase::{
+        error::AppError,
+        frame::{StopSendingFrame, StreamCtlFrame, StreamFrame, io::ReceiveFrame},
+        sid::{Dir, StreamId},
+    };
+    let mut streams = DataStreams::new(
+        ArcParameters::new(
+            Role::Client,
+            Arc::new(client_parameters()),
+            Arc::new(server_parameters()),
+        ),
+        Box::new(DemandConcurrency),
+        Broker,
+        None,
+    );
+    let (_, mut writer) = streams.open_uni().await.unwrap().unwrap();
+    writer.write_all(b"queued").await.unwrap();
+    let error = AppError::new(42u32.into(), "closed").into();
+    streams.on_error(&error);
+    for _ in 0..2 {
+        assert_eq!(poll(&mut streams, 128, Waker::noop()), Poll::Ready(Ok(0)));
+    }
+    // These directions would be protocol errors on an active connection.
+    assert_eq!(
+        streams.recv_frame((
+            StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 4),
+            Bytes::from_static(b"late"),
+        )),
+        Ok(0)
+    );
+    assert_eq!(
+        streams.recv_frame(StreamCtlFrame::StopSending(StopSendingFrame::new(
+            StreamId::new(Role::Server, Dir::Uni, 0),
+            0u32.into(),
+        ))),
+        Ok(0)
+    );
+    assert!(matches!(streams.open_uni().await, Err(e) if e == error));
+    assert!(writer.write_all(b"late").await.is_err());
+}
+
 #[test]
 fn ack_registers_only_when_pending() {
     for queued in [false, true] {

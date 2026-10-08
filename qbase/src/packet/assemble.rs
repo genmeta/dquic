@@ -100,6 +100,8 @@ pub trait Package<B: BufMut + ?Sized> {
     }
 
     /// No data: register the task and return Pending. Data that cannot fit: Ready(Ok(0)).
+    /// Closed sources return Ready(Ok(0)); their stored close error belongs to application I/O.
+    /// A new error requests connection closure, not immediate termination of its sending task.
     /// Retain recovery descriptors in `buffer.frames`; return the number of all frames written.
     fn poll_dump(
         &mut self,

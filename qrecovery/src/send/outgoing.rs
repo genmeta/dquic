@@ -29,7 +29,7 @@ impl<TX: Clone> Outgoing<TX> {
     ) -> Poll<Result<usize, QuicError>> {
         match self.0.sender().as_mut() {
             Ok(sender) => sender.poll_dump(cx, buffer, tokens),
-            Err(error) => Poll::Ready(Err(error.clone())),
+            Err(_) => Poll::Ready(Ok(0)),
         }
     }
 }
@@ -340,6 +340,40 @@ mod poll_tests {
     struct Broker;
     impl<T> SendFrame<T> for Broker {
         fn send_frame<I: IntoIterator<Item = T>>(&self, _: I) {}
+    }
+
+    #[tokio::test]
+    async fn closed_stream_outgoing_is_empty_but_its_writer_keeps_the_error() {
+        let sender = ArcSender::new(StreamId::new(Role::Client, Dir::Uni, 0), 100, Broker, None);
+        let mut writer = Writer::new(sender.clone());
+        let mut outgoing = Outgoing::new(sender);
+        writer.write_all(b"queued").await.unwrap();
+        let error = qbase::error::AppError::new(42u32.into(), "closed").into();
+        outgoing.on_error(&error);
+        let mut bytes = BytesMut::new();
+        let mut frames = Vec::new();
+        let mut limits = Constraints {
+            flow_ctrl: 100,
+            send_quota: 128,
+            credit: 128,
+            max_size: 128,
+            ..Default::default()
+        };
+        let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        for _ in 0..2 {
+            let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+            assert_eq!(
+                outgoing.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
+                Poll::Ready(Ok(0))
+            );
+        }
+        assert!(bytes.is_empty());
+        assert!(frames.is_empty());
+        assert_eq!(
+            writer.poll_ready(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Err(crate::streams::error::StreamError::Connection(error))),
+        );
+        assert!(writer.write_all(b"late").await.is_err());
     }
 
     #[derive(Default)]

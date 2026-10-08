@@ -169,7 +169,6 @@ pub async fn server_growing(
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
-            terminator.register(Arc::new(flow_ctrl.clone()));
             let data = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
             resender
                 .write()

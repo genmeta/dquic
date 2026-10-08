@@ -69,7 +69,9 @@ impl DatagramIncoming {
     /// If the application is waiting for the data to be read, the task will be woken up when the datagram is received.
     pub fn recv_datagram(&self, frame: DatagramFrame, data: bytes::Bytes) -> Result<(), Error> {
         let mut guard = self.0.lock().unwrap();
-        let reader = guard.as_mut().map_err(|e| e.clone())?;
+        let Ok(reader) = guard.as_mut() else {
+            return Ok(());
+        };
         if (frame.encoding_size() + data.len()) > reader.local_max_size {
             tracing::error!("   Cause by: DatagramIncoming::recv_datagram");
             return Err(QuicError::new(
@@ -298,6 +300,14 @@ mod tests {
         )
         .into();
         incoming.on_conn_error(&error);
+
+        assert_eq!(
+            incoming.recv_datagram(
+                DatagramFrame::new(true, VarInt::from_u32(4)),
+                Bytes::from_static(b"late"),
+            ),
+            Ok(())
+        );
 
         let new_reader = incoming.new_reader();
         assert!(new_reader.is_err());

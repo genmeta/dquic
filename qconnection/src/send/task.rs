@@ -30,6 +30,8 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
                 }
                 break;
             } else if !terminator.close(error.into(), paths.closing_pto()) {
+                // Closed components are empty sources. A repeated error here means
+                // packet assembly itself still fails; wait without spinning.
                 tokio::select! {
                     _ = terminator.clone() => {},
                     _ = path.failed() => {},
