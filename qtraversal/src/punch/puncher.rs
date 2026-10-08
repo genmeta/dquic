@@ -254,6 +254,7 @@ where
 
     pub fn recv_punch_hello(&self, pathway: Pathway, link: Link, frame: PunchHelloFrame) {
         let id = frame.punch_id().flip();
+        tracing::trace!(target: "punch", %id, %pathway, %link, "PunchHello received");
         if let Some(entry) = self.0.transaction.get(&id) {
             let tx = entry.value().1.clone();
             drop(entry);
@@ -282,6 +283,7 @@ where
     }
 
     pub fn recv_punch_done(&self, link: Link, frame: PunchDoneFrame) {
+        tracing::trace!(target: "punch", id = %frame.punch_id().flip(), %link, "PunchDone received");
         if let Some(entry) = self.0.transaction.get(&frame.punch_id().flip()) {
             let tx = entry.value().1.clone();
             drop(entry);
@@ -482,7 +484,8 @@ where
         let id = (&local.frame, &remote).punch_id();
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
-        tracing::debug!(target: "punch", %id, ?local_nat, ?remote_nat, "active punch strategy");
+        tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
+            remote = %*remote, ?local_nat, ?remote_nat, "active punch strategy");
         let dst = *remote;
         let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
@@ -612,7 +615,8 @@ where
         let id = PunchId::new(local.frame.seq_num(), remote.local_seq());
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
-        tracing::debug!(target: "punch", %id, ?local_nat, ?remote_nat, "passive punch strategy");
+        tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
+            remote = %remote.address(), ?local_nat, ?remote_nat, "passive punch strategy");
         let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
         })?;

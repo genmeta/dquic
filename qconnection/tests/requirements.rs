@@ -87,7 +87,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
     paths.add_path(pathway);
 
-
     let data = [hello];
     let mut crypto = (
         CryptoFrame::new(0u32.into(), (data[0].len() as u32).into()),

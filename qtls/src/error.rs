@@ -57,10 +57,7 @@ pub enum CryptoError {
 #[derive(Debug, Error)]
 pub enum PeerTlsError {
     #[error("received CRYPTO data at {actual:?}; expected {expected:?}")]
-    WrongCryptoLevel {
-        expected: Epoch,
-        actual: Epoch,
-    },
+    WrongCryptoLevel { expected: Epoch, actual: Epoch },
     #[error("TLS peer exceeded {resource} limit of {limit} bytes")]
     ResourceLimit {
         resource: &'static str,

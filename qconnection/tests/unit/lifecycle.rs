@@ -1,8 +1,6 @@
 use std::{future::pending, time::Duration};
 
-use qbase::{
-    error::{ErrorKind, QuicError},
-};
+use qbase::error::{ErrorKind, QuicError};
 
 use crate::{CloseReason, lifecycle::any};
 
@@ -62,10 +60,13 @@ async fn any_termination_interrupts_a_pending_future() {
     let closed = qtransport::terminate::ArcTerminator::no_error();
     let waiting = tokio::spawn(any(pending::<()>(), closed.clone()));
     tokio::task::yield_now().await;
-    closed.close(CloseReason::Internal(QuicError::with_default_fty(
-        ErrorKind::ConnectionRefused,
-        "connection closed while waiting",
-    )), Duration::from_secs(1));
+    closed.close(
+        CloseReason::Internal(QuicError::with_default_fty(
+            ErrorKind::ConnectionRefused,
+            "connection closed while waiting",
+        )),
+        Duration::from_secs(1),
+    );
 
     assert!(!waiting.is_finished());
     tokio::time::advance(Duration::from_secs(3)).await;

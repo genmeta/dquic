@@ -179,7 +179,17 @@ impl Spaces {
                 0,
                 tag,
             );
-            constrained.scope(1200usize.saturating_sub(prefix));
+            // RFC 9000 Sections 8.2.1 and 8.2.2 require datagrams containing
+            // PATH_CHALLENGE or PATH_RESPONSE to be at least 1200 bytes, except
+            // when the path's anti-amplification limit prevents expansion.
+            // Congestion limits are enforced separately by PacketBuffer (RFC 9000
+            // Section 8.2.2 and RFC 9002 Section 7, including its PTO/recovery exceptions).
+            let validation_min_size = 1200usize.saturating_sub(prefix);
+            constrained.scope(if constrained.limits.credit() >= validation_min_size {
+                validation_min_size
+            } else {
+                0
+            });
             let result = space.encapsulate(
                 cx,
                 dcid,

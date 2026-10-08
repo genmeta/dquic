@@ -24,11 +24,13 @@ pub fn reserve(
 > {
     let mut record_error = None;
     keys.reserve(|generation| {
-        journal.record_pending(generation, records).map_err(|error| {
-            record_error = Some(error);
-            // Return the journal error without counting an AEAD use.
-            qtransport::keys::PacketError::Layout
-        })
+        journal
+            .record_pending(generation, records)
+            .map_err(|error| {
+                record_error = Some(error);
+                // Return the journal error without counting an AEAD use.
+                qtransport::keys::PacketError::Layout
+            })
     })
     .map_err(|error| match record_error {
         Some(error) => error.into(),

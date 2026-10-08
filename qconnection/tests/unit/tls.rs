@@ -62,10 +62,7 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
         .map(|space| tokio::spawn(read_tls_to_space(client.clone(), space, paths.clone())))
         .collect::<Vec<_>>();
     tokio::time::timeout(Duration::from_secs(4), async {
-        assert!(matches!(
-            closed.await,
-            crate::Error::Quic(_)
-        ));
+        assert!(matches!(closed.await, crate::Error::Quic(_)));
         for write in writes {
             write.await.unwrap();
         }
