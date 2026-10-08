@@ -553,7 +553,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 link.into(),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-                initial.trackers.clone(),
+                initial.resender.clone(),
             ));
             paths
                 .entries

@@ -43,7 +43,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let pathway = Pathway::new(
@@ -79,7 +79,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     phase.enter_handshake(Arc::new(Space::new(
         Epoch::Handshake,
@@ -134,7 +134,7 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
     );
     let space = initial.initial_space.clone();
     space.crypto.writer().write_all(b"hello").await.unwrap();
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     let paths = Paths::new(Role::Client, phase, Duration::ZERO, Duration::ZERO);
     // No registered socket: collect succeeds, but submitting the batch fails.
@@ -198,7 +198,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         .write_all(b"handshake")
         .await
         .unwrap();
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     phase.enter_handshake(handshake);
     let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
@@ -301,7 +301,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     ),
                     paths.handshake.clone(),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                    initial.trackers.clone(),
+                    initial.resender.clone(),
                 ));
                 path.validate();
                 match selected {
@@ -393,7 +393,7 @@ async fn mixed_packets_consume_shared_budget_once_including_envelope() {
             .write_all(b"handshake")
             .await
             .unwrap();
-        let trackers = initial.trackers.clone();
+        let trackers = initial.resender.clone();
         let paths = Paths::new(
             Role::Client,
             crate::ArcConnPhase::initial(initial),
@@ -625,7 +625,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
         ConnectionId::from_slice(b"original"),
         keys(true),
     );
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
     let pathway = Pathway::new(
@@ -708,7 +708,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let phase = crate::ArcConnPhase::initial(initial);
     let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let make_path = |port| {
@@ -813,7 +813,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         );
         let terminator = initial.terminator.clone();
         let mut space = initial.initial_space.clone();
-        let trackers = initial.trackers.clone();
+        let trackers = initial.resender.clone();
         let phase = crate::ArcConnPhase::initial(initial);
         if epoch == Epoch::Handshake {
             let handshake = Arc::new(Space::new(
@@ -1025,7 +1025,7 @@ fn mature_server_phase() -> (InitialPhase, Arc<MaturePhase>) {
         dcid: ConnectionId::from_slice(b"client00"),
         parameters,
         puncher,
-        trackers: initial.trackers.clone(),
+        resender: initial.resender.clone(),
         terminator: initial.terminator.clone(),
     });
     (initial, mature)
@@ -1156,7 +1156,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        mature.trackers.clone(),
+        mature.resender.clone(),
     ));
     dcid_cell
         .set(crate::common::dcid(dcid))
@@ -1256,7 +1256,7 @@ async fn selected_sender_requests_its_cell_before_other_paths_are_released() {
                 ),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                mature.trackers.clone(),
+                mature.resender.clone(),
             ));
             paths
                 .entries
@@ -1380,7 +1380,7 @@ async fn pending_path_cid_allows_long_headers_and_later_supplies_one_rtt_header(
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        mature.trackers.clone(),
+        mature.resender.clone(),
     ));
     assert!(dcid_cell.get().is_none());
     path.validate();
@@ -1527,7 +1527,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        mature.trackers.clone(),
+        mature.resender.clone(),
     ));
     dcid_cell
         .set(crate::common::dcid(mature.dcid))
@@ -1608,7 +1608,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        mature.trackers.clone(),
+        mature.resender.clone(),
     ));
     waiting_path.validate();
     mature
@@ -1700,7 +1700,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
             ),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            mature.trackers.clone(),
+            mature.resender.clone(),
         ));
         path.validate();
         path.decide(true);
@@ -1768,7 +1768,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         keys(true),
     );
     let space = initial.initial_space.clone();
-    let trackers = initial.trackers.clone();
+    let trackers = initial.resender.clone();
     let paths = Paths::new(
         Role::Server,
         crate::ArcConnPhase::initial(initial),
@@ -1833,7 +1833,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     assert!(!super::take_heartbeat(&path));
     path.retire();
     sender.await.unwrap();
-    QuicProtocol::global().unregister(local, &socket);
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1872,8 +1872,8 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
     for role in [Role::Client, Role::Server] {
         for retire_before_handshake in [false, true] {
             let (initial, mature) = mature_server_phase();
-            let trackers = initial.trackers.clone();
-            assert!(Arc::ptr_eq(&trackers, &mature.trackers));
+            let trackers = initial.resender.clone();
+            assert!(Arc::ptr_eq(&trackers, &mature.resender));
             let phase = crate::ArcConnPhase::initial(initial);
             let paths = Paths::new(role, phase.clone(), Duration::ZERO, Duration::ZERO);
             let epochs = || {
@@ -1902,7 +1902,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
             let ConnPhase::Handshake(handshake) = phase.get() else {
                 panic!("expected Handshake");
             };
-            assert!(Arc::ptr_eq(&trackers, &handshake.trackers));
+            assert!(Arc::ptr_eq(&trackers, &handshake.resender));
             if retire_before_handshake {
                 assert_eq!(epochs(), [1]);
             } else {
