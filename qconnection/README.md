@@ -80,17 +80,19 @@ DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignore
 
 ### 底层接线
 
-客户端调用者准备 TLS context、本地参数、Initial keys、`ArcConnIdle` 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
+客户端调用者准备 TLS context、本地参数、Initial keys 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
+
+`Paths::new(role, phase, max_idle_timeout, defer_idle_timeout)` 创建连接共享的 `ArcIdleTimer`，并启动等待 `timeout().await` 的任务；超时通过 `close_reason` 进入已有关闭流程。各空间成功收发的所有包都通知该计时器，包括 ACK-only 和 PING。每条路径单独持有 `ArcHeartbeat`，接收真实的 `PacketContent`，并作为 `Package` 参与 Initial、Handshake 和 Data 组包；只有有效载荷更新其活动计时。参数协商后更新连接超时和已有路径的心跳间隔，新路径使用更新后的配置。关闭连接时取消空闲计时和心跳，路径退休时取消该路径的心跳。
 
 客户端和服务端都在创建连接任务时，将成长协程与 `recv::tick(paths.clone())` 放进同一个 `tokio::join!`。直接使用底层成长协程的调用者也需要这样接线；取消连接任务会同时取消 tick。
 
 ```rust,ignore
 let phase = ArcConnPhase::initial(InitialPhase::new(scid, original_dcid, initial_keys));
-let paths = qconnection::Paths::new(Role::Client, phase, idle);
+let paths = qconnection::Paths::new(Role::Client, phase, max_idle_timeout, defer_idle_timeout);
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
 let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
 
-paths.add_path(pathway)?;
+paths.add_path(pathway);
 let tick = qconnection::recv::tick(paths.clone());
 let growing = qconnection::client_growing(
     server_name,

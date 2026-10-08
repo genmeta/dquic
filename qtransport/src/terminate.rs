@@ -1,0 +1,374 @@
+//! Closing and Draining state for a connection.
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use qbase::{
+    Close,
+    error::{AppError, ErrorKind, QuicError},
+    frame::{ConnectionCloseFrame, Frame},
+    net::tx::ArcSendWakers,
+    packet::{ConstraintBuffer, Package, Type},
+    util::Wakers,
+};
+use tokio::time::Instant;
+
+use crate::Error;
+
+/// The source of a connection's first close request. qconnection drives its lifecycle.
+#[derive(Debug, Clone)]
+pub enum CloseReason {
+    App(AppError),
+    Peer(ConnectionCloseFrame),
+    Internal(QuicError),
+}
+
+impl From<Error> for CloseReason {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::App(error) => Self::App(error),
+            Error::Quic(error) => Self::Internal(error),
+        }
+    }
+}
+
+/// Owns the monotonic Normal -> Closing/Draining -> Terminated state machine.
+enum Terminator {
+    NoError {
+        tx_wakers: ArcSendWakers,
+        components: Vec<Arc<dyn qbase::Close>>,
+        waiters: Arc<Wakers>,
+    },
+    Closing {
+        waiters: Arc<Wakers>,
+        tx_wakers: ArcSendWakers,
+        sync_ccf: bool,
+        sent_ccf: bool,
+        frame: ConnectionCloseFrame,
+        rcvd_packets: u8,
+        last_sent: Instant,
+        interval: Duration,
+    },
+    Draining {
+        waiters: Arc<Wakers>,
+        frame: ConnectionCloseFrame,
+        sent_ccf: bool,
+    },
+    Terminated(Error),
+}
+
+impl Terminator {
+    fn no_error() -> Self {
+        Self::NoError {
+            tx_wakers: ArcSendWakers::default(),
+            components: Vec::new(),
+            waiters: Arc::new(Wakers::new()),
+        }
+    }
+
+    fn close(&mut self, reason: &CloseReason, pto: Duration) -> Option<Duration> {
+        let now = Instant::now();
+        match self {
+            Self::NoError {
+                tx_wakers,
+                components,
+                waiters,
+            } => {
+                let error: Error = match reason {
+                    CloseReason::App(error) => error.clone().into(),
+                    CloseReason::Peer(frame) => frame.clone().into(),
+                    CloseReason::Internal(error) => error.clone().into(),
+                };
+                for component in components.iter() {
+                    component.close_with_error(error.clone());
+                }
+                tx_wakers.wake_all();
+                match reason {
+                    CloseReason::Peer(frame) => {
+                        *self = Self::Draining {
+                            waiters: waiters.clone(),
+                            frame: frame.clone(),
+                            sent_ccf: false,
+                        }
+                    }
+                    CloseReason::App(error) => {
+                        *self = Self::Closing {
+                            waiters: waiters.clone(),
+                            tx_wakers: tx_wakers.clone(),
+                            sync_ccf: true,
+                            sent_ccf: false,
+                            frame: ConnectionCloseFrame::from(Error::from(error.clone())),
+                            rcvd_packets: 0,
+                            last_sent: now,
+                            interval: pto,
+                        }
+                    }
+                    CloseReason::Internal(error) => {
+                        *self = Self::Closing {
+                            waiters: waiters.clone(),
+                            tx_wakers: tx_wakers.clone(),
+                            sync_ccf: true,
+                            sent_ccf: false,
+                            frame: ConnectionCloseFrame::from(Error::from(error.clone())),
+                            rcvd_packets: 0,
+                            last_sent: now,
+                            interval: pto,
+                        }
+                    }
+                };
+                Some(pto)
+            }
+            _ => None,
+        }
+    }
+
+    fn poll_dump<B: bytes::BufMut + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        let mut dump_ccf = |frame: &ConnectionCloseFrame, buffer: &mut ConstraintBuffer<'_, B>| {
+            let mut frame = match (buffer.packet_type, frame) {
+                (Type::Long(_), ConnectionCloseFrame::App(frame)) => {
+                    ConnectionCloseFrame::Quic(frame.conceal())
+                }
+                (_, frame) => frame.clone(),
+            };
+            frame.poll_dump(cx, buffer, frames)
+        };
+        match self {
+            Self::NoError { tx_wakers, .. } => {
+                tx_wakers.register(cx.waker());
+                Poll::Pending
+            }
+            Self::Closing {
+                tx_wakers: send_wakers,
+                sync_ccf,
+                sent_ccf,
+                frame,
+                ..
+            } => {
+                if *sync_ccf {
+                    let result = dump_ccf(frame, buffer);
+                    if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                        *sync_ccf = false;
+                        *sent_ccf = true;
+                    } else {
+                        buffer.limits.set_max_size(0);
+                    }
+                    result
+                } else {
+                    buffer.limits.set_max_size(0);
+                    send_wakers.register(cx.waker());
+                    Poll::Pending
+                }
+            }
+            Self::Draining {
+                frame, sent_ccf, ..
+            } => {
+                if !*sent_ccf {
+                    let result = dump_ccf(frame, buffer);
+                    if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                        *sent_ccf = true;
+                    } else {
+                        buffer.limits.set_max_size(0);
+                    }
+                    result
+                } else {
+                    buffer.limits.set_max_size(0);
+                    Poll::Ready(Ok(0))
+                }
+            }
+            Self::Terminated(error) => Poll::Ready(Err(error.clone())),
+        }
+    }
+
+    fn on_rcvd_packet(&mut self, now: Instant) {
+        match self {
+            Self::Closing {
+                tx_wakers,
+                sync_ccf,
+                rcvd_packets,
+                last_sent,
+                interval,
+                ..
+            } => {
+                *rcvd_packets = rcvd_packets.saturating_add(1);
+                let time_due = now.saturating_duration_since(*last_sent) >= *interval;
+                if !*sync_ccf && (*rcvd_packets >= 5 || time_due) {
+                    *sync_ccf = true;
+                    *rcvd_packets = 0;
+                    *last_sent = now;
+                    tx_wakers.wake_all();
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn recv_conn_close_frame(&mut self, frame: ConnectionCloseFrame) {
+        match self {
+            Terminator::Closing {
+                waiters,
+                tx_wakers: send_wakers,
+                sent_ccf,
+                ..
+            } => {
+                if !*sent_ccf {
+                    send_wakers.wake_all();
+                }
+                *self = Self::Draining {
+                    waiters: waiters.clone(),
+                    frame,
+                    sent_ccf: *sent_ccf,
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn terminate(&mut self) {
+        match self {
+            Self::NoError { tx_wakers, .. } => {
+                tx_wakers.wake_all();
+                *self = Self::Terminated(
+                    QuicError::with_default_fty(ErrorKind::None, "connection terminated").into(),
+                );
+            }
+            Self::Closing {
+                tx_wakers, frame, ..
+            } => {
+                tx_wakers.wake_all();
+                *self = Self::Terminated(frame.clone().into());
+            }
+            Self::Draining { frame, .. } => {
+                *self = Self::Terminated(frame.clone().into());
+            }
+            _ => (),
+        }
+    }
+
+    fn poll_terminate(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+        match self {
+            Self::Terminated(error) => Poll::Ready(error.clone()),
+            Self::NoError { waiters, .. }
+            | Self::Closing { waiters, .. }
+            | Self::Draining { waiters, .. } => {
+                waiters.add(cx.waker());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ArcTerminator(Arc<Mutex<Terminator>>);
+
+impl Default for ArcTerminator {
+    fn default() -> Self {
+        Self::no_error()
+    }
+}
+
+impl ArcTerminator {
+    pub fn no_error() -> Self {
+        Self(Arc::new(Mutex::new(Terminator::no_error())))
+    }
+
+    /// Register before publishing a component. Late registrations use the current state error.
+    /// Close callbacks must not synchronously reenter this terminator.
+    pub fn register(&self, component: Arc<dyn Close>) {
+        let error = {
+            let mut state = self.0.lock().unwrap();
+            match &mut *state {
+                Terminator::NoError { components, .. } => {
+                    components.push(component);
+                    return;
+                }
+                Terminator::Closing { frame, .. } | Terminator::Draining { frame, .. } => {
+                    frame.clone().into()
+                }
+                Terminator::Terminated(error) => error.clone(),
+            }
+        };
+        component.close_with_error(error);
+    }
+
+    /// Request closing once and terminate after three PTOs on the Tokio runtime.
+    pub fn close(&self, reason: CloseReason, pto: Duration) {
+        if let Some(pto) = self.0.lock().unwrap().close(&reason, pto) {
+            let deadline = Instant::now() + 3 * pto;
+            let terminator = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                terminator.terminate();
+            });
+        }
+    }
+
+    /// Count one authenticated packet. Only Closing schedules another CLOSE response.
+    pub fn on_rcvd_packet(&self, now: Instant) {
+        self.0.lock().unwrap().on_rcvd_packet(now);
+    }
+
+    /// A peer CLOSE enters Draining without extending an existing closing deadline.
+    pub fn recv_conn_close_frame(&self, frame: ConnectionCloseFrame, pto: Duration) {
+        self.close(CloseReason::Peer(frame.clone()), pto);
+        self.0.lock().unwrap().recv_conn_close_frame(frame);
+    }
+
+    pub fn terminate(&self) {
+        let (error, components, waiters) = {
+            let mut state = self.0.lock().unwrap();
+            let (components, waiters) = match &mut *state {
+                Terminator::NoError {
+                    components,
+                    waiters,
+                    ..
+                } => (std::mem::take(components), waiters.clone()),
+                Terminator::Closing { waiters, .. } | Terminator::Draining { waiters, .. } => {
+                    (Vec::new(), waiters.clone())
+                }
+                Terminator::Terminated(_) => return,
+            };
+            state.terminate();
+            let Terminator::Terminated(error) = &*state else {
+                unreachable!()
+            };
+            (error.clone(), components, waiters)
+        };
+        waiters.wake_all();
+        for component in components {
+            component.close_with_error(error.clone());
+        }
+    }
+
+    /// Wait for the terminal error without consuming it.
+    pub async fn wait(&self) -> Error {
+        self.clone().await
+    }
+}
+
+impl Future for ArcTerminator {
+    type Output = Error;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.lock().unwrap().poll_terminate(cx)
+    }
+}
+
+impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        self.0.lock().unwrap().poll_dump(cx, buffer, frames)
+    }
+}

@@ -16,11 +16,10 @@ use qbase::{
     },
     packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
     role::Role,
-    time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, CloseReason, ConnPhase, InitialPhase, Paths, Scope, ServerRegistry, TlsContext,
+    ArcConnPhase, ConnPhase, Error, InitialPhase, Paths, Scope, ServerRegistry, TlsContext,
     server_growing,
 };
 use qprotocol::{QuicProtocol, UdpSocket};
@@ -85,12 +84,8 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         reliable_frames,
         cid_registry,
     ));
-    let paths = Paths::new(
-        Role::Server,
-        phase.clone(),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
-    );
-    paths.add_path(pathway).unwrap();
+    let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
+    paths.add_path(pathway);
 
 
     let data = [hello];
@@ -136,7 +131,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         .expect("growing must reject a CID different from the Initial header");
     assert_eq!(error.kind(), ErrorKind::TransportParameter);
     assert!(
-        matches!(growing.await.unwrap(), CloseReason::Internal(error) if error.kind() == ErrorKind::TransportParameter)
+        matches!(growing.await.unwrap(), Error::Quic(error) if error.kind() == ErrorKind::TransportParameter)
     );
     assert!(matches!(phase.get(), ConnPhase::Initial(_)));
     assert!(paths.snapshot().is_empty());

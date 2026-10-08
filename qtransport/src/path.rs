@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU8, AtomicU16, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -14,7 +14,7 @@ use qbase::{
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
     packet::{ConstraintBuffer, Package},
-    time::PathIdleTimer,
+    time::heartbeat::ArcHeartbeat,
     util::IndexDeque,
 };
 use qcongestion::{Algorithm, ArcCC, HandshakeStatus, PathStatus, Resend, Transport as _};
@@ -22,9 +22,6 @@ use qcongestion::{Algorithm, ArcCC, HandshakeStatus, PathStatus, Resend, Transpo
 use crate::Error;
 mod anti_amplifier;
 pub use anti_amplifier::AntiAmplifier;
-
-#[cfg(test)]
-use crate::send::{constraints::Constraints, write::PendingPacket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
@@ -49,7 +46,7 @@ pub struct Path {
     pub send_waker: ArcSendWakers,
     responses: Mutex<VecDeque<PathResponseFrame>>,
     pub anti_amplifier: Arc<AntiAmplifier>,
-    pub activity: PathIdleTimer,
+    pub heartbeat: ArcHeartbeat,
 }
 
 impl Path {
@@ -62,7 +59,7 @@ impl Path {
     pub fn new(
         pathway: Pathway,
         handshake: Arc<HandshakeStatus>,
-        activity: PathIdleTimer,
+        heartbeat: ArcHeartbeat,
         trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
@@ -83,7 +80,7 @@ impl Path {
             send_waker,
             responses: Mutex::new(VecDeque::new()),
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
-            activity,
+            heartbeat,
         }
     }
 
@@ -179,6 +176,7 @@ impl Path {
 
     pub fn retire(&self) {
         self.anti_amplifier.retire();
+        self.heartbeat.stop();
         self.clear_challenge();
         self.responses.lock().unwrap().clear();
         self.send_waker.wake_all();
@@ -186,16 +184,6 @@ impl Path {
 
     pub fn amplification_credit(&self) -> usize {
         self.anti_amplifier.balance()
-    }
-
-    #[cfg(test)]
-    pub fn constraints(&self, capacity: usize, probe: bool) -> Constraints {
-        Constraints {
-            flow_ctrl: std::cell::Cell::new(usize::MAX),
-            capacity,
-            congestion: self.cc.send_quota().max(if probe { 1200 } else { 0 }),
-            anti_amplification: self.amplification_credit(),
-        }
     }
 
     pub fn challenge(&self) -> Option<PathChallengeFrame> {
@@ -225,23 +213,6 @@ impl Path {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Confirm only path validation frames whose datagram reached the socket.
-    #[cfg(test)]
-    pub fn on_packet_sent(&self, packet: &PendingPacket) {
-        if let Some(frame) = packet.response {
-            let mut responses = self.responses.lock().unwrap();
-            if responses.front() == Some(&frame) {
-                responses.pop_front();
-            }
-        }
-        if let Some(sent) = packet.challenge
-            && let Some((challenge, submitted)) = self.challenge.lock().unwrap().as_mut()
-            && *challenge == sent
-        {
-            *submitted = true;
         }
     }
 }
@@ -300,20 +271,15 @@ impl<B: BufMut + ?Sized> Package<B> for &Path {
             result
         }
     }
-
-    fn cancel(&mut self, waker: &Waker) {
-        self.send_waker.cancel(waker);
-    }
 }
 
 #[cfg(test)]
 mod package_tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::{sync::atomic::AtomicUsize, task::Waker};
 
     use qbase::{
         net::addr::EndpointAddr,
         packet::{Constraints, GetType, OneRttHeader},
-        time::ArcConnIdle,
     };
 
     use super::*;
@@ -334,7 +300,7 @@ mod package_tests {
                 EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
             ),
             Arc::new(HandshakeStatus::new(false)),
-            ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Arc::new(RwLock::new(IndexDeque::with_capacity(3))),
         );
         path.client_handshaking();
@@ -361,7 +327,7 @@ mod package_tests {
                         EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
                     ),
                     Arc::new(HandshakeStatus::new(true)),
-                    ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+                    ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     Arc::default(),
                 );
                 if queued {

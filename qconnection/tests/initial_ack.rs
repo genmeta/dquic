@@ -19,7 +19,7 @@ use qbase::{
         route::{Line, Link, Pathway},
     },
     packet::{DataHeader, GetDcid, LongHeaderBuilder, Packet, PacketReader, long},
-    time::ArcConnIdle,
+    time::heartbeat::ArcHeartbeat,
 };
 use qconnection::{Scope, ServerRegistry, TlsContext};
 use qprotocol::{QuicProtocol, UdpSocket};
@@ -57,7 +57,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let path = Path::new(
         pathway,
         Arc::new(qcongestion::HandshakeStatus::new(false)),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO).timer(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Arc::default(),
     );
     path.client_handshaking();

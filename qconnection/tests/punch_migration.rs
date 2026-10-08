@@ -10,13 +10,11 @@ use qbase::{
     packet::{GetDcid, GetScid},
     param::ParameterId,
     role::Role,
-    time::ArcConnIdle,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, CloseReason,
-    ConnPhase, InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing,
-    server_growing,
+    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, ConnPhase, Error,
+    InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
@@ -69,7 +67,7 @@ struct Peer {
     connection: ArcConnection,
     phase: ArcConnPhase,
     paths: Arc<Paths>,
-    growing: JoinHandle<CloseReason>,
+    growing: JoinHandle<Error>,
 }
 
 impl Peer {
@@ -133,11 +131,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             reliable,
             cid_registry,
         ));
-        let paths = Paths::new(
-            Role::Server,
-            phase.clone(),
-            ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
-        );
+        let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
         let growing = server_growing(
@@ -180,11 +174,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         reliable,
         cid_registry,
     ));
-    let paths = Paths::new(
-        Role::Client,
-        phase.clone(),
-        ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO),
-    );
+    let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
     let (deliver, connected) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(

@@ -1,12 +1,12 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::FutureExt;
 use qbase::{
-    ArcReceiving, Epoch,
+    Epoch,
     error::ErrorKind,
     frame::{CryptoFrame, io::ReceiveFrame},
 };
-use qconnection::{CloseReason, TlsContext};
+use qconnection::{Error, TlsContext};
 use qtls::InstalledKeys;
 use qtransport::space::Space;
 
@@ -118,11 +118,13 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
     let space = Space::new(Epoch::Initial, ());
     let crypto = &space.crypto;
-    let closed = ArcReceiving::default();
+    let (paths, closed) = common::paths(qbase::role::Role::Server);
+    closed.register(Arc::new(space.crypto.clone()));
+    closed.register(Arc::new(server.clone()));
     let reader = tokio::spawn(qconnection::tls::read_space_to_tls(
         server.clone(),
         &space,
-        closed.clone(),
+        paths.clone(),
     ));
     let (_, bytes) = client.read_msg().await.unwrap();
     crypto
@@ -141,14 +143,14 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
         .await
         .unwrap()
         .unwrap();
-    assert!(closed.clone().now_or_never().is_none());
+    assert!(closed.wait().now_or_never().is_none());
     assert!(matches!(
         server.read_keys().await.unwrap(),
         InstalledKeys::Handshake(_)
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn data_space_delivers_post_handshake_crypto_to_tls() {
     use std::sync::Arc;
 
@@ -180,11 +182,13 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
             None,
         );
         let space = DataSpace::new(keys, streams, reliable);
-        let closed = ArcReceiving::default();
+        let (paths, closed) = common::paths(role);
+        closed.register(Arc::new(space.crypto.clone()));
+        closed.register(Arc::new(tls.clone()));
         let reader = tokio::spawn(qconnection::tls::read_space_to_tls(
             tls.clone(),
             &space,
-            closed.clone(),
+            paths.clone(),
         ));
 
         // TLS KeyUpdate is forbidden in QUIC: the Data input must reach the TLS backend.
@@ -197,11 +201,11 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
                 bytes,
             ))
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let reason = closed.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            let reason = closed.await;
             assert!(matches!(
                 reason,
-                CloseReason::Internal(error) if matches!(error.kind(), ErrorKind::Crypto(_))
+                Error::Quic(error) if matches!(error.kind(), ErrorKind::Crypto(_))
             ));
             reader.await.unwrap();
             assert!(tls.read_msg().await.is_err());

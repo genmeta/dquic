@@ -1,14 +1,15 @@
 use std::{
     ops::Range,
     sync::{Arc, RwLock},
-    task::Poll,
+    task::{Context, Poll, Waker},
 };
 
 use bytes::BufMut;
 use qbase::{
-    frame::AckFrame,
-    net::tx::ArcSendWakers,
-    packet::{InvalidPacketNumber, PacketNumber},
+    error::Error,
+    frame::{AckFrame, Ecn, Frame, FrameType},
+    net::tx::{ArcSendWakers, UnregisterWaker},
+    packet::{ConstraintBuffer, InvalidPacketNumber, Package, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};
@@ -278,6 +279,73 @@ impl AckPackege<'_> {
     }
 }
 
+impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        use std::task::Poll;
+        buffer.for_frame(FrameType::Ack(Ecn::None), frames);
+        let journal = self.journal.inner.read().unwrap();
+        let ack = match self
+            .need_ack
+            .ok_or(Poll::Pending)
+            .and_then(|(largest, time)| {
+                journal.gen_ack_frame_util(largest, time, buffer.remaining_mut())
+            }) {
+            Ok(ack) => ack,
+            Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
+            Err(Poll::Pending) => {
+                self.journal.waiters.register(cx.waker());
+                return Poll::Pending;
+            }
+        };
+        drop(journal);
+        let mut ack = AckFrame::new(
+            VarInt::from_u64(ack.largest()).unwrap(),
+            VarInt::from_u64(ack.delay() >> self.exponent).unwrap(),
+            VarInt::from_u64(ack.first_range()).unwrap(),
+            ack.ranges().clone(),
+            ack.ecn(),
+        );
+        let result = ack.poll_dump(cx, buffer, frames);
+        if matches!(result, Poll::Ready(Ok(1))) {
+            self.need_ack = None;
+        }
+        result
+    }
+}
+
+impl UnregisterWaker for AckPackege<'_> {
+    fn unregister(&self, waker: &std::task::Waker) {
+        self.journal.waiters.unregister(waker);
+    }
+}
+impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut ConstraintBuffer<'_, B>,
+        frames: &mut Vec<Frame>,
+    ) -> Poll<Result<usize, Error>> {
+        let journal = self.inner.read().unwrap();
+        let Some(latest) = journal.packets.largest() else {
+            self.waiters.register(cx.waker());
+            return Poll::Pending;
+        };
+        drop(journal);
+        self.ack_package(Some(latest)).poll_dump(cx, buffer, frames)
+    }
+}
+
+impl UnregisterWaker for ArcRcvdJournal {
+    fn unregister(&self, waker: &Waker) {
+        self.waiters.unregister(waker);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,69 +476,5 @@ mod tests {
                 retired_before: self.packets.retired_before,
             }
         }
-    }
-}
-
-impl<B: BufMut + ?Sized> qbase::packet::assemble::Package<B> for AckPackege<'_> {
-    fn poll_dump(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buffer: &mut qbase::packet::assemble::ConstraintBuffer<'_, B>,
-        frames: &mut Vec<qbase::frame::Frame>,
-    ) -> Poll<Result<usize, qbase::error::Error>> {
-        use std::task::Poll;
-        buffer.for_frame(
-            qbase::frame::FrameType::Ack(qbase::frame::Ecn::None),
-            frames,
-        );
-        let journal = self.journal.inner.read().unwrap();
-        let ack = match self
-            .need_ack
-            .ok_or(Poll::Pending)
-            .and_then(|(largest, time)| {
-                journal.gen_ack_frame_util(largest, time, buffer.remaining_mut())
-            }) {
-            Ok(ack) => ack,
-            Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
-            Err(Poll::Pending) => {
-                self.journal.waiters.register(cx.waker());
-                return Poll::Pending;
-            }
-        };
-        drop(journal);
-        let mut ack = AckFrame::new(
-            VarInt::from_u64(ack.largest()).unwrap(),
-            VarInt::from_u64(ack.delay() >> self.exponent).unwrap(),
-            VarInt::from_u64(ack.first_range()).unwrap(),
-            ack.ranges().clone(),
-            ack.ecn(),
-        );
-        let result = ack.poll_dump(cx, buffer, frames);
-        if matches!(result, Poll::Ready(Ok(1))) {
-            self.need_ack = None;
-        }
-        result
-    }
-    fn cancel(&mut self, waker: &std::task::Waker) {
-        self.journal.waiters.cancel(waker);
-    }
-}
-impl<B: BufMut + ?Sized> qbase::packet::assemble::Package<B> for ArcRcvdJournal {
-    fn poll_dump(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buffer: &mut qbase::packet::assemble::ConstraintBuffer<'_, B>,
-        frames: &mut Vec<qbase::frame::Frame>,
-    ) -> Poll<Result<usize, qbase::error::Error>> {
-        let journal = self.inner.read().unwrap();
-        let Some(latest) = journal.packets.largest() else {
-            self.waiters.register(cx.waker());
-            return Poll::Pending;
-        };
-        drop(journal);
-        self.ack_package(Some(latest)).poll_dump(cx, buffer, frames)
-    }
-    fn cancel(&mut self, waker: &std::task::Waker) {
-        self.waiters.cancel(waker);
     }
 }

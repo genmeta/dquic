@@ -10,7 +10,6 @@ mod paths;
 pub mod phase;
 pub mod recv;
 pub mod send;
-pub(crate) mod terminate;
 pub mod tls;
 
 use std::sync::{Arc, RwLock};
@@ -34,7 +33,7 @@ pub type ArcLocalCids =
 pub type CidRegistry =
     qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
 pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
-pub type ArcTracker = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
+pub type ArcResend = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
 
 pub type Connected = (
     Option<qtls::LocalAuthority>,

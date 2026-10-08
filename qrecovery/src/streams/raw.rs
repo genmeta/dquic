@@ -1,6 +1,6 @@
 use std::{
     sync::atomic::{AtomicBool, Ordering::*},
-    task::{Context, Poll, ready},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::BufMut;
@@ -11,7 +11,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     metric::ArcConnectionMetrics,
-    net::tx::ArcSendWakers,
+    net::tx::{ArcSendWakers, UnregisterWaker},
     packet::ConstraintBuffer,
     param::{ArcParameters, ParameterId, core::Parameters},
     sid::{
@@ -468,7 +468,7 @@ where
     ///
     /// After the method called, read on [`Reader`] or write on [`Writer`] will return an error,
     /// the resouces will be released.
-    pub fn on_conn_error(&self, error: &Error) {
+    pub fn on_error(&self, error: &Error) {
         let mut output = match self.output.guard() {
             Ok(out) => out,
             Err(_) => return,
@@ -482,10 +482,10 @@ where
             Err(_) => return,
         };
 
-        output.on_conn_error(error);
-        input.on_conn_error(error);
-        listener.on_conn_error(error);
-        self.stream_ids.on_conn_error();
+        output.on_error(error);
+        input.on_error(error);
+        listener.on_error(error);
+        self.stream_ids.on_error();
         self.tx_wakers.wake_all();
     }
 }
@@ -1115,12 +1115,12 @@ mod tests {
         // Re-polling discovers the new stream and subscribes both paths to its state.
         assert!(poll(&wa).is_pending());
         assert!(poll(&wb).is_pending());
-        streams.cancel(&wa);
+        streams.unregister(&wa);
         writer.write_all(b"data").await.unwrap();
         assert_eq!(a.0.load(Ordering::Relaxed), 1);
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         assert!(matches!(poll(&wb), Poll::Ready(Ok(n)) if n > 0));
-        streams.cancel(&wb);
+        streams.unregister(&wb);
         writer.write_all(b"more").await.unwrap();
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         let c = Arc::new(Counter(AtomicUsize::new(0)));
@@ -1134,7 +1134,7 @@ mod tests {
         assert_eq!(a.0.load(Ordering::Relaxed), 1);
         assert_eq!(b.0.load(Ordering::Relaxed), 2);
         assert_eq!(c.0.load(Ordering::Relaxed), 0);
-        streams.cancel(&wc);
+        streams.unregister(&wc);
         use crate::send::CancelStream;
         writer.cancel(0);
         next.cancel(0);
@@ -1173,7 +1173,7 @@ mod tests {
             .recv_data((frame, bytes::Bytes::from_static(b"data")))
             .unwrap();
         let error: Error = QuicError::with_default_fty(ErrorKind::Internal, "closed").into();
-        streams.on_conn_error(&error);
+        streams.on_error(&error);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let mut buf = BytesMut::with_capacity(4);
         assert!(matches!(
@@ -1287,7 +1287,7 @@ where
 
     pub(crate) fn poll_dump<B: BufMut + ?Sized>(
         &self,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         buffer: &mut ConstraintBuffer<'_, B>,
         frames: &mut Vec<Frame>,
     ) -> Poll<Result<usize, Error>> {
@@ -1324,13 +1324,11 @@ where
         }
     }
 
-    pub(crate) fn cancel(&self, waker: &std::task::Waker) {
-        self.tx_wakers.cancel(waker);
-        if let Ok(output) = self.output.streams().as_mut() {
-            for (outgoing, _) in output.values_mut() {
-                <Outgoing<Ext<TX>> as qbase::packet::Package<bytes::BytesMut>>::cancel(
-                    outgoing, waker,
-                );
+    pub(crate) fn unregister(&self, waker: &Waker) {
+        self.tx_wakers.unregister(waker);
+        if let Ok(output) = self.output.streams().as_ref() {
+            for (outgoing, _) in output.values() {
+                outgoing.unregister(waker);
             }
         }
     }

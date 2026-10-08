@@ -64,7 +64,7 @@ impl Inbox {
     }
 
     /// A connection must never backpressure the shared UDP receive loop.
-    pub(crate) fn try_send(&self, packet: Packet, pathway: Pathway, link: Link) -> bool {
+    pub fn try_send(&self, packet: Packet, pathway: Pathway, link: Link) -> bool {
         match packet {
             Packet::Data(packet) => match packet.header {
                 DataHeader::Long(long::DataHeader::Initial(header)) => self

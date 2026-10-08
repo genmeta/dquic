@@ -10,8 +10,29 @@ use qbase::{
 };
 
 use super::{constraints::Constraints, records::ArcSentJournal};
-pub use crate::keys::PacketError;
 use crate::{GuaranteedFrame, keys::SealPacket};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PacketError {
+    #[error("packet assembly blocked: {0:?}")]
+    Blocked(Poll<()>),
+    #[error(transparent)]
+    Connection(crate::Error),
+    #[error("invalid packet layout or capacity")]
+    Layout,
+    #[error(transparent)]
+    Crypto(qtls::CryptoError),
+}
+
+impl From<qtransport::keys::PacketError> for PacketError {
+    fn from(error: qtransport::keys::PacketError) -> Self {
+        match error {
+            qtransport::keys::PacketError::Connection(error) => Self::Connection(error),
+            qtransport::keys::PacketError::Layout => Self::Layout,
+            qtransport::keys::PacketError::Crypto(error) => Self::Crypto(error),
+        }
+    }
+}
 
 /// Sealed bytes and submission metadata; recovery frames belong to ArcSendJournal.
 /// It contains no borrowed source, journal lock, or buffer reference.
@@ -35,6 +56,15 @@ pub struct PendingPacket {
 }
 
 impl PendingPacket {
+    pub fn on_sent(&self, path: &crate::path::Path) {
+        if let Some(frame) = self.response {
+            path.on_frame_assembled(&Frame::PathResponse(frame));
+        }
+        if let Some(frame) = self.challenge {
+            path.on_frame_assembled(&Frame::PathChallenge(frame));
+        }
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.datagram.msg[self.datagram.raw_offset..]
     }
@@ -313,10 +343,10 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn failed_sealing_leaves_journal_cancellation_to_the_caller() {
-        let [(_client, transport, _path), _peer] = crate::tests::pair(1);
-        let keys = crate::tests::keys(&transport);
+    #[tokio::test]
+    async fn failed_sealing_leaves_journal_cancellation_to_the_caller() {
+        let [(_client, transport, _path), _peer] = crate::transport::pair(1);
+        let keys = crate::transport::keys(&transport);
         let journal = ArcSentJournal::default();
         let mut packet = Packet::new(
             BytesMut::zeroed(1200),
@@ -338,13 +368,7 @@ mod tests {
                 [&mut frame.clone()],
             )
             .unwrap();
-        let ((pn, encoded), key) = keys
-            .reserve(|generation| {
-                journal
-                    .record_pending(generation, &mut frames)
-                    .map_err(Into::into)
-            })
-            .unwrap();
+        let ((pn, encoded), key) = super::super::records::reserve(&keys, &journal, &mut frames).unwrap();
         let result = packet.seal(&key, pn, encoded);
         assert!(result.is_err());
         // Sealing neither drains recovery records nor cancels their journal entry.

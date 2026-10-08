@@ -29,11 +29,14 @@ use bytes::Bytes;
 use derive_more::Deref;
 pub use listener::{AcceptBiStream, AcceptUniStream};
 use qbase::{
+    Close,
     error::Error,
     frame::{
         Frame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
+    metric::ArcConnectionMetrics,
+    net::tx::UnregisterWaker,
     packet::{ConstraintBuffer, Package},
     param::ArcParameters,
     sid::{ControlStreamsConcurrency, StreamId},
@@ -78,6 +81,15 @@ pub struct DataStreams<TX>(Arc<raw::DataStreams<TX>>)
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static;
 
+impl<TX> Close for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + Sync + 'static,
+{
+    fn close_with_error(&self, error: Error) {
+        self.on_error(&error);
+    }
+}
+
 impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
@@ -89,7 +101,7 @@ where
         parameters: ArcParameters,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
-        metrics: Option<qbase::metric::ArcConnectionMetrics>,
+        metrics: Option<ArcConnectionMetrics>,
     ) -> Self {
         Self(Arc::new(raw::DataStreams::new(
             parameters,
@@ -211,7 +223,13 @@ where
     ) -> Poll<Result<usize, Error>> {
         self.0.poll_dump(cx, buffer, frames)
     }
-    fn cancel(&mut self, waker: &std::task::Waker) {
-        self.0.cancel(waker);
+}
+
+impl<TX> UnregisterWaker for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    fn unregister(&self, waker: &std::task::Waker) {
+        self.0.unregister(waker);
     }
 }

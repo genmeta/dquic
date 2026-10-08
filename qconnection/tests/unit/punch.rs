@@ -17,15 +17,15 @@ use qbase::{
     },
     packet::{DataHeader, OneRttHeader, Packet, PacketNumber, PacketReader},
     role::Role,
-    time::ArcConnIdle,
+    time::heartbeat::ArcHeartbeat,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qtransport::{keys::ArcKeys, path::Path, space::Space};
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 use crate::{
-    ArcConnPhase, ArcHandshake, ArcParameters, CloseReason, MaturePhase, Paths, Scopes, common,
-    recv::receive_1rtt_pkt_and_deliver_frames, terminate::Terminator,
+    ArcConnPhase, ArcHandshake, ArcParameters, MaturePhase, Paths, Scopes, common,
+    recv::receive_1rtt_pkt_and_deliver_frames,
 };
 
 fn pair() -> [Arc<MaturePhase>; 2] {
@@ -120,7 +120,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 dcid: peer,
                 parameters,
                 puncher,
-                trackers: initial.trackers.clone(),
+                resender: initial.resender.clone(),
                 terminator: initial.terminator.clone(),
             });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
@@ -193,22 +193,31 @@ fn empty_paths(phase: &MaturePhase) -> Arc<Paths> {
         ConnectionId::from_slice(b"original"),
         common::initial_keys(role == Role::Server),
     ));
-    let idle = ArcConnIdle::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    Paths::new(role, snapshot, idle)
+    let paths = Paths::new(role, snapshot, Duration::ZERO, Duration::ZERO);
+    let terminator = paths.phase().terminator();
+    terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
+    terminator.register(Arc::new(phase.spaces.data.streams.clone()));
+    terminator.register(Arc::new(phase.flow_ctrl.clone()));
+    paths
 }
 
 async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Pathway, link: Link) {
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
+    let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
+        panic!("expected Initial");
+    };
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
-        paths.idle().timer(),
-        paths.phase().get().trackers(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        initial.resender.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
-    paths.retire_all();
+    for path in paths.snapshot() {
+        paths.remove(&path);
+    }
 }
 
 async fn receive_on_paths(
@@ -235,7 +244,8 @@ async fn receive_on_paths(
         .unwrap();
     }
     drop(tx);
-    let closed = paths.close_reason();
+    let closed = paths.phase().terminator();
+    let notification = crate::common::observe_close(&closed);
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
     let role = phase.parameters.role();
     let handshake = ArcHandshake::new(role, phase.spaces.data.reliable_frames.clone());
@@ -252,7 +262,7 @@ async fn receive_on_paths(
     )
     .await;
     assert!(
-        closed.now_or_never().is_none(),
+        notification.notified().is_none(),
         "received frames must not close the connection"
     );
     handshake
@@ -358,7 +368,8 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             (&pair[1], &pair[0])
         };
         let paths = empty_paths(receiver);
-        let closed = paths.close_reason();
+        let closed = paths.phase().terminator();
+        let notification = crate::common::observe_close(&closed);
         let first = if bundled_close {
             encode_frames(sender, [&mut HandshakeDoneFrame, &mut close.clone()])
         } else {
@@ -404,17 +415,14 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             handshake.clone(),
         )
         .await;
-        let reason = closed.now_or_never().unwrap().unwrap().unwrap();
+        let stream_error = receiver.spaces.data.streams.accept_uni().await.unwrap_err();
+        assert_eq!(notification.notified(), Some(stream_error.clone()));
         if role == Role::Client {
-            assert!(matches!(reason, CloseReason::Peer(frame) if frame == close));
+            assert_eq!(stream_error, close.clone().into());
         } else {
-            assert!(matches!(reason, CloseReason::Internal(error)
-                if error.kind() == ErrorKind::ProtocolViolation));
+            assert_eq!(stream_error.kind(), ErrorKind::ProtocolViolation);
         }
-        assert!(matches!(
-            &*paths.phase().terminator().lock_guard(),
-            Terminator::Draining { .. }
-        ));
+        assert!(futures::poll!(std::pin::pin!(closed.clone())).is_pending());
         assert_eq!(handshake.is_handshake_done(), role == Role::Client);
         assert!(receiver.spaces.data.streams.accept_uni().await.is_err());
         assert!(receiver.spaces.data.streams.accept_bi().await.is_err());
@@ -433,8 +441,12 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         for pn in [0, 1] {
             assert_eq!(journal.decode_pn(PacketNumber::encode(pn, 0)), Ok(pn));
         }
-        assert!(journal.decode_pn(PacketNumber::encode(2, 0)).is_err());
+        assert_eq!(
+            journal.decode_pn(PacketNumber::encode(2, 0)),
+            Err(qbase::packet::InvalidPacketNumber::Duplicate)
+        );
         paths.retire_all();
+        assert_eq!(closed.await, close.clone().into());
     }
 }
 
@@ -561,8 +573,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let paths = empty_paths(receiver);
         let local: EndpointAddr = "127.0.0.1:44501".parse().unwrap();
         let original = paths
-            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()))
-            .unwrap();
+            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
         paths.handshake_confirmed();
         paths.activate_paths(&original);
@@ -765,4 +776,72 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
     ));
     // Let the finite direct-confirmation task finish before releasing its socket.
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heartbeat() {
+    use qbase::frame::{AckFrame, CryptoFrame};
+    use tokio::time::Instant;
+
+    for kind in 0..3 {
+        let [sender, receiver] = pair();
+        let paths = empty_paths(&receiver);
+        paths.update_max_idle_timeout(Duration::from_secs(5));
+        let link = Link::new(
+            "127.0.0.1:47001".parse().unwrap(),
+            "127.0.0.1:47002".parse().unwrap(),
+        );
+        let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
+            panic!("expected Initial");
+        };
+        let path = Arc::new(Path::new(
+            link.into(),
+            paths.handshake.clone(),
+            ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+            initial.resender.clone(),
+        ));
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.pathway, path.clone());
+        let data = &receiver.spaces.data;
+        let pn = data.next_pn().unwrap().0;
+        data.on_sealed(pn, 0, []);
+        data.on_sent(
+            [(pn, false)],
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        );
+        let bytes = match kind {
+            0 => encode_frame(
+                &sender,
+                AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None),
+            ),
+            1 => encode_frame(&sender, PingFrame),
+            _ => encode_frame(
+                &sender,
+                (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice()),
+            ),
+        };
+        let start = Instant::now();
+        receive_on_paths(
+            &receiver,
+            &paths,
+            vec![bytes],
+            path.pathway,
+            link,
+            Scopes::ALL,
+        )
+        .await;
+        let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
+        let reason = paths.phase().terminator().await;
+        assert!(
+            matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
+        );
+        assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
+        tokio::time::advance(Duration::from_secs(15)).await;
+        assert_eq!(super::take_heartbeat(&path), kind == 2);
+        paths.retire_all();
+    }
 }

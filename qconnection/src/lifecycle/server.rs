@@ -17,10 +17,10 @@ use qtransport::{
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::io::AsyncWriteExt;
 
-use super::{any, close_error, finish, interceptor::read_crypto_stream_to_interceptor};
+use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcParameters, CloseReason, DataStreams, Error, FlowController, Interceptor, MaturePhase,
-    Paths, ServerRegistry, TlsContext,
+    ArcLocalCids, ArcParameters, ArcResend, DataStreams, Error, FlowController, Interceptor,
+    MaturePhase, Paths, ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -32,50 +32,45 @@ pub async fn server_growing(
     rcvd_pkt: RcvdPacket,
     paths: Arc<Paths>,
     token: ArcTokenRegistry,
-) -> CloseReason {
+) -> Error {
     let phase = paths.phase();
     let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
-    let idle = paths.idle();
-    let closed = paths.close_reason();
+    let terminator = paths.phase().terminator();
     let initial = initial_phase.initial_space.clone();
     let reliable_frames = initial_phase.reliable_frames.clone();
-    let terminator = initial_phase.terminator.clone();
     let cid_registry = initial_phase.cid_registry.clone();
-    let trackers = initial_phase.trackers.clone();
+    let resender = initial_phase.resender.clone();
     let scid = initial_phase.scid;
     let origin_dcid = initial_phase.odcid;
-    drop(initial_phase);
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
         initial.clone(),
         paths.clone(),
-        closed.clone(),
     ));
 
     let interceptor = Interceptor::new();
     tokio::spawn(read_crypto_stream_to_interceptor(
         interceptor.clone(),
         initial.crypto.clone(),
-        closed.clone(),
+        paths.clone(),
     ));
 
-    let hello = any(interceptor.read(), closed.clone())
-        .await
-        .and_then(|result| result.map_err(CloseReason::from));
+    let hello = any(interceptor.read(), terminator.clone()).await.flatten();
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
-            return shutdown_initial(&paths, &cid_registry.local, reason).await;
+            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
         }
     };
     let Some(server_name) = hello.server_name() else {
-        return shutdown_initial(
+        return shutdown(
             &paths,
+            &resender,
             &cid_registry.local,
-            CloseReason::Internal(QuicError::with_default_fty(
+            Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "ClientHello has no server name",
             )),
@@ -83,17 +78,18 @@ pub async fn server_growing(
         .await;
     };
     let Some(server) = ServerRegistry::global().get(server_name) else {
-        return shutdown_initial(
+        return shutdown(
             &paths,
+            &resender,
             &cid_registry.local,
-            CloseReason::Internal(QuicError::with_default_fty(
+            Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "server name is not listening",
             )),
         )
         .await;
     };
-    idle.negotiate_max_idle_timeout(
+    paths.update_max_idle_timeout(
         server
             .server_parameters
             .get::<std::time::Duration>(ParameterId::MaxIdleTimeout),
@@ -103,9 +99,10 @@ pub async fn server_growing(
             Ok(ready) => ready,
             Err(error) => {
                 (server.accept_cb)(Err(error.clone()));
-                return shutdown_initial(&paths, &cid_registry.local, error.into()).await;
+                return shutdown(&paths, &resender, &cid_registry.local, error.into()).await;
             }
         };
+    terminator.register(Arc::new(tls_ctx.clone()));
     let scopes = server.scopes;
     cid_registry
         .remote
@@ -113,23 +110,25 @@ pub async fn server_growing(
     let result = {
         let establish = async {
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
-            parameters.authenticate_cids(Requirements::require_client(phase.get().dcid()))?;
+            parameters.authenticate_cids(Requirements::require_client(initial_phase.dcid()))?;
+            drop(initial_phase);
 
             let handshake_keys = tls_ctx.read_keys().await?;
             let handshake = Arc::new(Space::new(Epoch::Handshake, ArcKeys::from(handshake_keys)));
+            terminator.register(Arc::new(handshake.crypto.clone()));
             paths.handshake.got_handshake_key();
+            phase.enter_handshake(handshake.clone());
             initial.crypto.recver.retire();
 
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 handshake.as_ref(),
-                closed.clone(),
+                paths.clone(),
             ));
             tokio::spawn(recv_ih_pkt_and_deliver_frames(
                 (rcvd_pkt.handshake, Some(scopes)),
                 handshake.clone(),
                 paths.clone(),
-                closed.clone(),
             ));
 
             let client_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
@@ -145,12 +144,15 @@ pub async fn server_growing(
                 reliable_frames.clone(),
                 None,
             );
+            terminator.register(Arc::new(streams.clone()));
             let flow_ctrl = FlowController::new(
                 parameters.remote(ParameterId::InitialMaxData),
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
+            terminator.register(Arc::new(flow_ctrl.clone()));
             let data = Arc::new(DataSpace::new(keys, streams, reliable_frames.clone()));
+            terminator.register(Arc::new(data.crypto.clone()));
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data.clone(), client_scid),
@@ -158,7 +160,7 @@ pub async fn server_growing(
             cid_registry
                 .local
                 .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
-            idle.negotiate_max_idle_timeout(parameters.remote(ParameterId::MaxIdleTimeout));
+            paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             for space in [initial.as_ref(), handshake.as_ref()] {
                 let flight = tls_ctx.read_msg_at(space.epoch).await?;
@@ -183,17 +185,17 @@ pub async fn server_growing(
             }
 
             for space in [initial.as_ref(), handshake.as_ref()] {
-                tokio::spawn(read_tls_to_space(tls_ctx.clone(), space, closed.clone()));
+                tokio::spawn(read_tls_to_space(tls_ctx.clone(), space, paths.clone()));
             }
             tokio::spawn(read_tls_to_space(
                 tls_ctx.clone(),
                 data.as_ref(),
-                closed.clone(),
+                paths.clone(),
             ));
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 data.as_ref(),
-                closed.clone(),
+                paths.clone(),
             ));
 
             let handshake_done = ArcHandshake::new_server(reliable_frames.clone());
@@ -221,7 +223,7 @@ pub async fn server_growing(
                 flow_ctrl,
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
-                trackers: trackers.clone(),
+                resender: resender.clone(),
                 terminator: terminator.clone(),
             }));
 
@@ -240,39 +242,31 @@ pub async fn server_growing(
                     qtransport::ArcConnection::new(
                         summary.alpn.unwrap_or_default(),
                         data.streams.clone(),
-                        closed.clone(),
+                        terminator.clone(),
                     )
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
                         move || {
-                            paths.upgrade().map_or_else(Vec::new, |paths| {
-                                paths
-                                    .snapshot()
-                                    .into_iter()
-                                    .filter(|path| path.is_validated())
-                                    .map(|path| path.pathway)
-                                    .collect()
-                            })
+                            paths
+                                .upgrade()
+                                .map_or_else(Vec::new, |paths| paths.snapshot())
                         }
                     }),
                 ),
                 puncher,
             ))
         };
-        any(establish, closed.clone())
-            .await
-            .and_then(|result| result.map_err(CloseReason::from))
+        any(establish, terminator.clone()).await.flatten()
     };
 
     let (connection, puncher) = match result {
         Ok(connection) => connection,
         Err(reason) => {
-            (server.accept_cb)(Err(close_error(&reason)));
-            return shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await;
+            (server.accept_cb)(Err(reason.clone()));
+            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
         }
     };
 
-    // The observer must not consume the connection's close reason.
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let observer = puncher.observe_endpoints(
         qprotocol::AddressBook::global().subscribe_punch(scopes),
@@ -280,33 +274,19 @@ pub async fn server_growing(
         |_| {},
     );
     (server.accept_cb)(Ok(connection));
-    let reason = closed
-        .await
-        .expect("growing owns close")
-        .expect("first close reason");
+    let reason = terminator.await;
     drop(stop);
     let _ = observer.await;
-    shutdown(&paths, &tls_ctx, &cid_registry.local, reason).await
+    shutdown(&paths, &resender, &cid_registry.local, reason).await
 }
 
 async fn shutdown(
     paths: &Paths,
-    tls: &TlsContext,
-    local_cids: &crate::ArcLocalCids,
-    reason: CloseReason,
-) -> CloseReason {
-    tls.on_error(close_error(&reason));
-    finish(paths, &reason).await;
-    local_cids.clear();
-    reason
-}
-
-async fn shutdown_initial(
-    paths: &Paths,
-    local_cids: &crate::ArcLocalCids,
-    reason: CloseReason,
-) -> CloseReason {
-    finish(paths, &reason).await;
+    resender: &ArcResend,
+    local_cids: &ArcLocalCids,
+    reason: Error,
+) -> Error {
+    let reason = finish(paths, resender, reason).await;
     local_cids.clear();
     reason
 }

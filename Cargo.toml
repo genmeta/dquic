@@ -42,7 +42,6 @@ rust-version = "1.88.0"
 [workspace.dependencies]
 # arc-swap = "1"
 bitflags = "2"
-bon = "3"
 bytes = "1"
 cfg-if = "1"
 dashmap = "6"
@@ -67,10 +66,8 @@ smallvec = { version = "1", features = [
     "const_new",
 ] }
 socket2 = { version = "0.6", features = ["all"] }
-snafu = "0.9"
 thiserror = "2.0.20"
 tokio = { version = "1" }
-tokio-util = { version = "0.7" }
 tracing = "0.1"
 x509-parser = "0.18"
 
@@ -83,7 +80,6 @@ x509-parser = "0.18"
 # dev-dependencies, for examples
 clap = { version = "4", features = ["derive"] }
 http = "1"
-parking_lot = "0.12"
 # postcard = { version = "1", features = ["use-std"] }
 tracing-subscriber = "0.3"
 

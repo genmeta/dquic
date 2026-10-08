@@ -28,10 +28,11 @@ use qtransport::{
     keys::ArcKeys,
     path::{AntiAmplifier, Path},
     space::Space,
+    terminate::ArcTerminator,
 };
 pub(crate) use task::sending;
 
-use crate::{ArcReliableFrames, ConnPhase, Error, MaturePhase, Paths, terminate::ArcTerminator};
+use crate::{ArcReliableFrames, ConnPhase, Error, MaturePhase, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
 /// Submission metadata retained independently of frames that an early ACK can release.
@@ -112,7 +113,7 @@ impl Future for Collector<'_, '_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let shared_phase = this.paths.phase();
-        let phase = shared_phase.poll_phase(cx);
+        let phase = shared_phase.poll_phase(cx).clone();
         let mut limits = Constraints {
             flow_ctrl: 0,
             send_quota: ready!(this.burst.cc.poll_send_quota(cx)).map_err(|error| {
@@ -131,11 +132,12 @@ impl Future for Collector<'_, '_> {
         if selected == Path::SUSPEND {
             return Poll::Pending;
         }
-        match &*phase {
+        match &phase {
             ConnPhase::Initial(phase) => {
+                let dcid = phase.dcid();
                 while count < this.burst.datagrams.len() && limits.credit > 0 {
                     let header =
-                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
+                        LongHeaderBuilder::with_cid(dcid, phase.scid).initial(vec![]);
                     let crypto: &mut dyn for<'b> Package<&'b mut BytesMut> =
                         if selected == Path::MP_INITIAL && this.paths.role() == Role::Client {
                             &mut phase.initial_space.crypto.multipath()
@@ -161,7 +163,7 @@ impl Future for Collector<'_, '_> {
                 while count < this.burst.datagrams.len() && limits.credit > 0 {
                     let before = count;
                     let header =
-                        LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).initial(vec![]);
+                        LongHeaderBuilder::with_cid(phase.dcid, phase.scid).initial(vec![]);
                     count += this.collect_long(
                         cx,
                         &phase.initial_space,
@@ -171,7 +173,7 @@ impl Future for Collector<'_, '_> {
                         &mut limits,
                         &mut acked[Epoch::Initial],
                     )?;
-                    let header = LongHeaderBuilder::with_cid(phase.dcid(), phase.scid).handshake();
+                    let header = LongHeaderBuilder::with_cid(phase.dcid, phase.scid).handshake();
                     count += this.collect_long(
                         cx,
                         &phase.handshake_space,
@@ -265,6 +267,7 @@ impl Collector<'_, '_> {
         let mut ping = (self.burst.pns[space.epoch].is_empty()
             && self.burst.cc.need_send_ack_eliciting(space.epoch) > 0)
             .then_some(PingFrame);
+        let mut heartbeat = (self.count() == 0).then(|| self.path.heartbeat.clone());
         limits.probe_quota = if ping.is_some() { 1200 } else { 0 };
         limits.max_size = 1200;
         limits.min_size = if space.epoch == Epoch::Initial {
@@ -283,15 +286,25 @@ impl Collector<'_, '_> {
             keys: &keys.sealing,
             limits,
         };
-        match packet.assemble(
-            cx,
-            [&mut terminator, &mut ack, crypto, &mut ping],
-            self.burst.frames,
-        ) {
+        let closing = packet.assemble(cx, [&mut terminator], self.burst.frames);
+        let result = match closing {
+            Poll::Ready(Ok(n)) if n > 0 => closing,
+            Poll::Ready(Err(_)) => closing,
+            _ if packet.limits.max_size() == 0 => closing,
+            _ => packet.assemble(
+                cx,
+                [&mut ack, crypto, &mut heartbeat, &mut ping],
+                self.burst.frames,
+            ),
+        };
+        match result {
             Poll::Ready(Ok(n)) if n > 0 => {
                 packet.seal()?;
             }
-            Poll::Ready(Err(error)) => return Err(error),
+            Poll::Ready(Err(error)) => {
+                space.cancel(pn.0);
+                return Err(error);
+            },
             _ => {
                 space.cancel(pn.0);
                 return Ok(0);
@@ -366,9 +379,7 @@ impl Collector<'_, '_> {
         let mut crypto = space.crypto.outgoing();
         let mut reliable = space.reliable_frames.clone();
         let mut streams = space.streams.clone();
-        let mut heartbeat = self.burst.pns[Epoch::Data]
-            .is_empty()
-            .then_some(&self.path.activity);
+        let mut heartbeat = (self.count() == 0).then(|| self.path.heartbeat.clone());
         let buffer = &mut self.burst.datagrams[index];
         buffer.clear();
         let (pn, key) = keys
@@ -384,7 +395,7 @@ impl Collector<'_, '_> {
             Poll::Ready(Ok(n)) if n > 0 => {
                 let (generation, _) = packet.seal()?;
                 self.record(Epoch::Data, pn.0, acked);
-                space.on_assembled(pn.0, generation, self.burst.frames.drain(..));
+                space.on_sealed(pn.0, generation, self.burst.frames.drain(..));
                 return Poll::Ready(Ok(1));
             }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -426,7 +437,7 @@ impl Collector<'_, '_> {
         let (generation, _) = packet.seal()?;
         flow.post_sent(flow.available() - limits.flow_ctrl);
         self.record(Epoch::Data, pn.0, acked);
-        space.on_assembled(pn.0, generation, self.burst.frames.drain(..));
+        space.on_sealed(pn.0, generation, self.burst.frames.drain(..));
         Poll::Ready(Ok(1))
     }
 
