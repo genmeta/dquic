@@ -509,9 +509,8 @@ impl ServerCertVerifier for ServerVerifier {
             ocsp_response,
             now,
         )?;
-        // Peer staples are temporarily optional for every server name. The
-        // certificate chain, name and validity have already been checked above.
-        // An explicitly supplied DDNS fallback still requires full validation.
+        // A configured DDNS fallback must pass the same mandatory OCSP checks
+        // as a peer staple.
         let fetched_ocsp = if ocsp_response.is_empty()
             && matches!(server_name, ServerName::DnsName(name) if name.as_ref() == "ddns.genmeta.net")
         {
@@ -534,16 +533,14 @@ impl ServerCertVerifier for ServerVerifier {
         } else {
             None
         };
-        if !ocsp_response.is_empty() || fetched_ocsp.is_some() {
-            crate::ocsp::verify(
-                fetched_ocsp.as_deref().unwrap_or(ocsp_response),
-                end_entity,
-                intermediates,
-                &self.roots,
-                now,
-                self.algorithms,
-            )?;
-        }
+        crate::ocsp::verify(
+            fetched_ocsp.as_deref().unwrap_or(ocsp_response),
+            end_entity,
+            intermediates,
+            &self.roots,
+            now,
+            self.algorithms,
+        )?;
         let name: Arc<str> = match server_name {
             ServerName::DnsName(name) => Arc::from(name.as_ref()),
             _ => return Err(CertificateError::NotValidForName.into()),
@@ -657,18 +654,14 @@ impl ClientCertVerifier for ClientVerifier {
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
         self.inner
             .verify_client_cert_with_ocsp(end_entity, intermediates, ocsp_response, now)?;
-        // Legacy clients (including AnySee) do not staple OCSP. Their
-        // certificate chain is still verified above; validate a staple when present.
-        if !ocsp_response.is_empty() {
-            crate::ocsp::verify(
-                ocsp_response,
-                end_entity,
-                intermediates,
-                &self.roots,
-                now,
-                self.algorithms,
-            )?;
-        }
+        crate::ocsp::verify(
+            ocsp_response,
+            end_entity,
+            intermediates,
+            &self.roots,
+            now,
+            self.algorithms,
+        )?;
         let name = certificate_name(end_entity)?;
         let authority = RemoteAuthority::new(name, &certificates)
             .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
@@ -784,11 +777,29 @@ mod client_ocsp_tests {
     }
 
     #[test]
-    fn authenticated_client_without_ocsp_publishes_its_authority() {
+    fn authenticated_client_without_ocsp_is_rejected() {
         let (verifier, peer) = verifier();
         let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
-        verifier
-            .verify_client_cert(&certificate, &[], UnixTime::now())
+        assert!(matches!(
+            verifier.verify_client_cert(&certificate, &[], UnixTime::now()),
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::InvalidOcspResponse
+            ))
+        ));
+        assert!(matches!(
+            verifier.verify_client_cert_with_ocsp(&certificate, &[], &[], UnixTime::now()),
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::InvalidOcspResponse
+            ))
+        ));
+        assert!(peer.authorities.lock().unwrap().remote.is_none());
+    }
+
+    #[test]
+    fn supplied_client_ocsp_must_still_be_valid_and_bound_to_the_certificate() {
+        let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
+        let (good, peer) = verifier();
+        good.verify_client_cert_with_ocsp(&certificate, &[], CLIENT_OCSP, UnixTime::now())
             .unwrap();
         assert_eq!(
             peer.authorities
@@ -800,14 +811,6 @@ mod client_ocsp_tests {
                 .name(),
             "client"
         );
-    }
-
-    #[test]
-    fn supplied_client_ocsp_must_still_be_valid_and_bound_to_the_certificate() {
-        let certificate = CertificateDer::from_pem_slice(CLIENT).unwrap();
-        let (good, _) = verifier();
-        good.verify_client_cert_with_ocsp(&certificate, &[], CLIENT_OCSP, UnixTime::now())
-            .unwrap();
         for staple in [&[1_u8][..], SERVER_OCSP] {
             let (verifier, peer) = verifier();
             assert!(
@@ -876,17 +879,30 @@ mod server_ocsp_tests {
     }
 
     #[test]
-    fn server_without_ocsp_publishes_verified_authority() {
+    fn server_without_ocsp_is_rejected() {
         let (verifier, peer) = verifier(CA);
         let certificate = CertificateDer::from_pem_slice(SERVER).unwrap();
-        verifier
-            .verify_server_cert(
+        assert!(matches!(
+            verifier.verify_server_cert(
                 &certificate,
                 &[],
                 &ServerName::try_from("localhost").unwrap(),
                 &[],
                 UnixTime::now(),
-            )
+            ),
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::InvalidOcspResponse
+            ))
+        ));
+        assert!(peer.authorities.lock().unwrap().remote.is_none());
+    }
+
+    #[test]
+    fn supplied_server_ocsp_still_requires_matching_good_status() {
+        let certificate = CertificateDer::from_pem_slice(SERVER).unwrap();
+        let name = ServerName::try_from("localhost").unwrap();
+        let (good, peer) = verifier(CA);
+        good.verify_server_cert(&certificate, &[], &name, GOOD_OCSP, UnixTime::now())
             .unwrap();
         assert_eq!(
             peer.authorities
@@ -898,15 +914,6 @@ mod server_ocsp_tests {
                 .name(),
             "localhost"
         );
-    }
-
-    #[test]
-    fn supplied_server_ocsp_still_requires_matching_good_status() {
-        let certificate = CertificateDer::from_pem_slice(SERVER).unwrap();
-        let name = ServerName::try_from("localhost").unwrap();
-        let (good, _) = verifier(CA);
-        good.verify_server_cert(&certificate, &[], &name, GOOD_OCSP, UnixTime::now())
-            .unwrap();
         for staple in [&[1_u8][..], WRONG_OCSP, REVOKED_OCSP] {
             let (verifier, peer) = verifier(CA);
             assert!(
