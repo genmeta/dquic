@@ -15,7 +15,8 @@ use qbase::{
 use crate::keys::Seal;
 
 /// Header and PN are encoded at construction. The cursor counts packet bytes.
-pub struct Packet<H, B> {
+pub struct Packet<'a, H, B> {
+    frames: &'a mut Vec<GuaranteedFrame>,
     pub header: H,
     pub pn: (u64, PacketNumber),
     pub buffer: B,
@@ -24,8 +25,13 @@ pub struct Packet<H, B> {
     finished: bool,
 }
 
-impl<H: HeaderSize + GetType, B: BufMut + WriteHeader<H>> Packet<H, B> {
-    pub fn new(header: H, pn: (u64, PacketNumber), mut buffer: B) -> Result<Self, Error> {
+impl<'a, H: HeaderSize + GetType, B: BufMut + WriteHeader<H>> Packet<'a, H, B> {
+    pub fn new(
+        header: H,
+        pn: (u64, PacketNumber),
+        mut buffer: B,
+        frames: &'a mut Vec<GuaranteedFrame>,
+    ) -> Result<Self, Error> {
         let cursor = header.size()
             + if matches!(header.get_type(), Type::Long(_)) {
                 2
@@ -41,8 +47,12 @@ impl<H: HeaderSize + GetType, B: BufMut + WriteHeader<H>> Packet<H, B> {
             buffer.put_u16(0);
         }
         buffer.put_packet_number(pn.1);
-        let meta = Metadata::new(header.get_type());
+        let meta = Metadata {
+            pn: pn.0,
+            ..Metadata::new(header.get_type())
+        };
         Ok(Self {
+            frames,
             header,
             pn,
             buffer,
@@ -53,64 +63,16 @@ impl<H: HeaderSize + GetType, B: BufMut + WriteHeader<H>> Packet<H, B> {
     }
 }
 
-impl<H: GetType, B: BufMut> Packet<H, B> {
-    fn assemble_with<const N: usize>(
-        &mut self,
-        cx: &mut Context<'_>,
-        sources: [&mut dyn Package<B>; N],
-        frames: &mut Vec<GuaranteedFrame>,
-        limits: &mut dyn Limit,
-        tag_len: usize,
-    ) -> Poll<Result<usize, Error>> {
-        if self.finished {
-            return Poll::Ready(Ok(0));
-        }
-        let start = self.meta.nframes;
-        let mut buffer = PacketBuffer::new(
-            &mut self.buffer,
-            limits,
-            frames,
-            self.header.get_type(),
-            self.cursor,
-            tag_len,
-        );
-        buffer.meta = self.meta;
-        let mut result = Poll::Pending;
-        for source in sources {
-            match source.poll_dump(cx, &mut buffer) {
-                Poll::Ready(Err(error)) => {
-                    result = Poll::Ready(Err(error));
-                    break;
-                }
-                Poll::Ready(Ok(_)) => result = Poll::Ready(Ok(0)),
-                Poll::Pending => {}
-            }
-            if buffer.limits.max_size() == 0 || buffer.is_finished() {
-                break;
-            }
-        }
-        self.finished = buffer.is_finished();
-        self.cursor = buffer.written();
-        self.meta = buffer.meta;
-        if matches!(result, Poll::Ready(Err(_))) {
-            return result;
-        }
-        if self.meta.nframes != start {
-            Poll::Ready(Ok(self.meta.nframes - start))
-        } else {
-            result
-        }
-    }
-}
-
-impl<H: GetType, B: BufMut, const N: usize> Assemble<N> for Packet<H, B> {
+impl<H: GetType, B: BufMut> Assemble for Packet<'_, H, B> {
     type Buffer = B;
     fn assemble(
         &mut self,
         cx: &mut Context<'_>,
-        sources: [&mut dyn Package<B>; N],
-        frames: &mut Vec<GuaranteedFrame>,
+        sources: &mut [&mut dyn Package<B>],
     ) -> Poll<Result<usize, Error>> {
+        if self.finished {
+            return Poll::Ready(Ok(0));
+        }
         let mut limits = Constraints {
             flow_ctrl: usize::MAX,
             send_quota: usize::MAX,
@@ -119,27 +81,40 @@ impl<H: GetType, B: BufMut, const N: usize> Assemble<N> for Packet<H, B> {
             max_size: self.cursor.saturating_add(self.buffer.remaining_mut()),
             ..Default::default()
         };
-        self.assemble_with(cx, sources, frames, &mut limits, 0)
+        let mut buffer = PacketBuffer::new(
+            &mut self.buffer,
+            &mut limits,
+            self.frames,
+            self.header.get_type(),
+            self.cursor,
+            0,
+        );
+        buffer.meta = self.meta;
+        let result = buffer.assemble(cx, sources);
+        self.finished = buffer.is_finished();
+        self.cursor = buffer.written();
+        self.meta = buffer.meta;
+        result
     }
 }
 
 /// Protection and send limits decorate packet encoding, without owning frame records.
 pub struct Envelope<'a, H, B, K> {
-    pub packet: Packet<H, B>,
+    pub packet: Packet<'a, H, B>,
     pub keys: &'a K,
     pub limits: &'a mut Constraints,
 }
 
-impl<H: GetType + HeaderSize, B: BufMut, K: Seal, const N: usize> Assemble<N>
-    for Envelope<'_, H, B, K>
-{
+impl<H: GetType + HeaderSize, B: BufMut, K: Seal> Assemble for Envelope<'_, H, B, K> {
     type Buffer = B;
     fn assemble(
         &mut self,
         cx: &mut Context<'_>,
-        sources: [&mut dyn Package<B>; N],
-        frames: &mut Vec<GuaranteedFrame>,
+        sources: &mut [&mut dyn Package<B>],
     ) -> Poll<Result<usize, Error>> {
+        if self.packet.finished {
+            return Poll::Ready(Ok(0));
+        }
         let start = self.packet.meta.nframes;
         let tag_len = self.keys.tag_len();
         let pn_offset = self.packet.cursor - self.packet.pn.1.size();
@@ -147,22 +122,29 @@ impl<H: GetType + HeaderSize, B: BufMut, K: Seal, const N: usize> Assemble<N>
             .limits
             .min_size
             .max(pn_offset + 4 + 16 + self.limits.overhead);
-        let result = self
-            .packet
-            .assemble_with(cx, sources, frames, self.limits, tag_len);
+        let mut buffer = PacketBuffer::new(
+            &mut self.packet.buffer,
+            self.limits,
+            self.packet.frames,
+            self.packet.header.get_type(),
+            self.packet.cursor,
+            tag_len,
+        );
+        buffer.meta = self.packet.meta;
+        let result = buffer.assemble(cx, sources);
+        self.packet.finished = buffer.is_finished();
+        self.packet.cursor = buffer.written();
+        self.packet.meta = buffer.meta;
         match result {
             Poll::Ready(Ok(n)) if n > 0 => {}
             _ => return result,
         }
-        let padding = self
-            .limits
-            .min_size()
-            .saturating_sub(self.packet.cursor + tag_len);
+        let padding = buffer.min_size().saturating_sub(buffer.written() + tag_len);
         if padding > 0 {
             let mut buffer = PacketBuffer::new(
                 &mut self.packet.buffer,
                 self.limits,
-                frames,
+                self.packet.frames,
                 self.packet.header.get_type(),
                 self.packet.cursor,
                 tag_len,
@@ -173,8 +155,8 @@ impl<H: GetType + HeaderSize, B: BufMut, K: Seal, const N: usize> Assemble<N>
                 return Poll::Ready(Err(layout_error()));
             }
             buffer.put_bytes(0, padding);
-            self.packet.cursor = buffer.written();
             buffer.record(Frame::Padding(PaddingFrame));
+            self.packet.cursor = buffer.written();
             self.packet.meta = buffer.meta;
         }
         let size = self.packet.cursor + tag_len;
@@ -225,7 +207,9 @@ macro_rules! seal_buffer {
             pub fn seal(&mut self) -> Result<K::Output, Error> {
                 if self.packet.buffer.len() != self.packet.cursor { return Err(layout_error()); }
                 self.packet.buffer.put_bytes(0, self.keys.tag_len());
-                protect(&self.packet.header, self.packet.pn, self.keys, self.packet.buffer.as_mut(), self.packet.cursor)
+                let sealed = protect(&self.packet.header, self.packet.pn, self.keys, self.packet.buffer.as_mut(), self.packet.cursor)?;
+                self.packet.meta.pktlen = self.packet.buffer.len();
+                Ok(sealed)
             }
         }
     )*};

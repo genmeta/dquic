@@ -11,7 +11,7 @@ use qbase::{
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
         GetType, OneRttHeader,
-        assemble::{PacketBuffer, Limit, Package},
+        assemble::{Metadata, PacketBuffer, Limit, Package},
     },
     util::IndexDeque,
 };
@@ -26,6 +26,8 @@ pub struct Constraints {
     pub send_quota: usize,
     pub credit: usize,
     pub probe_quota: [usize; 3],
+    /// Datagram envelope bytes, charged once when a datagram is assembled.
+    pub overhead: usize,
 }
 
 impl Constraints {
@@ -79,14 +81,22 @@ impl Spaces {
         &self,
         cx: &mut Context<'_>,
         dcids: [Option<ConnectionId>; 3],
-        external: &mut [&mut [&mut dyn for<'b> Package<&'b mut [u8]>]; 3],
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut [u8],
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
-        pns: &mut [Option<u64>; 3],
+        packets: &mut [Option<Metadata>; 3],
         multipath: bool,
     ) -> Result<(usize, usize), Error> {
+        if limits.credit <= limits.overhead {
+            return Ok((0, 0));
+        }
         let before = limits.clone();
+        limits.credit -= limits.overhead;
+        limits.send_quota = limits.send_quota.saturating_sub(limits.overhead);
+        for quota in &mut limits.probe_quota {
+            *quota = quota.saturating_sub(limits.overhead);
+        }
         let start = frames.len();
         let result = self.package_at(
             self.0.offset(),
@@ -96,26 +106,41 @@ impl Spaces {
             buffer,
             limits,
             frames,
-            pns,
+            packets,
             multipath,
             0,
             None,
         );
         if result.is_err() {
             for (index, space) in self.0.enumerate() {
-                if let Some(pn) = pns[index as usize].take() {
+                if let Some(meta) = packets[index as usize].take() {
                     space.cancel(
-                        pn,
+                        meta.pn,
                         &mut frames.drain(start..),
                     );
                 }
             }
-            // Fresh stream bytes have advanced their source, and are recovered as lost bytes.
-            let fresh = limits.flow_ctrl;
-            *limits = before;
-            limits.flow_ctrl = fresh;
         }
-        result
+        match result {
+            Ok((size, nframes, flight)) if size > 0 => {
+                if !flight {
+                    limits.send_quota = before.send_quota;
+                }
+                for epoch in qbase::Epoch::EPOCHS {
+                    if packets[epoch].is_none() {
+                        limits.probe_quota[epoch] = before.probe_quota[epoch];
+                    }
+                }
+                Ok((size, nframes))
+            }
+            result => {
+                // Consumed STREAM bytes are recovered as retransmissions, not fresh data.
+                let fresh = limits.flow_ctrl;
+                *limits = before;
+                limits.flow_ctrl = fresh;
+                result.map(|_| (0, 0))
+            }
+        }
     }
 
     fn package_at(
@@ -123,17 +148,17 @@ impl Spaces {
         index: u64,
         cx: &mut Context<'_>,
         dcids: [Option<ConnectionId>; 3],
-        external: &mut [&mut [&mut dyn for<'b> Package<&'b mut [u8]>]; 3],
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut [u8],
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
-        pns: &mut [Option<u64>; 3],
+        packets: &mut [Option<Metadata>; 3],
         multipath: bool,
         prefix: usize,
         min_bytes: Option<usize>,
-    ) -> Result<(usize, usize), Error> {
+    ) -> Result<(usize, usize, bool), Error> {
         let Some(space) = self.0.get(index) else {
-            return Ok((0, 0));
+            return Ok((0, 0, false));
         };
         let epoch = space.epoch();
         let reserved = match dcids[epoch] {
@@ -151,7 +176,7 @@ impl Spaces {
                 buffer,
                 limits,
                 frames,
-                pns,
+                packets,
                 multipath,
                 prefix,
                 min_bytes,
@@ -179,6 +204,7 @@ impl Spaces {
                 0,
                 tag,
             );
+            constrained.meta.pn = pn.0;
             // RFC 9000 Sections 8.2.1 and 8.2.2 require datagrams containing
             // PATH_CHALLENGE or PATH_RESPONSE to be at least 1200 bytes, except
             // when the path's anti-amplification limit prevents expansion.
@@ -194,7 +220,7 @@ impl Spaces {
                 cx,
                 dcid,
                 pn,
-                external[epoch],
+                external,
                 &mut constrained,
                 required,
                 multipath,
@@ -229,7 +255,7 @@ impl Spaces {
                     buffer,
                     limits,
                     frames,
-                    pns,
+                    packets,
                     multipath,
                     prefix,
                     min_bytes,
@@ -251,12 +277,12 @@ impl Spaces {
             &mut buffer[size..],
             limits,
             frames,
-            pns,
+            packets,
             multipath,
             prefix + size,
             Some(required.saturating_sub(size)).filter(|&min| min != 0),
         );
-        let (tail_size, tail_frames) = match tail {
+        let (tail_size, tail_frames, tail_flight) = match tail {
             Ok(tail) => tail,
             Err(error) => {
                 space.cancel(
@@ -299,6 +325,7 @@ impl Spaces {
                 return Err(error);
             }
         };
+        meta.pktlen = final_size;
         let own_frames = meta.nframes;
         space.on_sealed(
             pn.0,
@@ -307,8 +334,9 @@ impl Spaces {
             meta,
             &mut frames.drain(start..),
         );
-        pns[epoch] = Some(pn.0);
-        Ok((final_size + tail_size, own_frames + tail_frames))
+        packets[epoch] = Some(meta);
+        limits.probe_quota[epoch] = 0;
+        Ok((final_size + tail_size, own_frames + tail_frames, meta.in_flight || tail_flight))
     }
 
     pub fn snapshot(&self) -> Self {

@@ -48,14 +48,16 @@ impl<RETIRED> RemoteCids<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
-    /// Create a new RemoteCids with the maximum number of active cids,
-    /// and the retired cids.
+    /// Create a remote CID manager with the peer's Initial SCID and active CID limit.
     ///
     /// As mentioned above, the retired cids can be a deque, a channel, or any buffer,
     /// as long as it can send those [`RetireConnectionIdFrame`] to the peer finally.
     /// See [`RemoteCids`]
-    fn new(active_cid_limit: u64, retired_cids: RETIRED) -> Self {
-        let cid_deque = IndexDeque::default();
+    fn new(initial_dcid: ConnectionId, active_cid_limit: u64, retired_cids: RETIRED) -> Self {
+        let mut cid_deque = IndexDeque::default();
+        cid_deque
+            .push_back(Some((0, initial_dcid, ResetToken::default())))
+            .expect("Initial connection ID should be inserted at the offset 0");
 
         Self {
             active_cid_limit,
@@ -65,17 +67,6 @@ where
             cursor: 0,
             retired_cids,
         }
-    }
-
-    fn set_initial_dcid(&mut self, initial_dcid: ConnectionId) {
-        assert!(
-            self.cid_deque.is_empty() && self.cid_deque.offset() == 0 && self.cursor == 0,
-            "NewConnectionIdFrame received before the first initial packet processed"
-        );
-
-        self.cid_deque
-            .push_back(Some((0, initial_dcid, ResetToken::default())))
-            .expect("Initial connection ID should be inserted at the offset 0");
     }
 
     /// Receive a [`NewConnectionIdFrame`] from peer.
@@ -244,43 +235,21 @@ impl<RETIRED> ArcRemoteCids<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
-    /// Create a new RemoteCids with the maximum number of active cids,
-    /// and the retired cids.
+    /// Create a remote CID manager with the peer's Initial SCID as sequence zero.
     ///
-    /// As mentioned above, the `retired_cids` can be a deque, a channel, or any buffer,
-    /// as long as it can send those [`RetireConnectionIdFrame`] to the peer finally.
-    pub fn new(active_cid_limit: u64, retired_cids: RETIRED) -> Self {
+    /// `active_cid_limit` is the limit advertised by this endpoint. `retired_cids`
+    /// sends RETIRE_CONNECTION_ID frames to the peer.
+    ///
+    /// Construction does not request a CID cell. The first [`Self::apply_dcid`]
+    /// gets sequence zero unless the peer has already retired it through a
+    /// NEW_CONNECTION_ID frame's retire_prior_to field. With multiple paths,
+    /// the selected sender must request its cell before the other senders.
+    pub fn new(initial_dcid: ConnectionId, active_cid_limit: u64, retired_cids: RETIRED) -> Self {
         Self(Arc::new(Mutex::new(RemoteCids::new(
+            initial_dcid,
             active_cid_limit,
             retired_cids,
         ))))
-    }
-
-    /// Set the local CID limit once the server has been selected, before receiving 1-RTT.
-    pub fn set_limit(&self, active_cid_limit: u64) {
-        self.0.lock().unwrap().active_cid_limit = active_cid_limit;
-    }
-
-    /// Register the peer's Initial SCID as connection ID sequence zero.
-    ///
-    /// Call this once, after the peer's Initial SCID is known and before receiving
-    /// NEW_CONNECTION_ID frames or requesting any CID cells. Connection growth
-    /// registers it before publishing the Mature phase; registration does not
-    /// depend on which path is selected for the handshake.
-    ///
-    /// This only inserts sequence zero. It does not create or assign a cell,
-    /// rearrange pending cells, or advance the allocation cursor. The first
-    /// subsequent [`Self::apply_dcid`] gets sequence zero unless the peer has
-    /// already retired it through NEW_CONNECTION_ID's retire_prior_to field.
-    ///
-    /// With multiple paths, the caller must let the selected path's sending task
-    /// request its cell before allowing the other sending tasks to request theirs.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the CID queue has already been initialized or advanced.
-    pub fn set_initial_dcid(&self, initial_dcid: ConnectionId) {
-        self.0.lock().unwrap().set_initial_dcid(initial_dcid);
     }
 
     /// Apply for a CID cell when a path starts sending 1-RTT packets.
@@ -354,6 +323,10 @@ where
     fn renew(&mut self) {
         assert!(self.is_using);
         self.is_using = false;
+        if self.is_retired {
+            self.retire();
+            return;
+        }
         while self.allocated_cids.len() > 1 {
             let (seq, _) = self.allocated_cids.pop_back().unwrap();
             let sequence = VarInt::try_from(seq)
@@ -364,9 +337,8 @@ where
     }
 
     fn retire(&mut self) {
-        if !self.is_retired {
-            self.is_retired = true;
-
+        self.is_retired = true;
+        if !self.is_using {
             while let Some((seq, _)) = self.allocated_cids.pop_front() {
                 let sequence = VarInt::try_from(seq)
                     .expect("Sequence of connection id is very hard to exceed VARINT_MAX");
@@ -415,10 +387,10 @@ where
     /// If the corresponding path which applied this cid is inactive,
     /// then this cid apply is retired.
     /// In this case, None will be returned.
-    pub fn borrow_cid(&'_ self, tx_waker: ArcSendWakers) -> Poll<Option<BorrowedCid<'_, RETIRED>>> {
+    pub fn borrow_cid(&self, tx_waker: ArcSendWakers) -> Poll<Option<BorrowedCid<RETIRED>>> {
         self.0.lock().unwrap().borrow_cid(tx_waker).map(|cid| {
             cid.map(|cid| BorrowedCid {
-                cid_cell: &self.0,
+                cid_cell: self.0.clone(),
                 cid,
             })
         })
@@ -435,15 +407,15 @@ where
 ///
 /// While the connection ID is borrowed, the retired cids will not be truly retired. The retire will be delayed until
 /// the [`BorrowedCid`] is dropped, a [`RetireConnectionIdFrame`] will be sent to the peer.
-pub struct BorrowedCid<'a, RETIRED>
+pub struct BorrowedCid<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
     cid: ConnectionId,
-    cid_cell: &'a Mutex<CidCell<RETIRED>>,
+    cid_cell: Arc<Mutex<CidCell<RETIRED>>>,
 }
 
-impl<RETIRED> Deref for BorrowedCid<'_, RETIRED>
+impl<RETIRED> Deref for BorrowedCid<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
@@ -454,7 +426,7 @@ where
     }
 }
 
-impl<RETIRED> Drop for BorrowedCid<'_, RETIRED>
+impl<RETIRED> Drop for BorrowedCid<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
@@ -479,11 +451,28 @@ mod tests {
     }
 
     #[test]
-    fn initial_registration_leaves_allocation_to_the_first_sender() {
-        let mut remote = RemoteCids::new(4, RetiredCids::default());
+    fn borrowed_cid_outlives_the_cell_handle_and_defers_path_retirement() {
+        let retired = RetiredCids::default();
+        let cid = ConnectionId::from_slice(b"client00");
+        let remote = ArcRemoteCids::new(cid, 2, retired.clone());
+        let cell = remote.apply_dcid();
+        let Poll::Ready(Some(borrowed)) = cell.borrow_cid(ArcSendWakers::default()) else {
+            panic!("initial CID is ready");
+        };
+        cell.retire();
+        assert!(retired.lock().unwrap().is_empty());
+        assert!(matches!(cell.borrow_cid(ArcSendWakers::default()), Poll::Ready(None)));
+        drop(cell);
+        assert_eq!(*borrowed, cid);
+        drop(borrowed);
+        assert_eq!(retired.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn construction_leaves_allocation_to_the_first_sender() {
         let initial = ConnectionId::from_slice(b"client00");
         let next = ConnectionId::from_slice(b"client01");
-        remote.set_initial_dcid(initial);
+        let mut remote = RemoteCids::new(initial, 4, RetiredCids::default());
         assert_eq!(remote.cursor, 0);
         assert!(remote.ready_cells.is_empty());
         assert!(remote.pending_cells.is_empty());
@@ -501,8 +490,11 @@ mod tests {
 
     #[test]
     fn initial_cid_can_be_retired_before_any_sender_requests_a_cell() {
-        let remote = ArcRemoteCids::new(2, RetiredCids::default());
-        remote.set_initial_dcid(ConnectionId::from_slice(b"client00"));
+        let remote = ArcRemoteCids::new(
+            ConnectionId::from_slice(b"client00"),
+            2,
+            RetiredCids::default(),
+        );
         let next = ConnectionId::from_slice(b"client01");
         remote
             .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
@@ -513,13 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn selected_server_limit_preserves_existing_cid_cells() {
-        let remote = ArcRemoteCids::new(2, RetiredCids::default());
+    fn selected_server_limit_counts_initial_and_new_cids() {
         let initial = ConnectionId::from_slice(b"client00");
-        remote.set_initial_dcid(initial);
+        let remote = ArcRemoteCids::new(initial, 8, RetiredCids::default());
         let cell = remote.apply_dcid();
 
-        remote.clone().set_limit(8);
         for seq in 1..8u32 {
             let frame = NewConnectionIdFrame::new(
                 ConnectionId::from_slice(&u64::from(seq).to_be_bytes()),
@@ -545,10 +535,8 @@ mod tests {
     #[test]
     fn test_remote_cids() {
         let retired_cids = RetiredCids::default();
-        let mut remote_cids = RemoteCids::new(8, retired_cids);
-
         let initial_dcid = ConnectionId::random_gen(8);
-        remote_cids.set_initial_dcid(initial_dcid);
+        let mut remote_cids = RemoteCids::new(initial_dcid, 8, retired_cids);
         let cid_apply0 = remote_cids.apply_dcid();
 
         let waker = ArcSendWakers::default();
@@ -592,10 +580,8 @@ mod tests {
     #[test]
     fn test_retire_in_remote_cids() {
         let retired_cids = RetiredCids::default();
-        let remote_cids = ArcRemoteCids::new(8, retired_cids);
-
         let initial_dcid = ConnectionId::random_gen(8);
-        remote_cids.set_initial_dcid(initial_dcid);
+        let remote_cids = ArcRemoteCids::new(initial_dcid, 8, retired_cids);
         let cid_apply0 = remote_cids.apply_dcid();
 
         let mut guard = remote_cids.0.lock().unwrap();
@@ -672,10 +658,8 @@ mod tests {
     #[test]
     fn test_retire_without_apply() {
         let retired_cids = RetiredCids::default();
-        let remote_cids = ArcRemoteCids::new(8, retired_cids);
-
         let initial_dcid = ConnectionId::random_gen(8);
-        remote_cids.set_initial_dcid(initial_dcid);
+        let remote_cids = ArcRemoteCids::new(initial_dcid, 8, retired_cids);
         let cid_apply0 = remote_cids.apply_dcid();
 
         let mut guard = remote_cids.0.lock().unwrap();

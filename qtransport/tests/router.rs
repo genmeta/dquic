@@ -2,10 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use qbase::{
-    cid::{ConnectionId, GenUniqueCid, RetireCid},
+    cid::{ArcLocalCids, ConnectionId, GenUniqueCid, RetireCid},
     frame::{NewConnectionIdFrame, io::SendFrame},
     net::route::{Link, Pathway},
     packet::{DataHeader, DataPacket, GetDcid, LongHeaderBuilder, long},
+    role::Role,
 };
 use qtransport::{
     packet::channel,
@@ -42,27 +43,27 @@ fn is_routed(router: &QuicRouter, packet: &Packet) -> bool {
 async fn empty_cid_routes_by_peer_address() {
     let router = router();
     let (inbox, mut rcvd_pkt) = channel::new();
-    let route = router.insert(way().1.dst.into(), inbox);
+    router.insert(way().1.dst.into(), inbox, ());
     let (pathway, link) = way();
     router.deliver(packet(ConnectionId::default()), pathway, link);
     assert!(rcvd_pkt.initial.recv().await.is_some());
-    drop(route);
+    router.remove(&way().1.dst.into());
     assert!(!is_routed(&router, &packet(ConnectionId::default())));
 }
 
 #[tokio::test]
-async fn old_entry_cannot_remove_a_replacement() {
+async fn old_registry_cannot_retire_a_replacement() {
     let router = router();
     let cid = ConnectionId::from_slice(b"replaced");
     let (old_inbox, _) = channel::new();
-    let old = router.insert(cid.into(), old_inbox);
+    let old = router.insert(cid.into(), old_inbox, ());
     let (replacement, mut rcvd_pkt) = channel::new();
-    let current = router.insert(cid.into(), replacement);
-    drop(old);
+    let current = router.insert(cid.into(), replacement, ());
+    old.retire_cid(cid);
     let (pathway, link) = way();
     router.deliver(packet(cid), pathway, link);
     assert!(rcvd_pkt.initial.recv().await.is_some());
-    drop(current);
+    current.retire_cid(cid);
     assert!(!is_routed(&router, &packet(cid)));
 }
 
@@ -74,14 +75,14 @@ async fn retained_route_drops_late_initials_after_the_receiver_closes() {
     router.on_incoming(move |_, _, _| *observed.lock().unwrap() += 1);
     let cid = ConnectionId::from_slice(b"original");
     let (inbox, received) = channel::new();
-    let route = router.insert(cid.into(), inbox);
+    let registry = router.insert(cid.into(), inbox, ());
     drop(received);
 
     let (pathway, link) = way();
     router.deliver(packet(cid), pathway, link);
     assert_eq!(*incoming.lock().unwrap(), 0);
 
-    drop(route);
+    registry.retire_cid(cid);
     router.deliver(packet(cid), pathway, link);
     assert_eq!(*incoming.lock().unwrap(), 1);
 }
@@ -141,4 +142,53 @@ async fn registry_routes_issued_cids_and_forwards_frames() {
     assert!(!is_routed(&router, &packet(first)));
     assert!(is_routed(&router, &packet(second)));
     registry.retire_cid(second);
+}
+
+#[test]
+fn server_local_cids_clear_the_original_route() {
+    let router = router();
+    let odcid = ConnectionId::from_slice(b"original");
+    let (inbox, received) = channel::new();
+    let frames = IssuedFrames::default();
+    let registry = router.insert(odcid.into(), inbox, frames.clone());
+    let scid = registry.gen_unique_cid();
+    let local = ArcLocalCids::new(Role::Server, odcid, scid, registry);
+    let issued = *frames.0.lock().unwrap()[0].connection_id();
+    drop(received);
+    assert!(is_routed(&router, &packet(odcid)));
+
+    local.clear();
+    for cid in [odcid, scid, issued] {
+        assert!(!is_routed(&router, &packet(cid)));
+    }
+
+    let (replacement, _) = channel::new();
+    router.insert(odcid.into(), replacement, ());
+    local.clear();
+    drop(local);
+    assert!(is_routed(&router, &packet(odcid)));
+}
+
+#[test]
+fn local_cids_drop_retires_odcid_only_for_servers() {
+    for role in [Role::Client, Role::Server] {
+        let router = router();
+        let odcid = ConnectionId::from_slice(b"original");
+        let (inbox, _) = channel::new();
+        let frames = IssuedFrames::default();
+        let registry = router.insert(odcid.into(), inbox, frames.clone());
+        let scid = registry.gen_unique_cid();
+        let local = ArcLocalCids::new(role, odcid, scid, registry);
+        let issued = *frames.0.lock().unwrap()[0].connection_id();
+        let clone = local.clone();
+        drop(local);
+        for cid in [odcid, scid, issued] {
+            assert!(is_routed(&router, &packet(cid)));
+        }
+
+        drop(clone);
+        assert!(!is_routed(&router, &packet(scid)));
+        assert!(!is_routed(&router, &packet(issued)));
+        assert_eq!(is_routed(&router, &packet(odcid)), role == Role::Client);
+    }
 }

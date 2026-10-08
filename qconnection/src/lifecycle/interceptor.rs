@@ -102,7 +102,7 @@ pub(super) async fn read_crypto_stream_to_interceptor(
     stream: CryptoStream,
     paths: Arc<Paths>,
 ) {
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let mut reader = stream.reader();
     let mut buffer = [0; 4096];
     loop {

@@ -28,7 +28,7 @@
 | `space` | Initial/Handshake 使用 `Space<K>`；独立的 `DataSpace` 还持有 `DataStreams` 和 `ArcReliableFrames`，负责三类帧的恢复；没有父级回指 |
 | `keys` | Result<K, KeyRetired>、同步取材与退役、1-RTT 代次、认证与 AEAD 用量；OpenPacket、SealPacket、私有 open_with 包保护基础实现 |
 | `packet` | qtls 密钥驱动的 `CipherPacket<H>` / `PlainPacket<H>`；`channel` 提供四个加密级别的 typed channel |
-| `router` | Signpost → Inbox；RAII 路由守卫、CID registry、未知包 channel |
+| `router` | Signpost → Inbox；CID registry、未知包 channel |
 | `recv` | acknowledge；Data 空间的 ACK 处理 |
 | `path` | 每路径一个 CC、路径验证/重试、反放大信用、按实例退役 |
 | `send` | 每路径一个 Sender，分空间组包、Burst 批量提交；独立的 `acknowledge` 函数供原组件管道捕获 |
@@ -37,7 +37,7 @@
 
 建立连接的外部驱动按以下顺序工作：
 
-1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。将 `inbox` 注册到 Router，把 `(route, rcvd_pkt)` 传给 qconnection。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
+1. 使用 `let (inbox, rcvd_pkt) = packet::channel::new()` 创建四级 channel。通过 `router.insert(signpost, inbox, issued_cids)` 注册路由，用返回的 registry 构造 LocalCids，并将 `rcvd_pkt` 传给 qconnection。独立 Router 由调用者传入 connectless sender；全局 Router 的 listener 用 `take_connectless_packets()` 取得唯一 receiver。
 2. growing 从 TLS 取得密钥后，创建 `ArcKeys::new(keys)` 或 `ArcOneRttKeys::from(material)`，Initial/Handshake 通过 `Space::new(epoch, keys)` 构造空间，Data 通过 `DataSpace::new(keys, streams, reliable_frames)` 构造。`try_get()` 返回 `Result<K, KeyRetired>`，密钥层不再维护 Pending 或 Waker，也不实现 Future。取得密钥后直接使用 opening/sealing；收包用具体解密函数接线。
 3. `rcvd_pkt.initial / handshake / zero_rtt / one_rtt` 分别具有对应 header 类型。qconnection 的接收循环直接消费各空间的 typed receiver，完成解密、去重与完整帧解析后，再接纳路径、记账和投递帧；不经过统一 Packet 队列和二次分流。
 4. 参数和 1-RTT 密钥就绪后构造 MaturePhase、streams/flow 和 Data 空间，再发布阶段并启动 Data 收包。`MaturePhase::new` 返回 `Arc<MaturePhase>`；从 Data 空间克隆 streams，将它与选定 ALPN、同一个关闭信号传给 `ArcConnection::new`。Connection 直接调用 streams 的开流/接流接口，不持有 DataSpace；构造函数不重复握手校验。
@@ -46,7 +46,7 @@
 
 Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器、CID/token 管理实例由外部驱动持有；QuicRouter 实现在 qtransport，支持独立实例和显式取得的全局实例。
 
-路由保留 `Signpost`、`QuicRouterEntry` 和 `QuicRouterRegistry`，不包含 `QuicRouterComponent`、admissibility 或 handler。`Way = (Pathway, Link)`。`receive` 解析 datagram 并为同一连接的 CID 别名只记一次字节数；未知包直接 `try_send` 到 connectless channel。`packet::channel::Inbox` 将 Data packet 按 header 类型投递，满 channel 时直接丢包。
+路由保留 `Signpost` 和 `QuicRouterRegistry`，不包含 `QuicRouterComponent`、admissibility 或 handler。`Way = (Pathway, Link)`。`receive` 解析 datagram 并为同一连接的 CID 别名只记一次字节数；未知包直接 `try_send` 到 connectless channel。`packet::channel::Inbox` 将 Data packet 按 header 类型投递，满 channel 时直接丢包。
 
 1-RTT 密钥分为固定的 `HeaderKeys { opening, sealing }` 和共享的 `OneRttPacketKeys`。
 `qtls::DirectionalKeys` 与 `OneRttKeys` 均实现 `keys::OpenPacket`、`keys::SealPacket`，

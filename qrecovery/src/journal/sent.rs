@@ -107,8 +107,7 @@ impl SentJournal {
                 expire_after: sent_at + retention,
             };
             self.deadlines.insert((retrans_at, pn));
-        }
-        if !in_flight {
+        } else {
             let record = self.remove_packet(pn, SentPacketState::Retired).unwrap();
             self.take_frames(record.frame_range, drop);
         }

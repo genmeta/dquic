@@ -14,7 +14,7 @@ use qbase::{
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
-use crate::{ArcConnPhase, Error, Paths, lifecycle::client::resolve_paths};
+use crate::{Error, Paths, lifecycle::client::resolve_paths};
 
 struct ScriptedResolver(Mutex<Option<ResolveResult>>);
 
@@ -115,14 +115,11 @@ fn paths() -> Arc<Paths> {
             tls_backend::quic::Version::V1,
         )
         .into();
-    Paths::new(
+    crate::common::initial_paths_with_timeouts(
         Role::Client,
-        ArcConnPhase::initial(crate::common::initial_phase(
-            Role::Client,
-            ConnectionId::from_slice(b"clientid"),
-            ConnectionId::from_slice(b"original"),
-            keys,
-        )),
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys,
         Duration::ZERO,
         Duration::ZERO,
     )
