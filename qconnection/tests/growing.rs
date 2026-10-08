@@ -87,7 +87,10 @@ async fn tls_error_wakes_each_independent_waiter() {
     });
     tokio::task::yield_now().await;
     // Actual backend input failure, not a fabricated completion event.
-    assert!(server.write_msg(Epoch::Handshake, &[1]).is_err());
+    let error = server.write_msg(Epoch::Handshake, &[1]).unwrap_err();
+    // Once closed, subsequent input is discarded without replacing the first failure.
+    server.write_msg(Epoch::Handshake, &[1]).unwrap();
+    assert_eq!(server.read_server_parameters().await.unwrap_err(), error);
     tokio::time::timeout(Duration::from_secs(2), async {
         assert!(msg.await.unwrap());
         assert!(keys.await.unwrap());

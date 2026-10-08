@@ -947,7 +947,6 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
         parameters.local(qbase::param::ParameterId::InitialMaxData),
         reliable_frames.clone(),
     );
-    terminator.register(Arc::new(flow.clone()));
     let data = Arc::new(qtransport::space::DataSpace::new(
         Default::default(),
         qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
@@ -1405,12 +1404,29 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         .unwrap();
     mature.spaces.initial.retire();
     mature.spaces.handshake.retire();
+    let (_, mut writer) = mature
+        .spaces
+        .data
+        .streams
+        .open_uni()
+        .await
+        .unwrap()
+        .unwrap();
+    writer.write_all(b"queued before closing").await.unwrap();
+    assert!(mature.spaces.data.streams.fresh_bytes() > 0);
+    let credit = mature.flow_ctrl.sender.credit(usize::MAX).available();
+    assert!(credit > 0);
     let error = QuicError::with_default_fty(ErrorKind::Internal, "connection failed");
     paths
         .terminator
         .close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
-    mature.flow_ctrl.on_error(&error.clone().into());
     mature.spaces.data.crypto.on_error(&error.into());
+    // Closing stops the streams; the flow controller remains an ordinary credit ledger.
+    assert_eq!(mature.spaces.data.streams.fresh_bytes(), 0);
+    assert_eq!(
+        mature.flow_ctrl.sender.credit(usize::MAX).available(),
+        credit
+    );
     assert_eq!(
         collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
         .unwrap()
@@ -1631,6 +1647,105 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
     tokio::task::yield_now().await;
     assert!(paths.get(&path.pathway).is_none());
     assert_eq!(path.state(), qtransport::path::PathState::Retired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_source_does_not_stop_sending_close_responses_before_termination() {
+    use qbase::{
+        error::AppError,
+        net::route::{Line, Link},
+        packet::GetType,
+    };
+    use qprotocol::{QuicProtocol, UdpSocket};
+
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local = EndpointAddr::direct(socket.local_addr().unwrap());
+    QuicProtocol::global().register(local, &socket).unwrap();
+    let paths = crate::common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let path = Arc::new(Path::new(
+        Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
+        paths.handshake.clone(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        paths.resender.clone(),
+    ));
+    path.client_handshaking();
+    path.decide(true);
+    paths
+        .entries
+        .lock()
+        .unwrap()
+        .insert(path.pathway, path.clone());
+    let terminator = paths.terminator.clone();
+    let error: crate::Error = AppError::new(42u32.into(), "closed").into();
+    // Component failure is observable to its writer, not a fresh send-task error.
+    crate::common::initial_space(&paths.spaces)
+        .crypto
+        .on_error(&error);
+    let sender = tokio::spawn(sending(paths.clone(), path.clone()));
+    tokio::task::yield_now().await;
+    assert!(!sender.is_finished());
+    assert!(crate::common::observe_close(&terminator).notified().is_none());
+    let pto = Duration::from_secs(10);
+    terminator.close(error.clone().into(), pto);
+    for retransmit in [false, true] {
+        if retransmit {
+            for _ in 0..5 {
+                terminator.on_rcvd_packet(tokio::time::Instant::now());
+            }
+        }
+        let mut bytes = [BytesMut::zeroed(1500)];
+        let mut lines = [Line::new(
+            Link::new(local.addr(), peer.local_addr().unwrap()),
+            64,
+            None,
+            1500,
+        )];
+        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut bytes, &mut lines))
+            .await
+            .unwrap()
+            .unwrap();
+        bytes[0].truncate(lines[0].seg_size as usize);
+        let ParsedPacket::Data(packet) = PacketReader::new(bytes[0].clone(), 8)
+            .next()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
+            panic!()
+        };
+        let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+            .decrypt_long_packet(&keys(true).opening, |pn| Ok(pn.decode(0)))
+            .unwrap()
+            .unwrap();
+        let decoded = FrameReader::new(opened.body(), opened.get_type())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            decoded
+                .iter()
+                .any(|(frame, _)| matches!(frame, Frame::Close(_)))
+        );
+        assert!(
+            decoded
+                .iter()
+                .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
+        );
+        assert!(!sender.is_finished());
+        assert!(paths.get(&path.pathway).is_some());
+    }
+    tokio::time::advance(3 * pto).await;
+    sender.await.unwrap();
+    assert_eq!(terminator.await, error);
+    assert!(paths.snapshot().is_empty());
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
 #[tokio::test]

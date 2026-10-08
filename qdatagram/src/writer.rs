@@ -433,7 +433,7 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
         let mut guard = self.0.lock().unwrap();
         let writer = match guard.as_mut() {
             Ok(writer) => writer,
-            Err(error) => return Poll::Ready(Err(error.clone())),
+            Err(_) => return Poll::Ready(Ok(0)),
         };
         let Some(data) = writer.datagrams.front() else {
             writer.tx_wakers.register(cx.waker());

@@ -12,7 +12,10 @@ use qbase::{
     error::{AppError, ErrorKind, QuicError},
     frame::ConnectionCloseFrame,
     net::tx::ArcSendWakers,
-    packet::{PacketBuffer, Package, Type},
+    packet::{
+        PacketBuffer, Package, Type,
+        r#type::long::{Type::V1, Ver1},
+    },
     util::Wakers,
 };
 use tokio::time::Instant;
@@ -48,14 +51,14 @@ enum Terminator {
         tx_wakers: ArcSendWakers,
         sync_ccf: bool,
         sent_ccf: bool,
-        frame: ConnectionCloseFrame,
+        error: Error,
         rcvd_packets: u8,
         last_sent: Instant,
         interval: Duration,
     },
     Draining {
         waiters: Arc<Wakers>,
-        frame: ConnectionCloseFrame,
+        error: Error,
         sent_ccf: bool,
     },
     Terminated(Error),
@@ -88,32 +91,20 @@ impl Terminator {
                 }
                 tx_wakers.wake_all();
                 match reason {
-                    CloseReason::Peer(frame) => {
+                    CloseReason::Peer(_) => {
                         *self = Self::Draining {
                             waiters: waiters.clone(),
-                            frame: frame.clone(),
+                            error,
                             sent_ccf: false,
                         }
                     }
-                    CloseReason::App(error) => {
+                    CloseReason::App(_) | CloseReason::Internal(_) => {
                         *self = Self::Closing {
                             waiters: waiters.clone(),
                             tx_wakers: tx_wakers.clone(),
                             sync_ccf: true,
                             sent_ccf: false,
-                            frame: ConnectionCloseFrame::from(Error::from(error.clone())),
-                            rcvd_packets: 0,
-                            last_sent: now,
-                            interval: pto,
-                        }
-                    }
-                    CloseReason::Internal(error) => {
-                        *self = Self::Closing {
-                            waiters: waiters.clone(),
-                            tx_wakers: tx_wakers.clone(),
-                            sync_ccf: true,
-                            sent_ccf: false,
-                            frame: ConnectionCloseFrame::from(Error::from(error.clone())),
+                            error,
                             rcvd_packets: 0,
                             last_sent: now,
                             interval: pto,
@@ -131,12 +122,16 @@ impl Terminator {
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
-        let mut dump_ccf = |frame: &ConnectionCloseFrame, buffer: &mut PacketBuffer<'_, B>| {
-            let mut frame = match (buffer.meta.packet_type, frame) {
-                (Type::Long(_), ConnectionCloseFrame::App(frame)) => {
-                    ConnectionCloseFrame::Quic(frame.conceal())
+        let mut dump_ccf = |error: &Error, buffer: &mut PacketBuffer<'_, B>| {
+            let mut frame = match (buffer.meta.packet_type, error) {
+                (Type::Long(V1(Ver1::INITIAL | Ver1::HANDSHAKE)), Error::App(_)) => {
+                    // RFC 9000 §10.2.3: conceal application details at these levels.
+                    ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(
+                        ErrorKind::Application,
+                        "",
+                    )))
                 }
-                (_, frame) => frame.clone(),
+                (_, error) => ConnectionCloseFrame::from(error.clone()),
             };
             frame.poll_dump(cx, buffer)
         };
@@ -149,11 +144,11 @@ impl Terminator {
                 tx_wakers: send_wakers,
                 sync_ccf,
                 sent_ccf,
-                frame,
+                error,
                 ..
             } => {
                 if *sync_ccf {
-                    let result = dump_ccf(frame, buffer);
+                    let result = dump_ccf(error, buffer);
                     if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
                         *sync_ccf = false;
                         *sent_ccf = true;
@@ -168,10 +163,10 @@ impl Terminator {
                 }
             }
             Self::Draining {
-                frame, sent_ccf, ..
+                error, sent_ccf, ..
             } => {
                 if !*sent_ccf {
-                    let result = dump_ccf(frame, buffer);
+                    let result = dump_ccf(error, buffer);
                     if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
                         *sent_ccf = true;
                     } else {
@@ -223,7 +218,7 @@ impl Terminator {
                 }
                 *self = Self::Draining {
                     waiters: waiters.clone(),
-                    frame,
+                    error: frame.into(),
                     sent_ccf: *sent_ccf,
                 }
             }
@@ -240,13 +235,13 @@ impl Terminator {
                 );
             }
             Self::Closing {
-                tx_wakers, frame, ..
+                tx_wakers, error, ..
             } => {
                 tx_wakers.wake_all();
-                *self = Self::Terminated(frame.clone().into());
+                *self = Self::Terminated(error.clone());
             }
-            Self::Draining { frame, .. } => {
-                *self = Self::Terminated(frame.clone().into());
+            Self::Draining { error, .. } => {
+                *self = Self::Terminated(error.clone());
             }
             _ => (),
         }
@@ -289,10 +284,9 @@ impl ArcTerminator {
                     components.push(component);
                     return;
                 }
-                Terminator::Closing { frame, .. } | Terminator::Draining { frame, .. } => {
-                    frame.clone().into()
-                }
-                Terminator::Terminated(error) => error.clone(),
+                Terminator::Closing { error, .. }
+                | Terminator::Draining { error, .. }
+                | Terminator::Terminated(error) => error.clone(),
             }
         };
         component.close_with_error(error);
