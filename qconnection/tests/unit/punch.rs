@@ -202,7 +202,6 @@ fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
     terminator.register(Arc::new(phase.spaces.data.streams.clone()));
-    terminator.register(Arc::new(phase.flow_ctrl.clone()));
     paths
 }
 
@@ -331,6 +330,92 @@ async fn data_reception_delivers_crypto_and_streams_to_the_data_space() {
         assert_eq!(&body, b"stream");
         assert!(reader.read(&mut body).now_or_never().is_none());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_data_receiver_processes_peer_close_after_business_frames_and_waits() {
+    use qbase::{
+        error::{AppError, QuicError},
+        frame::{CryptoFrame, Len, MaxDataFrame, StreamFrame},
+        sid::{Dir, StreamId},
+        varint::VarInt,
+    };
+
+    let [sender, receiver] = pair();
+    let paths = empty_paths(&receiver);
+    let link = Link::new(
+        "127.0.0.1:47011".parse().unwrap(),
+        "127.0.0.1:47012".parse().unwrap(),
+    );
+    let pathway = link.into();
+    let path = Arc::new(Path::new(
+        pathway,
+        paths.handshake.clone(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        paths.resender.clone(),
+    ));
+    paths.entries.lock().unwrap().insert(pathway, path);
+    let terminator = paths.terminator.clone();
+    terminator.close(
+        crate::CloseReason::App(AppError::new(42u32.into(), "local close")),
+        Duration::from_secs(1),
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let task = tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
+        (rx, None),
+        receiver.spaces.data.clone(),
+        receiver.flow_ctrl.clone(),
+        receiver.puncher.clone(),
+        paths.clone(),
+        receiver.parameters.clone(),
+        receiver.cid_registry.clone(),
+        ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
+        ArcHandshake::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
+    ));
+    let peer_error: crate::Error =
+        QuicError::with_default_fty(ErrorKind::None, "peer close").into();
+    let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
+    let mut stream = (
+        StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 1),
+        b"x".as_slice(),
+    );
+    stream.0.set_len_bit(Len::Explicit);
+    let limit = receiver.flow_ctrl.sender.credit(usize::MAX).available() + 100;
+    let mut max_data = MaxDataFrame::new(VarInt::from_u64(limit as u64).unwrap());
+    let mut close = ConnectionCloseFrame::from(peer_error.clone());
+    let bytes = encode_frames(
+        &sender,
+        [&mut crypto, &mut stream, &mut max_data, &mut close],
+    );
+    let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
+        panic!()
+    };
+    let DataHeader::Short(header) = packet.header else {
+        panic!()
+    };
+    tx.send((
+        qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
+        pathway,
+        link,
+    ))
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished());
+    assert!(terminator.clone().now_or_never().is_none());
+    assert_eq!(
+        receiver.flow_ctrl.sender.credit(usize::MAX).available(),
+        limit
+    );
+    // Late registration observes Draining's peer reason only if CLOSE was delivered.
+    assert_eq!(
+        crate::common::observe_close(&terminator).notified(),
+        Some(peer_error.clone())
+    );
+    tokio::time::advance(Duration::from_secs(3)).await;
+    task.await.unwrap();
+    assert_eq!(terminator.await, peer_error);
+    paths.retire_all();
 }
 
 #[tokio::test]

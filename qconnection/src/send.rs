@@ -190,8 +190,8 @@ impl Burst<'_, '_> {
                     .get(Epoch::Data as u64)
                     .filter(|_| limits.send_quota >= 1200)
                     .map_or(0, |data| data.fresh_bytes_up_to(limits.send_quota));
-                let mut flow = ready!(phase.flow_ctrl.sender.poll_credit(cx, requested)).ok();
-                limits.flow_ctrl = flow.as_ref().map_or(0, |credit| credit.available());
+                let mut flow = ready!(phase.flow_ctrl.sender.poll_credit(cx, requested));
+                limits.flow_ctrl = flow.available();
                 let result = self.collect_depth(
                     cx,
                     3,
@@ -200,9 +200,7 @@ impl Burst<'_, '_> {
                     phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
                     false,
                 );
-                if let Some(flow) = &mut flow {
-                    flow.post_sent(flow.available() - limits.flow_ctrl);
-                }
+                flow.post_sent(flow.available() - limits.flow_ctrl);
                 if result.is_pending() {
                     self.dcid.take();
                 }

@@ -304,6 +304,9 @@ where
         &self,
         (stream_frame, body): (StreamFrame, bytes::Bytes),
     ) -> Result<usize, QuicError> {
+        if self.input.streams().is_err() {
+            return Ok(0);
+        }
         let sid = stream_frame.stream_id();
         // 对方必须是发送端，才能发送此帧
         if sid.role() != self.parameters.role() {
@@ -347,6 +350,9 @@ where
         &self,
         stream_ctl_frame: StreamCtlFrame,
     ) -> Result<usize, QuicError> {
+        if self.output.streams().is_err() {
+            return Ok(0);
+        }
         let mut sync_fresh_data = 0;
         match stream_ctl_frame {
             StreamCtlFrame::ResetStream(reset) => {
@@ -1288,7 +1294,7 @@ where
         let mut guard = self.output.streams();
         let output = match guard.as_mut() {
             Ok(output) => output,
-            Err(error) => return Poll::Ready(Err(error.clone())),
+            Err(_) => return Poll::Ready(Ok(0)),
         };
         let start = buffer.meta.nframes;
         loop {

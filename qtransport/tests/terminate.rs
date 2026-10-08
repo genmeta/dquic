@@ -5,9 +5,12 @@ use std::{
 
 use futures::FutureExt;
 use qbase::{
-    error::{ErrorKind, QuicError},
-    frame::{ConnectionCloseFrame, Frame},
-    packet::{PacketBuffer, Constraints, GetType, Limit, OneRttHeader, Package},
+    error::{AppError, ErrorKind, QuicError},
+    frame::{ConnectionCloseFrame, Frame, FrameReader, FrameType},
+    packet::{
+        PacketBuffer, Constraints, GetType, Limit, OneRttHeader, Package, Type,
+        r#type::long::{Type::V1, Ver1},
+    },
 };
 use qtransport::{CloseReason, Error, terminate::ArcTerminator};
 use tokio::time::Instant;
@@ -41,6 +44,98 @@ fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, E
         0,
     );
     (&*terminator).poll_dump(&mut Context::from_waker(waker), &mut buffer)
+}
+
+fn dump_close(terminator: &ArcTerminator, packet_type: Type) -> ConnectionCloseFrame {
+    let mut limits = Constraints {
+        send_quota: 2400,
+        credit: 2400,
+        max_size: 1200,
+        ..Default::default()
+    };
+    let mut bytes = bytes::BytesMut::new();
+    let mut frames = Vec::new();
+    let mut buffer = PacketBuffer::new(
+        &mut bytes,
+        &mut limits,
+        &mut frames,
+        packet_type,
+        0,
+        0,
+    );
+    assert_eq!(
+        (&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
+        Poll::Ready(Ok(1))
+    );
+    let decoded = FrameReader::new(bytes.freeze(), packet_type)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let [(Frame::Close(frame), _)] = decoded.as_slice() else {
+        panic!("expected one CONNECTION_CLOSE frame, got {decoded:?}");
+    };
+    frame.clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
+    use std::sync::{Arc, Mutex};
+
+    struct Component(Mutex<Option<Error>>);
+    impl qbase::Close for Component {
+        fn close_with_error(&self, error: Error) {
+            *self.0.lock().unwrap() = Some(error);
+        }
+    }
+
+    for error in [
+        Error::from(AppError::new(42u32.into(), "private application detail")),
+        Error::from(QuicError::new(
+            ErrorKind::ProtocolViolation,
+            FrameType::Crypto.into(),
+            "transport detail",
+        )),
+    ] {
+        for (packet_type, conceal) in [
+            (Type::Long(V1(Ver1::INITIAL)), true),
+            (Type::Long(V1(Ver1::HANDSHAKE)), true),
+            (Type::Long(V1(Ver1::ZERO_RTT)), false),
+            (OneRttHeader::new(Default::default(), Default::default()).get_type(), false),
+        ] {
+            // Cover Closing, direct Draining, and Closing -> Draining.
+            for (closing, peer) in [(true, false), (false, true), (true, true)] {
+                let terminator = ArcTerminator::no_error();
+                let pto = Duration::from_secs(1);
+                if closing {
+                    terminator.close(error.clone().into(), pto);
+                }
+                if peer {
+                    terminator.recv_conn_close_frame(error.clone().into(), pto);
+                }
+                let expected = if conceal && matches!(error, Error::App(_)) {
+                    ConnectionCloseFrame::new_quic(
+                        ErrorKind::Application,
+                        FrameType::Padding.into(),
+                        "",
+                    )
+                } else {
+                    error.clone().into()
+                };
+                assert_eq!(dump_close(&terminator, packet_type), expected);
+                let late = Arc::new(Component(Mutex::new(None)));
+                terminator.register(late.clone());
+                assert_eq!(*late.0.lock().unwrap(), Some(error.clone()));
+                if !peer {
+                    for _ in 0..5 {
+                        terminator.on_rcvd_packet(Instant::now());
+                    }
+                    let one_rtt = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                    assert_eq!(dump_close(&terminator, one_rtt), error.clone().into());
+                }
+                terminator.terminate();
+                assert_eq!(terminator.await, error);
+            }
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
