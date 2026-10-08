@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch,
-    HandshakeSummary, InstalledKeys, LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial,
-    PrivateKeyDer, QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig,
-    SessionSealKeyRing, SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake,
-    TlsLimits, TlsServer, default_provider as crypto_provider,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch, HandshakeSummary,
+    InstalledKeys, LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial, PrivateKeyDer,
+    QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig, SessionSealKeyRing,
+    SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake, TlsLimits, TlsServer,
+    default_provider as crypto_provider,
 };
 use rustls::pki_types::pem::PemObject;
 
@@ -146,7 +146,7 @@ fn anonymous_client_completes_without_remote_authority() {
 }
 
 #[test]
-fn server_certificate_requires_current_matching_good_ocsp() {
+fn supplied_server_ocsp_requires_current_matching_good_status() {
     set_roots();
     let provider = Arc::new(crypto_provider());
     let client = TlsClient::new(ClientTlsConfig {
@@ -439,16 +439,12 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
         })
         .unwrap();
 
-    handshake
-        .receive_crypto(Epoch::Handshake, &[])
-        .unwrap();
+    handshake.receive_crypto(Epoch::Handshake, &[]).unwrap();
     let error = handshake
         .receive_crypto(Epoch::Handshake, &[1])
         .unwrap_err();
     assert!(error.to_string().contains("expected Initial"));
-    let terminal = handshake
-        .receive_crypto(Epoch::Initial, &[1])
-        .unwrap_err();
+    let terminal = handshake.receive_crypto(Epoch::Initial, &[1]).unwrap_err();
     assert!(terminal.to_string().contains("terminal state"));
 }
 
@@ -510,7 +506,10 @@ fn transfer(
     while let Some(event) = sender.next_event() {
         progressed = true;
         match event {
-            TlsEvent::WriteCrypto { epoch: level, bytes } => {
+            TlsEvent::WriteCrypto {
+                epoch: level,
+                bytes,
+            } => {
                 for chunk in bytes.chunks(7) {
                     receiver.receive_crypto(level, chunk)?;
                 }
