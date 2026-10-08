@@ -19,9 +19,9 @@
 
 `qtransport::router::QuicRouter::global()` 首次取得时将自己接到全局协议收包入口；也可由外部用 connectless sender 创建独立 Router。全局 listener 通过 `take_connectless_packets()` 取得未知包 receiver。qprotocol 不反向依赖 qtransport。
 
-路由表由 `Signpost` 索引，非空 CID 按 CID 查找，空 CID 按对端地址查找。`packet::channel::new()` 返回 `Inbox` 和 `RcvdPacket`：前者包含四级 sender，后者暴露 `initial / handshake / zero_rtt / one_rtt` 四个 typed receiver。`QuicRouterEntry` 释放时撤销对应路由，旧 entry 不会删除指向另一组 channel 的新路由。`Way` 为 `(Pathway, Link)`；`ReceivedPacket` 用 `Option<usize>` 表示该包是否承担整个 datagram 的收包记账。
+路由表由 `Signpost` 索引，非空 CID 按 CID 查找，空 CID 按对端地址查找。`packet::channel::new()` 返回 `Inbox` 和 `RcvdPacket`：前者包含四级 sender，后者暴露 `initial / handshake / zero_rtt / one_rtt` 四个 typed receiver。`QuicRouter::insert` 插入路由并返回 `QuicRouterRegistry`，由 `LocalCids::clear` 或析构撤销本地 CID 与服务端 ODCID 路由；退休 CID 时不会删除指向另一组 channel 的新路由。`Way` 为 `(Pathway, Link)`；`ReceivedPacket` 用 `Option<usize>` 表示该包是否承担整个 datagram 的收包记账。
 
-`qtransport::router::QuicRouterRegistry` 为 ArcLocalCids 提供 CID 占位注册、撤销和 NEW_CONNECTION_ID 可靠帧投递。growing 从传入的路由守卫取得所属 router，不在 qconnection 中另写 registry，也不把独立 router 的 CID 注册到全局实例。
+`qtransport::router::QuicRouterRegistry` 为 ArcLocalCids 提供 CID 占位注册、撤销和 NEW_CONNECTION_ID 可靠帧投递。服务端用 `insert(signpost, inbox, issued_cids)` 返回的 registry 构造 LocalCids；客户端用 `registry_on_issuing_scid` 构造 registry，无需插入 ODCID 路由。
 
 ## 使用
 

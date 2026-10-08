@@ -37,8 +37,7 @@ fn frame(seq: u64, retire_prior_to: u64) -> NewConnectionIdFrame {
 
 fn remote(limit: u64) -> (ArcRemoteCids<Retired>, Retired) {
     let retired = Retired::default();
-    let remote = ArcRemoteCids::new(limit, retired.clone());
-    remote.set_initial_dcid(cid(0));
+    let remote = ArcRemoteCids::new(cid(0), limit, retired.clone());
     (remote, retired)
 }
 

@@ -59,14 +59,15 @@ impl QuicRouter {
         *self.incoming_cb.write().unwrap() = Box::new(callback);
     }
 
-    // for origin_dcid
-    pub fn insert(self: &Arc<Self>, signpost: Signpost, inbox: Inbox) -> QuicRouterEntry {
+    /// Insert a known route and return the registry used to issue and retire its CIDs.
+    pub fn insert<T>(
+        self: &Arc<Self>,
+        signpost: Signpost,
+        inbox: Inbox,
+        issued_cids: T,
+    ) -> QuicRouterRegistry<T> {
         self.table.insert(signpost, inbox.clone());
-        QuicRouterEntry {
-            signpost,
-            inbox,
-            router: self.clone(),
-        }
+        self.registry_on_issuing_scid(inbox, issued_cids)
     }
 
     pub fn remove(&self, signpost: &Signpost) {
@@ -162,39 +163,6 @@ impl From<SocketAddr> for Signpost {
     }
 }
 
-#[must_use = "When RouterEntry dropped, this will remove the entry from the router table"]
-pub struct QuicRouterEntry {
-    signpost: Signpost,
-    inbox: Inbox,
-    router: Arc<QuicRouter>,
-}
-
-impl QuicRouterEntry {
-    pub fn signpost(&self) -> Signpost {
-        self.signpost
-    }
-
-    pub fn router(&self) -> &Arc<QuicRouter> {
-        &self.router
-    }
-
-    pub fn inbox(&self) -> Inbox {
-        self.inbox.clone()
-    }
-
-    pub fn remove(&self) {
-        self.router
-            .table
-            .remove_if(&self.signpost, |_, inbox| inbox.same_channel(&self.inbox));
-    }
-}
-
-impl Drop for QuicRouterEntry {
-    fn drop(&mut self) {
-        self.remove();
-    }
-}
-
 #[derive(Clone)]
 pub struct QuicRouterRegistry<TX> {
     router: Arc<QuicRouter>,
@@ -228,7 +196,9 @@ where
     TX: Send + Sync + 'static,
 {
     fn retire_cid(&self, cid: ConnectionId) {
-        self.router.remove(&Signpost::from(cid));
+        self.router
+            .table
+            .remove_if(&cid.into(), |_, inbox| inbox.same_channel(&self.inbox));
     }
 }
 

@@ -24,7 +24,7 @@ use qtransport::{keys::ArcKeys, path::Path, space::HandshakeSpace};
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 use crate::{
-    ArcConnPhase, ArcHandshake, ArcParameters, MaturePhase, Paths, Scopes, common,
+    ArcHandshake, ArcParameters, MaturePhase, Paths, Scopes, common,
     recv::receive_1rtt_pkt_and_deliver_frames,
 };
 
@@ -73,18 +73,21 @@ pub(super) fn pair() -> [Arc<super::MatureFixture>; 2] {
             );
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
-            let initial = crate::common::initial_phase(
+            let paths = crate::common::initial_paths(
                 role,
                 scid,
                 ConnectionId::from_slice(b"original"),
                 common::initial_keys(role == Role::Server),
             );
-            let registry = initial.cid_registry.clone();
+            let registry = crate::CidRegistry::new(
+                crate::common::initial_phase(&paths).local_cids.clone(),
+                qbase::cid::ArcRemoteCids::new(peer, 2, paths.reliable_frames.clone()),
+            );
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
             ));
-            let reliable_frames = initial.reliable_frames.clone();
+            let reliable_frames = paths.reliable_frames.clone();
             let streams = crate::DataStreams::new(
                 parameters.clone(),
                 Box::new(qbase::sid::handy::ConsistentConcurrency::new(
@@ -110,22 +113,18 @@ pub(super) fn pair() -> [Arc<super::MatureFixture>; 2] {
                 qtraversal::punch::ProbeEncoder::new(data.clone(), peer),
             );
             let concrete = super::SpaceFixture {
-                initial: crate::common::initial_space(&initial.spaces),
+                initial: crate::common::initial_space(&paths.spaces),
                 handshake,
                 data,
             };
             let phase = Arc::new(MaturePhase {
-                spaces: initial.spaces.clone(),
-                scid: initial.scid,
                 flow_ctrl: flow,
                 cid_registry: registry,
-                dcid: peer,
                 parameters,
                 puncher,
-                resender: initial.resender.clone(),
-                terminator: initial.terminator.clone(),
             });
             let phase = Arc::new(super::MatureFixture {
+                paths,
                 phase,
                 spaces: concrete,
             });
@@ -139,7 +138,7 @@ pub(super) fn pair() -> [Arc<super::MatureFixture>; 2] {
 }
 
 fn encoder(phase: &super::MatureFixture) -> ProbeEncoder {
-    ProbeEncoder::new(phase.spaces.data.clone(), phase.dcid)
+    ProbeEncoder::new(phase.spaces.data.clone(), phase.peer_cid())
 }
 
 fn encode_frame(
@@ -161,10 +160,12 @@ fn encode_frames<const N: usize>(
         .reserve(|_| space.next_pn().map_err(Into::into))
         .unwrap();
     let mut bytes = BytesMut::with_capacity(1200);
+    let mut recorded = Vec::new();
     let packet = crate::send::Packet::new(
-        OneRttHeader::new(Default::default(), phase.dcid),
+        OneRttHeader::new(Default::default(), phase.peer_cid()),
         pn,
         &mut bytes,
+        &mut recorded,
     )
     .unwrap();
     let mut limits = Constraints {
@@ -182,8 +183,7 @@ fn encode_frames<const N: usize>(
     assert!(matches!(
         sending.assemble(
             &mut std::task::Context::from_waker(std::task::Waker::noop()),
-            frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
-            &mut Vec::new(),
+            &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
         ),
         std::task::Poll::Ready(Ok(n)) if n > 0
     ));
@@ -193,14 +193,13 @@ fn encode_frames<const N: usize>(
 
 fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
     let role = phase.parameters.role();
-    let snapshot = ArcConnPhase::initial(crate::common::initial_phase(
+    let paths = crate::common::initial_paths(
         role,
-        phase.scid,
+        phase.spaces.initial.initial_scid,
         ConnectionId::from_slice(b"original"),
         common::initial_keys(role == Role::Server),
-    ));
-    let paths = Paths::new(role, snapshot, Duration::ZERO, Duration::ZERO);
-    let terminator = paths.phase().terminator();
+    );
+    let terminator = paths.terminator.clone();
     terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
     terminator.register(Arc::new(phase.spaces.data.streams.clone()));
     terminator.register(Arc::new(phase.flow_ctrl.clone()));
@@ -215,14 +214,11 @@ async fn receive(
 ) {
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
-    let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
-        panic!("expected Initial");
-    };
     let path = Arc::new(Path::new(
         pathway,
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        initial.resender.clone(),
+        paths.resender.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -255,7 +251,7 @@ async fn receive_on_paths(
         .unwrap();
     }
     drop(tx);
-    let closed = paths.phase().terminator();
+    let closed = paths.terminator.clone();
     let notification = crate::common::observe_close(&closed);
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
     let role = phase.parameters.role();
@@ -379,7 +375,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             (&pair[1], &pair[0])
         };
         let paths = empty_paths(receiver);
-        let closed = paths.phase().terminator();
+        let closed = paths.terminator.clone();
         let notification = crate::common::observe_close(&closed);
         let first = if bundled_close {
             encode_frames(sender, [&mut HandshakeDoneFrame, &mut close.clone()])
@@ -582,11 +578,14 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
     let pair = pair();
     for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
         let paths = empty_paths(receiver);
-        let local: EndpointAddr = "127.0.0.1:44501".parse().unwrap();
-        let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
+        let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let local = EndpointAddr::direct(socket.local_addr().unwrap());
+        qprotocol::QuicProtocol::global().register(local, &socket).unwrap();
+        let original = paths
+            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
+        super::enter_mature(&paths, receiver);
         super::confirm_handshake(&paths);
-        paths.activate_paths(&original);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
         let packet = encoder(sender)
             .encode_probe(PunchDoneFrame::new(1, 2, 3))
@@ -625,6 +624,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         assert!(!path.is_validated());
         assert!(original.is_validated());
         paths.retire_all();
+        qprotocol::QuicProtocol::global().unregister(socket.local_addr().unwrap());
     }
 }
 
@@ -645,7 +645,7 @@ fn take_reliable(phase: &super::MatureFixture) -> Vec<Frame> {
             &mut bytes,
             &mut limits,
             &mut frames,
-            OneRttHeader::new(Default::default(), phase.dcid).get_type(),
+            OneRttHeader::new(Default::default(), phase.peer_cid()).get_type(),
             0,
             0,
         ),
@@ -805,14 +805,11 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             "127.0.0.1:47001".parse().unwrap(),
             "127.0.0.1:47002".parse().unwrap(),
         );
-        let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
-            panic!("expected Initial");
-        };
         let path = Arc::new(Path::new(
             link.into(),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            initial.resender.clone(),
+            paths.resender.clone(),
         ));
         paths
             .entries
@@ -825,7 +822,8 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(&OneRttHeader::new(Default::default(), Default::default()))),
             &mut std::iter::empty());
         data.on_sent(
-            [(pn, false)],
+            pn,
+            false,
             Duration::from_secs(1),
             Duration::from_secs(3),
         );
@@ -851,7 +849,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         )
         .await;
         let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
-        let reason = paths.phase().terminator().await;
+        let reason = paths.terminator.clone().await;
         assert!(
             matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
         );

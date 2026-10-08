@@ -11,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use qbase::{
     Epoch,
-    cid::ConnectionId,
+    cid::{ConnectionId, RetireCid},
     error::{AppError, ErrorKind, QuicError},
     flow::FlowController,
     frame::{AckFrame, Frame, MaxStreamsFrame, PingFrame, StreamCtlFrame, io::ReceiveFrame},
@@ -661,8 +661,8 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
     );
     let cid = ConnectionId::from_slice(b"original");
     let alias = ConnectionId::from_slice(b"newalias");
-    let original = router.insert(cid.into(), inbox.clone());
-    let alias_route = router.insert(alias.into(), inbox.clone());
+    let original = router.insert(cid.into(), inbox.clone(), ());
+    let alias_route = router.insert(alias.into(), inbox.clone(), ());
     let mut datagram = initial_datagram(cid, 600);
     datagram.extend_from_slice(&initial_datagram(alias, 600));
     router.receive(datagram, link.into(), link, 8);
@@ -676,6 +676,8 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
         received += 1;
     }
     assert_eq!(received, 8);
+    original.retire_cid(cid);
+    alias_route.retire_cid(alias);
     drop(original);
     drop(alias_route);
     drop(inbox);
@@ -707,7 +709,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
         "127.0.0.1:4400".parse().unwrap(),
     );
     let cid = ConnectionId::from_slice(b"original");
-    let route = router.insert(cid.into(), inbox.clone());
+    let route = router.insert(cid.into(), inbox.clone(), ());
     let journal = st.data.rcvd_journal.clone();
     let received = st.clone();
     let task = tokio::spawn(receive_packets(
@@ -773,6 +775,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
             .decode_pn(PacketNumber::encode(1, 0))
             .is_err()
     );
+    route.retire_cid(cid);
     drop(route);
     drop(inbox);
     tokio::time::timeout(Duration::from_secs(2), task)

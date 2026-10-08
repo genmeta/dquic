@@ -21,9 +21,7 @@ use qtransport::{
     space::{HandshakeSpace, Space},
 };
 
-use crate::{
-    ArcConnPhase, Paths, common::initial_keys as keys, recv::recv_ih_pkt_and_deliver_frames,
-};
+use crate::{Paths, common::initial_keys as keys, recv::recv_ih_pkt_and_deliver_frames};
 
 fn seal<H, const N: usize>(
     header: H,
@@ -38,7 +36,8 @@ where
     use qbase::packet::assemble::Assemble;
     let mut buffer = BytesMut::with_capacity(1200);
     let pn = journal.next_pn().unwrap();
-    let packet = crate::send::Packet::new(header, pn, &mut buffer)?;
+    let mut frames = Vec::new();
+    let packet = crate::send::Packet::new(header, pn, &mut buffer, &mut frames)?;
     let mut limits = qbase::packet::assemble::Constraints {
         flow_ctrl: usize::MAX,
         send_quota: 1200,
@@ -52,10 +51,9 @@ where
         keys,
         limits: &mut limits,
     };
-    let mut frames = Vec::new();
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), Poll::Ready(Ok(n)) if n > 0)
     );
     packet.seal()?;
     journal.on_sealed(
@@ -142,13 +140,12 @@ async fn receive_bytes(
 }
 
 fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
-    let phase = ArcConnPhase::initial(crate::common::initial_phase(
+    let paths = crate::common::initial_paths(
         role,
         ConnectionId::from_slice(b"localcid"),
         ConnectionId::from_slice(b"original"),
         keys(role == Role::Server),
-    ));
-    let paths = Paths::new(role, phase, Duration::ZERO, Duration::ZERO);
+    );
     let local = EndpointAddr::direct("127.0.0.1:30001".parse().unwrap());
     let first = paths.add_path(Pathway::new(
         local,
@@ -162,29 +159,23 @@ fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
 }
 
 #[tokio::test]
-async fn initial_and_handshake_close_enter_draining_through_phase_terminator() {
+async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
     use tokio::io::AsyncReadExt;
 
     for role in [Role::Client, Role::Server] {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             let (paths, path, _) = paths(role);
-            let phase = paths.phase();
-            let crate::ConnPhase::Initial(initial) = phase.get() else {
-                unreachable!()
-            };
             let space = if epoch == Epoch::Initial {
-                crate::common::initial_space(&initial.spaces)
+                crate::common::initial_space(&paths.spaces)
             } else {
                 let space = Arc::new(Space::new(
                     Epoch::Handshake,
                     Default::default(),
                     ArcKeys::new(Arc::new(keys(role == Role::Server))),
                 ));
-                paths
-                    .phase()
-                    .terminator()
+                paths.terminator.clone()
                     .register(Arc::new(space.crypto.clone()));
-                super::enter_handshake(&phase, Arc::new(HandshakeSpace(space.as_ref().clone())));
+                super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
                 space
             };
             let peer_keys = keys(role != Role::Server);
@@ -226,9 +217,9 @@ async fn initial_and_handshake_close_enter_draining_through_phase_terminator() {
                     .await
                     .is_err()
             );
-            assert!(futures::poll!(std::pin::pin!(initial.terminator.clone())).is_pending());
+            assert!(futures::poll!(std::pin::pin!(paths.terminator.clone())).is_pending());
             paths.retire_all();
-            assert_eq!(initial.terminator.clone().await, close.into());
+            assert_eq!(paths.terminator.clone().await, close.into());
         }
     }
 }
@@ -245,13 +236,9 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
 
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let (paths, path, _) = paths(Role::Server);
-        let phase = paths.phase();
-        let crate::ConnPhase::Initial(initial) = phase.get() else {
-            unreachable!()
-        };
-        let terminator = initial.terminator.clone();
+        let terminator = paths.terminator.clone();
         let space = if epoch == Epoch::Initial {
-            crate::common::initial_space(&initial.spaces)
+            crate::common::initial_space(&paths.spaces)
         } else {
             let space = Arc::new(Space::new(
                 epoch,
@@ -259,7 +246,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 ArcKeys::new(Arc::new(keys(true))),
             ));
             terminator.register(Arc::new(space.crypto.clone()));
-            super::enter_handshake(&phase, Arc::new(HandshakeSpace(space.as_ref().clone())));
+            super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
             space
         };
         terminator.close(
@@ -550,15 +537,11 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
 
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         for kind in 0..3 {
-            let phase = ArcConnPhase::initial(crate::common::initial_phase(
+            let paths = crate::common::initial_paths_with_timeouts(
                 Role::Server,
                 ConnectionId::from_slice(b"localcid"),
                 ConnectionId::from_slice(b"original"),
                 keys(true),
-            ));
-            let paths = Paths::new(
-                Role::Server,
-                phase,
                 Duration::from_secs(5),
                 Duration::from_secs(60),
             );
@@ -566,14 +549,11 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 "127.0.0.1:30001".parse().unwrap(),
                 "127.0.0.1:30002".parse().unwrap(),
             );
-            let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
-                panic!("expected Initial");
-            };
             let path = Arc::new(Path::new(
                 link.into(),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-                initial.resender.clone(),
+                paths.resender.clone(),
             ));
             paths
                 .entries
@@ -594,7 +574,8 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             };
             space.sent_journal.on_sealed(pn, None, 0, Metadata::new(packet_type), []);
             space.on_sent(
-                [(pn, false)],
+                pn,
+                false,
                 Duration::from_secs(1),
                 Duration::from_secs(3),
             );
@@ -621,7 +602,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             let start = Instant::now();
             receive_bytes(bytes, space, &paths, &path).await;
             let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
-            let reason = paths.phase().terminator().await;
+            let reason = paths.terminator.clone().await;
             assert!(
                 matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
             );
@@ -638,18 +619,14 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
 
 #[tokio::test(start_paused = true)]
 async fn blocked_receivers_and_tick_wait_until_termination() {
-    let phase = ArcConnPhase::initial(crate::common::initial_phase(
+    let paths = crate::common::initial_paths(
         Role::Server,
         ConnectionId::from_slice(b"localcid"),
         ConnectionId::from_slice(b"original"),
         keys(true),
-    ));
-    let crate::ConnPhase::Initial(initial) = phase.get() else {
-        unreachable!()
-    };
-    let space = crate::common::initial_space(&initial.spaces);
-    let terminator = initial.terminator.clone();
-    let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
+    );
+    let space = crate::common::initial_space(&paths.spaces);
+    let terminator = paths.terminator.clone();
     let (_initial_tx, initial_rx) = tokio::sync::mpsc::channel(1);
     let (_handshake_tx, handshake_rx) = tokio::sync::mpsc::channel(1);
     let first = tokio::spawn(

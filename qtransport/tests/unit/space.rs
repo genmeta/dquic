@@ -38,7 +38,7 @@ fn record(space: &Space<ArcKeys<()>>) -> u64 {
         metadata(space.epoch, &frames),
         frames.into_iter().map(|frame| frame.try_into().unwrap()),
     );
-    space.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
+    space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     pn
 }
 
@@ -124,11 +124,9 @@ async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
             None,
         );
         assert!(space.on_acked(&ack).unwrap());
-        space.on_sent(
-            pns[..2].iter().map(|&pn| (pn, true)),
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        );
+        for &pn in &pns[..2] {
+            space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        }
         space.on_tick(Instant::now() + Duration::from_secs(2));
         let recovered = crate::tests::take_frames(&mut space.crypto.outgoing());
         assert!(
@@ -167,7 +165,7 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
         None,
     );
     assert_eq!(data.on_acked(&ack).unwrap(), Some(7));
-    data.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
+    data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     data.on_tick(Instant::now() + Duration::from_secs(2));
     assert!(crate::tests::take_frames(&mut data.reliable_frames.clone()).is_empty());
     assert!(data.on_acked(&ack).unwrap().is_none());
@@ -194,7 +192,7 @@ async fn retired_data_keys_stop_loss_and_timer_recovery() {
         metadata(Epoch::Data, &frames),
         &mut frames.drain(..).map(|frame| frame.try_into().unwrap()),
     );
-    data.on_sent([(pn, true)], Duration::from_secs(1), Duration::from_secs(3));
+    data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     data.keys.retire();
     data.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
     data.on_tick(Instant::now() + Duration::from_secs(2));

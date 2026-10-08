@@ -7,6 +7,7 @@ use crate::{
         FrameType, GetFrameType, NewConnectionIdFrame, RetireConnectionIdFrame,
         io::{ReceiveFrame, SendFrame},
     },
+    role::Role,
     token::ResetToken,
     util::IndexDeque,
     varint::{VARINT_MAX, VarInt},
@@ -18,6 +19,8 @@ struct LocalCids<ISSUED>
 where
     ISSUED: GenUniqueCid + RetireCid + SendFrame<NewConnectionIdFrame>,
 {
+    role: Role,
+    odcid: ConnectionId,
     // If the item in cid_deque is None, it means the connection ID has been retired.
     cid_deque: IndexDeque<Option<(ConnectionId, ResetToken)>, VARINT_MAX>,
     // Each issued connection ID will be written into this issued_cids.
@@ -37,7 +40,7 @@ where
     ISSUED: GenUniqueCid + RetireCid + SendFrame<NewConnectionIdFrame>,
 {
     /// Create a new local connection ID manager.
-    fn new(scid: ConnectionId, issued_cids: ISSUED) -> Self {
+    fn new(role: Role, odcid: ConnectionId, scid: ConnectionId, issued_cids: ISSUED) -> Self {
         let mut cid_deque = IndexDeque::default();
         cid_deque
             .push_back(Some((scid, ResetToken::default())))
@@ -54,6 +57,8 @@ where
             )))
             .unwrap();
         Self {
+            role,
+            odcid,
             cid_deque,
             issued_cids,
             active_cid_limit: None,
@@ -129,6 +134,9 @@ where
         for (cid, _reset_token) in self.cid_deque.drain_to(self.cid_deque.largest()).flatten() {
             self.issued_cids.retire_cid(cid);
         }
+        if self.role == Role::Server {
+            self.issued_cids.retire_cid(self.odcid);
+        }
     }
 }
 
@@ -170,14 +178,24 @@ where
 {
     /// Create a new share local connection ID manager.
     ///
+    /// - `odcid` is the destination CID in the client's first Initial packet.
+    ///   Servers retain its route until this manager is cleared or dropped.
     /// - `scid` is set initially, whether it is a client or a server,
     ///   they both get their early `scid` externally.
     /// - `issued_cids` is responsible for generating CIDs that do not conflict
     ///   in the packet reception routing table and will also be responsible for
     ///   eventually sending the [`NewConnectionIdFrame`] to the peer.
-    pub fn new(scid: ConnectionId, issued_cids: ISSUED) -> Self {
-        let raw_local_cids = LocalCids::new(scid, issued_cids);
+    pub fn new(role: Role, odcid: ConnectionId, scid: ConnectionId, issued_cids: ISSUED) -> Self {
+        let raw_local_cids = LocalCids::new(role, odcid, scid, issued_cids);
         Self(Arc::new(Mutex::new(raw_local_cids)))
+    }
+
+    pub fn role(&self) -> Role {
+        self.0.lock().unwrap().role
+    }
+
+    pub fn origin_dcid(&self) -> ConnectionId {
+        self.0.lock().unwrap().odcid
     }
 
     /// Get the initial source connection ID.
@@ -221,7 +239,7 @@ where
         self.0.lock().unwrap().initial_scid()
     }
 
-    /// Unilaterally no longer use all local connection IDs.
+    /// Unilaterally no longer use all local connection IDs, including the server's ODCID route.
     ///
     /// No longer used means that packets sent by the peer to that connection ID are no
     /// longer accepted. This method is called when the Termination event occurs and `LocalCids`
@@ -311,7 +329,12 @@ mod tests {
     #[test]
     fn test_issue_cid() {
         let initial_scid = ConnectionId::random_gen(8);
-        let local_cids = ArcLocalCids::new(initial_scid, IssuedCids::default());
+        let local_cids = ArcLocalCids::new(
+            Role::Client,
+            ConnectionId::random_gen(8),
+            initial_scid,
+            IssuedCids::default(),
+        );
         let mut local_cids = local_cids.0.lock().unwrap();
 
         assert_eq!(local_cids.cid_deque.len(), 2);
@@ -323,7 +346,12 @@ mod tests {
     #[test]
     fn test_recv_retire_cid_frame() {
         let initial_scid = ConnectionId::random_gen(8);
-        let mut local_cids = LocalCids::new(initial_scid, IssuedCids::default());
+        let mut local_cids = LocalCids::new(
+            Role::Client,
+            ConnectionId::random_gen(8),
+            initial_scid,
+            IssuedCids::default(),
+        );
 
         assert_eq!(local_cids.cid_deque.len(), 2);
         assert_eq!(local_cids.issued_cids.frames().len(), 1);

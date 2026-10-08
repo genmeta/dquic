@@ -299,7 +299,8 @@ impl ArcTerminator {
     }
 
     /// Request closing once and terminate after three PTOs on the Tokio runtime.
-    pub fn close(&self, reason: CloseReason, pto: Duration) {
+    /// Returns whether this request started closing.
+    pub fn close(&self, reason: CloseReason, pto: Duration) -> bool {
         if let Some(pto) = self.0.lock().unwrap().close(&reason, pto) {
             let deadline = Instant::now() + 3 * pto;
             let terminator = self.clone();
@@ -307,6 +308,9 @@ impl ArcTerminator {
                 tokio::time::sleep_until(deadline).await;
                 terminator.terminate();
             });
+            true
+        } else {
+            false
         }
     }
 
@@ -362,6 +366,10 @@ impl Future for ArcTerminator {
 }
 
 impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
+    fn priority(&self) -> u32 {
+        u32::MAX
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,

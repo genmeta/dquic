@@ -6,7 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
+    cid::{ConnectionId, GenUniqueCid},
     endpoint::Endpoint,
     error::{AppError, ErrorKind, QuicError},
     net::route::Scopes,
@@ -19,8 +19,7 @@ use qtransport::{packet::channel, router::QuicRouter};
 use tokio::sync::oneshot;
 
 use crate::{
-    Accepted, ArcConnPhase, ArcLocalCids, ArcReliableFrames, CidRegistry, Connected, Error,
-    InitialPhase, Paths, TlsContext, client_growing,
+    Accepted, ArcLocalCids, ArcReliableFrames, Connected, Error, Paths, TlsContext, client_growing,
 };
 
 /// A named QUIC endpoint. Listening always requires local credentials.
@@ -193,24 +192,13 @@ async fn connect_with_authority(
             .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
         &client_params,
     )?;
-    let cid_registry = CidRegistry::new(
+    let local_cids = ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
+    let paths = Paths::new(
         Role::Client,
-        origin_dcid,
-        ArcLocalCids::new(initial_scid, router_registry),
-        ArcRemoteCids::new(
-            client_params.get::<u64>(ParameterId::ActiveConnectionIdLimit),
-            reliable_frames.clone(),
-        ),
-    );
-    let phase = ArcConnPhase::initial(InitialPhase::new(
         (initial_scid, origin_dcid),
         initial_keys,
         reliable_frames,
-        cid_registry,
-    ));
-    let paths = Paths::new(
-        Role::Client,
-        phase,
+        local_cids,
         client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
         Duration::ZERO,
     );
@@ -240,7 +228,7 @@ async fn connect_with_authority(
             reason = &mut driving => reason,
             result = claimed => {
                 if result.is_err() {
-                    pending_paths.phase().terminator().close(
+                    pending_paths.terminator.close(
                         crate::CloseReason::App(AppError::new(
                             0u32.into(),
                             "connection request cancelled",
@@ -311,28 +299,24 @@ impl ServerRegistry {
                 let client_scid = *packet.scid();
                 let (inbox, rcvd_pkt) = channel::new();
                 let router = QuicRouter::global();
-                let route = router.insert(odcid.into(), inbox.clone());
+                let reliable_frames = ArcReliableFrames::with_capacity(0);
+                let router_registry =
+                    router.insert(odcid.into(), inbox.clone(), reliable_frames.clone());
+                let initial_scid = router_registry.gen_unique_cid();
+                let local_cids =
+                    ArcLocalCids::new(Role::Server, odcid, initial_scid, router_registry);
                 let Some(initial_keys) = ServerRegistry::global().initial_keys(odcid) else {
                     return;
                 };
-
-                let reliable_frames = ArcReliableFrames::with_capacity(0);
-                let router_registry =
-                    router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone());
-                let initial_scid = router_registry.gen_unique_cid();
-                let cid_registry = CidRegistry::new(
+                let paths = Paths::new(
                     Role::Server,
-                    odcid,
-                    ArcLocalCids::new(initial_scid, router_registry),
-                    ArcRemoteCids::new(2, reliable_frames.clone()),
-                );
-                let phase = ArcConnPhase::initial(InitialPhase::new(
                     (initial_scid, client_scid),
                     initial_keys,
                     reliable_frames,
-                    cid_registry,
-                ));
-                let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
+                    local_cids,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                );
                 if !inbox.try_send_initial(packet, pathway, link) {
                     return;
                 }
@@ -343,13 +327,7 @@ impl ServerRegistry {
                     paths,
                     ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
                 );
-                tokio::spawn(async move {
-                    // Keep late Initial packets on this route through Closing/Draining.
-                    let reason = tokio::join!(growing, tick).0;
-                    // Dropping the guard removes the ODCID entry from the router.
-                    drop(route);
-                    reason
-                });
+                tokio::spawn(async move { tokio::join!(growing, tick).0 });
             });
             Self(RwLock::new(HashMap::new()))
         })

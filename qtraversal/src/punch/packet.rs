@@ -49,7 +49,9 @@ impl PunchPacketEncoder for ProbeEncoder {
         let result = (|| {
             let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
             let header = OneRttHeader::new(Default::default(), self.peer_cid);
-            let packet = Packet::new(header, pn, &mut bytes).map_err(io::Error::other)?;
+            let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
+            let packet =
+                Packet::new(header, pn, &mut bytes, &mut frames).map_err(io::Error::other)?;
             let mut limits = Constraints {
                 flow_ctrl: usize::MAX,
                 send_quota: usize::MAX,
@@ -63,11 +65,9 @@ impl PunchPacketEncoder for ProbeEncoder {
                 keys: &key,
                 limits: &mut limits,
             };
-            let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
             match sending.assemble(
                 &mut Context::from_waker(Waker::noop()),
-                [&mut frame],
-                &mut frames,
+                &mut [&mut frame],
             ) {
                 Poll::Ready(Ok(1)) => {
                     sending.seal().map_err(io::Error::other)?;
@@ -79,7 +79,7 @@ impl PunchPacketEncoder for ProbeEncoder {
         })();
         match result {
             Ok(bytes) => {
-                space.on_sent([(pn.0, false)], Duration::ZERO, Duration::ZERO);
+                space.on_sent(pn.0, false, Duration::ZERO, Duration::ZERO);
                 Ok(bytes)
             }
             Err(error) => {

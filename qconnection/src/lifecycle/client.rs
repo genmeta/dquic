@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use qbase::{
     Epoch,
+    cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     handshake::ArcHandshake,
     param::{ClientParameters, ParameterId, Requirements},
@@ -20,8 +21,8 @@ use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use super::{any, finish};
 use crate::{
-    ArcParameters, ConnPhase, Connected, DataStreams, Error, FlowController, MaturePhase, Paths,
-    TlsContext,
+    ArcParameters, CidRegistry, ConnPhase, Connected, DataStreams, Error, FlowController,
+    MaturePhase, Paths, TlsContext,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -40,24 +41,24 @@ pub async fn client_growing(
     established: impl FnOnce(Result<Connected, Error>),
 ) -> Error {
     let phase = paths.phase();
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     terminator.register(Arc::new(tls_context.clone()));
     let ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("client_growing starts with InitialPhase")
     };
 
-    let spaces = initial_phase.spaces.clone();
+    let spaces = paths.spaces.clone();
     let initial = spaces
         .read()
         .unwrap()
         .get::<InitialSpace>(Epoch::Initial)
         .expect("Initial space");
     let initial = Arc::new(initial.space.clone());
-    let reliable_frames = initial_phase.reliable_frames.clone();
-    let cid_registry = initial_phase.cid_registry.clone();
-    let resender = initial_phase.resender.clone();
-    let scid = initial_phase.scid;
-    let odcid = initial_phase.odcid;
+    let reliable_frames = paths.reliable_frames.clone();
+    let local_cids = initial_phase.local_cids.clone();
+    let resender = paths.resender.clone();
+    let scid = initial.initial_scid;
+    let odcid = local_cids.origin_dcid();
     drop(initial_phase);
 
     let discovery = tokio::spawn({
@@ -136,7 +137,13 @@ pub async fn client_growing(
                 .authenticate_cids(Requirements::require_server(handshake_phase.dcid, odcid))?;
             drop(handshake_phase);
             let server_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
-            cid_registry.remote.set_initial_dcid(server_scid);
+            let remote_cids = ArcRemoteCids::new(
+                server_scid,
+                parameters.local(ParameterId::ActiveConnectionIdLimit),
+                reliable_frames.clone(),
+            );
+            paths.assign_initial_dcid(&remote_cids);
+            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
             let keys = ArcOneRttKeys::from(tls_context.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
                 parameters.local(ParameterId::InitialMaxStreamsBidi),
@@ -173,19 +180,12 @@ pub async fn client_growing(
                 ProbeEncoder::new(data.clone(), server_scid),
             );
             phase.enter_mature(Arc::new(MaturePhase {
-                spaces: spaces.clone(),
-                scid,
-                dcid: server_scid,
                 parameters: parameters.clone(),
                 flow_ctrl: flow_ctrl.clone(),
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
-                resender: resender.clone(),
-                terminator: terminator.clone(),
             }));
-            cid_registry
-                .local
-                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             let handshake_done = ArcHandshake::new_client();
@@ -248,7 +248,7 @@ pub async fn client_growing(
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(reason.clone()));
-            return shutdown(&paths, &resender, &cid_registry.local, reason, discovery).await;
+            return shutdown(&paths, &local_cids, reason, discovery).await;
         }
     };
     established(Ok(connected));
@@ -284,12 +284,11 @@ pub async fn client_growing(
             reason
         }
     };
-    shutdown(&paths, &resender, &cid_registry.local, reason, discovery).await
+    shutdown(&paths, &local_cids, reason, discovery).await
 }
 
 async fn shutdown(
     paths: &Paths,
-    resender: &crate::ArcResend,
     local_cids: &crate::ArcLocalCids,
     error: Error,
     discovery: tokio::task::JoinHandle<()>,
@@ -297,7 +296,7 @@ async fn shutdown(
     // Stop discovery before path cleanup so late DNS results cannot create senders.
     discovery.abort();
     let _ = discovery.await;
-    let reason = finish(paths, resender, error).await;
+    let reason = finish(paths, error).await;
     local_cids.clear();
     reason
 }

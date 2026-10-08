@@ -39,9 +39,12 @@ pub struct Constraints {
     pub probe_quota: usize,
 }
 
-/// Packet properties accumulated only after frames have been encoded.
+/// Packet metadata collected during assembly and finalized after sealing.
 #[derive(Debug, Clone, Copy)]
 pub struct Metadata {
+    pub pn: u64,
+    /// Final packet length including padding and the authentication tag; set after sealing.
+    pub pktlen: usize,
     pub packet_type: Type,
     pub nframes: usize,
     pub content: super::PacketContent,
@@ -52,6 +55,8 @@ pub struct Metadata {
 impl Metadata {
     pub fn new(packet_type: Type) -> Self {
         Self {
+            pn: 0,
+            pktlen: 0,
             packet_type,
             nframes: 0,
             content: Default::default(),
@@ -86,6 +91,14 @@ pub struct PacketBuffer<'a, B: ?Sized> {
 }
 
 pub trait Package<B: BufMut + ?Sized> {
+    fn belongs_to(&self, _packet_type: Type) -> bool {
+        true
+    }
+
+    fn priority(&self) -> u32 {
+        0
+    }
+
     /// No data: register the task and return Pending. Data that cannot fit: Ready(Ok(0)).
     /// Retain recovery descriptors in `buffer.frames`; return the number of all frames written.
     fn poll_dump(
@@ -95,14 +108,52 @@ pub trait Package<B: BufMut + ?Sized> {
     ) -> Poll<Result<usize, Error>>;
 }
 
-pub trait Assemble<const N: usize> {
-    type Buffer: BufMut;
+pub trait Assemble {
+    type Buffer: BufMut + ?Sized;
     fn assemble(
         &mut self,
         cx: &mut Context<'_>,
-        sources: [&mut dyn Package<Self::Buffer>; N],
-        frames: &mut Vec<GuaranteedFrame>,
+        sources: &mut [&mut dyn Package<Self::Buffer>],
     ) -> Poll<Result<usize, Error>>;
+}
+
+impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
+    type Buffer = B;
+
+    fn assemble(
+        &mut self,
+        cx: &mut Context<'_>,
+        sources: &mut [&mut dyn Package<B>],
+    ) -> Poll<Result<usize, Error>> {
+        if self.finished || self.limits.max_size() == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let packet_type = self.meta.packet_type;
+        // Keep applicable sources first, preserving input order at equal priority.
+        sources.sort_by_key(|source| {
+            if source.belongs_to(packet_type) {
+                (false, std::cmp::Reverse(source.priority()))
+            } else {
+                (true, std::cmp::Reverse(0))
+            }
+        });
+        let start = self.meta.nframes;
+        let mut result = Poll::Pending;
+        for source in sources {
+            if self.finished || self.limits.max_size() == 0 || !source.belongs_to(packet_type) {
+                break;
+            }
+            if let Poll::Ready(value) = source.poll_dump(cx, self) {
+                value?;
+                result = Poll::Ready(Ok(0));
+            }
+        }
+        if self.meta.nframes > start {
+            Poll::Ready(Ok(self.meta.nframes - start))
+        } else {
+            result
+        }
+    }
 }
 
 impl Limit for Constraints {
@@ -314,6 +365,14 @@ unsafe impl<B: BufMut + ?Sized> BufMut for PacketBuffer<'_, B> {
 /// TODO: trait From<&[Frame]>
 /// Submission properties are derived from exactly the frames written in this packet.
 impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
+    fn belongs_to(&self, packet_type: Type) -> bool {
+        (**self).belongs_to(packet_type)
+    }
+
+    fn priority(&self) -> u32 {
+        (**self).priority()
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
@@ -324,6 +383,14 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
 }
 
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
+    fn belongs_to(&self, packet_type: Type) -> bool {
+        self.as_ref().is_some_and(|source| source.belongs_to(packet_type))
+    }
+
+    fn priority(&self) -> u32 {
+        self.as_ref().map_or(0, Package::priority)
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
@@ -340,9 +407,38 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
     }
 }
 
+/// Restrict a source to one packet-number space without duplicating its state.
+impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for (crate::Epoch, P) {
+    fn belongs_to(&self, packet_type: Type) -> bool {
+        use super::r#type::long::{Type as Long, Ver1};
+        let epoch = match packet_type {
+            Type::Long(Long::V1(Ver1::INITIAL)) => crate::Epoch::Initial,
+            Type::Long(Long::V1(Ver1::HANDSHAKE)) => crate::Epoch::Handshake,
+            Type::Long(Long::V1(Ver1::ZERO_RTT)) | Type::Short(_) => crate::Epoch::Data,
+            _ => return false,
+        };
+        self.0 == epoch && self.1.belongs_to(packet_type)
+    }
+
+    fn priority(&self) -> u32 {
+        self.1.priority()
+    }
+
+    fn poll_dump(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut PacketBuffer<'_, B>,
+    ) -> Poll<Result<usize, Error>> {
+        self.1.poll_dump(cx, buffer)
+    }
+}
+
 macro_rules! frame_packages {
     ($($ty:ty),* $(,)?) => {$ (
         impl<B: BufMut + ?Sized> Package<B> for $ty {
+            fn belongs_to(&self, packet_type: Type) -> bool {
+                self.frame_type().belongs_to(packet_type)
+            }
             fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
                 if !self.frame_type().belongs_to(buffer.meta.packet_type) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
                 buffer.for_frame(self.frame_type());
@@ -382,6 +478,9 @@ macro_rules! data_packages {
     ($($ty:ident => $variant:ident),* $(,)?) => {$ (
         impl<B: BufMut + ?Sized, D: crate::util::Buffer + Clone> Package<B> for ($ty, D)
         where for<'a, 'b> &'a mut PacketBuffer<'b, B>: crate::util::WriteData<D> {
+            fn belongs_to(&self, packet_type: Type) -> bool {
+                self.0.frame_type().belongs_to(packet_type)
+            }
             fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
                 if !self.0.frame_type().belongs_to(buffer.meta.packet_type) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
                 buffer.for_frame(self.0.frame_type());
@@ -584,6 +683,9 @@ mod tests {
 macro_rules! stream_control_packages {
     ($($ty:ty),* $(,)?) => {$ (
         impl<B: BufMut + ?Sized> Package<B> for $ty {
+            fn belongs_to(&self, packet_type: Type) -> bool {
+                self.frame_type().belongs_to(packet_type)
+            }
             fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
                 StreamCtlFrame::from(*self).poll_dump(cx, buffer)
             }

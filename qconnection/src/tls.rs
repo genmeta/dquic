@@ -387,7 +387,7 @@ pub fn read_space_to_tls<K>(
     space: &Space<K>,
     paths: Arc<Paths>,
 ) -> impl Future<Output = ()> + Send + 'static + use<K> {
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let epoch = space.epoch;
     let mut reader = space.crypto.reader();
     async move {
@@ -410,7 +410,7 @@ pub(crate) fn read_tls_to_space<K>(
     space: &Space<K>,
     paths: Arc<Paths>,
 ) -> impl Future<Output = ()> + Send + 'static + use<K> {
-    let terminator = paths.phase().terminator();
+    let terminator = paths.terminator.clone();
     let epoch = space.epoch;
     let stream = space.crypto.clone();
     async move {
