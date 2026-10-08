@@ -583,8 +583,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
     for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
         let paths = empty_paths(receiver);
         let local: EndpointAddr = "127.0.0.1:44501".parse().unwrap();
-        let original = paths
-            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
+        let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
         super::confirm_handshake(&paths);
         paths.activate_paths(&original);
@@ -856,7 +855,10 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         assert!(
             matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
         );
-        assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
+        assert_eq!(
+            Instant::now() - start,
+            Duration::from_secs(5) + closing_duration
+        );
         tokio::time::advance(Duration::from_secs(15)).await;
         assert_eq!(super::take_heartbeat(&path), kind == 2);
         paths.retire_all();

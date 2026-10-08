@@ -1,15 +1,16 @@
 use std::sync::{Arc, Mutex};
 
-use qbase::packet::{DataHeader, DataPacket, GetDcid, LongHeaderBuilder, long};
-
 use bytes::BytesMut;
 use qbase::{
     cid::{ConnectionId, GenUniqueCid, RetireCid},
     frame::{NewConnectionIdFrame, io::SendFrame},
     net::route::{Link, Pathway},
+    packet::{DataHeader, DataPacket, GetDcid, LongHeaderBuilder, long},
 };
-use qtransport::router::{Packet, QuicRouter};
-use qtransport::packet::channel;
+use qtransport::{
+    packet::channel,
+    router::{Packet, QuicRouter},
+};
 
 fn router() -> Arc<QuicRouter> {
     Arc::new(QuicRouter::new())
