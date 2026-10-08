@@ -4,7 +4,7 @@ use std::task::{Context, Poll, Waker};
 
 use qbase::{
     frame::{Frame, FrameReader},
-    packet::{ConstraintBuffer, Constraints, Type},
+    packet::{Constraints, PacketBuffer, Type},
 };
 use qprotocol::{StunProtocol, protocol::stun::ChangeServer};
 use tokio::{
@@ -47,12 +47,10 @@ impl PunchPacketEncoder for Encoder {
             ..Default::default()
         };
         let mut output = &mut bytes;
-        let mut buffer = ConstraintBuffer::new(&mut output, &mut limits, packet_type(), 0, 0);
-        let result = frame.poll_dump(
-            &mut Context::from_waker(Waker::noop()),
-            &mut buffer,
-            &mut Vec::new(),
-        );
+        let mut frames = Vec::new();
+        let mut buffer =
+            PacketBuffer::new(&mut output, &mut limits, &mut frames, packet_type(), 0, 0);
+        let result = frame.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer);
         assert!(
             matches!(result, Poll::Ready(Ok(1))),
             "encode probe: {result:?}"
