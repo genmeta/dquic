@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use qbase::{
     Epoch,
+    cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     handshake::ArcHandshake,
     param::{ParameterId, Requirements},
@@ -19,7 +20,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcLocalCids, ArcParameters, ArcResend, DataStreams, Error, FlowController, Interceptor,
+    ArcLocalCids, ArcParameters, CidRegistry, DataStreams, Error, FlowController, Interceptor,
     MaturePhase, Paths, ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
@@ -37,19 +38,19 @@ pub async fn server_growing(
     let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
-    let terminator = paths.phase().terminator();
-    let spaces = initial_phase.spaces.clone();
+    let terminator = paths.terminator.clone();
+    let spaces = paths.spaces.clone();
     let initial = spaces
         .read()
         .unwrap()
         .get::<InitialSpace>(Epoch::Initial)
         .expect("Initial space");
     let initial = Arc::new(initial.space.clone());
-    let reliable_frames = initial_phase.reliable_frames.clone();
-    let cid_registry = initial_phase.cid_registry.clone();
-    let resender = initial_phase.resender.clone();
-    let scid = initial_phase.scid;
-    let origin_dcid = initial_phase.odcid;
+    let reliable_frames = paths.reliable_frames.clone();
+    let local_cids = initial_phase.local_cids.clone();
+    let resender = paths.resender.clone();
+    let scid = initial.initial_scid;
+    let origin_dcid = local_cids.origin_dcid();
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
@@ -68,14 +69,13 @@ pub async fn server_growing(
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
-            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
+            return shutdown(&paths, &local_cids, reason).await;
         }
     };
     let Some(server_name) = hello.server_name() else {
         return shutdown(
             &paths,
-            &resender,
-            &cid_registry.local,
+            &local_cids,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "ClientHello has no server name",
@@ -86,8 +86,7 @@ pub async fn server_growing(
     let Some(server) = ServerRegistry::global().get(server_name) else {
         return shutdown(
             &paths,
-            &resender,
-            &cid_registry.local,
+            &local_cids,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "server name is not listening",
@@ -105,14 +104,11 @@ pub async fn server_growing(
             Ok(ready) => ready,
             Err(error) => {
                 (server.accept_cb)(Err(error.clone()));
-                return shutdown(&paths, &resender, &cid_registry.local, error.into()).await;
+                return shutdown(&paths, &local_cids, error.into()).await;
             }
         };
     terminator.register(Arc::new(tls_ctx.clone()));
     let scopes = server.scopes;
-    cid_registry
-        .remote
-        .set_limit(server_parameters.get::<u64>(ParameterId::ActiveConnectionIdLimit));
     let result = {
         let establish = async {
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
@@ -149,7 +145,13 @@ pub async fn server_growing(
             ));
 
             let client_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
-            cid_registry.remote.set_initial_dcid(client_scid);
+            let remote_cids = ArcRemoteCids::new(
+                client_scid,
+                parameters.local(ParameterId::ActiveConnectionIdLimit),
+                reliable_frames.clone(),
+            );
+            paths.assign_initial_dcid(&remote_cids);
+            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
             let keys = ArcOneRttKeys::from(tls_ctx.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
                 parameters.local(ParameterId::InitialMaxStreamsBidi),
@@ -185,9 +187,7 @@ pub async fn server_growing(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data.clone(), client_scid),
             );
-            cid_registry
-                .local
-                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             for space in [initial.as_ref(), handshake.as_ref()] {
@@ -240,15 +240,10 @@ pub async fn server_growing(
             ));
 
             phase.enter_mature(Arc::new(MaturePhase {
-                spaces: spaces.clone(),
-                scid,
-                dcid: client_scid,
                 parameters,
                 flow_ctrl,
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
-                resender: resender.clone(),
-                terminator: terminator.clone(),
             }));
 
             let summary = tls_ctx.finished().await?;
@@ -300,7 +295,7 @@ pub async fn server_growing(
         Ok(connection) => connection,
         Err(reason) => {
             (server.accept_cb)(Err(reason.clone()));
-            return shutdown(&paths, &resender, &cid_registry.local, reason).await;
+            return shutdown(&paths, &local_cids, reason).await;
         }
     };
 
@@ -314,16 +309,11 @@ pub async fn server_growing(
     let reason = terminator.await;
     drop(stop);
     let _ = observer.await;
-    shutdown(&paths, &resender, &cid_registry.local, reason).await
+    shutdown(&paths, &local_cids, reason).await
 }
 
-async fn shutdown(
-    paths: &Paths,
-    resender: &ArcResend,
-    local_cids: &ArcLocalCids,
-    reason: Error,
-) -> Error {
-    let reason = finish(paths, resender, reason).await;
+async fn shutdown(paths: &Paths, local_cids: &ArcLocalCids, reason: Error) -> Error {
+    let reason = finish(paths, reason).await;
     local_cids.clear();
     reason
 }

@@ -1,25 +1,38 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
 use qbase::{
     ArcReceiving, Epoch,
+    cid::{ArcRemoteCids, ConnectionId},
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
     role::Role,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
+    util::IndexDeque,
 };
 use qcongestion::{HandshakeStatus, Transport as _};
-use qtransport::path::{Path, PathState};
+use qtransport::{
+    keys::ArcKeys,
+    path::{Path, PathState},
+    space::{ArcSpaces, InitialSpace, Spaces},
+    terminate::ArcTerminator,
+};
 
-use crate::{ArcConnPhase, CloseReason, ConnPhase};
+use crate::{
+    ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, ConnPhase, InitialPhase,
+};
 
-/// Connection-level path control. Every path has exactly one sending task.
+/// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
+    pub spaces: ArcSpaces,
+    pub reliable_frames: ArcReliableFrames,
+    pub(crate) resender: ArcResend,
+    pub terminator: ArcTerminator,
     pub(crate) handshake: Arc<HandshakeStatus>,
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub(crate) responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
@@ -32,18 +45,31 @@ pub struct Paths {
 impl Paths {
     pub fn new(
         role: Role,
-        phase: ArcConnPhase,
+        (scid, dcid): (ConnectionId, ConnectionId),
+        keys: qtls::BidirectionalKeys,
+        reliable_frames: ArcReliableFrames,
+        local_cids: ArcLocalCids,
         max_idle_timeout: Duration,
         defer_idle_timeout: Duration,
     ) -> Arc<Self> {
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
-        if !matches!(phase.get(), ConnPhase::Initial(_)) {
-            handshake.got_handshake_key();
-        }
         let idle = ArcIdleTimer::new(max_idle_timeout);
-        let terminator = phase.terminator();
+        let initial_space = Arc::new(InitialSpace::new(scid, ArcKeys::new(Arc::new(keys)), None));
+        let mut resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
+        resender
+            .push_back(initial_space.clone())
+            .expect("Initial epoch");
+        let terminator = ArcTerminator::no_error();
+        terminator.register(Arc::new(initial_space.crypto.clone()));
+        let mut spaces = Spaces(IndexDeque::with_capacity(3));
+        spaces.0.push_back(initial_space).expect("Initial epoch");
+        let phase = ArcConnPhase::initial(InitialPhase::new(dcid, local_cids));
         let paths = Arc::new(Self {
             phase,
+            spaces: Arc::new(RwLock::new(spaces)),
+            reliable_frames,
+            resender: Arc::new(RwLock::new(resender)),
+            terminator: terminator.clone(),
             handshake,
             entries: Mutex::new(BTreeMap::new()),
             responses: Mutex::new(HashMap::new()),
@@ -110,7 +136,6 @@ impl Paths {
         if let Some(path) = entries.get(&pathway) {
             return path.clone();
         }
-        let resender = self.phase.get().resender().clone();
         let path = Arc::new(Path::new(
             pathway,
             self.handshake.clone(),
@@ -118,7 +143,7 @@ impl Paths {
                 self.defer_idle_timeout,
                 *self.max_idle_timeout.lock().unwrap(),
             ),
-            resender,
+            self.resender.clone(),
         ));
         if entries
             .values()
@@ -135,6 +160,9 @@ impl Paths {
             path.decide(false);
         } else if handshaking {
             path.client_handshaking();
+        }
+        if let ConnPhase::Mature(phase) = self.phase.get() {
+            path.assign_dcid(&phase.cid_registry.remote);
         }
         entries.insert(pathway, path.clone());
         drop(entries);
@@ -161,7 +189,7 @@ impl Paths {
         }
     }
 
-    pub(crate) fn phase(&self) -> ArcConnPhase {
+    pub fn phase(&self) -> ArcConnPhase {
         self.phase.clone()
     }
 
@@ -199,8 +227,7 @@ impl Paths {
     pub(crate) fn on_handshake_sent(&self) {
         self.handshake.on_handshake_sent();
         if self.role == Role::Client {
-            let phase = self.phase.get();
-            let spaces = phase.spaces().read().unwrap();
+            let spaces = self.spaces.read().unwrap();
             if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
                 initial.retire();
             }
@@ -210,31 +237,33 @@ impl Paths {
     pub(crate) fn on_handshake_received(&self) {
         self.handshake.on_handshake_received();
         if self.role == Role::Server {
-            let phase = self.phase.get();
-            let spaces = phase.spaces().read().unwrap();
+            let spaces = self.spaces.read().unwrap();
             if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
                 initial.retire();
             }
         }
     }
 
-    pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
-        self.handshake.handshake_confirmed();
-        // The selected sender releases paths after it has requested its CID cell.
-        for path in self.entries.lock().unwrap().values() {
-            if path.selected() == Path::SELECTED {
-                path.send_waker.wake_all();
-            }
+    /// Growing reserves sequence zero before publishing the remote CID registry.
+    pub(crate) fn assign_initial_dcid(&self, remote: &ArcRemoteCids<ArcReliableFrames>) {
+        let entries = self.entries.lock().unwrap();
+        if let Some(path) = entries
+            .values()
+            .find(|path| path.selected() == Path::SELECTED)
+            .or_else(|| entries.values().find(|path| path.selected() == Path::MP_INITIAL))
+        {
+            path.assign_dcid(remote);
         }
     }
 
-    /// Called by the selected sender only after it has requested its CID cell.
-    pub(crate) fn activate_paths(self: &Arc<Self>, selected: &Path) {
-        let entries = self.entries.lock().unwrap();
-        if selected.selected() != Path::SELECTED || !self.handshake.is_handshake_confirmed() {
+    pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
+        self.handshake.handshake_confirmed();
+        let ConnPhase::Mature(phase) = self.phase.get() else {
             return;
-        }
+        };
+        let entries = self.entries.lock().unwrap();
         for path in entries.values() {
+            path.assign_dcid(&phase.cid_registry.remote);
             if path.selected() == Path::SELECTED {
                 path.validate();
             } else if self.role == Role::Client {
@@ -265,7 +294,7 @@ impl Paths {
         let paths = self.clone();
         let path = path.clone();
         tokio::spawn(async move {
-            let terminator = paths.phase().terminator();
+            let terminator = paths.terminator.clone();
             let challenge = PathChallengeFrame::random();
             for _ in 0..3 {
                 if !matches!(

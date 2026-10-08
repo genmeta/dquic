@@ -5,7 +5,7 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use qbase::{
-    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
+    cid::{ConnectionId, GenUniqueCid},
     net::{addr::EndpointAddr, route::Pathway},
     packet::{GetDcid, GetScid},
     param::ParameterId,
@@ -13,8 +13,8 @@ use qbase::{
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, CidRegistry, ConnPhase, Error,
-    InitialPhase, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
+    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, ConnPhase, Error, Paths, Scope,
+    ServerRegistry, TlsContext, client_growing, server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
@@ -112,26 +112,24 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let odcid = *packet.dcid();
         let router = QuicRouter::global();
         let (inbox, received) = channel::new();
-        let route = router.insert(odcid.into(), inbox.clone());
         let reliable = ArcReliableFrames::with_capacity(0);
-        let registry = router.registry_on_issuing_scid(inbox.clone(), reliable.clone());
+        let registry = router.insert(odcid.into(), inbox.clone(), reliable.clone());
         let scid = registry.gen_unique_cid();
-        let cid_registry = CidRegistry::new(
+        let local_cids = ArcLocalCids::new(Role::Server, odcid, scid, registry);
+        let paths = Paths::new(
             Role::Server,
-            odcid,
-            ArcLocalCids::new(scid, registry),
-            ArcRemoteCids::new(2, reliable.clone()),
-        );
-        let phase = ArcConnPhase::initial(InitialPhase::new(
             (scid, *packet.scid()),
             server
                 .tls_server
                 .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
                 .unwrap(),
             reliable,
-            cid_registry,
-        ));
-        let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
+            local_cids,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let phase = paths.phase();
+
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
         let growing = server_growing(
@@ -139,10 +137,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             paths.clone(),
             ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
         );
-        let growing = tokio::spawn(async move {
-            let _route = route;
-            tokio::join!(growing, tick).0
-        });
+        let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
         created.send((phase, paths, growing)).unwrap();
     });
 
@@ -157,24 +152,20 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .set(ParameterId::InitialSourceConnectionId, scid)
         .unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
-    let cid_registry = CidRegistry::new(
+    let local_cids = ArcLocalCids::new(Role::Client, odcid, scid, registry);
+    let paths = Paths::new(
         Role::Client,
-        odcid,
-        ArcLocalCids::new(scid, registry),
-        ArcRemoteCids::new(
-            parameters.get::<u64>(ParameterId::ActiveConnectionIdLimit),
-            reliable.clone(),
-        ),
-    );
-    let phase = ArcConnPhase::initial(InitialPhase::new(
         (scid, odcid),
         client
             .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
             .unwrap(),
         reliable,
-        cid_registry,
-    ));
-    let paths = Paths::new(Role::Client, phase.clone(), Duration::ZERO, Duration::ZERO);
+        local_cids,
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    let phase = paths.phase();
+
     let (deliver, connected) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(

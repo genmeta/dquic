@@ -143,7 +143,8 @@ where
     use qbase::packet::assemble::Assemble;
     let mut buffer = BytesMut::with_capacity(1200);
     let pn = journal.next_pn().unwrap();
-    let packet = qconnection::send::Packet::new(header, pn, &mut buffer)?;
+    let mut frames = Vec::new();
+    let packet = qconnection::send::Packet::new(header, pn, &mut buffer, &mut frames)?;
     let mut limits = qbase::packet::assemble::Constraints {
         flow_ctrl: usize::MAX,
         send_quota: 1200,
@@ -157,10 +158,9 @@ where
         keys,
         limits: &mut limits,
     };
-    let mut frames = Vec::new();
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>), &mut frames), std::task::Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready(Ok(n)) if n > 0)
     );
     packet.seal()?;
     journal.on_sealed(
@@ -179,33 +179,65 @@ pub fn use_system_resolver() {
     REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
 }
 
-/// Build an isolated Initial phase for component tests without a live router.
-pub fn initial_phase(
+/// Build an isolated connection for component tests without a live router.
+pub fn initial_paths(
     role: qbase::role::Role,
     scid: ConnectionId,
     odcid: ConnectionId,
     keys: qtls::BidirectionalKeys,
-) -> qconnection::InitialPhase {
+) -> Arc<qconnection::Paths> {
+    initial_paths_with_timeouts(
+        role,
+        scid,
+        odcid,
+        keys,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    )
+}
+
+pub fn initial_paths_with_timeouts(
+    role: qbase::role::Role,
+    scid: ConnectionId,
+    odcid: ConnectionId,
+    keys: qtls::BidirectionalKeys,
+    max_idle_timeout: std::time::Duration,
+    defer_idle_timeout: std::time::Duration,
+) -> Arc<qconnection::Paths> {
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
     let router = Arc::new(qtransport::router::QuicRouter::new());
     let (inbox, _) = qtransport::packet::channel::new();
-    let cid_registry = qconnection::CidRegistry::new(
+    let local_cids = qconnection::ArcLocalCids::new(
         role,
         odcid,
-        qconnection::ArcLocalCids::new(
-            scid,
-            router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
-        ),
-        qbase::cid::ArcRemoteCids::new(2, reliable_frames.clone()),
+        scid,
+        router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
     );
-    qconnection::InitialPhase::new((scid, odcid), keys, reliable_frames, cid_registry)
+    qconnection::Paths::new(
+        role,
+        (scid, odcid),
+        keys,
+        reliable_frames,
+        local_cids,
+        max_idle_timeout,
+        defer_idle_timeout,
+    )
+}
+
+pub fn initial_phase(paths: &qconnection::Paths) -> Arc<qconnection::InitialPhase> {
+    let qconnection::ConnPhase::Initial(initial) = paths.phase().get() else {
+        panic!("expected Initial");
+    };
+    initial
 }
 
 /// A ready CID cell for component tests that do not run the connection lifecycle.
 pub fn dcid(cid: ConnectionId) -> qbase::cid::ArcCidCell<qconnection::ArcReliableFrames> {
-    let remote =
-        qbase::cid::ArcRemoteCids::new(2, qconnection::ArcReliableFrames::with_capacity(0));
-    remote.set_initial_dcid(cid);
+    let remote = qbase::cid::ArcRemoteCids::new(
+        cid,
+        2,
+        qconnection::ArcReliableFrames::with_capacity(0),
+    );
     remote.apply_dcid()
 }
 
@@ -235,19 +267,13 @@ pub fn paths(
     Arc<qconnection::Paths>,
     qtransport::terminate::ArcTerminator,
 ) {
-    let phase = qconnection::ArcConnPhase::initial(initial_phase(
+    let paths = initial_paths(
         role,
         ConnectionId::from_slice(b"local"),
         ConnectionId::from_slice(b"original"),
         initial_keys(role == qbase::role::Role::Server),
-    ));
-    let terminator = phase.terminator();
-    let paths = qconnection::Paths::new(
-        role,
-        phase,
-        std::time::Duration::ZERO,
-        std::time::Duration::ZERO,
     );
+    let terminator = paths.terminator.clone();
     (paths, terminator)
 }
 

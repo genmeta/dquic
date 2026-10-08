@@ -9,17 +9,15 @@ async fn packet_events_retire_initial_but_leave_queue_removal_to_growing() {
     use qbase::{Epoch, role::Role};
 
     for role in [Role::Client, Role::Server] {
-        let initial = crate::common::initial_phase(
+        let paths = crate::common::initial_paths(
             role,
             Default::default(),
             Default::default(),
             crate::common::initial_keys(role == Role::Server),
         );
-        let space = crate::common::initial_space(&initial.spaces);
-        let spaces = initial.spaces.clone();
-        let resender = initial.resender.clone();
-        let phase = crate::ArcConnPhase::initial(initial);
-        let paths = crate::Paths::new(role, phase, Duration::ZERO, Duration::ZERO);
+        let space = crate::common::initial_space(&paths.spaces);
+        let spaces = paths.spaces.clone();
+        let resender = paths.resender.clone();
         if role == Role::Client {
             paths.on_handshake_received();
         } else {
@@ -81,36 +79,34 @@ async fn any_termination_interrupts_a_pending_future() {
 }
 
 #[tokio::test]
-async fn initial_crypto_receives_close_before_paths_are_created() {
+async fn initial_crypto_receives_close_before_any_path_is_added() {
     use std::task::Poll;
 
     use qbase::{cid::ConnectionId, role::Role};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let initial = crate::common::initial_phase(
+    let paths = crate::common::initial_paths(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         crate::common::initial_keys(false),
     );
-    let mut reader = crate::common::initial_space(&initial.spaces)
-        .crypto
-        .reader();
+    let mut reader = crate::common::initial_space(&paths.spaces).crypto.reader();
     let mut buffer = [0; 1];
     let read = reader.read(&mut buffer);
     tokio::pin!(read);
     assert!(futures::poll!(&mut read).is_pending());
 
-    initial.terminator.close(
+    paths.terminator.close(
         CloseReason::Internal(QuicError::with_default_fty(
             ErrorKind::Internal,
-            "closed before paths were created",
+            "closed before any path was added",
         )),
         Duration::from_secs(1),
     );
     assert!(matches!(futures::poll!(&mut read), Poll::Ready(Err(_))));
     assert!(
-        crate::common::initial_space(&initial.spaces)
+        crate::common::initial_space(&paths.spaces)
             .crypto
             .writer()
             .write_all(b"after close")

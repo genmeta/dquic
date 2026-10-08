@@ -10,7 +10,7 @@ use crate::Paths;
 
 impl Paths {
     fn retire_all(&self) {
-        self.phase().terminator().terminate();
+        self.terminator.terminate();
         for path in self.snapshot() {
             self.remove(&path);
         }
@@ -54,8 +54,16 @@ pub struct SpaceFixture {
 }
 
 pub struct MatureFixture {
+    pub paths: std::sync::Arc<Paths>,
     pub phase: std::sync::Arc<crate::MaturePhase>,
     pub spaces: SpaceFixture,
+}
+
+impl MatureFixture {
+    pub fn peer_cid(&self) -> qbase::cid::ConnectionId {
+        self.parameters
+            .remote(qbase::param::ParameterId::InitialSourceConnectionId)
+    }
 }
 
 impl std::ops::Deref for MatureFixture {
@@ -65,54 +73,53 @@ impl std::ops::Deref for MatureFixture {
     }
 }
 
-pub fn enter_mature(phase: &crate::ArcConnPhase, mature: &MatureFixture) {
-    if matches!(phase.get(), crate::ConnPhase::Initial(_)) {
-        enter_handshake(phase, mature.spaces.handshake.clone());
+pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
+    if matches!(paths.phase().get(), crate::ConnPhase::Initial(_)) {
+        enter_handshake(paths, mature.spaces.handshake.clone());
     }
-    mature
+    paths
         .resender
         .write()
         .unwrap()
         .push_back(mature.spaces.data.clone())
         .unwrap();
-    mature
-        .phase
+    paths
         .spaces
         .write()
         .unwrap()
         .0
         .push_back(mature.spaces.data.clone())
         .unwrap();
-    phase.enter_mature(mature.phase.clone());
+    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    paths.phase().enter_mature(mature.phase.clone());
 }
 
 /// Install resources before switching phase, as growing does.
 pub fn enter_handshake(
-    phase: &crate::ArcConnPhase,
+    paths: &Paths,
     handshake: std::sync::Arc<qtransport::space::HandshakeSpace>,
 ) {
-    let current = phase.get();
-    current
-        .resender()
+    paths
+        .resender
         .write()
         .unwrap()
         .push_back(handshake.clone())
         .unwrap();
-    current
-        .spaces()
+    paths
+        .spaces
         .write()
         .unwrap()
         .0
         .push_back(handshake)
         .unwrap();
-    phase.enter_handshake();
+    paths.handshake.got_handshake_key();
+    paths.phase().enter_handshake();
 }
 
 /// Emulate lifecycle retirement in tests that do not run growing.
 pub fn retire_spaces(paths: &Paths, end: qbase::Epoch) {
-    let phase = paths.phase().get();
-    let mut spaces = phase.spaces().write().unwrap();
-    let mut resender = phase.resender().write().unwrap();
+    let mut spaces = paths.spaces.write().unwrap();
+    let mut resender = paths.resender.write().unwrap();
     while spaces
         .0
         .front()

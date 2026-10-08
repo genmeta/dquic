@@ -68,17 +68,9 @@ impl<K> Space<K> {
         self.sent_journal.next_pn()
     }
 
-    /// Start timers for a successfully submitted batch, locking the journal once.
-    pub fn on_sent(
-        &self,
-        packets: impl IntoIterator<Item = (u64, bool)>,
-        retransmit_after: Duration,
-        retention: Duration,
-    ) {
-        let mut journal = self.sent_journal.lock_guard();
-        for (pn, in_flight) in packets {
-            journal.on_sent(pn, in_flight, retransmit_after, retention);
-        }
+    /// Start recovery timers after successful submission, under the path's CC lock.
+    pub fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        self.sent_journal.on_sent(pn, in_flight, retransmit_after, retention);
     }
 
     /// Release acknowledged CRYPTO data and report whether any bytes were acknowledged.
@@ -240,6 +232,10 @@ where
     fn rcvd_journal(&self) -> &ArcRcvdJournal {
         &self.rcvd_journal
     }
+
+    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        Space::on_sent(self, pn, in_flight, retransmit_after, retention)
+    }
 }
 
 /// Shared packet-number, key reservation and journal operations.
@@ -251,6 +247,9 @@ pub trait Transmit: Allocate + Recover + UnregisterWaker + Any + Send + Sync {
     fn sent_journal(&self) -> &ArcSentJournal;
 
     fn rcvd_journal(&self) -> &ArcRcvdJournal;
+
+    /// Commit one packet under the sending path's CC lock, then account it on that path.
+    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration);
 
     fn on_sealed(
         &self,
@@ -284,6 +283,10 @@ where
 
     fn rcvd_journal(&self) -> &ArcRcvdJournal {
         self.deref().rcvd_journal()
+    }
+
+    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        self.deref().on_sent(pn, in_flight, retransmit_after, retention)
     }
 }
 
@@ -352,28 +355,5 @@ fn packet_error(error: crate::keys::PacketError) -> Error {
             error.to_string(),
         )
         .into(),
-    }
-}
-
-fn dump_sources(
-    cx: &mut Context<'_>,
-    buffer: &mut PacketBuffer<'_, &mut [u8]>,
-    sources: &mut [&mut dyn for<'a> Package<&'a mut [u8]>],
-    start: usize,
-) -> Poll<Result<usize, Error>> {
-    let mut result = Poll::Pending;
-    for source in sources {
-        if buffer.limits.max_size() == 0 || buffer.is_finished() {
-            break;
-        }
-        if let Poll::Ready(value) = source.poll_dump(cx, buffer) {
-            value?;
-            result = Poll::Ready(Ok(0));
-        }
-    }
-    if buffer.meta.nframes > start {
-        Poll::Ready(Ok(buffer.written()))
-    } else {
-        result
     }
 }

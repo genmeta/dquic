@@ -18,10 +18,7 @@ use qbase::{
     role::Role,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qconnection::{
-    ArcConnPhase, ConnPhase, Error, InitialPhase, Paths, Scope, ServerRegistry, TlsContext,
-    server_growing,
-};
+use qconnection::{ConnPhase, Error, Paths, Scope, ServerRegistry, TlsContext, server_growing};
 use qprotocol::{QuicProtocol, UdpSocket};
 use qrecovery::journal::ArcSentJournal;
 use qtransport::{
@@ -66,25 +63,24 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         .unwrap();
     let router = Arc::new(QuicRouter::new());
     let (inbox, received) = channel::new();
-    let _route = router.insert(odcid.into(), inbox.clone());
     let scid = ConnectionId::from_slice(b"server00");
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
-    let cid_registry = qconnection::CidRegistry::new(
+    let local_cids = qconnection::ArcLocalCids::new(
         Role::Server,
         odcid,
-        qconnection::ArcLocalCids::new(
-            scid,
-            router.registry_on_issuing_scid(inbox.clone(), reliable_frames.clone()),
-        ),
-        qbase::cid::ArcRemoteCids::new(2, reliable_frames.clone()),
+        scid,
+        router.insert(odcid.into(), inbox.clone(), reliable_frames.clone()),
     );
-    let phase = ArcConnPhase::initial(InitialPhase::new(
+    let paths = Paths::new(
+        Role::Server,
         (scid, ConnectionId::from_slice(b"wrongcid")),
         server_keys,
         reliable_frames,
-        cid_registry,
-    ));
-    let paths = Paths::new(Role::Server, phase.clone(), Duration::ZERO, Duration::ZERO);
+        local_cids,
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    let phase = paths.phase();
     paths.add_path(pathway);
 
     let data = [hello];

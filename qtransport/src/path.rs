@@ -1,6 +1,7 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
     collections::VecDeque,
+    future::poll_fn,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU8, AtomicU16, Ordering},
@@ -11,15 +12,21 @@ use std::{
 
 use bytes::BufMut;
 use qbase::{
+    Epoch,
+    cid::{ArcCidCell, ArcRemoteCids},
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
-    packet::{PacketBuffer, Package},
-    time::heartbeat::ArcHeartbeat,
+    packet::{self, Package, PacketBuffer, assemble::Metadata},
+    time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::IndexDeque,
 };
-use qcongestion::{Algorithm, ArcCC, HandshakeStatus, PathStatus, Resend, Transport as _};
+use qcongestion::{
+    Algorithm, ArcCC, CongestionController, HandshakeStatus, PathStatus, Resend, Transport as _,
+};
+use qprotocol::QuicProtocol;
+use tokio::time::Instant;
 
-use crate::Error;
+use crate::{ArcReliableFrames, Error};
 mod anti_amplifier;
 pub use anti_amplifier::AntiAmplifier;
 
@@ -37,6 +44,7 @@ pub enum PathState {
 
 pub struct Path {
     pub pathway: Pathway,
+    pub dcid_cell: RwLock<Option<ArcCidCell<ArcReliableFrames>>>,
     // 0xff: undecided, 0: suspended, 1: selected, 2: released after handshake
     // confirmation and the selected sender's CID allocation.
     selected: AtomicU8,
@@ -73,6 +81,7 @@ impl Path {
         );
         Self {
             pathway,
+            dcid_cell: RwLock::new(None),
             selected: AtomicU8::new(u8::MAX),
             handshake,
             cc,
@@ -82,6 +91,25 @@ impl Path {
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
             heartbeat,
         }
+    }
+
+    pub fn assign_dcid(&self, remote: &ArcRemoteCids<ArcReliableFrames>) {
+        let mut cell = self.dcid_cell.write().unwrap();
+        if self.state() != PathState::Retired {
+            cell.get_or_insert_with(|| remote.apply_dcid());
+        }
+    }
+
+    pub async fn failed(&self) {
+        poll_fn(|cx| {
+            self.send_waker.register(cx.waker());
+            if self.state() == PathState::Retired {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     pub fn decide(&self, selected: bool) {
@@ -125,6 +153,33 @@ impl Path {
             self.cc.grant_anti_amplification();
         }
         self.send_waker.wake_all();
+    }
+
+    /// Account one successfully submitted datagram under the submission's CC lock.
+    pub fn on_sent(
+        &self,
+        cc: &mut CongestionController,
+        bytes: usize,
+        packets: [Option<Metadata>; 3],
+        idle: &ArcIdleTimer,
+    ) {
+        let overhead = QuicProtocol::packet_overhead(self.pathway);
+        let charged = packets
+            .iter()
+            .position(|p| p.as_ref().is_some_and(|meta| meta.in_flight))
+            .or_else(|| packets.iter().position(Option::is_some));
+        let now = Instant::now();
+        self.anti_amplifier.on_sent(bytes + overhead);
+        let _ = idle.on_sent_at(now);
+        for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
+            let Some(meta) = packet else { continue };
+            let size = meta.pktlen
+                + if charged == Some(epoch as usize) { overhead } else { 0 };
+            cc.on_pkt_sent(
+                epoch, meta.pn, meta.content.is_ack_eliciting(), size, meta.in_flight, meta.ack,
+            );
+            let _ = self.heartbeat.on_sent_at(meta.content, now);
+        }
     }
 
     pub fn client_handshaking(&self) {
@@ -176,6 +231,9 @@ impl Path {
 
     pub fn retire(&self) {
         self.anti_amplifier.retire();
+        if let Some(cell) = self.dcid_cell.write().unwrap().take() {
+            cell.retire();
+        }
         self.heartbeat.stop();
         self.clear_challenge();
         self.responses.lock().unwrap().clear();
@@ -235,6 +293,10 @@ impl ReceiveFrame<PathChallengeFrame> for Path {
 }
 
 impl<B: BufMut + ?Sized> Package<B> for &Path {
+    fn belongs_to(&self, packet_type: packet::Type) -> bool {
+        matches!(packet_type, packet::Type::Short(_))
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
