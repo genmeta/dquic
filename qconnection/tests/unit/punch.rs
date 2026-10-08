@@ -120,7 +120,7 @@ fn pair() -> [Arc<MaturePhase>; 2] {
                 dcid: peer,
                 parameters,
                 puncher,
-                trackers: initial.trackers.clone(),
+                resender: initial.resender.clone(),
                 terminator: initial.terminator.clone(),
             });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
@@ -211,7 +211,7 @@ async fn receive(phase: &Arc<MaturePhase>, packets: Vec<BytesMut>, pathway: Path
         pathway,
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        initial.trackers.clone(),
+        initial.resender.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -798,7 +798,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             link.into(),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            initial.trackers.clone(),
+            initial.resender.clone(),
         ));
         paths
             .entries

@@ -214,8 +214,12 @@ async fn connect_with_authority(
             reason = &mut driving => reason,
             result = claimed => {
                 if result.is_err() {
-                    pending_paths.on_error(
-                        AppError::new(0u32.into(), "connection request cancelled").into(),
+                    pending_paths.phase().terminator().close(
+                        crate::CloseReason::App(AppError::new(
+                            0u32.into(),
+                            "connection request cancelled",
+                        )),
+                        pending_paths.closing_pto(),
                     );
                 }
                 // Keep driving Closing/Draining, or the successfully claimed connection.
