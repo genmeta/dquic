@@ -108,8 +108,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                         }
                     }
                     Frame::Close(frame) => {
-                        terminator
-                            .recv_conn_close_frame(frame.clone(), path.cc.pto_base(epoch));
+                        terminator.recv_conn_close_frame(frame.clone(), path.cc.pto_base(epoch));
                         return Ok(());
                     }
                     _ => {
@@ -228,10 +227,8 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                         handshake.recv_frame(frame)?;
                     }
                     Frame::Close(frame) => {
-                        terminator.recv_conn_close_frame(
-                            frame.clone(),
-                            path.cc.pto_base(Epoch::Data),
-                        );
+                        terminator
+                            .recv_conn_close_frame(frame.clone(), path.cc.pto_base(Epoch::Data));
                         return Ok(());
                     }
                     Frame::AddAddress(frame) => puncher.recv_add_address(frame),

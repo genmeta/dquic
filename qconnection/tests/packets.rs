@@ -310,10 +310,8 @@ async fn close_at_client_stage(wait: ClientWait) {
                 .err()
                 .expect("growing must reject a CID different from the Initial header");
             assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
-            assert!(
-                matches!(growing.await.unwrap(), Error::Quic(error)
-                if error.kind() == qbase::error::ErrorKind::TransportParameter)
-            );
+            assert!(matches!(growing.await.unwrap(), Error::Quic(error)
+                if error.kind() == qbase::error::ErrorKind::TransportParameter));
             assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
             assert!(paths.snapshot().is_empty());
             assert!(!route_exists(&router, cid).await);

@@ -11,7 +11,7 @@ use qbase::{
     net::{Family, addr::EndpointAddr, route::Pathway},
     role::Role,
 };
-use qprotocol::{AddressBook, Dock, UdpSocket};
+use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
 use crate::{ArcConnPhase, Error, Paths, lifecycle::client::resolve_paths};
@@ -46,6 +46,61 @@ impl Resolve for ScriptedResolver {
 
 fn resolver(result: ResolveResult) -> Arc<dyn Resolve> {
     Arc::new(ScriptedResolver(Mutex::new(Some(result))))
+}
+
+#[tokio::test(start_paused = true)]
+async fn dns_records_are_consumed_in_order_without_delaying_relays() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let public = EndpointAddr::direct("8.8.8.8:41000".parse().unwrap());
+    book.insert_outer(&local.0, public).unwrap();
+    QuicProtocol::global().register(public, &local.0).unwrap();
+    let paths = paths();
+    let direct = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
+    let relay = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), direct.addr());
+    let (send, records) = mpsc::unbounded();
+    let mut discovery = Box::pin(resolve_paths(
+        &paths,
+        &book,
+        resolver(Ok(records.boxed())),
+        "example.test:8443",
+    ));
+    send.unbounded_send((Source::Dht, relay)).unwrap();
+    assert!(futures::poll!(&mut discovery).is_pending());
+    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_none());
+    send.unbounded_send((Source::System, direct)).unwrap();
+    assert!(futures::poll!(&mut discovery).is_pending());
+    assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_some());
+    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    drop(send);
+    discovery.await.unwrap();
+    paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_only_dns_creates_a_path_without_waiting() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let public = EndpointAddr::direct("8.8.8.8:42000".parse().unwrap());
+    book.insert_outer(&local.0, public).unwrap();
+    QuicProtocol::global().register(public, &local.0).unwrap();
+    let paths = paths();
+    let relay = EndpointAddr::mediate(
+        "127.0.0.1:20002".parse().unwrap(),
+        "127.0.0.1:8443".parse().unwrap(),
+    );
+    resolve_paths(
+        &paths,
+        &book,
+        resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())),
+        "example.test:8443",
+    )
+    .now_or_never()
+    .expect("relay-only discovery must not wait for a timer")
+    .unwrap();
+    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    paths.retire_all();
 }
 
 fn paths() -> Arc<Paths> {
