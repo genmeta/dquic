@@ -6,8 +6,8 @@ extern crate self as qconnection;
 #[path = "../src/lib.rs"]
 mod implementation;
 
-pub use implementation::*;
 pub(crate) use implementation::lifecycle;
+pub use implementation::*;
 
 mod common;
 

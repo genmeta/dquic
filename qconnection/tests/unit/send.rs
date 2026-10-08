@@ -858,7 +858,10 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         path.validate();
         path.decide(true);
         let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
-        terminator.close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
+        terminator.close(
+            crate::CloseReason::Internal(error.clone()),
+            paths.closing_pto(),
+        );
         space.crypto.on_error(&error.into());
         let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
         let mut frames = Vec::new();
@@ -1170,7 +1173,10 @@ fn phase_upgrades_preserve_cid_cleanup_and_termination() {
     assert!(mature.cid_registry.local.initial_scid().is_none());
     terminator.terminate();
     let error = terminator.now_or_never().unwrap();
-    assert_eq!(handshake.terminator.clone().now_or_never(), Some(error.clone()));
+    assert_eq!(
+        handshake.terminator.clone().now_or_never(),
+        Some(error.clone())
+    );
     assert_eq!(phase.terminator().now_or_never(), Some(error));
 }
 
@@ -1190,9 +1196,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         mature.resender.clone(),
     ));
-    dcid_cell
-        .set(crate::common::dcid(dcid))
-        .unwrap();
+    dcid_cell.set(crate::common::dcid(dcid)).unwrap();
     path.validate();
     path.decide(true);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
@@ -1564,9 +1568,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         mature.resender.clone(),
     ));
-    dcid_cell
-        .set(crate::common::dcid(mature.dcid))
-        .unwrap();
+    dcid_cell.set(crate::common::dcid(mature.dcid)).unwrap();
     path.validate();
     path.decide(true);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
@@ -1672,9 +1674,10 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     mature.spaces.initial.retire();
     mature.spaces.handshake.retire();
     let error = QuicError::with_default_fty(ErrorKind::Internal, "connection failed");
-    mature
-        .terminator
-        .close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
+    mature.terminator.close(
+        crate::CloseReason::Internal(error.clone()),
+        paths.closing_pto(),
+    );
     mature.flow_ctrl.on_error(&error.clone().into());
     mature.spaces.data.crypto.on_error(&error.into());
     assert_eq!(
@@ -1899,17 +1902,19 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
     ));
     let terminator = phase.terminator();
     let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
-    let path = paths
-        .add_path(Pathway::new(
-            EndpointAddr::direct("127.0.0.1:49001".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:49002".parse().unwrap()),
-        ));
+    let path = paths.add_path(Pathway::new(
+        EndpointAddr::direct("127.0.0.1:49001".parse().unwrap()),
+        EndpointAddr::direct("127.0.0.1:49002".parse().unwrap()),
+    ));
     tokio::task::yield_now().await;
     let pto = path.cc.pto_base(Epoch::Data);
-    terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(
-        ErrorKind::Internal,
-        "closed while credit blocked",
-    )), pto);
+    terminator.close(
+        crate::CloseReason::Internal(QuicError::with_default_fty(
+            ErrorKind::Internal,
+            "closed while credit blocked",
+        )),
+        pto,
+    );
     tokio::task::yield_now().await;
     assert!(paths.get(&path.pathway).is_some());
     assert_ne!(path.state(), qtransport::path::PathState::Retired);
@@ -2336,4 +2341,86 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         .unwrap();
     assert!(initial.sent_journal.lock_guard().frames(pns[0].unwrap())
         .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn path_validation_respects_small_amplification_credit() {
+    use qbase::frame::{PathChallengeFrame, io::ReceiveFrame};
+
+    for received in [0, 128, 399, 400] {
+        for reply in [false, true] {
+            let (initial, mature) = mature_server_phase();
+            let phase = crate::ArcConnPhase::initial(initial);
+            super::enter_mature(&phase, &mature);
+            let paths = Paths::new(Role::Server, phase, Duration::ZERO, Duration::ZERO);
+            super::confirm_handshake(&paths);
+            let path = Arc::new(Path::new(
+                Pathway::new(
+                    EndpointAddr::direct("127.0.0.1:35101".parse().unwrap()),
+                    EndpointAddr::direct("127.0.0.1:35102".parse().unwrap()),
+                ),
+                paths.handshake.clone(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                mature.resender.clone(),
+            ));
+            path.handshake_confirmed();
+            path.on_datagram_received(received);
+            let challenge = PathChallengeFrame::from_slice(&[7; 8]);
+            if reply {
+                path.recv_frame(challenge).unwrap();
+            } else {
+                path.set_challenge(challenge);
+            }
+            let credit = path.amplification_credit();
+            let dcid_cell = OnceLock::new();
+            dcid_cell.set(crate::common::dcid(mature.dcid)).unwrap();
+            let mut datagrams = [BytesMut::with_capacity(1200)];
+            let mut frames = Vec::new();
+            let mut pns: BurstPns = [[None; 3]; MAX_BURST_PACKETS];
+            let mut collector = burst(
+                &path.cc,
+                &path.anti_amplifier,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            )
+            .collect(&paths, &path, &dcid_cell);
+            let result = Pin::new(&mut collector).poll(&mut Context::from_waker(Waker::noop()));
+            drop(collector);
+            if received == 0 {
+                assert!(result.is_pending());
+                assert!(pns_for(&pns, Epoch::Data).next().is_none());
+            } else {
+                assert!(
+                    matches!(result, Poll::Ready(Ok(1))),
+                    "received={received}, reply={reply}, result={result:?}"
+                );
+                let size = datagrams[0].len();
+                assert!(size <= credit, "validation exceeded amplification credit");
+                if credit < 1200 {
+                    assert!(size < 1200);
+                } else {
+                    assert_eq!(size, 1200);
+                }
+                let journal = mature.spaces.data.sent_journal.lock_guard();
+                assert!(
+                    journal
+                        .packet(pns[0][Epoch::Data].unwrap())
+                        .unwrap()
+                        .in_flight
+                );
+                assert!(
+                    if reply {
+                        path.response().is_none()
+                    } else {
+                        path.challenge().is_none()
+                    },
+                    "validation frame was not encoded"
+                );
+            }
+            assert!(!path.is_validated());
+            path.retire();
+            paths.phase().terminator().terminate();
+        }
+    }
 }

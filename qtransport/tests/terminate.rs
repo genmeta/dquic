@@ -9,10 +9,7 @@ use qbase::{
     frame::{ConnectionCloseFrame, Frame},
     packet::{PacketBuffer, Constraints, GetType, Limit, OneRttHeader, Package},
 };
-use qtransport::{
-    CloseReason, Error,
-    terminate::ArcTerminator,
-};
+use qtransport::{CloseReason, Error, terminate::ArcTerminator};
 use tokio::time::Instant;
 
 fn close_frame(reason: &'static str) -> ConnectionCloseFrame {
@@ -219,8 +216,14 @@ async fn pending_senders_are_woken_in_normal_and_closing() {
                 assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(0)));
             }
             terminator.terminate();
-            assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!(closing && draining)));
-            assert!(matches!(poll_close(&terminator, &waker), Poll::Ready(Err(_))));
+            assert_eq!(
+                counter.0.load(Ordering::Relaxed),
+                usize::from(!(closing && draining))
+            );
+            assert!(matches!(
+                poll_close(&terminator, &waker),
+                Poll::Ready(Err(_))
+            ));
         }
     }
 }
@@ -360,7 +363,10 @@ async fn close_notifies_and_releases_registered_components() {
     terminator.terminate();
     assert_eq!(
         errors.lock().unwrap().as_slice(),
-        &[Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))]
+        &[Error::from(QuicError::with_default_fty(
+            ErrorKind::Internal,
+            "local"
+        ))]
     );
 }
 
@@ -388,7 +394,10 @@ async fn registration_racing_close_never_misses_or_duplicates_notification() {
         });
         assert_eq!(
             component.0.lock().unwrap().as_slice(),
-            &[Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))]
+            &[Error::from(QuicError::with_default_fty(
+                ErrorKind::Internal,
+                "local"
+            ))]
         );
     }
 }
