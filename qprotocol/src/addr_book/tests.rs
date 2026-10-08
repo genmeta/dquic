@@ -324,7 +324,7 @@ fn failed_mutations_preserve_directory_and_do_not_notify() {
     let old = direct("8.8.4.4:50000");
     let occupied = direct("1.1.1.1:50000");
     let absent = direct("1.0.0.1:50000");
-    let agent = mediate("8.8.8.8:3478", "8.8.4.4:50000");
+    let agent = mediate("0.0.0.0:3478", "8.8.4.4:50000");
     book.insert(bound, old, Scope::External, None).unwrap();
     book.insert(bound, occupied, Scope::External, None).unwrap();
     let mut events = book.subscribe_punch(Scope::External);
@@ -657,7 +657,7 @@ async fn public_insertions_read_the_socket_binding_and_do_not_retain_it() {
         Err(AddressBookError::ExpectedDirect)
     ));
     assert!(matches!(
-        book.insert_outer(&socket, agent),
+        book.insert_outer(&socket, mediate("0.0.0.0:3478", "8.8.4.4:50000")),
         Err(AddressBookError::ExpectedDirect)
     ));
     assert!(matches!(
@@ -918,4 +918,51 @@ fn inner_binding_snapshot_filters_and_deduplicates_actual_metadata() {
     assert_eq!(book.inner_bindings(), vec![(bound, device)]);
     book.remove_bound(bound);
     assert!(book.inner_bindings().is_empty());
+}
+
+#[test]
+fn relay_dns_snapshot_keeps_each_agent_and_withdraws_replaced_mapping() {
+    let book = AddressBook::new();
+    let bound = addr("192.168.1.10:4433");
+    let first = mediate("8.8.8.8:20002", "1.1.1.1:51000");
+    let second = mediate("8.8.4.4:20002", "1.1.1.1:51000");
+    let replacement = mediate("8.8.8.8:20002", "1.1.1.1:52000");
+    book.set_nat(bound, NatType::RestrictedPort);
+    book.insert(bound, first, Scope::External, None).unwrap();
+    book.insert(bound, second, Scope::External, None).unwrap();
+    let mut events = book.subscribe_punch(Scope::External);
+    let replay = drain(&mut events);
+    assert_eq!(replay.len(), 2);
+    assert!(replay.iter().all(|event| matches!(
+        event,
+        Added {
+            endpoint: EndpointAddr::Mediate { .. },
+            nat: NatType::RestrictedPort,
+            ..
+        }
+    )));
+    let mut expected = vec![first, second];
+    expected.sort_unstable();
+    assert_eq!(book.ddns_endpoints().as_ref(), expected.as_slice());
+    book.replace(first, replacement).unwrap();
+    let mut expected = vec![replacement, second];
+    expected.sort_unstable();
+    assert_eq!(book.ddns_endpoints().as_ref(), expected.as_slice());
+    assert_eq!(
+        drain(&mut events),
+        vec![
+            Removed {
+                bound,
+                endpoint: first
+            },
+            Added {
+                bound,
+                endpoint: replacement,
+                nat: NatType::RestrictedPort
+            }
+        ]
+    );
+    book.remove_bound(bound);
+    assert!(book.ddns_endpoints().is_empty());
+    assert_eq!(book.nat(bound), None);
 }
