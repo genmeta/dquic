@@ -958,15 +958,11 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
             );
             assert!(
                 !recorded
-                    .as_slice()
                     .iter()
                     .any(|frame| matches!(frame, GuaranteedFrame::Crypto(..)))
             );
         } else {
-            assert!(matches!(
-                recorded.as_slice().last(),
-                Some(GuaranteedFrame::Crypto(..))
-            ));
+            assert!(matches!(recorded.last(), Some(GuaranteedFrame::Crypto(..))));
         }
     }
     assert_eq!(sent, (1000..1600).collect::<Vec<_>>());
@@ -1219,7 +1215,7 @@ fn packet_assembly_uses_fixed_limits_across_ack_data_and_padding() {
             .is_err()
     );
     assert!(packet.pad_to(101, &constraints).is_err());
-    assert!(recorded.as_slice().is_empty());
+    assert!(recorded.is_empty());
     assert_eq!(constraints.capacity, 100);
     assert_eq!(constraints.anti_amplification, 100);
     assert_eq!(constraints.congestion, 100);
