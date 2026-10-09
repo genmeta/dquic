@@ -6,8 +6,8 @@ use std::{
 };
 
 use qbase::net::{
-    AddrFamily, NatType,
-    addr::{EndpointAddr, Kind},
+    AddrFamily, Family, NatType,
+    addr::EndpointAddr,
     route::{Pathway, Scope, Scopes},
 };
 use qresolve::Source;
@@ -24,8 +24,6 @@ pub enum AddressBookError {
     Duplicate(EndpointAddr),
     #[error("{0} is not present in the address book")]
     NotFound(EndpointAddr),
-    #[error("expected a Direct endpoint")]
-    ExpectedDirect,
     #[error("{0} is already associated with another interface")]
     ConflictingInterface(SocketAddr),
 }
@@ -106,6 +104,7 @@ impl AddressBook {
     }
 
     /// Publish an inner endpoint using the socket's actual binding and interface metadata.
+    /// The caller supplies a Direct endpoint.
     /// Only the metadata is copied; the directory does not retain the socket.
     pub fn insert_inner(
         &self,
@@ -135,7 +134,7 @@ impl AddressBook {
     }
 
     /// Replace an endpoint in its existing table, retaining its binding and NAT record.
-    /// Failed validation leaves the old endpoint intact. Punch consumers receive Removed
+    /// Failed replacement leaves the old endpoint intact. Punch consumers receive Removed
     /// followed by Added when the new endpoint is ready; DNS receives the final snapshot.
     pub fn replace(&self, old: EndpointAddr, new: EndpointAddr) -> Result<(), AddressBookError> {
         let mut state = self.state.lock().unwrap();
@@ -143,7 +142,6 @@ impl AddressBook {
         if old == new {
             return Ok(());
         }
-        ensure_published(new, scope)?;
         state.ensure_absent(new)?;
         let addresses = state.addresses_mut(scope);
         addresses.remove(&old);
@@ -315,82 +313,25 @@ impl AddressBook {
         receiver
     }
 
-    /// Generate sorted, deduplicated bootstrap candidates without opening sockets or Paths.
-    /// Direct peers use the actual binding; mediated peers need a publicly reachable local
-    /// return endpoint. For a known filtering NAT, the return endpoint uses the peer's relay.
-    /// The network owner must register that Mediate alias, the binding's Direct address and
-    /// published aliases with QuicProtocol. mDNS sources restrict the interface
-    /// name and family using registered binding metadata; missing metadata cannot match.
-    /// Names must be the same canonical netdev names used at registration.
-    /// No system interface enumeration or IP-to-interface inference happens here.
-    /// The caller checks socket liveness; matching does not establish reachability.
+    /// Select sorted bootstrap candidates from existing unique local endpoints.
+    /// Direct peers match Direct endpoints; mediated peers match Mediate endpoints and
+    /// retain each local endpoint's own agent and outer mapping. No endpoint is synthesized.
+    /// mDNS sources restrict the address family and interface using registered binding metadata;
+    /// missing metadata cannot match. The caller checks socket liveness and reachability.
     pub fn pathways_to(&self, peer: EndpointAddr, source: &Source) -> Vec<Pathway> {
-        let family = peer.addr().family();
-        if !usable_endpoint(peer)
-            || matches!(source, Source::Mdns { family: expected, .. } if *expected != family)
-        {
-            return Vec::new();
-        }
-        let Some(destination_scope) = EndpointAddr::direct(*peer).scope() else {
-            return Vec::new();
-        };
-        let mediated = peer.kind() == Kind::Mediate;
         let state = self.state.lock().unwrap();
         let mut pathways = state
             .entries()
-            .filter_map(|(&endpoint, &bound)| {
-                let direct = EndpointAddr::direct(bound);
-                if bound.port() == 0
-                    || bound.family() != family
-                    || !compatible_scope(direct.scope()?, destination_scope)
-                    || !usable_endpoint(endpoint)
-                {
-                    return None;
+            .filter(|&(&endpoint, _)| endpoint.matches_peer(peer))
+            .filter(|&(_, &bound)| match source {
+                Source::Mdns { nic, family } => {
+                    peer.addr().family() == *family && state.matches_mdns(bound, nic, *family)
                 }
-                if let Source::Mdns { nic, .. } = source {
-                    let device = state.interfaces.get(&bound)?.as_ref()?;
-                    if device.name() != nic.as_ref()
-                        || matches!(bound, SocketAddr::V6(addr)
-                        if addr.scope_id() != 0 && addr.scope_id() != device.index().get())
-                    {
-                        return None;
-                    }
-                }
-                Some((direct, endpoint))
+                _ => true,
             })
-            .flat_map(|(direct, endpoint)| {
-                std::iter::once(direct)
-                    .chain(mediated.then_some(endpoint))
-                    .map(move |local| (direct.addr(), local))
-            })
-            .filter(|(_, local)| {
-                *local != peer
-                    && local.addr().family() == family
-                    && (!mediated || local.is_globally_routable())
-            })
-            .map(|(bound, local)| {
-                // A mapped address behind filtering NAT cannot receive the reply directly.
-                // The network owner registers this relay alias with QuicProtocol.
-                let local = if let EndpointAddr::Mediate { agent, .. } = peer
-                    && state.nat.get(&bound).is_some_and(|nat| {
-                        matches!(
-                            nat,
-                            NatType::RestrictedCone
-                                | NatType::RestrictedPort
-                                | NatType::Symmetric
-                                | NatType::Dynamic
-                        )
-                    }) {
-                    EndpointAddr::mediate(agent, local.addr())
-                } else {
-                    local
-                };
-                Pathway::new(local, peer)
-            })
-            .filter(|pathway| pathway.local() != pathway.remote())
+            .map(|(&endpoint, _)| Pathway::new(endpoint, peer))
             .collect::<Vec<_>>();
         pathways.sort_unstable();
-        pathways.dedup();
         pathways
     }
 
@@ -401,7 +342,6 @@ impl AddressBook {
         scope: Scope,
         interface: Option<&qudp::BoundDevice>,
     ) -> Result<(), AddressBookError> {
-        ensure_published(endpoint, scope)?;
         let mut state = self.state.lock().unwrap();
         state.ensure_absent(endpoint)?;
         state.set_interface(bound, interface)?;
@@ -413,6 +353,20 @@ impl AddressBook {
 }
 
 impl State {
+    fn matches_mdns(&self, bound: SocketAddr, nic: &str, family: Family) -> bool {
+        let Some(device) = self.interfaces.get(&bound).and_then(Option::as_ref) else {
+            return false;
+        };
+        bound.family() == family
+            && device.name() == nic
+            && match bound {
+                SocketAddr::V4(_) => true,
+                SocketAddr::V6(addr) => {
+                    addr.scope_id() == 0 || addr.scope_id() == device.index().get()
+                }
+            }
+    }
+
     // Metadata is recorded atomically with endpoint publication. All aliases must
     // agree, including an explicitly unscoped socket. remove_bound ends its lifetime.
     fn set_interface(
@@ -540,36 +494,8 @@ impl State {
     }
 }
 
-fn ensure_published(endpoint: EndpointAddr, scope: Scope) -> Result<(), AddressBookError> {
-    if endpoint.kind() == Kind::Direct || (scope == Scope::External && usable_endpoint(endpoint)) {
-        Ok(())
-    } else {
-        Err(AddressBookError::ExpectedDirect)
-    }
-}
-
 fn in_scope(endpoint: EndpointAddr, scopes: Scopes) -> bool {
     endpoint.scope().is_some_and(|scope| scopes.contains(scope))
-}
-
-fn compatible_scope(local: Scope, destination: Scope) -> bool {
-    match destination {
-        Scope::Loopback | Scope::Internal => local == destination,
-        Scope::External => matches!(local, Scope::Internal | Scope::External),
-    }
-}
-
-fn usable_endpoint(endpoint: EndpointAddr) -> bool {
-    match endpoint {
-        EndpointAddr::Direct { addr } => addr.port() != 0 && endpoint.scope().is_some(),
-        EndpointAddr::Mediate { agent, outer } => {
-            usable_endpoint(EndpointAddr::direct(agent))
-                && outer.port() != 0
-                && !outer.ip().is_unspecified()
-                && !outer.ip().is_multicast()
-                && agent.is_ipv4() == outer.is_ipv4()
-        }
-    }
 }
 
 #[cfg(test)]
