@@ -105,7 +105,7 @@ pub async fn server_growing(
         match server.spawn_connection_with(qtls::QuicVersion::V1, hello, scid, origin_dcid) {
             Ok(ready) => ready,
             Err(error) => {
-                (server.accept_cb)(Err(error.clone()));
+                tracing::warn!(%error, "QUIC server handshake failed");
                 return shutdown(&paths, &local_cids, error).await;
             }
         };
@@ -297,7 +297,7 @@ pub async fn server_growing(
     let (connection, puncher) = match result {
         Ok(connection) => connection,
         Err(reason) => {
-            (server.accept_cb)(Err(reason.clone()));
+            tracing::warn!(error = %reason, "QUIC server handshake failed");
             return shutdown(&paths, &local_cids, reason).await;
         }
     };
@@ -308,7 +308,7 @@ pub async fn server_growing(
         stopped,
         |_| {},
     );
-    (server.accept_cb)(Ok(connection));
+    (server.accept_cb)(connection);
     let reason = terminator.await;
     drop(stop);
     let _ = observer.await;

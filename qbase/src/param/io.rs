@@ -159,7 +159,7 @@ fn handle_nom_error<F: Debug, E: Debug>(_input: &[u8], _nom_error: nom::Err<F, E
 
 impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
     pub fn parse_from_bytes(mut buf: &[u8]) -> Result<Self, QuicError> {
-        let mut parameters = Self::default();
+        let mut parameters = Self::new();
         let mut seen = HashSet::new();
         while !buf.is_empty() {
             let (param_id, param_value);

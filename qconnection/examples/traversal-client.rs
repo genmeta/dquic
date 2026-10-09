@@ -6,7 +6,7 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use clap::Parser;
 use futures::{FutureExt, StreamExt, stream};
-use qbase::{endpoint::Endpoint, param::handy::client_parameters};
+use qbase::endpoint::Endpoint;
 use qconnection::QuicEndpoint;
 use qresolve::{EndpointAddr, Family, Resolve, ResolveFuture, Resolver, Source};
 use tls_backend::pki_types::pem::PemObject;
@@ -61,7 +61,6 @@ async fn main() -> Result<(), Error> {
         "../../tests/keychain/localhost/ca.cert"
     ))?])?;
     let identity = Endpoint::new(
-        &qtls::default_provider(),
         "client",
         vec![qtls::CertificateDer::from_pem_slice(include_bytes!(
             "../../tests/keychain/localhost/client.cert"
@@ -71,8 +70,7 @@ async fn main() -> Result<(), Error> {
         ))?,
         include_bytes!("../../tests/keychain/localhost/client.ocsp").to_vec(),
     )?;
-    let mut endpoint = QuicEndpoint::new(identity);
-    endpoint.client_parameters = client_parameters();
+    let endpoint = QuicEndpoint::from(identity);
 
     let EndpointAddr::Mediate { agent, .. } = options.server else {
         return Err("--server must be the relay endpoint printed by traversal-server".into());

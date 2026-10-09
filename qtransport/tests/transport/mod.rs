@@ -20,10 +20,7 @@ use qbase::{
         route::{Link, Pathway},
     },
     packet::{DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader},
-    param::{
-        ParameterId,
-        handy::{client_parameters, server_parameters},
-    },
+    param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
     time::heartbeat::ArcHeartbeat,
     util::IndexDeque,
@@ -115,7 +112,7 @@ fn tls_server(provider: Arc<qtls::CryptoProvider>, alpn: Vec<Vec<u8>>) -> qtls::
     qtls::TlsServer::new(qtls::ServerTlsConfig {
         provider,
         alpn,
-        local,
+        authority: local,
         resumption: qtls::ServerResumptionConfig::Disabled,
         limits: Default::default(),
     })
@@ -170,8 +167,8 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
 }
 
 fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Transport> {
-    let mut client = client_parameters();
-    let mut server = server_parameters();
+    let mut client = ClientParameters::default();
+    let mut server = ServerParameters::default();
     client
         .set(ParameterId::InitialMaxStreamsBidi, limits)
         .unwrap();

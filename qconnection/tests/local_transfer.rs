@@ -16,10 +16,8 @@ use std::{
 use futures::{FutureExt, StreamExt, stream};
 use qbase::{
     endpoint::Endpoint,
-    param::{
-        ParameterId,
-        handy::{client_parameters, server_parameters},
-    },
+    param::{ClientParameters, ParameterId, ServerParameters},
+    role::Role,
 };
 use qconnection::{ArcConnection, QuicEndpoint, Scopes, ServerRegistry};
 use qprotocol::{AddressBook, Dock, UdpSocket};
@@ -146,7 +144,6 @@ fn identity(server: bool) -> Result<Arc<Endpoint>, Error> {
         )
     };
     Ok(Endpoint::new(
-        &qtls::default_provider(),
         name,
         vec![qtls::CertificateDer::from_pem_slice(cert)?],
         qtls::PrivateKeyDer::from_pem_slice(key)?,
@@ -275,20 +272,29 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     let server_socket = LocalSocket::bind(false)?;
     let client_socket = LocalSocket::bind(true)?;
     Resolver::add(Arc::new(LocalResolver(server_socket.addr.into())));
-    let mut server = QuicEndpoint::new(identity(true)?);
-    server.server_parameters = server_parameters();
-    server
-        .server_parameters
-        .set(ParameterId::InitialMaxStreamsBidi, count as u32)?;
-    server
-        .server_parameters
-        .set(ParameterId::InitialMaxData, 16u32 * 1024 * 1024)?;
-    server.server_parameters.set(
+    let mut server = QuicEndpoint::from(identity(true)?);
+    for (id, value) in ServerParameters::default().iter() {
+        server.set_parameters(Role::Server, *id, value.clone())?;
+    }
+    server.set_parameters(
+        Role::Server,
+        ParameterId::InitialMaxStreamsBidi,
+        count as u32,
+    )?;
+    server.set_parameters(
+        Role::Server,
+        ParameterId::InitialMaxData,
+        16u32 * 1024 * 1024,
+    )?;
+    server.set_parameters(
+        Role::Server,
         ParameterId::InitialMaxStreamDataBidiRemote,
         CHUNK_SIZE as u32,
     )?;
-    let mut client = QuicEndpoint::new(identity(false)?);
-    client.client_parameters = client_parameters();
+    let mut client = QuicEndpoint::from(identity(false)?);
+    for (id, value) in ClientParameters::default().iter() {
+        client.set_parameters(Role::Client, *id, value.clone())?;
+    }
     let (incoming, mut accepted) = mpsc::unbounded_channel();
     server.listen(Scopes::ALL, move |result| {
         let _ = incoming.send(result);
@@ -296,7 +302,7 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     let _listener = Listener;
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(15), async {
         tokio::try_join!(client.connect("localhost".into()), async {
-            accepted.recv().await.expect("listener stopped")
+            Ok(accepted.recv().await.expect("listener stopped"))
         })
     })
     .await

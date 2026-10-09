@@ -10,7 +10,7 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt, channel::mpsc, stream};
-use qbase::{cid::ConnectionId, net::Family};
+use qbase::{cid::ConnectionId, endpoint::Anonymous, net::Family, role::Role};
 use qconnection::{QuicEndpoint, Scope, ServerRegistry};
 use qprotocol::{AddressBook, Dock, UdpSocket};
 use qresolve::{Record, Resolve, ResolveFuture, Resolver};
@@ -91,7 +91,7 @@ async fn connect_case(anonymous: bool, alpn: &[u8]) {
     let server_socket = Registration::new(false);
     let _client_socket = Registration::new(true);
     let mut server = common::quic_endpoint();
-    server.alpn = vec![alpn.to_vec()];
+    server.set_alpn(vec![alpn.to_vec()]);
     let (accepted, mut incoming) = tokio::sync::mpsc::unbounded_channel();
     server
         .listen(Scope::Loopback, move |result| {
@@ -111,7 +111,7 @@ async fn connect_case(anonymous: bool, alpn: &[u8]) {
     .unwrap();
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(5), async {
         let connected = connect(anonymous, server_name, alpn).await.unwrap();
-        let accepted = incoming.recv().await.unwrap().unwrap();
+        let accepted = incoming.recv().await.unwrap();
         assert_eq!(connected.0.is_none(), anonymous);
         assert_eq!(accepted.0.is_none(), anonymous);
         assert_eq!(accepted.1.name(), "localhost");
@@ -173,15 +173,18 @@ async fn connect(
     server_name: String,
     alpn: &[u8],
 ) -> Result<qconnection::Connected, qconnection::Error> {
-    let parameters = qbase::param::handy::client_parameters();
-    if anonymous {
-        qconnection::connect_anonymously(server_name, parameters, vec![alpn.to_vec()]).await
+    let mut endpoint: QuicEndpoint = if anonymous {
+        Anonymous.into()
     } else {
-        let mut endpoint = common::quic_endpoint();
-        endpoint.client_parameters = parameters;
-        endpoint.alpn = vec![alpn.to_vec()];
-        endpoint.connect(server_name).await
+        common::quic_endpoint()
+    };
+    for (id, value) in qbase::param::ClientParameters::default().iter() {
+        endpoint
+            .set_parameters(Role::Client, *id, value.clone())
+            .unwrap();
     }
+    endpoint.set_alpn(vec![alpn.to_vec()]);
+    endpoint.connect(server_name).await
 }
 
 struct DropProbe(Arc<AtomicBool>);
@@ -344,11 +347,7 @@ async fn cancel_queued_connection() {
         server_socket.0.local_addr().unwrap().into(),
     ))
     .unwrap();
-    let mut connecting = Box::pin(qconnection::connect_anonymously(
-        hostname,
-        qbase::param::handy::client_parameters(),
-        vec![b"h3".to_vec()],
-    ));
+    let mut connecting = Box::pin(connect(true, hostname, b"h3"));
     // Poll once to start the lifecycle, then leave the delivery receiver unpolled.
     let ready = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = futures::task::waker(ready.clone());
@@ -360,7 +359,6 @@ async fn cancel_queued_connection() {
     );
     let (_, _, connection) = timeout(Duration::from_secs(5), accepted.recv())
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
     // The delivery slot is ready, but its connection has not reached the caller.
@@ -379,11 +377,9 @@ async fn cancel_queued_connection() {
 async fn reject_wrong_server_identity() {
     let server_socket = Registration::new(false);
     let _local = Registration::new(true);
-    let good = common::quic_endpoint();
-    let identity = &good.identity;
+    let identity = common::identity();
     use tls_backend::pki_types::pem::PemObject;
     let wrong = qbase::endpoint::Endpoint::new(
-        &qtls::default_provider(),
         "wrong.test",
         identity.cert_chain().to_vec(),
         qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
@@ -393,11 +389,17 @@ async fn reject_wrong_server_identity() {
         identity.ocsp().to_vec(),
     )
     .unwrap();
-    let mut server = QuicEndpoint::new(wrong);
-    server.server_parameters = qbase::param::handy::server_parameters();
+    let mut server = QuicEndpoint::from(wrong);
+    for (id, value) in qbase::param::ServerParameters::default().iter() {
+        server
+            .set_parameters(Role::Server, *id, value.clone())
+            .unwrap();
+    }
+    let accepted = Arc::new(AtomicBool::new(false));
+    let observed = accepted.clone();
     server
-        .listen(Scope::Loopback, |result| {
-            assert!(result.is_err(), "wrong-name handshake must not be accepted")
+        .listen(Scope::Loopback, move |_| {
+            observed.store(true, Ordering::SeqCst);
         })
         .unwrap();
     let (send, records) = mpsc::unbounded();
@@ -420,6 +422,10 @@ async fn reject_wrong_server_identity() {
         .is_err()
     );
     wait_until(|| send.is_closed()).await;
+    assert!(
+        !accepted.load(Ordering::SeqCst),
+        "wrong-name handshake must not be accepted"
+    );
     ServerRegistry::global().remove("wrong.test");
 }
 
@@ -434,10 +440,8 @@ async fn reject_invalid_client_certificate() {
             let _ = send_accepted.send(result);
         })
         .unwrap();
-    let good = common::quic_endpoint();
-    let identity = &good.identity;
+    let identity = common::identity();
     let invalid = qbase::endpoint::Endpoint::new(
-        &qtls::default_provider(),
         "localhost",
         identity.cert_chain().to_vec(),
         qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
@@ -447,8 +451,12 @@ async fn reject_invalid_client_certificate() {
         b"invalid OCSP".to_vec(),
     )
     .unwrap();
-    let mut client = QuicEndpoint::new(invalid);
-    client.client_parameters = qbase::param::handy::client_parameters();
+    let mut client = QuicEndpoint::from(invalid);
+    for (id, value) in qbase::param::ClientParameters::default().iter() {
+        client
+            .set_parameters(Role::Client, *id, value.clone())
+            .unwrap();
+    }
     let hostname = format!("localhost:{}", server_socket.0.local_addr().unwrap().port());
     let (send, records) = mpsc::unbounded();
     Resolver::add(Arc::new(StreamingResolver {
@@ -461,17 +469,20 @@ async fn reject_invalid_client_certificate() {
     ))
     .unwrap();
     timeout(Duration::from_secs(5), async {
-        let (connected, rejected) = tokio::join!(client.connect(hostname), accepted.recv());
-        assert!(
-            rejected.unwrap().is_err(),
-            "invalid credentials must not become an anonymous peer"
-        );
-        if let Ok((_, _, connection)) = connected {
-            connection.close(0u32.into(), "rejected client");
+        if let Ok((_, _, connection)) = client.connect(hostname).await {
+            // TLS can finish locally before the server rejects the client certificate.
+            assert!(connection.accept_uni_stream().await.is_err());
         }
     })
     .await
     .unwrap();
     wait_until(|| send.is_closed()).await;
+    assert!(
+        matches!(
+            accepted.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "invalid credentials must not invoke the accept callback"
+    );
     ServerRegistry::global().remove("localhost");
 }

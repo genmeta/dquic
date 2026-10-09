@@ -21,7 +21,7 @@ pub struct ClientTlsConfig {
 pub struct ServerTlsConfig {
     pub provider: Arc<rustls::crypto::CryptoProvider>,
     pub alpn: Vec<Vec<u8>>,
-    pub local: LocalAuthority,
+    pub authority: LocalAuthority,
     pub resumption: ServerResumptionConfig,
     pub limits: TlsLimits,
 }
@@ -184,7 +184,7 @@ impl TlsServer {
             provider: config.provider,
             roots: RootCerts::get()?,
             alpn: config.alpn.into(),
-            local: config.local,
+            local: config.authority,
             resumption: config.resumption,
             limits: config.limits,
             require_client_ocsp: true,

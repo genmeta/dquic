@@ -1,7 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData, time::Duration};
 
 use bytes::Bytes;
-use derive_more::{From, TryInto, TryIntoError};
+use derive_more::{From, TryIntoError};
 
 use super::{error::Error, preferred_address::PreferredAddress};
 use crate::{
@@ -245,7 +245,7 @@ impl std::fmt::LowerHex for ParameterId {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Parameters<Role> {
     pub(super) map: HashMap<ParameterId, ParameterValue>,
     _role: PhantomData<Role>,
@@ -289,8 +289,12 @@ impl<Role> Parameters<Role> {
 }
 
 impl<R: IntoRole + Default> Parameters<R> {
+    /// An empty parameter set whose missing values use protocol defaults.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            map: HashMap::new(),
+            _role: PhantomData,
+        }
     }
 
     pub fn set(&mut self, id: ParameterId, value: impl Into<ParameterValue>) -> Result<(), Error> {
@@ -305,6 +309,53 @@ impl<R: IntoRole + Default> Parameters<R> {
 
 pub type ClientParameters = Parameters<Client>;
 pub type ServerParameters = Parameters<Server>;
+
+impl Default for ClientParameters {
+    fn default() -> Self {
+        let mut params = Self::new();
+
+        for (id, value) in [
+            (ParameterId::InitialMaxStreamsBidi, 100u32),
+            (ParameterId::InitialMaxStreamsUni, 100u32),
+            (ParameterId::InitialMaxData, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataUni, 1u32 << 20),
+            (ParameterId::ActiveConnectionIdLimit, 10u32),
+        ] {
+            params.set(id, value).expect("unreachable");
+        }
+
+        params
+            .set(ParameterId::MaxIdleTimeout, Duration::from_secs(20))
+            .expect("unreachable");
+
+        params
+    }
+}
+
+impl Default for ServerParameters {
+    fn default() -> Self {
+        let mut params = Self::new();
+
+        for (id, value) in [
+            (ParameterId::InitialMaxStreamsBidi, 100u32),
+            (ParameterId::InitialMaxStreamsUni, 100u32),
+            (ParameterId::InitialMaxData, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20),
+            (ParameterId::InitialMaxStreamDataUni, 1u32 << 20),
+            (ParameterId::ActiveConnectionIdLimit, 10u32),
+        ] {
+            params.set(id, value).expect("unreachable");
+        }
+        params
+            .set(ParameterId::MaxIdleTimeout, Duration::from_secs(30))
+            .expect("unreachable");
+
+        params
+    }
+}
 
 impl ServerParameters {
     #[inline]
@@ -322,10 +373,4 @@ impl ServerParameters {
         .into_iter()
         .all(|id| self.get::<VarInt>(id) <= server_params.get::<VarInt>(id))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, From, TryInto)]
-pub enum PeerParameters {
-    Client(ClientParameters),
-    Server(ServerParameters),
 }

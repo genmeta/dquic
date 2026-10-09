@@ -3,7 +3,7 @@
 mod network;
 use std::io;
 
-use qbase::{endpoint::Endpoint, param::handy::server_parameters};
+use qbase::endpoint::Endpoint;
 use qconnection::{ArcConnection, QuicEndpoint, Scopes};
 use tls_backend::pki_types::pem::PemObject;
 use tokio::{io::AsyncWriteExt, sync::mpsc};
@@ -22,7 +22,6 @@ async fn main() -> Result<(), Error> {
         "../../tests/keychain/localhost/ca.cert"
     ))?])?;
     let identity = Endpoint::new(
-        &qtls::default_provider(),
         "localhost",
         vec![qtls::CertificateDer::from_pem_slice(include_bytes!(
             "../../tests/keychain/localhost/server.cert"
@@ -32,8 +31,7 @@ async fn main() -> Result<(), Error> {
         ))?,
         include_bytes!("../../tests/keychain/localhost/server.ocsp").to_vec(),
     )?;
-    let mut endpoint = QuicEndpoint::new(identity);
-    endpoint.server_parameters = server_parameters();
+    let endpoint = QuicEndpoint::from(identity);
 
     let network = network::start(None).await?;
 
@@ -44,17 +42,12 @@ async fn main() -> Result<(), Error> {
     for address in &network.endpoints {
         println!("cargo run -p qconnection --example traversal-client -- \\\n  --server {address}");
     }
-    while let Some(connection) = incoming.recv().await {
-        match connection {
-            Ok((_, _, connection)) => {
-                tokio::spawn(async move {
-                    if let Err(error) = echo(connection).await {
-                        eprintln!("connection ended: {error}");
-                    }
-                });
+    while let Some((_, _, connection)) = incoming.recv().await {
+        tokio::spawn(async move {
+            if let Err(error) = echo(connection).await {
+                eprintln!("connection ended: {error}");
             }
-            Err(error) => eprintln!("handshake failed: {error}"),
-        }
+        });
     }
 
     Err(io::Error::other("listener stopped").into())

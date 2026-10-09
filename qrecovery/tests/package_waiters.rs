@@ -12,10 +12,7 @@ use qbase::{
     error::Error,
     frame::io::SendFrame,
     packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
-    param::{
-        ArcParameters,
-        handy::{client_parameters, server_parameters},
-    },
+    param::{ArcParameters, ClientParameters, ServerParameters},
     role::Role,
     sid::handy::DemandConcurrency,
 };
@@ -94,8 +91,8 @@ async fn stream_ready_and_blocked_polls_do_not_subscribe() {
         let mut source = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             Broker,
@@ -152,8 +149,8 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
     let mut streams = DataStreams::new(
         ArcParameters::new(
             Role::Client,
-            Arc::new(client_parameters()),
-            Arc::new(server_parameters()),
+            Arc::new(ClientParameters::default()),
+            Arc::new(ServerParameters::default()),
         ),
         Box::new(DemandConcurrency),
         Broker,

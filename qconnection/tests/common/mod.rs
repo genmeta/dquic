@@ -5,10 +5,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use qbase::{
     cid::ConnectionId,
-    param::{
-        ParameterId, WriteParameters,
-        handy::{client_parameters, server_parameters},
-    },
+    param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
 };
 use tls_backend::pki_types::pem::PemObject;
 
@@ -44,7 +41,7 @@ pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     let server = qtls::TlsServer::new(qtls::ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority("localhost", CERT, KEY, SERVER_OCSP),
+        authority: authority("localhost", CERT, KEY, SERVER_OCSP),
         resumption: qtls::ServerResumptionConfig::Disabled,
         limits: Default::default(),
     })
@@ -64,21 +61,30 @@ pub fn anonymous_client() -> qtls::TlsClient {
     .unwrap()
 }
 
-pub fn quic_endpoint() -> qconnection::QuicEndpoint {
+pub fn identity() -> Arc<qbase::endpoint::Endpoint> {
     set_roots();
-    let provider = qtls::default_provider();
-    let identity = qbase::endpoint::Endpoint::new(
-        &provider,
+    qbase::endpoint::Endpoint::new(
         "localhost",
         vec![qtls::CertificateDer::from_pem_slice(CERT).unwrap()],
         qtls::PrivateKeyDer::from_pem_slice(KEY).unwrap(),
         SERVER_OCSP.to_vec(),
     )
-    .unwrap();
+    .unwrap()
+}
+
+pub fn quic_endpoint() -> qconnection::QuicEndpoint {
     let (client_parameters, server_parameters) = parameters();
-    let mut endpoint = qconnection::QuicEndpoint::new(identity);
-    endpoint.client_parameters = client_parameters;
-    endpoint.server_parameters = server_parameters;
+    let mut endpoint: qconnection::QuicEndpoint = identity().into();
+    for (id, value) in client_parameters.iter() {
+        endpoint
+            .set_parameters(qbase::role::Role::Client, *id, value.clone())
+            .unwrap();
+    }
+    for (id, value) in server_parameters.iter() {
+        endpoint
+            .set_parameters(qbase::role::Role::Server, *id, value.clone())
+            .unwrap();
+    }
     endpoint
 }
 
@@ -110,8 +116,8 @@ pub fn parameters() -> (
     qbase::param::ClientParameters,
     qbase::param::ServerParameters,
 ) {
-    let mut c = client_parameters();
-    let mut s = server_parameters();
+    let mut c = ClientParameters::default();
+    let mut s = ServerParameters::default();
     c.set(
         ParameterId::InitialSourceConnectionId,
         ConnectionId::from_slice(b"client00"),

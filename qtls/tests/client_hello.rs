@@ -78,7 +78,7 @@ fn encoded_client_hello_starts_the_selected_server() {
     let endpoint = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        local: authority,
+        authority,
         resumption: ServerResumptionConfig::Disabled,
         limits: Default::default(),
     })

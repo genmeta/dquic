@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 
 #[tokio::test(start_paused = true)]
 async fn server_rejects_client_parameters_with_a_different_initial_scid() {
-    let (accepted, acceptance) = oneshot::channel();
+    let (accepted, mut acceptance) = oneshot::channel();
     let accepted = Mutex::new(Some(accepted));
     common::quic_endpoint()
         .listen(Scope::Loopback, move |result| {
@@ -117,16 +117,15 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
     );
     let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
-    let result = tokio::time::timeout(Duration::from_secs(1), acceptance)
-        .await
-        .unwrap()
-        .unwrap();
-    let error = result
-        .err()
-        .expect("growing must reject a CID different from the Initial header");
-    assert_eq!(error.kind(), ErrorKind::TransportParameter);
     assert!(
         matches!(growing.await.unwrap(), Error::Quic(error) if error.kind() == ErrorKind::TransportParameter)
+    );
+    assert!(
+        matches!(
+            acceptance.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "a failed handshake must not invoke the accept callback"
     );
     assert!(matches!(phase.get(), ConnPhase::Initial(_)));
     assert!(paths.snapshot().is_empty());
