@@ -125,7 +125,7 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec(), b"ssh".to_vec()],
-        local: None,
+        authority: None,
         resumption: qtls::ClientResumptionConfig::Disabled,
         limits: Default::default(),
     })

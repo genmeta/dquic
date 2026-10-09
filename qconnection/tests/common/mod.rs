@@ -33,7 +33,7 @@ pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: mutual.then(|| authority("client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP)),
+        authority: mutual.then(|| authority("client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP)),
         resumption: qtls::ClientResumptionConfig::Disabled,
         limits: Default::default(),
     })
@@ -54,7 +54,7 @@ pub fn anonymous_client() -> qtls::TlsClient {
     qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: Arc::new(qtls::default_provider()),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: qtls::ClientResumptionConfig::Disabled,
         limits: Default::default(),
     })

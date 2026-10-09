@@ -13,7 +13,7 @@ use crate::{
 pub struct ClientTlsConfig {
     pub provider: Arc<rustls::crypto::CryptoProvider>,
     pub alpn: Vec<Vec<u8>>,
-    pub local: Option<LocalAuthority>,
+    pub authority: Option<LocalAuthority>,
     pub resumption: ClientResumptionConfig,
     pub limits: TlsLimits,
 }
@@ -59,7 +59,7 @@ pub struct TlsClient {
     provider: Arc<rustls::crypto::CryptoProvider>,
     roots: RootCertsSnapshot,
     alpn: Arc<[Vec<u8>]>,
-    local: Option<LocalAuthority>,
+    authority: Option<LocalAuthority>,
     resumption: ClientResumptionConfig,
     limits: TlsLimits,
 }
@@ -68,7 +68,7 @@ pub struct TlsServer {
     provider: Arc<rustls::crypto::CryptoProvider>,
     roots: RootCertsSnapshot,
     alpn: Arc<[Vec<u8>]>,
-    local: LocalAuthority,
+    authority: LocalAuthority,
     resumption: ServerResumptionConfig,
     limits: TlsLimits,
     require_client_ocsp: bool,
@@ -87,7 +87,7 @@ impl TlsClient {
             provider: config.provider,
             roots: RootCerts::get()?,
             alpn: config.alpn.into(),
-            local: config.local,
+            authority: config.authority,
             resumption: config.resumption,
             limits: config.limits,
         })
@@ -119,7 +119,7 @@ impl TlsClient {
             self.limits,
         )?);
         let client_cert = Arc::new(crate::handshake::OptionalClientCert::new(
-            self.local.clone(),
+            self.authority.clone(),
             peer.clone(),
             self.limits,
         ));
@@ -184,7 +184,7 @@ impl TlsServer {
             provider: config.provider,
             roots: RootCerts::get()?,
             alpn: config.alpn.into(),
-            local: config.authority,
+            authority: config.authority,
             resumption: config.resumption,
             limits: config.limits,
             require_client_ocsp: true,
@@ -223,7 +223,7 @@ impl TlsServer {
     ) -> Result<TlsHandshake, TlsError> {
         let peer = PeerState::new();
         let server_cert = Arc::new(crate::handshake::FixedServerCert::new(
-            self.local.clone(),
+            self.authority.clone(),
             peer.clone(),
             self.limits,
         ));

@@ -358,15 +358,15 @@ pub(crate) fn map_rustls_error(error: rustls::Error) -> TlsError {
 }
 
 pub(crate) struct FixedServerCert {
-    local: LocalAuthority,
+    authority: LocalAuthority,
     peer: PeerState,
     limits: TlsLimits,
 }
 
 impl FixedServerCert {
-    pub fn new(local: LocalAuthority, peer: PeerState, limits: TlsLimits) -> Self {
+    pub fn new(authority: LocalAuthority, peer: PeerState, limits: TlsLimits) -> Self {
         Self {
-            local,
+            authority,
             peer,
             limits,
         }
@@ -383,25 +383,25 @@ impl fmt::Debug for FixedServerCert {
 
 impl ResolvesServerCert for FixedServerCert {
     fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        if !authority_within_limits(&self.local, self.limits) {
+        if !authority_within_limits(&self.authority, self.limits) {
             return None;
         }
-        let certified_key = self.local.certified_key();
-        self.peer.authorities.lock().ok()?.local = Some(self.local.clone());
+        let certified_key = self.authority.certified_key();
+        self.peer.authorities.lock().ok()?.local = Some(self.authority.clone());
         Some(certified_key)
     }
 }
 
 pub(crate) struct OptionalClientCert {
-    local: Option<LocalAuthority>,
+    authority: Option<LocalAuthority>,
     peer: PeerState,
     limits: TlsLimits,
 }
 
 impl OptionalClientCert {
-    pub fn new(local: Option<LocalAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
+    pub fn new(authority: Option<LocalAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
         Self {
-            local,
+            authority,
             peer,
             limits,
         }
@@ -411,7 +411,7 @@ impl OptionalClientCert {
         &self,
         expected: &crate::resumption::AuthorityProjection,
     ) -> Option<LocalAuthority> {
-        let authority = self.local.as_ref()?;
+        let authority = self.authority.as_ref()?;
         if !authority_within_limits(authority, self.limits) || !expected.matches(authority) {
             return None;
         }
@@ -429,7 +429,7 @@ impl fmt::Debug for OptionalClientCert {
 
 impl ResolvesClientCert for OptionalClientCert {
     fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
-        let authority = self.local.as_ref()?;
+        let authority = self.authority.as_ref()?;
         if !authority_within_limits(authority, self.limits) {
             return None;
         }
@@ -439,7 +439,7 @@ impl ResolvesClientCert for OptionalClientCert {
     }
 
     fn has_certs(&self) -> bool {
-        self.local.is_some()
+        self.authority.is_some()
     }
 }
 
