@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use qtls::{CertificateDer, CryptoProvider, PrivateKeyDer, SigningKey};
+use qtls::{CertificateDer, PrivateKeyDer, SigningKey};
 
 /// A local name and immutable certificate/key/OCSP material for this process.
 #[derive(Clone)]
@@ -11,6 +11,9 @@ pub struct Endpoint {
     ocsp: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct Anonymous;
+
 impl fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Endpoint")
@@ -20,13 +23,12 @@ impl fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
-    /// Loads the private key with the selected crypto provider.
+    /// Loads the private key with the default qtls crypto provider.
     ///
     /// Names and certificate material are retained as supplied. Certificate
     /// parsing, key matching, validity and trust checks belong to the handshake.
     /// An unusable private key is returned immediately as an error.
     pub fn new(
-        provider: &CryptoProvider,
         name: &str,
         certs: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
@@ -37,7 +39,9 @@ impl Endpoint {
                 "endpoint OCSP staple is empty".into(),
             ));
         }
-        let signing_key = provider.key_provider.load_private_key(key)?;
+        let signing_key = qtls::default_provider()
+            .key_provider
+            .load_private_key(key)?;
         Ok(Arc::new(Self {
             name: name.to_owned(),
             cert: certs,
@@ -65,7 +69,7 @@ impl Endpoint {
 
 #[cfg(test)]
 mod tests {
-    use qtls::{PrivateKeyDer, default_provider};
+    use qtls::PrivateKeyDer;
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 
     use super::*;
@@ -80,7 +84,6 @@ mod tests {
 
     fn endpoint(certs: Vec<CertificateDer<'static>>) -> Arc<Endpoint> {
         Endpoint::new(
-            &default_provider(),
             "a different name",
             certs,
             PrivateKeyDer::from_pem_slice(KEY).unwrap(),
@@ -107,7 +110,6 @@ mod tests {
     #[test]
     fn construction_rejects_unloadable_private_key() {
         let result = Endpoint::new(
-            &default_provider(),
             "localhost",
             vec![certificate(CERT)],
             PrivatePkcs8KeyDer::from(vec![0]).into(),
@@ -119,7 +121,6 @@ mod tests {
     #[test]
     fn construction_rejects_empty_ocsp() {
         let result = Endpoint::new(
-            &default_provider(),
             "localhost",
             vec![certificate(CERT)],
             PrivateKeyDer::from_pem_slice(KEY).unwrap(),

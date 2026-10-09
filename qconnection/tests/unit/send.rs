@@ -902,7 +902,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
     let server = qtls::TlsServer::new(qtls::ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: qtls::LocalAuthority::new(
+        authority: qtls::LocalAuthority::new(
             &provider,
             Arc::from("localhost"),
             vec![
@@ -951,10 +951,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
 }
 
 pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::MatureFixture) {
-    use qbase::param::{
-        ArcParameters,
-        handy::{client_parameters, server_parameters},
-    };
+    use qbase::param::{ArcParameters, ClientParameters, ServerParameters};
     let paths = crate::common::initial_paths_with_timeouts(
         role,
         ConnectionId::from_slice(b"server00"),
@@ -963,7 +960,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
         Duration::ZERO,
         defer,
     );
-    let mut client = client_parameters();
+    let mut client = ClientParameters::default();
     client
         .set(
             ParameterId::InitialSourceConnectionId,
@@ -973,7 +970,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
     let parameters = ArcParameters::new(
         Role::Server,
         Arc::new(client),
-        Arc::new(server_parameters()),
+        Arc::new(ServerParameters::default()),
     );
     let terminator = &paths.terminator;
     let registry = crate::CidRegistry::new(

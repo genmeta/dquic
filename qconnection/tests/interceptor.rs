@@ -8,6 +8,7 @@ use qbase::{
     cid::ConnectionId,
     net::route::Pathway,
     param::{ClientParameters, ParameterId, WriteParameters},
+    role::Role,
 };
 use qconnection::{Interceptor, Scope, ServerRegistry};
 use qtls::{ClientStart, QuicVersion, TlsEvent};
@@ -84,7 +85,7 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
         .server_parameters
         .get::<qbase::varint::VarInt>(ParameterId::InitialMaxData);
     endpoint
-        .set_server_parameters(ParameterId::InitialMaxData, 123_456u32)
+        .set_parameters(Role::Server, ParameterId::InitialMaxData, 123_456u32)
         .unwrap();
     assert_eq!(
         server
@@ -99,9 +100,7 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
         updated
             .server_parameters
             .get::<qbase::varint::VarInt>(ParameterId::InitialMaxData),
-        endpoint
-            .server_parameters
-            .get::<qbase::varint::VarInt>(ParameterId::InitialMaxData)
+        qbase::varint::VarInt::from(123_456u32)
     );
     assert!(
         Pathway::new(

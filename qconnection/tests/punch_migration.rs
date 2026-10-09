@@ -190,7 +190,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .await
         .expect("stage 1: server handshake timed out")
         .unwrap()
-        .unwrap()
         .2;
     let (server_phase, server_paths, server_growing) = server_state.recv().await.unwrap();
     (

@@ -68,7 +68,7 @@ fn mutual_auth_publishes_both_authorities() {
     let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        local: server_authority,
+        authority: server_authority,
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -134,7 +134,7 @@ fn anonymous_client_completes_without_remote_authority() {
     let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        local: server_authority,
+        authority: server_authority,
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -173,7 +173,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
         let server = TlsServer::new(ServerTlsConfig {
             provider: provider.clone(),
             alpn: vec![b"h3".to_vec()],
-            local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, ocsp),
+            authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, ocsp),
             resumption: ServerResumptionConfig::Disabled,
             limits: TlsLimits::default(),
         })
@@ -191,7 +191,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority(
+        authority: authority(
             &provider,
             "localhost",
             SERVER_CERT,
@@ -238,7 +238,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
+        authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -275,7 +275,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
+        authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Stateful {
             namespace: Arc::from("integration-test"),
             store,
@@ -307,7 +307,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     let fallback_server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
+        authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -347,7 +347,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
+        authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Stateless {
             ticket_keys: Arc::new(ticket_key_ring()),
         },
@@ -382,7 +382,7 @@ fn initial_keys_interoperate_for_v1_and_v2() {
     let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        local: authority(
+        authority: authority(
             &Arc::new(crypto_provider()),
             "localhost",
             SERVER_CERT,

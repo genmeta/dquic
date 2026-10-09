@@ -13,15 +13,11 @@ use crate::{
 
 pub mod core;
 pub mod error;
-pub mod handy;
 pub mod io;
 pub mod preferred_address;
 
 pub use self::{
-    core::{
-        ClientParameters, ParameterId, ParameterValue, ParameterValueType, PeerParameters,
-        ServerParameters,
-    },
+    core::{ClientParameters, ParameterId, ParameterValue, ParameterValueType, ServerParameters},
     io::*,
 };
 
@@ -225,6 +221,48 @@ impl ArcParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_defaults_advertise_usable_flow_control_and_role_timeouts() {
+        fn check<R>(params: &core::Parameters<R>, timeout: u64) {
+            for (id, expected) in [
+                (ParameterId::InitialMaxStreamsBidi, 100),
+                (ParameterId::InitialMaxStreamsUni, 100),
+                (ParameterId::InitialMaxData, 1 << 20),
+                (ParameterId::InitialMaxStreamDataBidiLocal, 1 << 20),
+                (ParameterId::InitialMaxStreamDataBidiRemote, 1 << 20),
+                (ParameterId::InitialMaxStreamDataUni, 1 << 20),
+                (ParameterId::ActiveConnectionIdLimit, 10),
+            ] {
+                assert!(params.contains(id), "{id:?} must be advertised");
+                assert_eq!(params.get::<u64>(id), expected);
+            }
+            assert_eq!(
+                params.get::<Duration>(ParameterId::MaxIdleTimeout),
+                Duration::from_secs(timeout)
+            );
+            assert!(!params.contains(ParameterId::InitialSourceConnectionId));
+        }
+        check(&ClientParameters::default(), 20);
+        check(&ServerParameters::default(), 30);
+    }
+
+    #[test]
+    fn absent_peer_parameters_keep_protocol_defaults() {
+        fn check<R>(params: &core::Parameters<R>) {
+            assert!(!params.contains(ParameterId::InitialMaxData));
+            assert_eq!(params.get::<u64>(ParameterId::InitialMaxData), 0);
+            assert_eq!(params.get::<u64>(ParameterId::InitialMaxStreamsBidi), 0);
+            assert_eq!(params.get::<u64>(ParameterId::ActiveConnectionIdLimit), 2);
+            assert_eq!(
+                params.get::<Duration>(ParameterId::MaxIdleTimeout),
+                Duration::ZERO
+            );
+        }
+        check(&ClientParameters::parse_from_bytes(&[15, 0]).unwrap());
+        check(&ServerParameters::parse_from_bytes(&[0, 0, 15, 0]).unwrap());
+        check(&ServerParameters::try_from_remembered_bytes(&[]).unwrap());
+    }
 
     fn parameters(role: Role) -> ArcParameters {
         let mut client = ClientParameters::default();

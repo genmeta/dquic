@@ -6,10 +6,7 @@ use bytes::{Bytes, BytesMut};
 use qbase::{
     frame::Frame,
     packet::OneRttHeader,
-    param::{
-        ParameterId,
-        handy::{client_parameters, server_parameters},
-    },
+    param::{ClientParameters, ParameterId, ServerParameters},
     sid::handy::DemandConcurrency,
 };
 use qrecovery::streams::DataStreams;
@@ -55,7 +52,7 @@ fn tls_server(provider: Arc<qtls::CryptoProvider>, alpn: Vec<Vec<u8>>) -> qtls::
     qtls::TlsServer::new(qtls::ServerTlsConfig {
         provider,
         alpn,
-        local,
+        authority: local,
         resumption: qtls::ServerResumptionConfig::Disabled,
         limits: Default::default(),
     })
@@ -111,8 +108,8 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
 
 pub(crate) fn data() -> Arc<DataSpace> {
     let ([keys, _], _) = handshake();
-    let client = client_parameters();
-    let mut server = server_parameters();
+    let client = ClientParameters::default();
+    let mut server = ServerParameters::default();
     server
         .set(ParameterId::InitialMaxStreamsBidi, 1u32)
         .unwrap();

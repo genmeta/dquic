@@ -14,7 +14,7 @@ pub mod tls;
 
 use std::sync::{Arc, RwLock};
 
-pub use endpoint::{QuicEndpoint, Server, ServerRegistry, connect_anonymously};
+pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
 pub use lifecycle::{Interceptor, client_growing, server_growing};
 pub use paths::Paths;
 pub use phase::{ArcConnPhase, ConnPhase, HandshakePhase, InitialPhase, MaturePhase};

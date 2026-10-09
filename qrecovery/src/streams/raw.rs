@@ -798,10 +798,7 @@ mod tests {
     use qbase::{
         frame::{GuaranteedFrame, io::SendFrame},
         packet::PacketContent,
-        param::{
-            ArcParameters,
-            handy::{client_parameters, server_parameters},
-        },
+        param::{ArcParameters, ClientParameters, ServerParameters},
         role::Role,
         sid::{Dir, handy::DemandConcurrency},
     };
@@ -854,8 +851,8 @@ mod tests {
         let streams = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,
@@ -914,8 +911,8 @@ mod tests {
         let streams = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,
@@ -956,8 +953,8 @@ mod tests {
         let streams = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,
@@ -1026,8 +1023,8 @@ mod tests {
                 (false, Dir::Bi, 5),
                 (false, Dir::Uni, 7),
             ] {
-                let mut client = client_parameters();
-                let mut server = server_parameters();
+                let mut client = ClientParameters::default();
+                let mut server = ServerParameters::default();
                 for (id, value) in [
                     (ParameterId::InitialMaxStreamDataBidiLocal, 3u32),
                     (ParameterId::InitialMaxStreamDataBidiRemote, 5),
@@ -1082,11 +1079,11 @@ mod tests {
 
         use crate::send::CancelStream;
 
-        let mut client = client_parameters();
+        let mut client = ClientParameters::default();
         client
             .set(ParameterId::InitialMaxStreamDataUni, 0u32)
             .unwrap();
-        let server = server_parameters();
+        let server = ServerParameters::default();
         let streams = DataStreams::new(
             ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server)),
             Box::new(DemandConcurrency),
@@ -1104,15 +1101,13 @@ mod tests {
 
     #[test]
     fn ready_streams_use_current_parameters_even_with_remembered_limits() {
-        use qbase::param::ServerParameters;
-
         use crate::send::CancelStream;
 
-        let client = client_parameters();
-        let server = server_parameters();
-        // Remembered defaults prohibit writing; current parameters permit it.
+        let client = ClientParameters::default();
+        let server = ServerParameters::default();
+        // Missing remembered limits prohibit writing; current parameters permit it.
         let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server))
-            .with_remembered(Some(Arc::new(ServerParameters::default())));
+            .with_remembered(Some(Arc::new(ServerParameters::new())));
         let streams = DataStreams::new(
             parameters,
             Box::new(DemandConcurrency),
@@ -1151,8 +1146,8 @@ mod tests {
         let streams = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,
@@ -1235,8 +1230,8 @@ mod tests {
         let streams = DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,
@@ -1277,8 +1272,8 @@ mod tests {
         let streams = Arc::new(DataStreams::new(
             ArcParameters::new(
                 Role::Client,
-                Arc::new(client_parameters()),
-                Arc::new(server_parameters()),
+                Arc::new(ClientParameters::default()),
+                Arc::new(ServerParameters::default()),
             ),
             Box::new(DemandConcurrency),
             MockFrameSender,

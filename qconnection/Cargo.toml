@@ -21,9 +21,9 @@ qtls.workspace = true
 qtransport = { path = "../qtransport" }
 qtraversal = { path = "../qtraversal" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
+tracing.workspace = true
 
 [dev-dependencies]
-tracing.workspace = true
 clap.workspace = true
 netdev.workspace = true
 qudp.workspace = true

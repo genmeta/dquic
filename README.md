@@ -120,6 +120,73 @@ The `dquic` crate re-exports the `qconnection` API and related types. Start with
 - [DQuic Protocol Documentation](https://docs.dhttp.net/en/docs/protocol/dquic)
 - [Connection API](qconnection/README.md)
 
+Core snippets to run inside Tokio; see the complete
+[client](dquic/examples/echo-client.rs) and [server](dquic/examples/echo-server.rs) examples.
+
+### Initialization
+
+Bind to `127.0.0.1:4433` for both client and server.
+
+```rust,no_run
+RootCerts::set([CertificateDer::from(
+    include_bytes!("keychain/ca.der").as_slice(),
+)])?;
+let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
+Dock::global().add(socket.clone())?; // More sockets can be added.
+AddressBook::global().insert_inner(&socket, socket.local_addr()?.into())?;
+Resolver::add(Arc::new(SystemResolver));
+```
+
+### As a Client
+
+```rust,no_run
+let endpoint = QuicEndpoint::anonymous();
+let (_, _, connection) = endpoint.connect("localhost:4433".into()).await?;
+let (_, (mut reader, mut writer)) = connection
+    .open_bi_stream()
+    .await?
+    .ok_or("stream IDs exhausted")?;
+
+let message = b"hello, dquic!";
+writer.write_all(message).await?;
+writer.shutdown().await?; // Send FIN; the read half remains open.
+let mut reply = Vec::new();
+reader.read_to_end(&mut reply).await?; // Read through the server's FIN.
+assert_eq!(reply, message);
+println!("Echo: {}", String::from_utf8(reply)?);
+```
+
+### As a Server
+
+Here, `endpoint` is an `Endpoint` initialized with the server's credentials.
+
+```rust,no_run
+let endpoint = Endpoint::new(
+    "localhost",
+    vec![CertificateDer::from(
+        include_bytes!("keychain/server.der").as_slice(),
+    )],
+    PrivateKeyDer::try_from(include_bytes!("keychain/server.key.der").as_slice())?,
+    include_bytes!("keychain/server.ocsp").to_vec(),
+)?;
+let endpoint: QuicEndpoint = endpoint.into();
+endpoint.listen(Loopback, |(_, _, connection)| {
+    tokio::spawn(async move {
+        let (_, (mut reader, mut writer)) = connection.accept_bi_stream().await?;
+        let mut message = Vec::new();
+        reader.read_to_end(&mut message).await?;
+        writer.write_all(&message).await?;
+        writer.shutdown().await?;
+        println!("Echoed {} bytes", message.len());
+        drop((reader, writer));
+        connection.close(0u32.into(), "echo complete");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+})?;
+println!("Listening on localhost:4433 (Ctrl-C to stop)");
+tokio::signal::ctrl_c().await?;
+```
+
 ## Contributing
 
 Contributions and discussions around DQuic usage and improvement are welcome. Use [GitHub Issues](https://github.com/genmeta/dquic/issues) to share ideas, suggest improvements, or report problems. If you have implemented an improvement, pull requests are welcome. Before contributing code, read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Report security issues by following the process in [SECURITY.md](SECURITY.md).

@@ -27,17 +27,19 @@
 
 ### 具名端点与匿名建连
 
-`QuicEndpoint::new(identity)` 必须提供本端身份，具名端点可连接或监听。匿名客户端
-调用独立函数 `connect_anonymously(server_name, client_parameters, alpn)`，不创建
-无身份的 QuicEndpoint，也没有监听能力。两种入口共用内部建连流程。
+`Endpoint`、`Option<Endpoint>` 及其 Arc 形式、`Anonymous` 均可通过 `.into()`
+构造 `QuicEndpoint`。所有端点统一调用 `QuicEndpoint::connect(server_name)` 建连。
+具名端点可监听；匿名端点调用 `listen` 只打印 warn 并返回 `Ok(())`，不注册监听。
+`listen` 回调只在握手成功时接收 `Accepted`；握手失败由内部记录日志并关闭清理，
+不触发回调。`listen` 自身的 `Result` 仍用于报告本地监听配置错误。
 
 匿名连接不提交客户端证书，但仍验证服务器名称、证书及 OCSP。匿名客户端的
-`Connected.0` 为 None，服务端的 `Accepted.0` 为 None；握手失败返回 Err，
+`Connected.0` 为 None，服务端的 `Accepted.0` 为 None；客户端握手失败返回 Err，
 无效凭据不会降级为匿名。连接的身份以握手结果为准。
 
-具名端点的 `alpn` 同时用于客户端和服务端，默认保留 `h3`；匿名函数显式接收
-客户端参数及 ALPN。取消尚未交付的 connect future 会请求连接关闭；客户端
-生命周期停止解析并按现有 Closing/Draining 流程清理路径和 CID。连接交付后
+端点字段私有，通过 `set_alpn` 配置 ALPN（同时用于客户端和服务端，默认 `h3`），
+通过 `set_parameters(role, id, value)` 配置传输参数。取消尚未交付的 connect future
+会请求连接关闭；客户端生命周期停止解析并按现有 Closing/Draining 流程清理路径和 CID。连接交付后
 由连接句柄管理生命周期，包括匿名连接。
 
 ### 本地多流文件传输测试

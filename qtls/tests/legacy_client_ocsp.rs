@@ -95,7 +95,7 @@ fn connect_without_client_ocsp(
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: LocalAuthority::new(
+        authority: LocalAuthority::new(
             &provider,
             "localhost".into(),
             vec![CertificateDer::from_pem_slice(SERVER_CERT)?],

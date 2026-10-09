@@ -86,6 +86,73 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 - [DQuic 使用文档](https://docs.dhttp.net/zh/docs/protocol/dquic)
 - [连接 API](qconnection/README.md)
 
+以下为 Tokio 运行时内的核心代码，完整示例见
+[客户端](dquic/examples/echo-client.rs)和[服务端](dquic/examples/echo-server.rs)。
+
+### 初始化
+
+`127.0.0.1:4433` 即为客户端所用，也为服务端提供监听。
+
+```rust,no_run
+RootCerts::set([CertificateDer::from(
+    include_bytes!("keychain/ca.der").as_slice(),
+)])?;
+let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
+Dock::global().add(socket.clone())?; // 还可以添加更多 socket
+AddressBook::global().insert_inner(&socket, socket.local_addr()?.into())?;
+Resolver::add(Arc::new(SystemResolver));
+```
+
+### 作为客户端
+
+```rust,no_run
+let endpoint = QuicEndpoint::anonymous();
+let (_, _, connection) = endpoint.connect("localhost:4433".into()).await?;
+let (_, (mut reader, mut writer)) = connection
+    .open_bi_stream()
+    .await?
+    .ok_or("stream IDs exhausted")?;
+
+let message = b"hello, dquic!";
+writer.write_all(message).await?;
+writer.shutdown().await?; // 发送 FIN，仍可继续读取。
+let mut reply = Vec::new();
+reader.read_to_end(&mut reply).await?; // 读取直到收到服务端的 FIN。
+assert_eq!(reply, message);
+println!("Echo: {}", String::from_utf8(reply)?);
+```
+
+### 作为服务端
+
+这里的 `endpoint` 是已加载服务端凭据的 `Endpoint`。
+
+```rust,no_run
+let endpoint = Endpoint::new(
+    "localhost",
+    vec![CertificateDer::from(
+        include_bytes!("keychain/server.der").as_slice(),
+    )],
+    PrivateKeyDer::try_from(include_bytes!("keychain/server.key.der").as_slice())?,
+    include_bytes!("keychain/server.ocsp").to_vec(),
+)?;
+let endpoint: QuicEndpoint = endpoint.into();
+endpoint.listen(Loopback, |(_, _, connection)| {
+    tokio::spawn(async move {
+        let (_, (mut reader, mut writer)) = connection.accept_bi_stream().await?;
+        let mut message = Vec::new();
+        reader.read_to_end(&mut message).await?;
+        writer.write_all(&message).await?;
+        writer.shutdown().await?;
+        println!("Echoed {} bytes", message.len());
+        drop((reader, writer));
+        connection.close(0u32.into(), "echo complete");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+})?;
+println!("Listening on localhost:4433 (Ctrl-C to stop)");
+tokio::signal::ctrl_c().await?;
+```
+
 ## 参与贡献
 
 欢迎围绕 DQuic 的使用和改进交流讨论。你可以通过 [GitHub Issues](https://github.com/genmeta/dquic/issues) 分享想法、提出建议或反馈问题；如果已经实现相应改进，也欢迎提交 Pull Request。贡献代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)，安全问题请按照 [SECURITY.md](SECURITY.md) 中的流程报告。

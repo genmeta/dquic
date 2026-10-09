@@ -18,3 +18,6 @@ qprotocol = { path = "../qprotocol", version = "0.6.1" }
 qresolve.workspace = true
 qtls.workspace = true
 qtransport = { path = "../qtransport", version = "0.6.1" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "signal"] }
