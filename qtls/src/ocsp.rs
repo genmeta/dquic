@@ -1,6 +1,10 @@
 use der::{Decode as _, Encode as _};
-use pkix_path::SignatureVerifier as _;
 use pkix_revocation::{OcspChecker, RevocationChecker as _};
+use pkix_x509_cert::{
+    Certificate as PkixCertificate,
+    der::{Decode as _, Encode as _},
+    spki as pkix_spki,
+};
 use rustls::{
     CertificateError,
     crypto::WebPkiSupportedAlgorithms,
@@ -23,7 +27,7 @@ pub fn validate_ocsp(
     }
     let (leaf, intermediates) = certificates.split_first().ok_or_else(invalid)?;
     let certificate = Certificate::from_der(leaf.as_ref()).map_err(|_| invalid())?;
-    let validity = &certificate.tbs_certificate.validity;
+    let validity = certificate.tbs_certificate().validity();
     if now.as_secs() < validity.not_before.to_unix_duration().as_secs()
         || now.as_secs() > validity.not_after.to_unix_duration().as_secs()
     {
@@ -61,12 +65,15 @@ pub(crate) fn verify(
     })?;
 
     for issuer in intermediates.iter().chain(roots.certificates.iter()) {
-        let Ok(issuer) = Certificate::from_der(issuer.as_ref()) else {
+        let Ok(issuer_certificate) = Certificate::from_der(issuer.as_ref()) else {
             continue;
         };
-        if !issued_by(&certificate, &issuer, verifier) {
+        if !issued_by(&certificate, &issuer_certificate, verifier) {
             continue;
         }
+        // Keep the old certificate representation confined to the pkix boundary.
+        let certificate = PkixCertificate::from_der(end_entity.as_ref()).map_err(|_| invalid())?;
+        let issuer = PkixCertificate::from_der(issuer.as_ref()).map_err(|_| invalid())?;
         return checker
             .check_revocation(&certificate, &issuer)
             .map_err(|error| {
@@ -80,21 +87,21 @@ pub(crate) fn verify(
 }
 
 fn issued_by(certificate: &Certificate, issuer: &Certificate, verifier: ProviderVerifier) -> bool {
-    if certificate.tbs_certificate.issuer != issuer.tbs_certificate.subject {
+    if certificate.tbs_certificate().issuer() != issuer.tbs_certificate().subject() {
         return false;
     }
-    let Ok(message) = certificate.tbs_certificate.to_der() else {
+    let Ok(message) = certificate.tbs_certificate().to_der() else {
         return false;
     };
     verifier
         .verify_signature(
-            certificate.signature_algorithm.owned_to_ref(),
+            certificate.signature_algorithm().owned_to_ref(),
             issuer
-                .tbs_certificate
-                .subject_public_key_info
+                .tbs_certificate()
+                .subject_public_key_info()
                 .owned_to_ref(),
             &message,
-            certificate.signature.raw_bytes(),
+            certificate.signature().raw_bytes(),
         )
         .is_ok()
 }
@@ -105,6 +112,33 @@ struct ProviderVerifier {
 }
 
 impl pkix_path::SignatureVerifier for ProviderVerifier {
+    fn verify_signature(
+        &self,
+        signature_algorithm: pkix_spki::AlgorithmIdentifierRef<'_>,
+        issuer_spki: pkix_spki::SubjectPublicKeyInfoRef<'_>,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), pkix_signature::Error> {
+        // DER is the interchange format between pkix's types and RustCrypto 0.8.
+        let signature_algorithm = signature_algorithm
+            .to_der()
+            .map_err(|_| pkix_signature::Error::new())?;
+        let issuer_spki = issuer_spki
+            .to_der()
+            .map_err(|_| pkix_signature::Error::new())?;
+        self.verify_signature(
+            AlgorithmIdentifierRef::from_der(&signature_algorithm)
+                .map_err(|_| pkix_signature::Error::new())?,
+            SubjectPublicKeyInfoRef::from_der(&issuer_spki)
+                .map_err(|_| pkix_signature::Error::new())?,
+            message,
+            signature,
+        )
+        .map_err(|_| pkix_signature::Error::new())
+    }
+}
+
+impl ProviderVerifier {
     fn verify_signature(
         &self,
         signature_algorithm: AlgorithmIdentifierRef<'_>,

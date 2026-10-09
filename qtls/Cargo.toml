@@ -14,18 +14,22 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-der = "0.7"
+der = "0.8"
 pkix-path = { version = "0.3.2", default-features = false, features = ["std"] }
 pkix-revocation = { version = "0.3.3", default-features = false, features = ["ocsp"] }
 ring = { workspace = true, optional = true }
 aws-lc-rs = { version = "1.12", optional = true, default-features = false }
 rustls = { git = "https://github.com/genmeta/rustls.git", rev = "22dec513c4ebdf89f113f46e100393cf18963aa6", default-features = false, features = ["std"] }
-signature = "2"
-spki = "0.7"
+signature = "3"
+spki = "0.8"
 thiserror = { workspace = true }
-x509-cert = "0.2"
+x509-cert = "0.3"
 x509-parser = { workspace = true }
 zeroize = "1.7"
+
+# pkix 0.3 still exposes the previous RustCrypto types in its public API.
+pkix-signature = { package = "signature", version = "2" }
+pkix-x509-cert = { package = "x509-cert", version = "0.2" }
 
 [features]
 default = ["ring"]
