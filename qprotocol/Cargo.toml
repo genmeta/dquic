@@ -1,9 +1,8 @@
 [package]
-# Temporarily unpublished while qtls depends on the rustls Git fork.
-publish = false
 name = "qprotocol"
-version.workspace = true
+version = "0.7.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "STUN, forward and QUIC packet routing protocol implementation for dquic"
 readme.workspace = true
 repository.workspace = true

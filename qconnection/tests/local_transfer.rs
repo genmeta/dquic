@@ -131,16 +131,16 @@ fn identity(server: bool) -> Result<Arc<Endpoint>, Error> {
     let (name, cert, key, ocsp): (_, &[u8], &[u8], &[u8]) = if server {
         (
             "localhost",
-            include_bytes!("../../tests/keychain/localhost/server.cert"),
-            include_bytes!("../../tests/keychain/localhost/server.key"),
-            include_bytes!("../../tests/keychain/localhost/server.ocsp"),
+            include_bytes!("keychain/localhost/server.cert"),
+            include_bytes!("keychain/localhost/server.key"),
+            include_bytes!("keychain/localhost/server.ocsp"),
         )
     } else {
         (
             "client",
-            include_bytes!("../../tests/keychain/localhost/client.cert"),
-            include_bytes!("../../tests/keychain/localhost/client.key"),
-            include_bytes!("../../tests/keychain/localhost/client.ocsp"),
+            include_bytes!("keychain/localhost/client.cert"),
+            include_bytes!("keychain/localhost/client.key"),
+            include_bytes!("keychain/localhost/client.ocsp"),
         )
     };
     Ok(Endpoint::new(
@@ -267,7 +267,7 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     let payload: Arc<[u8]> = fs::read(&file.0)?.into();
     assert_eq!(payload.len(), FILE_SIZE);
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../../tests/keychain/localhost/ca.cert"
+        "keychain/localhost/ca.cert"
     ))?])?;
     let server_socket = LocalSocket::bind(false)?;
     let client_socket = LocalSocket::bind(true)?;

@@ -8,10 +8,10 @@ use qtls::{
 };
 use rustls::pki_types::pem::PemObject;
 
-const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-const SERVER_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
+const SERVER_CERT: &[u8] = include_bytes!("keychain/localhost/server.cert");
+const SERVER_KEY: &[u8] = include_bytes!("keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("keychain/localhost/ca.cert");
+const SERVER_OCSP: &[u8] = include_bytes!("keychain/localhost/server.ocsp");
 
 fn client_hello() -> Bytes {
     RootCerts::set([CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();

@@ -382,10 +382,8 @@ async fn reject_wrong_server_identity() {
     let wrong = qbase::endpoint::Endpoint::new(
         "wrong.test",
         identity.cert_chain().to_vec(),
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/server.key"
-        ))
-        .unwrap(),
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key"))
+            .unwrap(),
         identity.ocsp().to_vec(),
     )
     .unwrap();
@@ -444,10 +442,8 @@ async fn reject_invalid_client_certificate() {
     let invalid = qbase::endpoint::Endpoint::new(
         "localhost",
         identity.cert_chain().to_vec(),
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/server.key"
-        ))
-        .unwrap(),
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key"))
+            .unwrap(),
         b"invalid OCSP".to_vec(),
     )
     .unwrap();

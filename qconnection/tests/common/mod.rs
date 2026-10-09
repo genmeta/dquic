@@ -9,13 +9,13 @@ use qbase::{
 };
 use tls_backend::pki_types::pem::PemObject;
 
-const CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.cert");
-const KEY: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.key");
-const CA_CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/ca.cert");
-const CLIENT_CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/client.cert");
-const CLIENT_KEY: &[u8] = include_bytes!("../../../tests/keychain/localhost/client.key");
-const SERVER_OCSP: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.ocsp");
-const CLIENT_OCSP: &[u8] = include_bytes!("../../../tests/keychain/localhost/client.ocsp");
+const CERT: &[u8] = include_bytes!("../keychain/localhost/server.cert");
+const KEY: &[u8] = include_bytes!("../keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("../keychain/localhost/ca.cert");
+const CLIENT_CERT: &[u8] = include_bytes!("../keychain/localhost/client.cert");
+const CLIENT_KEY: &[u8] = include_bytes!("../keychain/localhost/client.key");
+const SERVER_OCSP: &[u8] = include_bytes!("../keychain/localhost/server.ocsp");
+const CLIENT_OCSP: &[u8] = include_bytes!("../keychain/localhost/client.ocsp");
 
 pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     set_roots();

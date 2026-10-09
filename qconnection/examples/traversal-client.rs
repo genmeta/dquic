@@ -58,17 +58,17 @@ async fn main() -> Result<(), Error> {
         .with_target(false)
         .init();
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../../tests/keychain/localhost/ca.cert"
+        "../tests/keychain/localhost/ca.cert"
     ))?])?;
     let identity = Endpoint::new(
         "client",
         vec![qtls::CertificateDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/client.cert"
+            "../tests/keychain/localhost/client.cert"
         ))?],
         qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/client.key"
+            "../tests/keychain/localhost/client.key"
         ))?,
-        include_bytes!("../../tests/keychain/localhost/client.ocsp").to_vec(),
+        include_bytes!("../tests/keychain/localhost/client.ocsp").to_vec(),
     )?;
     let endpoint = QuicEndpoint::from(identity);
 

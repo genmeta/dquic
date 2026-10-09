@@ -74,9 +74,9 @@ mod tests {
 
     use super::*;
 
-    const CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-    const KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-    const OTHER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
+    const CERT: &[u8] = include_bytes!("../tests/keychain/localhost/server.cert");
+    const KEY: &[u8] = include_bytes!("../tests/keychain/localhost/server.key");
+    const OTHER_CERT: &[u8] = include_bytes!("../tests/keychain/localhost/client.cert");
 
     fn certificate(pem: &[u8]) -> CertificateDer<'static> {
         CertificateDer::from_pem_slice(pem).unwrap()

@@ -290,7 +290,7 @@ impl OneRttKeys {
         pto: Duration,
     ) -> Result<Option<crate::packet::PlainPacket<H>>, Error>
     where
-        H: crate::packet::RcvdPacketHeader,
+        H: crate::packet::LogPacketHeader,
     {
         packet.decrypt_short_packet(
             &self.headers.opening,

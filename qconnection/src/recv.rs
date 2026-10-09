@@ -13,7 +13,7 @@ use qbase::{
 use qcongestion::Transport as _;
 use qtransport::{
     keys::ArcKeys,
-    packet::RcvdPacketHeader,
+    packet::LogPacketHeader,
     path::Path,
     recv,
     space::{DataSpace, Space},
@@ -32,7 +32,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     space: Arc<Space<ArcKeys>>,
     paths: Arc<Paths>,
 ) where
-    H: GetScid + GetType + RcvdPacketHeader,
+    H: GetScid + GetType + LogPacketHeader,
 {
     let epoch = space.epoch;
     let role = paths.role();
