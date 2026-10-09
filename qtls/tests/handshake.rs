@@ -59,7 +59,7 @@ fn mutual_auth_publishes_both_authorities() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: Some(client_authority),
+        authority: Some(client_authority),
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -125,7 +125,7 @@ fn anonymous_client_completes_without_remote_authority() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -151,7 +151,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -223,7 +223,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: Some(authority(
+        authority: Some(authority(
             &provider,
             "client",
             CLIENT_CERT,
@@ -256,7 +256,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: Some(authority(
+        authority: Some(authority(
             &provider,
             "client",
             CLIENT_CERT,
@@ -328,7 +328,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: Some(authority(
+        authority: Some(authority(
             &provider,
             "client",
             CLIENT_CERT,
@@ -373,7 +373,7 @@ fn initial_keys_interoperate_for_v1_and_v2() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -425,7 +425,7 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
     let client = TlsClient::new(ClientTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })

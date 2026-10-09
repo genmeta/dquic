@@ -12,7 +12,7 @@ fn tls_endpoints_require_an_explicit_nonempty_root_store() {
     let config = || ClientTlsConfig {
         provider: Arc::new(qtls::default_provider()),
         alpn: Vec::new(),
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: Default::default(),
     };

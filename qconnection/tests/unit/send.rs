@@ -894,7 +894,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: qtls::ClientResumptionConfig::Disabled,
         limits: Default::default(),
     })

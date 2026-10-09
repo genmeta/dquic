@@ -149,7 +149,7 @@ impl QuicEndpoint {
         let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
             provider: Arc::new(qtls::default_provider()),
             alpn: self.alpn.clone(),
-            local,
+            authority: local,
             resumption: qtls::ClientResumptionConfig::Disabled,
             limits: Default::default(),
         })

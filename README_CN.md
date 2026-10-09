@@ -135,6 +135,7 @@ let endpoint = Endpoint::new(
     PrivateKeyDer::try_from(include_bytes!("keychain/server.key.der").as_slice())?,
     include_bytes!("keychain/server.ocsp").to_vec(),
 )?;
+
 let endpoint: QuicEndpoint = endpoint.into();
 endpoint.listen(Loopback, |(_, _, connection)| {
     tokio::spawn(async move {

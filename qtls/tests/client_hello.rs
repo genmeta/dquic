@@ -18,7 +18,7 @@ fn client_hello() -> Bytes {
     let client = TlsClient::new(ClientTlsConfig {
         provider: Arc::new(default_provider()),
         alpn: vec![b"h3".to_vec()],
-        local: None,
+        authority: None,
         resumption: ClientResumptionConfig::Disabled,
         limits: Default::default(),
     })
