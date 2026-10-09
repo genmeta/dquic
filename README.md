@@ -15,6 +15,10 @@
 
 **English** | [简体中文](README_CN.md)
 
+The current development workspace uses a custom rustls Git fork through `qtls`.
+`qtls` and its dependent crates are temporarily marked `publish = false`; use this
+repository through Git or local paths until the dependency chain can be published to crates.io.
+
 **Is the Internet really interconnected?** At the data-link layer, many paths exist between any two endpoints; at the transport layer, it is not quite so — not all such paths are traversable, leaving the Internet only partially interconnected.
 Reachability is predicated on listening for inbound connections — a capability the architecture has systematically reserved for servers alone.
 If two phones cannot open a channel without some server in between, the architecture hardly deserves to be called an "inter" network.

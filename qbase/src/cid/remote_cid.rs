@@ -461,7 +461,10 @@ mod tests {
         };
         cell.retire();
         assert!(retired.lock().unwrap().is_empty());
-        assert!(matches!(cell.borrow_cid(ArcSendWakers::default()), Poll::Ready(None)));
+        assert!(matches!(
+            cell.borrow_cid(ArcSendWakers::default()),
+            Poll::Ready(None)
+        ));
         drop(cell);
         assert_eq!(*borrowed, cid);
         drop(borrowed);

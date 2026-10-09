@@ -1,4 +1,6 @@
 [package]
+# Temporarily unpublished while qtls depends on the rustls Git fork.
+publish = false
 name = "qtransport"
 version.workspace = true
 edition.workspace = true

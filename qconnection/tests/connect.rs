@@ -40,10 +40,10 @@ impl Resolve for StreamingResolver {
     ) -> ResolveFuture<'l> {
         async move {
             assert_eq!(servname, "");
-            if hostname == self.hostname {
-                if let Some(records) = self.records.lock().unwrap().take() {
-                    return Ok(records.boxed());
-                }
+            if hostname == self.hostname
+                && let Some(records) = self.records.lock().unwrap().take()
+            {
+                return Ok(records.boxed());
             }
             Ok(stream::empty().boxed())
         }

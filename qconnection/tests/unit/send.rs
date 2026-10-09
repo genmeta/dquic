@@ -71,7 +71,6 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
 
 #[tokio::test(start_paused = true)]
 async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
-
     let paths = crate::common::initial_paths(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
@@ -79,10 +78,13 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         keys(false),
     );
     let trackers = paths.resender.clone();
-    super::enter_handshake(&paths, Arc::new(HandshakeSpace::new(
-        Default::default(),
-        ArcKeys::new(Arc::new(keys(false))),
-    )));
+    super::enter_handshake(
+        &paths,
+        Arc::new(HandshakeSpace::new(
+            Default::default(),
+            ArcKeys::new(Arc::new(keys(false))),
+        )),
+    );
     let path = Arc::new(Path::new(
         Pathway::new(
             "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
@@ -105,14 +107,21 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     let mut frames = Vec::new();
     let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
     let mut collect = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
-    assert!(collect.poll_collect(&mut Context::from_waker(Waker::noop())).is_pending());
+    assert!(
+        collect
+            .poll_collect(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
     // While waiting for HANDSHAKE_DONE, an anti-deadlock probe must use live Handshake keys.
     tokio::time::advance(path.cc.pto_base(Epoch::Handshake)).await;
     path.cc.do_tick().unwrap();
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
-    assert!(matches!(collect.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
+    assert!(matches!(
+        collect.poll_collect(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(1))
+    ));
     assert_eq!(pns_for(collect.packets, Epoch::Handshake).count(), 1);
 }
 
@@ -163,7 +172,6 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
 
 #[tokio::test]
 async fn collector_mixes_spaces_and_selected_crypto_advances() {
-
     let paths = crate::common::initial_paths(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
@@ -213,7 +221,14 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
     let mut pns = [[None; 3]; MAX_BURST_PACKETS];
-    let count = collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+    let count = collect(Burst::new(
+        &paths,
+        &path,
+        &mut datagrams,
+        &mut frames,
+        &mut pns,
+    ))
+    .now_or_never()
     .unwrap()
     .unwrap();
     assert_eq!(count, 7);
@@ -263,7 +278,6 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
 
 #[tokio::test]
 async fn only_undecided_client_initial_replays_flighting_crypto() {
-
     for role in [Role::Client, Role::Server] {
         for handshaking in [false, true] {
             for selected in [u8::MAX, 0, 1, 2] {
@@ -280,10 +294,13 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     .await
                     .unwrap();
                 if handshaking {
-                    super::enter_handshake(&paths, Arc::new(HandshakeSpace::new(
-                        Default::default(),
-                        crate::common::initial_space(&paths.spaces).keys.clone(),
-                    )));
+                    super::enter_handshake(
+                        &paths,
+                        Arc::new(HandshakeSpace::new(
+                            Default::default(),
+                            crate::common::initial_space(&paths.spaces).keys.clone(),
+                        )),
+                    );
                 }
                 let path = Arc::new(Path::new(
                     Pathway::new(
@@ -305,7 +322,14 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                 let mut frames = Vec::new();
                 let mut pns = [[None; 3]; MAX_BURST_PACKETS];
                 for attempt in 0..2 {
-                    let result = collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never();
+                    let result = collect(Burst::new(
+                        &paths,
+                        &path,
+                        &mut datagrams,
+                        &mut frames,
+                        &mut pns,
+                    ))
+                    .now_or_never();
                     let replays = role == Role::Client && !handshaking && selected == u8::MAX;
                     if selected != 0 && (attempt == 0 || replays) {
                         assert!(
@@ -365,8 +389,13 @@ fn repeated_assembly_does_not_append_after_close() {
     let header = qbase::packet::OneRttHeader::new(Default::default(), Default::default());
     let mut bytes = BytesMut::with_capacity(128);
     let mut frames = Vec::new();
-    let mut packet =
-        Packet::new(header, (0, qbase::packet::PacketNumber::U16(0)), &mut bytes, &mut frames).unwrap();
+    let mut packet = Packet::new(
+        header,
+        (0, qbase::packet::PacketNumber::U16(0)),
+        &mut bytes,
+        &mut frames,
+    )
+    .unwrap();
     let mut close = qbase::frame::ConnectionCloseFrame::new_app(0u32.into(), "closed");
     let mut cx = Context::from_waker(Waker::noop());
     assert_eq!(
@@ -582,7 +611,8 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     let header = header();
     let pn_offset = qbase::packet::HeaderSize::size(&header) + 2;
     frames.clear();
-    let mut packet = Packet::new(header, (7, PacketNumber::U16(7)), &mut io[..], &mut frames).unwrap();
+    let mut packet =
+        Packet::new(header, (7, PacketNumber::U16(7)), &mut io[..], &mut frames).unwrap();
     assert!(matches!(
         packet.assemble(&mut cx, &mut [&mut PingFrame]),
         Poll::Ready(Ok(1))
@@ -595,7 +625,6 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
 
 #[tokio::test]
 async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription() {
-
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counter(AtomicUsize);
     impl std::task::Wake for Counter {
@@ -663,8 +692,6 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
 
 #[tokio::test]
 async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
-
-
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counter(AtomicUsize);
     impl std::task::Wake for Counter {
@@ -705,16 +732,22 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
     let b = Arc::new(Counter(AtomicUsize::new(0)));
     let wa = Waker::from(a.clone());
     let wb = Waker::from(b.clone());
-    let mut one = Burst::new(&paths, &first, &mut first_bytes, &mut first_frames, &mut first_pns);
-    let mut two = Burst::new(&paths, &second, &mut second_bytes, &mut second_frames, &mut second_pns);
-    assert!(
-        one.poll_collect(&mut Context::from_waker(&wa))
-            .is_pending()
+    let mut one = Burst::new(
+        &paths,
+        &first,
+        &mut first_bytes,
+        &mut first_frames,
+        &mut first_pns,
     );
-    assert!(
-        two.poll_collect(&mut Context::from_waker(&wb))
-            .is_pending()
+    let mut two = Burst::new(
+        &paths,
+        &second,
+        &mut second_bytes,
+        &mut second_frames,
+        &mut second_pns,
     );
+    assert!(one.poll_collect(&mut Context::from_waker(&wa)).is_pending());
+    assert!(two.poll_collect(&mut Context::from_waker(&wb)).is_pending());
     drop(one);
     crate::common::initial_space(&paths.spaces)
         .crypto
@@ -751,7 +784,6 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
 #[tokio::test]
 async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
-
         let paths = crate::common::initial_paths(
             Role::Server,
             ConnectionId::from_slice(b"server00"),
@@ -796,22 +828,48 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
             collector.poll_collect(&mut cx),
             Poll::Ready(Ok(1))
         ));
-        let pn = pns_for(&collector.packets, epoch).next().unwrap().1;
+        let pn = pns_for(collector.packets, epoch).next().unwrap().1;
         assert_eq!(space.sent_journal.lock_guard().frames(pn).count(), 0);
         drop(collector);
-        let ParsedPacket::Data(packet) = PacketReader::new(datagrams[0].clone(), 8).next().unwrap().unwrap() else { panic!() };
+        let ParsedPacket::Data(packet) = PacketReader::new(datagrams[0].clone(), 8)
+            .next()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
         use qbase::packet::GetType;
         let ty = packet.get_type();
         let body = match packet.header {
-            DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
-                .decrypt_long_packet(&keys(false).opening, |_| Ok(pn)).unwrap().unwrap().body(),
-            DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
-                .decrypt_long_packet(&keys(false).opening, |_| Ok(pn)).unwrap().unwrap().body(),
+            DataHeader::Long(long::DataHeader::Initial(header)) => {
+                CipherPacket::new(header, packet.bytes, packet.offset)
+                    .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
+                    .unwrap()
+                    .unwrap()
+                    .body()
+            }
+            DataHeader::Long(long::DataHeader::Handshake(header)) => {
+                CipherPacket::new(header, packet.bytes, packet.offset)
+                    .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
+                    .unwrap()
+                    .unwrap()
+                    .body()
+            }
             _ => panic!(),
         };
-        let decoded = FrameReader::new(body, ty).collect::<Result<Vec<_>, _>>().unwrap();
-        assert!(decoded.iter().any(|(frame, _)| matches!(frame, Frame::Close(_))));
-        assert!(decoded.iter().all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_))));
+        let decoded = FrameReader::new(body, ty)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            decoded
+                .iter()
+                .any(|(frame, _)| matches!(frame, Frame::Close(_)))
+        );
+        assert!(
+            decoded
+                .iter()
+                .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
+        );
         for slots in &mut pns {
             slots[epoch] = None;
         }
@@ -1081,7 +1139,6 @@ async fn phase_upgrades_preserve_cid_cleanup_and_termination() {
 
 #[tokio::test(start_paused = true)]
 async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
-
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
     let dcid = crate::common::initial_phase(&paths).dcid();
     let path = Arc::new(Path::new(
@@ -1116,7 +1173,14 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         let mut sent = Vec::new();
         for _ in 0..4 {
             crypto.writer().write_all(b"crypto").await.unwrap();
-            collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+            collect(Burst::new(
+                &paths,
+                &path,
+                &mut datagrams,
+                &mut frames,
+                &mut pns,
+            ))
+            .now_or_never()
             .unwrap()
             .unwrap();
             assert_eq!(pns_for(&pns, epoch).count(), 1);
@@ -1138,7 +1202,14 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
             None,
         );
         path.cc.on_ack_rcvd(epoch, &ack);
-        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+        collect(Burst::new(
+            &paths,
+            &path,
+            &mut datagrams,
+            &mut frames,
+            &mut pns,
+        ))
+        .now_or_never()
         .expect("loss must make the original CRYPTO range sendable")
         .unwrap();
         assert_eq!(pns_for(&pns, epoch).count(), 1);
@@ -1158,7 +1229,9 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
     let remote = &mature.cid_registry.remote;
     let next = ConnectionId::from_slice(b"client01");
-    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
+    remote
+        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
+        .unwrap();
     let make_path = |port| {
         let path = Arc::new(Path::new(
             Pathway::new(
@@ -1169,7 +1242,11 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.resender.clone(),
         ));
-        paths.entries.lock().unwrap().insert(path.pathway, path.clone());
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.pathway, path.clone());
         path
     };
     let other = make_path(34301);
@@ -1177,8 +1254,10 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
     paths.select_path(&selected);
     assert!(selected.dcid_cell.read().unwrap().is_none());
     super::enter_mature(&paths, &mature);
-    assert!(matches!(selected.dcid_cell.read().unwrap().as_ref().unwrap()
-        .borrow_cid(selected.send_waker.clone()), Poll::Ready(Some(cid)) if *cid == mature.peer_cid()));
+    assert!(
+        matches!(selected.dcid_cell.read().unwrap().as_ref().unwrap()
+        .borrow_cid(selected.send_waker.clone()), Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
+    );
     assert!(other.dcid_cell.read().unwrap().is_none());
     assert_eq!(other.selected(), Path::SUSPEND);
     super::confirm_handshake(&paths);
@@ -1197,7 +1276,6 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
 
 #[tokio::test]
 async fn mature_packets_wait_for_and_share_the_path_cid() {
-
     use qbase::{
         frame::{NewConnectionIdFrame, io::ReceiveFrame},
         packet::GetDcid,
@@ -1245,7 +1323,11 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     // Keep the CID borrowed while the assembled datagram awaits UDP submission.
     let borrowed = collector.dcid.take().unwrap();
     drop(collector);
-    assert!(Epoch::EPOCHS.into_iter().all(|epoch| pns[0][epoch].is_some()));
+    assert!(
+        Epoch::EPOCHS
+            .into_iter()
+            .all(|epoch| pns[0][epoch].is_some())
+    );
     let packets = PacketReader::new(datagrams[0].clone(), 8)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1286,10 +1368,21 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     ] {
         crypto.writer().write_all(b"next").await.unwrap();
     }
-    collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+    collect(Burst::new(
+        &paths,
+        &path,
+        &mut datagrams,
+        &mut frames,
+        &mut pns,
+    ))
+    .now_or_never()
     .unwrap()
     .unwrap();
-    assert!(Epoch::EPOCHS.into_iter().all(|epoch| pns[0][epoch].is_some()));
+    assert!(
+        Epoch::EPOCHS
+            .into_iter()
+            .all(|epoch| pns[0][epoch].is_some())
+    );
     let packets = PacketReader::new(datagrams[0].clone(), 8)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1304,7 +1397,6 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
 
 #[tokio::test]
 async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
-
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
     for crypto in [
         &mature.spaces.initial.crypto,
@@ -1330,7 +1422,14 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let mut frames = Vec::new();
     let mut pns = [[None; 3]; MAX_BURST_PACKETS];
     assert_eq!(
-        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+        collect(Burst::new(
+            &paths,
+            &path,
+            &mut datagrams,
+            &mut frames,
+            &mut pns
+        ))
+        .now_or_never()
         .unwrap()
         .unwrap(),
         1
@@ -1356,13 +1455,27 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         .unwrap();
     path.decide(false);
     assert!(
-        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+        collect(Burst::new(
+            &paths,
+            &path,
+            &mut datagrams,
+            &mut frames,
+            &mut pns
+        ))
+        .now_or_never()
         .is_none()
     );
     assert!(pns.iter().flatten().all(Option::is_none));
     path.handshake_confirmed();
     assert!(matches!(
-        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never(),
+        collect(Burst::new(
+            &paths,
+            &path,
+            &mut datagrams,
+            &mut frames,
+            &mut pns
+        ))
+        .now_or_never(),
         Some(Ok(1))
     ));
     assert_eq!(pns_for(&pns, Epoch::Initial).count(), 1);
@@ -1417,9 +1530,10 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let credit = mature.flow_ctrl.sender.credit(usize::MAX).available();
     assert!(credit > 0);
     let error = QuicError::with_default_fty(ErrorKind::Internal, "connection failed");
-    paths
-        .terminator
-        .close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
+    paths.terminator.close(
+        crate::CloseReason::Internal(error.clone()),
+        paths.closing_pto(),
+    );
     mature.spaces.data.crypto.on_error(&error.into());
     // Closing stops the streams; the flow controller remains an ordinary credit ledger.
     assert_eq!(mature.spaces.data.streams.fresh_bytes(), 0);
@@ -1428,7 +1542,14 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         credit
     );
     assert_eq!(
-        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never()
+        collect(Burst::new(
+            &paths,
+            &path,
+            &mut datagrams,
+            &mut frames,
+            &mut pns
+        ))
+        .now_or_never()
         .unwrap()
         .unwrap(),
         1
@@ -1518,7 +1639,8 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         assert_eq!(pns_for(&pns, epoch).count(), 1);
         let pn = pns_for(&pns, epoch).next().unwrap().1;
         assert_eq!(
-            paths.spaces
+            paths
+                .spaces
                 .read()
                 .unwrap()
                 .0
@@ -1625,11 +1747,10 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
         keys(true),
     );
     let terminator = paths.terminator.clone();
-    let path = paths
-        .add_path(Pathway::new(
-            EndpointAddr::direct("127.0.0.1:49001".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:49002".parse().unwrap()),
-        ));
+    let path = paths.add_path(Pathway::new(
+        EndpointAddr::direct("127.0.0.1:49001".parse().unwrap()),
+        EndpointAddr::direct("127.0.0.1:49002".parse().unwrap()),
+    ));
     tokio::task::yield_now().await;
     let pto = path.cc.pto_base(Epoch::Data);
     terminator.close(
@@ -1690,7 +1811,11 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
     let sender = tokio::spawn(sending(paths.clone(), path.clone()));
     tokio::task::yield_now().await;
     assert!(!sender.is_finished());
-    assert!(crate::common::observe_close(&terminator).notified().is_none());
+    assert!(
+        crate::common::observe_close(&terminator)
+            .notified()
+            .is_none()
+    );
     let pto = Duration::from_secs(10);
     terminator.close(error.clone().into(), pto);
     for retransmit in [false, true] {
@@ -1918,7 +2043,15 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             }
         }
         assert_eq!(recorded, expected.iter().filter(|&&size| size != 0).count());
-        assert_eq!(nframes, recorded + expected.iter().zip(sizes).filter(|(size, original)| **size > *original).count());
+        assert_eq!(
+            nframes,
+            recorded
+                + expected
+                    .iter()
+                    .zip(sizes)
+                    .filter(|(size, original)| **size > *original)
+                    .count()
+        );
         let packets = PacketReader::new(BytesMut::from(&bytes[..size]), sender.peer_cid().len());
         for packet in packets {
             let ParsedPacket::Data(packet) = packet.unwrap() else {
@@ -2145,7 +2278,10 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
     let result = spaces.package(
         &mut cx,
         [Some(Default::default()); 3],
-        &mut [&mut (Epoch::Initial, &mut ping), &mut (Epoch::Handshake, Failed)],
+        &mut [
+            &mut (Epoch::Initial, &mut ping),
+            &mut (Epoch::Handshake, Failed),
+        ],
         &mut bytes,
         &mut limits,
         &mut frames,
@@ -2203,13 +2339,7 @@ async fn path_validation_respects_small_amplification_credit() {
             let mut datagrams = [BytesMut::with_capacity(1200)];
             let mut frames = Vec::new();
             let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
-            let mut collector = Burst::new(
-                &paths,
-                &path,
-                &mut datagrams,
-                &mut frames,
-                &mut pns,
-            );
+            let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
             let result = collector.poll_collect(&mut Context::from_waker(Waker::noop()));
             drop(collector);
             if received == 0 {
@@ -2379,10 +2509,20 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(burst.packets[0].iter().all(Option::is_none));
     assert_eq!(
-        burst.packets[1].map(|packet| packet.map(|meta|
-            (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))),
-        pending[1].map(|packet| packet.map(|meta|
-            (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))),
+        burst.packets[1].map(|packet| packet.map(|meta| (
+            meta.pn,
+            meta.pktlen,
+            meta.content,
+            meta.in_flight,
+            meta.ack
+        ))),
+        pending[1].map(|packet| packet.map(|meta| (
+            meta.pn,
+            meta.pktlen,
+            meta.content,
+            meta.in_flight,
+            meta.ack
+        ))),
     );
     burst.cancel();
     assert!(burst.packets.iter().flatten().all(Option::is_none));
@@ -2502,9 +2642,17 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         keys(true),
     );
     let initial = crate::common::initial_space(&paths.spaces);
-    let handshake = Arc::new(HandshakeSpace::new(Default::default(), initial.keys.clone()));
+    let handshake = Arc::new(HandshakeSpace::new(
+        Default::default(),
+        initial.keys.clone(),
+    ));
     initial.crypto.writer().write_all(b"initial").await.unwrap();
-    handshake.crypto.writer().write_all(b"handshake").await.unwrap();
+    handshake
+        .crypto
+        .writer()
+        .write_all(b"handshake")
+        .await
+        .unwrap();
     super::enter_handshake(&paths, handshake.clone());
     let path = Arc::new(Path::new(
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
@@ -2527,8 +2675,8 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         journal.on_tick(Instant::now(), |_| panic!("unsubmitted packet timed out"));
     }
     assert_eq!(path.amplification_credit(), 3600);
-    let delays = [Epoch::Initial, Epoch::Handshake]
-        .map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
+    let delays =
+        [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
     burst.submit(1).await.unwrap();
     let submitted_at = Instant::now();
     assert!(burst.packets[0].iter().all(Option::is_none));
@@ -2540,7 +2688,10 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         });
         let mut recovered = 0;
         journal.on_tick(submitted_at + delay, |_| recovered += 1);
-        assert_eq!(recovered, 1, "each space starts its submitted packet's journal timer");
+        assert_eq!(
+            recovered, 1,
+            "each space starts its submitted packet's journal timer"
+        );
     }
     task::cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());

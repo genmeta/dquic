@@ -65,10 +65,7 @@ impl PunchPacketEncoder for ProbeEncoder {
                 keys: &key,
                 limits: &mut limits,
             };
-            match sending.assemble(
-                &mut Context::from_waker(Waker::noop()),
-                &mut [&mut frame],
-            ) {
+            match sending.assemble(&mut Context::from_waker(Waker::noop()), &mut [&mut frame]) {
                 Poll::Ready(Ok(1)) => {
                     sending.seal().map_err(io::Error::other)?;
                     Ok(bytes)

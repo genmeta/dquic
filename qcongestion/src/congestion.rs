@@ -83,6 +83,8 @@ impl CongestionController {
     }
 
     /// A.5. On Sending a Packet
+    ///
+    /// ```text
     /// OnPacketSent(packet_number, pn_space, ack_eliciting,
     ///              in_flight, sent_bytes):
     ///   sent_packets[pn_space][packet_number].packet_number =
@@ -97,6 +99,7 @@ impl CongestionController {
     ///       time_of_last_ack_eliciting_packet[pn_space] = now()
     ///     OnPacketSentCC(sent_bytes)
     ///     SetLossDetectionTimer()
+    /// ```
     pub fn on_packet_sent(
         &mut self,
         packet_number: u64,
@@ -173,6 +176,8 @@ impl CongestionController {
     }
 
     /// A.7. On Receiving an Acknowledgment
+    ///
+    /// ```text
     /// OnAckReceived(ack, pn_space):
     ///   if (largest_acked_packet[pn_space] == infinite):
     ///     largest_acked_packet[pn_space] = ack.largest_acked
@@ -211,6 +216,7 @@ impl CongestionController {
     ///   if (PeerCompletedAddressValidation()):
     ///     pto_count = 0
     ///   SetLossDetectionTimer()
+    /// ```
     pub fn on_ack_rcvd(&mut self, epoch: Epoch, ack_frame: &AckFrame, now: Instant) {
         if self.discarded_epochs[epoch] {
             return;

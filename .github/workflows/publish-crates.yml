@@ -65,6 +65,7 @@ jobs:
             PACKAGES="$(printf '%s\n' "${packages[@]}")" RUNNER_TEMP="$RUNNER_TEMP" python3 - <<'PY'
           import json
           import os
+          import sys
           from pathlib import Path
 
           metadata = json.loads((Path(os.environ["RUNNER_TEMP"]) / "workspace-metadata.json").read_text())
@@ -74,6 +75,9 @@ jobs:
               package = by_name.get(name)
               if package is None:
                   raise SystemExit(f"failed to resolve workspace package metadata for {name}")
+              if package.get("publish") == []:
+                  print(f"skip {name} (publish = false)", file=sys.stderr)
+                  continue
               print(f"{name}\t{package['version']}")
           PY
           )"

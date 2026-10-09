@@ -174,7 +174,7 @@ where
     ///
     /// The maximum number of streams that can be created by peer in each direction
     /// are `initial_max_streams_bidi` and `initial_max_sterams_uni`
-    /// in local [`Parameters`](`crate::param::Parameters`).
+    /// in the local transport parameters.
     /// See [section-18.2-4.21](https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.21)
     /// and [section-18.2-4.23](https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.23)
     /// of [QUIC](https://www.rfc-editor.org/rfc/rfc9000.html) for more details.

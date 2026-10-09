@@ -11,7 +11,7 @@ use crate::{
     Cancelled,
     error::Error,
     frame::PingFrame,
-    packet::{PacketBuffer, Package, PacketContent},
+    packet::{Package, PacketBuffer, PacketContent},
     time::IdleSince,
 };
 

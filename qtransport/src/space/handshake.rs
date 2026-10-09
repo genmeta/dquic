@@ -9,7 +9,7 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         LongHeaderBuilder, PacketNumber,
-        assemble::{Assemble, PacketBuffer, Package},
+        assemble::{Assemble, Package, PacketBuffer},
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;

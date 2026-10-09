@@ -10,7 +10,7 @@ use qbase::{
     error::Error,
     frame::{EncodeSize, FrameFeature, io::SendFrame},
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::{PacketBuffer, Package},
+    packet::{Package, PacketBuffer},
 };
 
 /// A deque for data space to send reliable frames.
@@ -117,7 +117,7 @@ mod tests {
     use bytes::BytesMut;
     use qbase::{
         frame::{HandshakeDoneFrame, ReliableFrame, io::SendFrame},
-        packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
+        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     };
 
     use super::ArcReliableFrames;
@@ -154,8 +154,7 @@ mod tests {
             };
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
             let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
-            let result =
-                queue.poll_dump(&mut Context::from_waker(&waker), &mut buffer);
+            let result = queue.poll_dump(&mut Context::from_waker(&waker), &mut buffer);
             assert_eq!(result, expected);
             queue.send_frame([HandshakeDoneFrame]);
             assert_eq!(

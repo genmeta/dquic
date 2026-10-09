@@ -21,7 +21,7 @@ fn take_heartbeat(path: &qtransport::path::Path) -> bool {
     use std::task::{Context, Poll, Waker};
 
     use bytes::BytesMut;
-    use qbase::packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package};
+    use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
 
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();

@@ -9,7 +9,7 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         OneRttHeader, PacketNumber,
-        assemble::{Assemble, PacketBuffer, Package},
+        assemble::{Assemble, Package, PacketBuffer},
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;
@@ -125,8 +125,7 @@ impl Encapsulate for DataSpace {
         let mut crypto = self.crypto.outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
-        let internal: [&mut dyn Package<&mut [u8]>; 3] =
-            [&mut crypto, &mut reliable, &mut streams];
+        let internal: [&mut dyn Package<&mut [u8]>; 3] = [&mut crypto, &mut reliable, &mut streams];
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)

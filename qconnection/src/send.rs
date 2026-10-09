@@ -110,7 +110,12 @@ impl<'a, 'path> Burst<'a, 'path> {
                     let packets = Epoch::EPOCHS.map(|epoch| {
                         let meta = self.packets[index][epoch].take()?;
                         let space = spaces.0.get(epoch as u64).unwrap();
-                        space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
+                        space.on_sent(
+                            meta.pn,
+                            meta.in_flight,
+                            deadlines[epoch].0,
+                            deadlines[epoch].1,
+                        );
                         Some(meta)
                     });
                     sent_handshake |= packets[Epoch::Handshake].is_some();

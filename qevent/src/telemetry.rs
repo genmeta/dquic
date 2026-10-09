@@ -199,6 +199,7 @@ mod tests {
     };
 
     #[test]
+    #[cfg(feature = "telemetry")]
     fn span_fields() {
         let exporter = Arc::new(NoopExporter);
         let _span = span!(exporter.clone());
@@ -218,6 +219,14 @@ mod tests {
                 assert_eq!(Span::current().load::<Vec<i32>>("e"), vec![1, 2, 3]);
             });
         })
+    }
+
+    #[test]
+    #[cfg(not(feature = "telemetry"))]
+    fn span_fields_are_disabled() {
+        span!(Arc::new(NoopExporter), a = 1i32).in_scope(|| {
+            assert_eq!(Span::current().try_load::<i32>("a"), None);
+        });
     }
 
     #[test]

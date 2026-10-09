@@ -233,11 +233,8 @@ pub fn initial_phase(paths: &qconnection::Paths) -> Arc<qconnection::InitialPhas
 
 /// A ready CID cell for component tests that do not run the connection lifecycle.
 pub fn dcid(cid: ConnectionId) -> qbase::cid::ArcCidCell<qconnection::ArcReliableFrames> {
-    let remote = qbase::cid::ArcRemoteCids::new(
-        cid,
-        2,
-        qconnection::ArcReliableFrames::with_capacity(0),
-    );
+    let remote =
+        qbase::cid::ArcRemoteCids::new(cid, 2, qconnection::ArcReliableFrames::with_capacity(0));
     remote.apply_dcid()
 }
 

@@ -1,4 +1,6 @@
 [package]
+# Temporarily unpublished while qtls depends on the rustls Git fork.
+publish = false
 name = "qresolve"
 version = "0.8.1"
 edition.workspace = true

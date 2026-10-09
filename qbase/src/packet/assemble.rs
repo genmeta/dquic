@@ -386,7 +386,8 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
 
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
     fn belongs_to(&self, packet_type: Type) -> bool {
-        self.as_ref().is_some_and(|source| source.belongs_to(packet_type))
+        self.as_ref()
+            .is_some_and(|source| source.belongs_to(packet_type))
     }
 
     fn priority(&self) -> u32 {

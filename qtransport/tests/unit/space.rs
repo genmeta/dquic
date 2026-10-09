@@ -154,8 +154,14 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
         pn,
         Some(7),
         0,
-        metadata(Epoch::Data, &[Frame::MaxData(MaxDataFrame::new(123u32.into()))]),
-        &mut [qbase::frame::GuaranteedFrame::Reliable(MaxDataFrame::new(123u32.into()).into())].into_iter(),
+        metadata(
+            Epoch::Data,
+            &[Frame::MaxData(MaxDataFrame::new(123u32.into()))],
+        ),
+        &mut [qbase::frame::GuaranteedFrame::Reliable(
+            MaxDataFrame::new(123u32.into()).into(),
+        )]
+        .into_iter(),
     );
     let ack = AckFrame::new(
         pn.try_into().unwrap(),
@@ -257,7 +263,7 @@ async fn data_trait_unregister_removes_all_source_waiters() {
     use bytes::BytesMut;
     use qbase::{
         frame::MaxDataFrame,
-        packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
+        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     };
 
     #[derive(Default)]

@@ -8,9 +8,7 @@ use qbase::{
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
 };
-use qtransport::{
-    path::{Path, PathState},
-};
+use qtransport::path::{Path, PathState};
 
 use crate::Paths;
 

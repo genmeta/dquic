@@ -1,4 +1,6 @@
 [package]
+# Temporarily unpublished while qtls depends on the rustls Git fork.
+publish = false
 name = "qudp"
 version = "0.7.2"
 edition.workspace = true

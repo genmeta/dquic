@@ -13,7 +13,7 @@ use qbase::{
     frame::ConnectionCloseFrame,
     net::tx::ArcSendWakers,
     packet::{
-        PacketBuffer, Package, Type,
+        Package, PacketBuffer, Type,
         r#type::long::{Type::V1, Ver1},
     },
     util::Wakers,
@@ -183,46 +183,42 @@ impl Terminator {
     }
 
     fn on_rcvd_packet(&mut self, now: Instant) {
-        match self {
-            Self::Closing {
-                tx_wakers,
-                sync_ccf,
-                rcvd_packets,
-                last_sent,
-                interval,
-                ..
-            } => {
-                *rcvd_packets = rcvd_packets.saturating_add(1);
-                let time_due = now.saturating_duration_since(*last_sent) >= *interval;
-                if !*sync_ccf && (*rcvd_packets >= 5 || time_due) {
-                    *sync_ccf = true;
-                    *rcvd_packets = 0;
-                    *last_sent = now;
-                    tx_wakers.wake_all();
-                }
+        if let Self::Closing {
+            tx_wakers,
+            sync_ccf,
+            rcvd_packets,
+            last_sent,
+            interval,
+            ..
+        } = self
+        {
+            *rcvd_packets = rcvd_packets.saturating_add(1);
+            let time_due = now.saturating_duration_since(*last_sent) >= *interval;
+            if !*sync_ccf && (*rcvd_packets >= 5 || time_due) {
+                *sync_ccf = true;
+                *rcvd_packets = 0;
+                *last_sent = now;
+                tx_wakers.wake_all();
             }
-            _ => (),
         }
     }
 
     fn recv_conn_close_frame(&mut self, frame: ConnectionCloseFrame) {
-        match self {
-            Terminator::Closing {
-                waiters,
-                tx_wakers: send_wakers,
-                sent_ccf,
-                ..
-            } => {
-                if !*sent_ccf {
-                    send_wakers.wake_all();
-                }
-                *self = Self::Draining {
-                    waiters: waiters.clone(),
-                    error: frame.into(),
-                    sent_ccf: *sent_ccf,
-                }
+        if let Self::Closing {
+            waiters,
+            tx_wakers: send_wakers,
+            sent_ccf,
+            ..
+        } = self
+        {
+            if !*sent_ccf {
+                send_wakers.wake_all();
             }
-            _ => (),
+            *self = Self::Draining {
+                waiters: waiters.clone(),
+                error: frame.into(),
+                sent_ccf: *sent_ccf,
+            }
         }
     }
 

@@ -12,7 +12,7 @@ mod send {
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, FrameType},
         net::tx::{ArcSendWakers, UnregisterWaker},
-        packet::{PacketBuffer, Package},
+        packet::{Package, PacketBuffer},
         varint::{VARINT_MAX, VarInt},
     };
     use tokio::io::AsyncWrite;
@@ -408,6 +408,12 @@ pub struct CryptoStream {
     pub recver: ArcRecver,
 }
 
+impl Default for CryptoStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Close for CryptoStream {
     fn close_with_error(&self, error: Error) {
         self.on_error(&error);
@@ -505,7 +511,7 @@ mod tests {
     impl TestPacket {
         fn load(&mut self, source: &mut impl Package<Self>) -> Result<usize, ()> {
             use qbase::packet::{
-                PacketBuffer, Constraints, Type,
+                Constraints, PacketBuffer, Type,
                 r#type::long::{Type as Long, Ver1},
             };
             let mut limits = Constraints {
@@ -831,7 +837,7 @@ mod poll_tests {
     use std::task::{Context, Poll, Waker};
 
     use bytes::BytesMut;
-    use qbase::packet::{PacketBuffer, Constraints, GetType, LongHeaderBuilder, Package};
+    use qbase::packet::{Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer};
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -858,20 +864,19 @@ mod poll_tests {
             };
             let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
             let result = if pass < 2 {
-                stream
-                    .multipath()
-                    .poll_dump(&mut cx, &mut buffer)
+                stream.multipath().poll_dump(&mut cx, &mut buffer)
             } else {
-                stream
-                    .outgoing()
-                    .poll_dump(&mut cx, &mut buffer)
+                stream.outgoing().poll_dump(&mut cx, &mut buffer)
             };
             if pass == 3 {
                 assert!(result.is_pending());
                 assert!(frames.is_empty());
             } else {
                 assert!(matches!(result, Poll::Ready(Ok(1))));
-                assert!(matches!(frames.as_slice(), [qbase::frame::GuaranteedFrame::Crypto(_)]));
+                assert!(matches!(
+                    frames.as_slice(),
+                    [qbase::frame::GuaranteedFrame::Crypto(_)]
+                ));
                 if let Some(previous) = &previous {
                     assert_eq!(&bytes, previous);
                 }

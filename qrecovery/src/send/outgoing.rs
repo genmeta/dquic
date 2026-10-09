@@ -8,7 +8,7 @@ use qbase::{
     error::Error as QuicError,
     frame::{Fin, Frame, FrameType, Len, Offset, PaddingFrame, ResetStreamError, StreamFrame},
     net::tx::UnregisterWaker,
-    packet::{PacketBuffer, Package},
+    packet::{Package, PacketBuffer},
     sid::StreamId,
     varint::VarInt,
 };
@@ -44,9 +44,7 @@ impl<TX: Clone> Sender<TX> {
         let Some((sid, _)) = self.source() else {
             return Poll::Pending;
         };
-        buffer.for_frame(
-            FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No),
-        );
+        buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let capacity = buffer.remaining_mut();
         let flow_limit = buffer.limits.flow_ctrl();
         let predicate = |offset| {
@@ -73,7 +71,10 @@ impl<TX: Clone> Sender<TX> {
                 let mut s: SendingSender<TX> = s.upgrade();
                 let (result, finished) = s
                     .pick_up(predicate, flow_limit)
-                    .map(|payload @ (.., with_eos)| (Ok(write(payload)), with_eos))
+                    .map(|payload @ (.., with_eos)| {
+                        write(payload);
+                        (Ok(()), with_eos)
+                    })
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
@@ -86,7 +87,10 @@ impl<TX: Clone> Sender<TX> {
             Sender::Sending(s) => {
                 let (result, finished) = s
                     .pick_up(predicate, flow_limit)
-                    .map(|payload @ (.., with_eos)| (Ok(write(payload)), with_eos))
+                    .map(|payload @ (.., with_eos)| {
+                        write(payload);
+                        (Ok(()), with_eos)
+                    })
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
@@ -312,10 +316,10 @@ impl<TX: Clone, B: BufMut + ?Sized> qbase::packet::Package<B> for Outgoing<TX> {
 
 impl<TX: Clone> UnregisterWaker for Outgoing<TX> {
     fn unregister(&self, waker: &std::task::Waker) {
-        if let Ok(state) = self.0.sender().as_ref() {
-            if let Some((_, wakers)) = state.source() {
-                wakers.unregister(waker);
-            }
+        if let Ok(state) = self.0.sender().as_ref()
+            && let Some((_, wakers)) = state.source()
+        {
+            wakers.unregister(waker);
         }
     }
 }
@@ -327,7 +331,7 @@ mod poll_tests {
     use bytes::BytesMut;
     use qbase::{
         frame::{FrameType, GuaranteedFrame, Len, io::SendFrame},
-        packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
+        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
         role::Role,
         sid::Dir,
     };
@@ -483,7 +487,6 @@ mod poll_tests {
             ack.poll_dump(&mut cx, &mut buffer),
             Poll::Ready(Ok(0))
         ));
-        drop(buffer);
         source.may_loss_data(&frame);
         bytes.clear();
         frames.clear();
@@ -494,7 +497,6 @@ mod poll_tests {
             Poll::Ready(Ok(0))
         ));
         assert!(buffer.frames.is_empty());
-        drop(buffer);
         limits.send_quota = 12;
         let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
         assert!(matches!(
