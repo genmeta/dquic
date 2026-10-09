@@ -18,7 +18,7 @@ use tls_backend::pki_types::pem::PemObject;
 use crate::{ArcParameters, ArcReliableFrames, Role, keys::ArcOneRttKeys, space::DataSpace};
 
 pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
-    use qbase::packet::{PacketBuffer, Constraints, GetType};
+    use qbase::packet::{Constraints, GetType, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();
     let mut limits = Constraints {
@@ -113,7 +113,9 @@ pub(crate) fn data() -> Arc<DataSpace> {
     let ([keys, _], _) = handshake();
     let client = client_parameters();
     let mut server = server_parameters();
-    server.set(ParameterId::InitialMaxStreamsBidi, 1u32).unwrap();
+    server
+        .set(ParameterId::InitialMaxStreamsBidi, 1u32)
+        .unwrap();
     server.set(ParameterId::InitialMaxStreamsUni, 1u32).unwrap();
     let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);

@@ -704,6 +704,88 @@ where
     }
 }
 
+impl<TX> DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    /// Bound reservations by actual pending fresh bytes; idle polling must not reserve and refund flow credit.
+    pub fn fresh_bytes(&self) -> usize {
+        self.fresh_bytes_up_to(usize::MAX)
+    }
+
+    /// Stop counting once the caller has enough credit for its packet.
+    pub fn fresh_bytes_up_to(&self, limit: usize) -> usize {
+        if limit == 0 {
+            return 0;
+        }
+        let streams = self.output.streams();
+        let Ok(output) = streams.as_ref() else {
+            return 0;
+        };
+        let remote = self.stream_ids.remote.role();
+        let bidi = self.stream_ids.local.opened_streams(Dir::Bi);
+        let uni = self.stream_ids.local.opened_streams(Dir::Uni);
+        let mut total = 0usize;
+        for (_, (stream, _)) in output.outgoings.iter().filter(|(sid, _)| {
+            sid.role() == remote
+                || (sid.dir() == Dir::Bi && sid.id() < bidi)
+                || (sid.dir() == Dir::Uni && sid.id() < uni)
+        }) {
+            total = total.saturating_add(stream.fresh_bytes());
+            if total >= limit {
+                return limit;
+            }
+        }
+        total
+    }
+
+    pub(crate) fn poll_dump<B: BufMut + ?Sized>(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut PacketBuffer<'_, B>,
+    ) -> Poll<Result<usize, Error>> {
+        // Keep stream insertion serialized with checking readiness and registering.
+        let mut guard = self.output.streams();
+        let output = match guard.as_mut() {
+            Ok(output) => output,
+            Err(_) => return Poll::Ready(Ok(0)),
+        };
+        let start = buffer.meta.nframes;
+        loop {
+            // A full packet or a lengthless STREAM cannot accept another frame.
+            buffer.for_frame(FrameType::Stream(
+                qbase::frame::Offset::Zero,
+                qbase::frame::Len::Explicit,
+                qbase::frame::Fin::No,
+            ));
+            if buffer.remaining_mut() < 2 {
+                return Poll::Ready(Ok(buffer.meta.nframes - start));
+            }
+            match self.poll_dump_once(output, cx, buffer) {
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(n)) if n > 0 => {}
+                _ if buffer.meta.nframes != start => {
+                    return Poll::Ready(Ok(buffer.meta.nframes - start));
+                }
+                Poll::Pending => {
+                    self.tx_wakers.register(cx.waker());
+                    return Poll::Pending;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    pub(crate) fn unregister(&self, waker: &Waker) {
+        self.tx_wakers.unregister(waker);
+        if let Ok(output) = self.output.streams().as_ref() {
+            for (outgoing, _) in output.values() {
+                outgoing.unregister(waker);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1238,94 +1320,11 @@ mod tests {
             0,
         );
         assert!(matches!(streams.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(n)) if n > 0));
-        assert_eq!(
-            buffer.meta.content,
-            PacketContent::EffectivePayload
-        );
+        assert_eq!(buffer.meta.content, PacketContent::EffectivePayload);
         assert!(
             frames
                 .iter()
                 .any(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.is_fin()))
         );
-    }
-}
-
-impl<TX> DataStreams<TX>
-where
-    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
-{
-    /// Bound reservations by actual pending fresh bytes; idle polling must not reserve and refund flow credit.
-    pub fn fresh_bytes(&self) -> usize {
-        self.fresh_bytes_up_to(usize::MAX)
-    }
-
-    /// Stop counting once the caller has enough credit for its packet.
-    pub fn fresh_bytes_up_to(&self, limit: usize) -> usize {
-        if limit == 0 {
-            return 0;
-        }
-        let streams = self.output.streams();
-        let Ok(output) = streams.as_ref() else {
-            return 0;
-        };
-        let remote = self.stream_ids.remote.role();
-        let bidi = self.stream_ids.local.opened_streams(Dir::Bi);
-        let uni = self.stream_ids.local.opened_streams(Dir::Uni);
-        let mut total = 0usize;
-        for (_, (stream, _)) in output.outgoings.iter().filter(|(sid, _)| {
-            sid.role() == remote
-                || (sid.dir() == Dir::Bi && sid.id() < bidi)
-                || (sid.dir() == Dir::Uni && sid.id() < uni)
-        }) {
-            total = total.saturating_add(stream.fresh_bytes());
-            if total >= limit {
-                return limit;
-            }
-        }
-        total
-    }
-
-    pub(crate) fn poll_dump<B: BufMut + ?Sized>(
-        &self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
-        // Keep stream insertion serialized with checking readiness and registering.
-        let mut guard = self.output.streams();
-        let output = match guard.as_mut() {
-            Ok(output) => output,
-            Err(_) => return Poll::Ready(Ok(0)),
-        };
-        let start = buffer.meta.nframes;
-        loop {
-            // A full packet or a lengthless STREAM cannot accept another frame.
-            buffer.for_frame(FrameType::Stream(
-                qbase::frame::Offset::Zero,
-                qbase::frame::Len::Explicit,
-                qbase::frame::Fin::No,
-            ));
-            if buffer.remaining_mut() < 2 {
-                return Poll::Ready(Ok(buffer.meta.nframes - start));
-            }
-            match self.poll_dump_once(output, cx, buffer) {
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(n)) if n > 0 => {}
-                _ if buffer.meta.nframes != start => return Poll::Ready(Ok(buffer.meta.nframes - start)),
-                Poll::Pending => {
-                    self.tx_wakers.register(cx.waker());
-                    return Poll::Pending;
-                }
-                result => return result,
-            }
-        }
-    }
-
-    pub(crate) fn unregister(&self, waker: &Waker) {
-        self.tx_wakers.unregister(waker);
-        if let Ok(output) = self.output.streams().as_ref() {
-            for (outgoing, _) in output.values() {
-                outgoing.unregister(waker);
-            }
-        }
     }
 }

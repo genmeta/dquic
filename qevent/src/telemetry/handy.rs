@@ -205,7 +205,7 @@ impl QLog for TracingLogger {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "telemetry"))]
 mod tests {
     use crate::{
         quic::connectivity::ServerListening,
@@ -213,7 +213,6 @@ mod tests {
     };
 
     #[tokio::test]
-    #[cfg(feature = "telemetry")]
     async fn legacy_seq_exporter() {
         let exporter = LegacySeqLogger::new(tokio::io::stdout());
 

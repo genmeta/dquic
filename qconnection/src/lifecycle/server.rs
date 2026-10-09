@@ -65,7 +65,9 @@ pub async fn server_growing(
         paths.clone(),
     ));
 
-    let hello = any(interceptor.read(), terminator.clone()).await.flatten();
+    let hello = any(interceptor.read(), terminator.clone())
+        .await
+        .and_then(std::convert::identity);
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
@@ -104,7 +106,7 @@ pub async fn server_growing(
             Ok(ready) => ready,
             Err(error) => {
                 (server.accept_cb)(Err(error.clone()));
-                return shutdown(&paths, &local_cids, error.into()).await;
+                return shutdown(&paths, &local_cids, error).await;
             }
         };
     terminator.register(Arc::new(tls_ctx.clone()));
@@ -287,7 +289,9 @@ pub async fn server_growing(
                 puncher,
             ))
         };
-        any(establish, terminator.clone()).await.flatten()
+        any(establish, terminator.clone())
+            .await
+            .and_then(std::convert::identity)
     };
 
     let (connection, puncher) = match result {

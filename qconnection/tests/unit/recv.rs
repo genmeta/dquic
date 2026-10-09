@@ -173,7 +173,9 @@ async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
                     Default::default(),
                     ArcKeys::new(Arc::new(keys(role == Role::Server))),
                 ));
-                paths.terminator.clone()
+                paths
+                    .terminator
+                    .clone()
                     .register(Arc::new(space.crypto.clone()));
                 super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
                 space
@@ -230,7 +232,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
 
     use qbase::{
         frame::{ConnectionCloseFrame, CryptoFrame},
-        packet::{PacketBuffer, Constraints, GetType, Package, PacketNumber},
+        packet::{Constraints, GetType, Package, PacketBuffer, PacketNumber},
     };
     use tokio::io::AsyncReadExt;
 
@@ -317,9 +319,19 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         let local = keys(true);
         let mut ping = PingFrame;
         if epoch == Epoch::Initial {
-            seal(header().initial(vec![]), &local.sealing, &space.sent_journal, [&mut ping])
+            seal(
+                header().initial(vec![]),
+                &local.sealing,
+                &space.sent_journal,
+                [&mut ping],
+            )
         } else {
-            seal(header().handshake(), &local.sealing, &space.sent_journal, [&mut ping])
+            seal(
+                header().handshake(),
+                &local.sealing,
+                &space.sent_journal,
+                [&mut ping],
+            )
         }
         .unwrap();
         space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
@@ -337,7 +349,12 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 [&mut ack, &mut close],
             )
         } else {
-            seal(header().handshake(), &peer.sealing, &journal, [&mut ack, &mut close])
+            seal(
+                header().handshake(),
+                &peer.sealing,
+                &journal,
+                [&mut ack, &mut close],
+            )
         }
         .unwrap();
         receive_bytes(bytes, space.clone(), &paths, &path).await;
@@ -585,13 +602,10 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             } else {
                 header.handshake().get_type()
             };
-            space.sent_journal.on_sealed(pn, None, 0, Metadata::new(packet_type), []);
-            space.on_sent(
-                pn,
-                false,
-                Duration::from_secs(1),
-                Duration::from_secs(3),
-            );
+            space
+                .sent_journal
+                .on_sealed(pn, None, 0, Metadata::new(packet_type), []);
+            space.on_sent(pn, false, Duration::from_secs(1), Duration::from_secs(3));
             let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
             let mut ping = PingFrame;
             let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());

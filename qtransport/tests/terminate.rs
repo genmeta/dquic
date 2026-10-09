@@ -8,7 +8,7 @@ use qbase::{
     error::{AppError, ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame, FrameReader, FrameType},
     packet::{
-        PacketBuffer, Constraints, GetType, Limit, OneRttHeader, Package, Type,
+        Constraints, GetType, Limit, OneRttHeader, Package, PacketBuffer, Type,
         r#type::long::{Type::V1, Ver1},
     },
 };
@@ -55,14 +55,7 @@ fn dump_close(terminator: &ArcTerminator, packet_type: Type) -> ConnectionCloseF
     };
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
-    let mut buffer = PacketBuffer::new(
-        &mut bytes,
-        &mut limits,
-        &mut frames,
-        packet_type,
-        0,
-        0,
-    );
+    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, packet_type, 0, 0);
     assert_eq!(
         (&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
         Poll::Ready(Ok(1))
@@ -99,7 +92,10 @@ async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
             (Type::Long(V1(Ver1::INITIAL)), true),
             (Type::Long(V1(Ver1::HANDSHAKE)), true),
             (Type::Long(V1(Ver1::ZERO_RTT)), false),
-            (OneRttHeader::new(Default::default(), Default::default()).get_type(), false),
+            (
+                OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                false,
+            ),
         ] {
             // Cover Closing, direct Draining, and Closing -> Draining.
             for (closing, peer) in [(true, false), (false, true), (true, true)] {
@@ -128,7 +124,8 @@ async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
                     for _ in 0..5 {
                         terminator.on_rcvd_packet(Instant::now());
                     }
-                    let one_rtt = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                    let one_rtt =
+                        OneRttHeader::new(Default::default(), Default::default()).get_type();
                     assert_eq!(dump_close(&terminator, one_rtt), error.clone().into());
                 }
                 terminator.terminate();
@@ -176,8 +173,12 @@ async fn draining_writes_one_close_and_never_schedules_another() {
             ));
             if expected == 1 {
                 assert!(frames.is_empty());
-                let decoded = qbase::frame::FrameReader::new(bytes.clone().freeze(), OneRttHeader::new(Default::default(), Default::default()).get_type())
-                    .collect::<Result<Vec<_>, _>>().unwrap();
+                let decoded = qbase::frame::FrameReader::new(
+                    bytes.clone().freeze(),
+                    OneRttHeader::new(Default::default(), Default::default()).get_type(),
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
                 assert!(matches!(decoded.as_slice(), [(Frame::Close(sent), _)] if sent == &frame));
                 assert!(!bytes.is_empty());
             } else {
@@ -218,10 +219,7 @@ async fn closing_without_a_written_frame_preserves_send_budget() {
             0,
             0,
         );
-        let result = (&terminator).poll_dump(
-            &mut Context::from_waker(Waker::noop()),
-            &mut buffer,
-        );
+        let result = (&terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer);
         if pending {
             assert!(result.is_pending());
         } else {
@@ -414,14 +412,8 @@ async fn forced_termination_wakes_all_waiters() {
         if closing {
             terminator.close(local_reason(), Duration::from_secs(1));
         }
-        let first = tokio::spawn({
-            let terminator = terminator.clone();
-            async move { terminator.await }
-        });
-        let second = tokio::spawn({
-            let terminator = terminator.clone();
-            async move { terminator.await }
-        });
+        let first = tokio::spawn(terminator.clone());
+        let second = tokio::spawn(terminator.clone());
         tokio::task::yield_now().await;
         assert!(!first.is_finished());
         assert!(!second.is_finished());

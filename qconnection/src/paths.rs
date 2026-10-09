@@ -250,7 +250,11 @@ impl Paths {
         if let Some(path) = entries
             .values()
             .find(|path| path.selected() == Path::SELECTED)
-            .or_else(|| entries.values().find(|path| path.selected() == Path::MP_INITIAL))
+            .or_else(|| {
+                entries
+                    .values()
+                    .find(|path| path.selected() == Path::MP_INITIAL)
+            })
         {
             path.assign_dcid(remote);
         }

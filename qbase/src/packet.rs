@@ -39,7 +39,7 @@ pub mod assemble;
 ///
 /// The writing of the QUIC packet is not provided here, they are written in place.
 pub mod io;
-pub use assemble::{Assemble, PacketBuffer, Constraints, Limit, Package};
+pub use assemble::{Assemble, Constraints, Limit, Package, PacketBuffer};
 
 /// Encoding and decoding of packet number
 pub mod number;

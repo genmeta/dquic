@@ -11,7 +11,7 @@ use qbase::{
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
         GetType, OneRttHeader,
-        assemble::{Metadata, PacketBuffer, Limit, Package},
+        assemble::{Limit, Metadata, Package, PacketBuffer},
     },
     util::IndexDeque,
 };
@@ -77,6 +77,7 @@ pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
 pub type ArcSpaces = Arc<RwLock<Spaces>>;
 
 impl Spaces {
+    #[allow(clippy::too_many_arguments)]
     pub fn package(
         &self,
         cx: &mut Context<'_>,
@@ -114,10 +115,7 @@ impl Spaces {
         if result.is_err() {
             for (index, space) in self.0.enumerate() {
                 if let Some(meta) = packets[index as usize].take() {
-                    space.cancel(
-                        meta.pn,
-                        &mut frames.drain(start..),
-                    );
+                    space.cancel(meta.pn, &mut frames.drain(start..));
                 }
             }
         }
@@ -143,6 +141,7 @@ impl Spaces {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn package_at(
         &self,
         index: u64,
@@ -235,18 +234,12 @@ impl Spaces {
         };
         match result {
             Poll::Ready(Err(error)) => {
-                space.cancel(
-                    pn.0,
-                    &mut frames.drain(start..),
-                );
+                space.cancel(pn.0, &mut frames.drain(start..));
                 return Err(error);
             }
             Poll::Ready(Ok(n)) if n > 0 => {}
             _ => {
-                space.cancel(
-                    pn.0,
-                    &mut frames.drain(start..),
-                );
+                space.cancel(pn.0, &mut frames.drain(start..));
                 return self.package_at(
                     index + 1,
                     cx,
@@ -285,10 +278,7 @@ impl Spaces {
         let (tail_size, tail_frames, tail_flight) = match tail {
             Ok(tail) => tail,
             Err(error) => {
-                space.cancel(
-                    pn.0,
-                    &mut frames.drain(start..),
-                );
+                space.cancel(pn.0, &mut frames.drain(start..));
                 return Err(error);
             }
         };
@@ -318,10 +308,7 @@ impl Spaces {
         ) {
             Ok(generation) => generation,
             Err(error) => {
-                space.cancel(
-                    pn.0,
-                    &mut frames.drain(start..),
-                );
+                space.cancel(pn.0, &mut frames.drain(start..));
                 return Err(error);
             }
         };
@@ -336,7 +323,11 @@ impl Spaces {
         );
         packets[epoch] = Some(meta);
         limits.probe_quota[epoch] = 0;
-        Ok((final_size + tail_size, own_frames + tail_frames, meta.in_flight || tail_flight))
+        Ok((
+            final_size + tail_size,
+            own_frames + tail_frames,
+            meta.in_flight || tail_flight,
+        ))
     }
 
     pub fn snapshot(&self) -> Self {

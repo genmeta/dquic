@@ -9,7 +9,7 @@ use qbase::{
     error::Error,
     frame::{AckFrame, Ecn, FrameType},
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::{PacketBuffer, InvalidPacketNumber, Package, PacketNumber},
+    packet::{InvalidPacketNumber, Package, PacketBuffer, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};

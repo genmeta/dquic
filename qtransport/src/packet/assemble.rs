@@ -7,7 +7,7 @@ use qbase::{
     packet::{
         GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
         WritePacketNumber,
-        assemble::{Assemble, PacketBuffer, Constraints, Limit, Metadata, Package},
+        assemble::{Assemble, Constraints, Limit, Metadata, Package, PacketBuffer},
         header::io::WriteHeader,
     },
 };

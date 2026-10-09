@@ -69,8 +69,15 @@ impl<K> Space<K> {
     }
 
     /// Start recovery timers after successful submission, under the path's CC lock.
-    pub fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
-        self.sent_journal.on_sent(pn, in_flight, retransmit_after, retention);
+    pub fn on_sent(
+        &self,
+        pn: u64,
+        in_flight: bool,
+        retransmit_after: Duration,
+        retention: Duration,
+    ) {
+        self.sent_journal
+            .on_sent(pn, in_flight, retransmit_after, retention);
     }
 
     /// Release acknowledged CRYPTO data and report whether any bytes were acknowledged.
@@ -200,6 +207,7 @@ pub trait Recover {
 /// Reserve a packet number together with its sealing-key snapshot.
 pub trait Allocate {
     /// Returns `None` when the space's keys have been retired.
+    #[allow(clippy::type_complexity)]
     fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error>;
 }
 
@@ -286,12 +294,14 @@ where
     }
 
     fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
-        self.deref().on_sent(pn, in_flight, retransmit_after, retention)
+        self.deref()
+            .on_sent(pn, in_flight, retransmit_after, retention)
     }
 }
 
 /// Space-specific packet header and frame assembly.
 pub trait Encapsulate: Transmit {
+    #[allow(clippy::too_many_arguments)]
     fn encapsulate(
         &self,
         cx: &mut Context<'_>,

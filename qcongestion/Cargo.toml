@@ -1,4 +1,6 @@
 [package]
+# Temporarily unpublished while qtls depends on the rustls Git fork.
+publish = false
 name = "qcongestion"
 version = "0.6.2"
 edition.workspace = true

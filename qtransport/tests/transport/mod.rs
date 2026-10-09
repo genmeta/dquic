@@ -59,7 +59,7 @@ impl Transport {
 }
 
 pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
-    use qbase::packet::{PacketBuffer, Constraints, GetType};
+    use qbase::packet::{Constraints, GetType, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();
     let mut limits = Constraints {
@@ -1594,10 +1594,7 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
         &mut [0].into_iter(),
     );
     let retry = emit(&mut sender);
-    assert_eq!(
-        ct.flow.sender.credit(usize::MAX).available(),
-        credit
-    );
+    assert_eq!(ct.flow.sender.credit(usize::MAX).available(), credit);
     assert_eq!(receive(&st, &sp, &retry), Some(1));
     acknowledge(&ct, &ack(1), &cp).unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
@@ -1626,8 +1623,9 @@ async fn retired_path_replacement_has_its_own_sender_and_waiter() {
 
 #[tokio::test(start_paused = true)]
 async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped() {
-    use crate::space::Recover as _;
     use qcongestion::Transport as _;
+
+    use crate::space::Recover as _;
 
     let [(client, transport, original), (server, peer, peer_path)] = pair(1);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
@@ -1635,11 +1633,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let (retransmit_after, _) = original.cc.retransmit_and_expire_time(Epoch::Data);
     let mut sender = Sender::new(keys(&transport), transport.clone(), original.clone()).unwrap();
     emit(&mut sender);
-    let credit = transport
-        .flow
-        .sender
-        .credit(usize::MAX)
-        .available();
+    let credit = transport.flow.sender.credit(usize::MAX).available();
     original.retire();
     drop(sender);
     drop(original);
@@ -1675,14 +1669,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let replacement = path(&transport, 1);
     let mut sender = Sender::new(keys(&transport), transport.clone(), replacement.clone()).unwrap();
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
-    assert_eq!(
-        transport
-            .flow
-            .sender
-            .credit(usize::MAX)
-            .available(),
-        credit
-    );
+    assert_eq!(transport.flow.sender.credit(usize::MAX).available(), credit);
     transport.data.on_tick(tokio::time::Instant::now());
     assert!(
         !sender.prepare().unwrap(),

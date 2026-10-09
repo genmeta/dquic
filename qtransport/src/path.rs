@@ -174,9 +174,18 @@ impl Path {
         for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
             let Some(meta) = packet else { continue };
             let size = meta.pktlen
-                + if charged == Some(epoch as usize) { overhead } else { 0 };
+                + if charged == Some(epoch as usize) {
+                    overhead
+                } else {
+                    0
+                };
             cc.on_pkt_sent(
-                epoch, meta.pn, meta.content.is_ack_eliciting(), size, meta.in_flight, meta.ack,
+                epoch,
+                meta.pn,
+                meta.content.is_ack_eliciting(),
+                size,
+                meta.in_flight,
+                meta.ack,
             );
             let _ = self.heartbeat.on_sent_at(meta.content, now);
         }

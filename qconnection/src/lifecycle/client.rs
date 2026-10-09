@@ -240,7 +240,9 @@ pub async fn client_growing(
                 puncher,
             ))
         };
-        any(establish, terminator.clone()).await.flatten()
+        any(establish, terminator.clone())
+            .await
+            .and_then(std::convert::identity)
     };
 
     let (connected, handshake_done, data, puncher) = match result {

@@ -78,7 +78,7 @@ pub trait Transport {
     fn grant_anti_amplification(&self);
 }
 
-/// The [`Feedback`] trait defines the interface for packet tracking
+/// The [`Resend`] trait defines the interface for retransmitting lost packets.
 pub trait Resend: Send + Sync {
     /// Indicates that a packet with the specified packet number may have been lost.
     /// # Parameters

@@ -75,6 +75,10 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 
 ## 快速开始
 
+当前开发版本通过 `qtls` 使用定制的 rustls Git 分支。`qtls` 及依赖它的 crate
+暂时标记为 `publish = false`；在依赖链具备 crates.io 发布条件前，请通过 Git
+或本地路径使用本仓库。
+
 `dquic` crate 统一导出 `qconnection` API 及相关类型，可通过
 `dquic::QuicEndpoint` 建连或监听：
 

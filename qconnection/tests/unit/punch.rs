@@ -304,7 +304,10 @@ async fn data_reception_delivers_crypto_and_streams_to_the_data_space() {
             .unwrap()
             .unwrap();
         assert_eq!(&body, b"ticket");
-        for space in [receiver.spaces.initial.as_ref(), &receiver.spaces.handshake.0] {
+        for space in [
+            receiver.spaces.initial.as_ref(),
+            &receiver.spaces.handshake.0,
+        ] {
             assert!(
                 space
                     .crypto
@@ -665,9 +668,10 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let paths = empty_paths(receiver);
         let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
-        qprotocol::QuicProtocol::global().register(local, &socket).unwrap();
-        let original = paths
-            .add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
+        qprotocol::QuicProtocol::global()
+            .register(local, &socket)
+            .unwrap();
+        let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
         super::enter_mature(&paths, receiver);
         super::confirm_handshake(&paths);
@@ -714,7 +718,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
 }
 
 fn take_reliable(phase: &super::MatureFixture) -> Vec<Frame> {
-    use qbase::packet::{PacketBuffer, Constraints, GetType, Package};
+    use qbase::packet::{Constraints, GetType, Package, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut limits = Constraints {
         flow_ctrl: usize::MAX,
@@ -903,15 +907,17 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             .insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;
         let pn = data.next_pn().unwrap().0;
-        qtransport::space::Transmit::on_sealed(data.as_ref(), pn, Some(0), 0,
-            qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(&OneRttHeader::new(Default::default(), Default::default()))),
-            &mut std::iter::empty());
-        data.on_sent(
+        qtransport::space::Transmit::on_sealed(
+            data.as_ref(),
             pn,
-            false,
-            Duration::from_secs(1),
-            Duration::from_secs(3),
+            Some(0),
+            0,
+            qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(
+                &OneRttHeader::new(Default::default(), Default::default()),
+            )),
+            &mut std::iter::empty(),
         );
+        data.on_sent(pn, false, Duration::from_secs(1), Duration::from_secs(3));
         let bytes = match kind {
             0 => encode_frame(
                 &sender,

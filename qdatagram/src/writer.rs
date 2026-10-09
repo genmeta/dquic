@@ -220,7 +220,7 @@ mod tests {
             task::{Context, Wake, Waker},
         };
 
-        use qbase::packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package};
+        use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
         struct Counter(AtomicUsize);
         impl Wake for Counter {
             fn wake(self: Arc<Self>) {
@@ -361,7 +361,7 @@ mod tests {
     fn package_preserves_datagram_length_and_padding_strategy() {
         use std::task::{Context, Poll, Waker};
 
-        use qbase::packet::{PacketBuffer, Constraints, GetType, OneRttHeader};
+        use qbase::packet::{Constraints, GetType, OneRttHeader, PacketBuffer};
         for (length, capacity) in [(11, 12), (64, 66), (64, 100)] {
             let data = Bytes::from(vec![b'a'; length]);
             let expected = DatagramOutgoing::new();

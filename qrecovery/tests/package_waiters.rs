@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use qbase::{
     error::Error,
     frame::io::SendFrame,
-    packet::{PacketBuffer, Constraints, GetType, OneRttHeader, Package},
+    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     param::{
         ArcParameters,
         handy::{client_parameters, server_parameters},
