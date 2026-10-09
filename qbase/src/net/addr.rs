@@ -8,7 +8,7 @@ use std::{
 use bytes::BufMut;
 use serde::{Deserialize, Serialize};
 
-use crate::net::{Family, be_socket_addr, route::Scope};
+use crate::net::{AddrFamily, Family, be_socket_addr, route::Scope};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
@@ -108,7 +108,35 @@ impl EndpointAddr {
         }
     }
 
-    /// Classifies the network scope of this endpoint. Unroutable direct addresses have no scope.
+    /// Whether the endpoint has usable addresses and nonzero ports.
+    pub fn is_usable(&self) -> bool {
+        let usable_addr = |addr: SocketAddr| {
+            addr.port() != 0
+                && !addr.ip().is_unspecified()
+                && !addr.ip().is_multicast()
+                && !matches!(addr.ip(), IpAddr::V4(ip) if ip.is_broadcast())
+        };
+        match self {
+            Self::Direct { addr } => usable_addr(*addr),
+            Self::Mediate { agent, outer } => {
+                usable_addr(*agent) && usable_addr(*outer) && agent.is_ipv4() == outer.is_ipv4()
+            }
+        }
+    }
+
+    /// Whether this local endpoint matches a peer's kind and address family.
+    /// Mediated endpoints retain their own agents and outer mappings.
+    /// Socket binding, interface constraints and reachability are checked by the caller.
+    pub fn matches_peer(&self, peer: Self) -> bool {
+        *self != peer
+            && self.kind() == peer.kind()
+            && self.addr().family() == peer.addr().family()
+            && self.is_usable()
+            && peer.is_usable()
+    }
+
+    /// Classifies the network scope of this endpoint for listening and advertisement.
+    /// Direct addresses outside the recognized scope classes have no scope.
     pub fn scope(&self) -> Option<Scope> {
         match self {
             EndpointAddr::Direct { addr } => match addr.ip() {
@@ -261,6 +289,57 @@ impl From<(SocketAddr, SocketAddr)> for EndpointAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_peer_does_not_restrict_scope() {
+        let endpoints = [
+            "192.168.1.10:4433",
+            "8.8.4.4:50000",
+            "127.0.0.1:4433",
+            "100.64.0.1:4433",
+        ]
+        .map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
+        for local in endpoints {
+            for peer in endpoints {
+                assert_eq!(local.matches_peer(peer), local != peer);
+            }
+        }
+        let local = endpoints[0];
+        assert!(!local.matches_peer(local));
+        for invalid_peer in [
+            "0.0.0.0:443",
+            "1.1.1.1:0",
+            "224.0.0.1:443",
+            "255.255.255.255:443",
+            "[::1]:443",
+        ] {
+            assert!(!local.matches_peer(EndpointAddr::direct(invalid_peer.parse().unwrap())));
+        }
+    }
+
+    #[test]
+    fn matches_peer_validates_mediated_addresses() {
+        let local = EndpointAddr::mediate(
+            "127.0.0.1:20002".parse().unwrap(),
+            "8.8.4.4:50000".parse().unwrap(),
+        );
+        let peer = EndpointAddr::mediate(
+            "127.0.0.1:20003".parse().unwrap(),
+            "1.0.0.1:60000".parse().unwrap(),
+        );
+        assert!(local.matches_peer(peer));
+        assert!(!EndpointAddr::direct(*local).matches_peer(peer));
+        for outer in [
+            "0.0.0.0:50000",
+            "8.8.4.4:0",
+            "224.0.0.1:50000",
+            "[fd00::1]:50000",
+        ] {
+            let invalid = EndpointAddr::mediate(*local, outer.parse().unwrap());
+            assert!(!invalid.matches_peer(peer));
+            assert!(!peer.matches_peer(invalid));
+        }
+    }
 
     #[test]
     fn ipv4_public_reachability() {
