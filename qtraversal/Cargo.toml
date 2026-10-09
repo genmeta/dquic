@@ -1,10 +1,9 @@
 [package]
-# Temporarily unpublished while qtls depends on the rustls Git fork.
-publish = false
 name = "qtraversal"
 workspace = ".."
-version = "0.7.2"
+version = "0.8.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "NAT traversal utilities for QUIC, a part of dquic"
 repository.workspace = true
 license.workspace = true
@@ -15,8 +14,8 @@ categories.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
 qbase.workspace = true
-qprotocol = { path = "../qprotocol" }
-qtransport = { path = "../qtransport" }
+qprotocol.workspace = true
+qtransport.workspace = true
 rand.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tracing.workspace = true

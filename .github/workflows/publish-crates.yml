@@ -37,6 +37,7 @@ jobs:
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          FIRST_PUBLISH_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -46,16 +47,20 @@ jobs:
             mode=dry-run
           fi
 
+          # Dependencies must precede dependents for per-crate publication.
           packages=(
             qmacro
+            qtls
             qbase
             qdatagram
             qevent
-            qprotocol
             qresolve
             qudp
+            qprotocol
             qcongestion
             qrecovery
+            qtransport
+            qtraversal
             qconnection
             dquic
           )
@@ -83,6 +88,7 @@ jobs:
           )"
 
           packages_to_publish=()
+          first_releases=()
           while IFS=$'\t' read -r crate_name crate_version; do
             [ -n "$crate_name" ] || continue
             crate_state="$(
@@ -127,27 +133,40 @@ jobs:
               echo "publish $crate_name $crate_version"
               packages_to_publish+=("$crate_name")
             else
-              echo "skip $crate_name $crate_version (crate not yet initialized on crates.io)"
+              if [[ "$mode" == "publish" && -z "$FIRST_PUBLISH_TOKEN" ]]; then
+                echo "::error::$crate_name needs its first publication. Configure the CARGO_REGISTRY_TOKEN repository secret for this CI release."
+                exit 1
+              fi
+              echo "publish $crate_name $crate_version (first release)"
+              packages_to_publish+=("$crate_name")
+              first_releases+=("$crate_name")
             fi
           done <<< "$package_versions"
 
           if [[ "${#packages_to_publish[@]}" -eq 0 ]]; then
-            echo "no already-initialized crates need a new crates.io release"
+            echo "no workspace crates need a new crates.io release"
             exit 0
           fi
 
           if [[ "$mode" == "dry-run" ]]; then
             publish_args=(cargo publish --dry-run --locked)
             echo "dry-run publish packages: ${packages_to_publish[*]}"
+            for package in "${packages_to_publish[@]}"; do
+              publish_args+=(-p "$package")
+            done
+            "${publish_args[@]}"
           else
-            publish_args=(cargo publish --locked)
             echo "publish packages: ${packages_to_publish[*]}"
+            for package in "${packages_to_publish[@]}"; do
+              if [[ " ${first_releases[*]} " == *" $package "* ]]; then
+                echo "publish $package using first-release API token"
+                CARGO_REGISTRY_TOKEN="$FIRST_PUBLISH_TOKEN" cargo publish --locked -p "$package"
+              else
+                echo "publish $package using OIDC"
+                cargo publish --locked -p "$package"
+              fi
+            done
           fi
-
-          for package in "${packages_to_publish[@]}"; do
-            publish_args+=(-p "$package")
-          done
-          "${publish_args[@]}"
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')

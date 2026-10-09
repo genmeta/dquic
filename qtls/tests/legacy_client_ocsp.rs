@@ -15,12 +15,12 @@ use rustls::{
     pki_types::{ServerName, UnixTime, pem::PemObject},
 };
 
-const CA: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-const SERVER_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
-const CLIENT_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
-const CLIENT_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/client.key");
+const CA: &[u8] = include_bytes!("keychain/localhost/ca.cert");
+const SERVER_CERT: &[u8] = include_bytes!("keychain/localhost/server.cert");
+const SERVER_KEY: &[u8] = include_bytes!("keychain/localhost/server.key");
+const SERVER_OCSP: &[u8] = include_bytes!("keychain/localhost/server.ocsp");
+const CLIENT_CERT: &[u8] = include_bytes!("keychain/localhost/client.cert");
+const CLIENT_KEY: &[u8] = include_bytes!("keychain/localhost/client.key");
 
 #[derive(Debug)]
 struct ObservedServerVerifier {

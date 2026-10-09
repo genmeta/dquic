@@ -887,7 +887,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
     use tls_backend::pki_types::pem::PemObject;
     let provider = Arc::new(qtls::default_provider());
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../../../tests/keychain/localhost/ca.cert"
+        "../keychain/localhost/ca.cert"
     ))
     .unwrap()])
     .unwrap();
@@ -907,15 +907,13 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
             Arc::from("localhost"),
             vec![
                 qtls::CertificateDer::from_pem_slice(include_bytes!(
-                    "../../../tests/keychain/localhost/server.cert"
+                    "../keychain/localhost/server.cert"
                 ))
                 .unwrap(),
             ],
-            qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-                "../../../tests/keychain/localhost/server.key"
-            ))
-            .unwrap(),
-            include_bytes!("../../../tests/keychain/localhost/server.ocsp").to_vec(),
+            qtls::PrivateKeyDer::from_pem_slice(include_bytes!("../keychain/localhost/server.key"))
+                .unwrap(),
+            include_bytes!("../keychain/localhost/server.ocsp").to_vec(),
         )
         .unwrap(),
         resumption: qtls::ServerResumptionConfig::Disabled,

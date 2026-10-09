@@ -10,15 +10,14 @@ use qtls::{
 };
 use rustls::pki_types::pem::PemObject;
 
-const SERVER_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-const SERVER_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/server.key");
-const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-const CLIENT_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
-const CLIENT_KEY: &[u8] = include_bytes!("../../tests/keychain/localhost/client.key");
-const SERVER_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
-const SERVER_REVOKED_OCSP: &[u8] =
-    include_bytes!("../../tests/keychain/localhost/server-revoked.ocsp");
-const CLIENT_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/client.ocsp");
+const SERVER_CERT: &[u8] = include_bytes!("keychain/localhost/server.cert");
+const SERVER_KEY: &[u8] = include_bytes!("keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("keychain/localhost/ca.cert");
+const CLIENT_CERT: &[u8] = include_bytes!("keychain/localhost/client.cert");
+const CLIENT_KEY: &[u8] = include_bytes!("keychain/localhost/client.key");
+const SERVER_OCSP: &[u8] = include_bytes!("keychain/localhost/server.ocsp");
+const SERVER_REVOKED_OCSP: &[u8] = include_bytes!("keychain/localhost/server-revoked.ocsp");
+const CLIENT_OCSP: &[u8] = include_bytes!("keychain/localhost/client.ocsp");
 
 fn ticket_key_ring() -> TicketKeyRing {
     #[cfg(feature = "aws-lc-rs")]

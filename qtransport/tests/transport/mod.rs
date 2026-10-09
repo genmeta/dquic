@@ -94,10 +94,10 @@ use receive::receive_packets;
 pub(crate) mod sender;
 pub(crate) use sender::Sender;
 
-const CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.cert");
-const KEY: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.key");
-const CA_CERT: &[u8] = include_bytes!("../../../tests/keychain/localhost/ca.cert");
-const OCSP: &[u8] = include_bytes!("../../../tests/keychain/localhost/server.ocsp");
+const CERT: &[u8] = include_bytes!("../keychain/localhost/server.cert");
+const KEY: &[u8] = include_bytes!("../keychain/localhost/server.key");
+const CA_CERT: &[u8] = include_bytes!("../keychain/localhost/ca.cert");
+const OCSP: &[u8] = include_bytes!("../keychain/localhost/server.ocsp");
 
 fn tls_server(provider: Arc<qtls::CryptoProvider>, alpn: Vec<Vec<u8>>) -> qtls::TlsServer {
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();

@@ -761,10 +761,10 @@ mod client_ocsp_tests {
 
     use super::*;
 
-    const CA: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-    const CLIENT: &[u8] = include_bytes!("../../tests/keychain/localhost/client.cert");
-    const CLIENT_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/client.ocsp");
-    const SERVER_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
+    const CA: &[u8] = include_bytes!("../tests/keychain/localhost/ca.cert");
+    const CLIENT: &[u8] = include_bytes!("../tests/keychain/localhost/client.cert");
+    const CLIENT_OCSP: &[u8] = include_bytes!("../tests/keychain/localhost/client.ocsp");
+    const SERVER_OCSP: &[u8] = include_bytes!("../tests/keychain/localhost/server.ocsp");
 
     fn verifier() -> (ClientVerifier, PeerState) {
         let ca = CertificateDer::from_pem_slice(CA).unwrap();
@@ -922,12 +922,11 @@ mod server_ocsp_tests {
 
     use super::*;
 
-    const CA: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
-    const SERVER: &[u8] = include_bytes!("../../tests/keychain/localhost/server.cert");
-    const GOOD_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/server.ocsp");
-    const WRONG_OCSP: &[u8] = include_bytes!("../../tests/keychain/localhost/client.ocsp");
-    const REVOKED_OCSP: &[u8] =
-        include_bytes!("../../tests/keychain/localhost/server-revoked.ocsp");
+    const CA: &[u8] = include_bytes!("../tests/keychain/localhost/ca.cert");
+    const SERVER: &[u8] = include_bytes!("../tests/keychain/localhost/server.cert");
+    const GOOD_OCSP: &[u8] = include_bytes!("../tests/keychain/localhost/server.ocsp");
+    const WRONG_OCSP: &[u8] = include_bytes!("../tests/keychain/localhost/client.ocsp");
+    const REVOKED_OCSP: &[u8] = include_bytes!("../tests/keychain/localhost/server-revoked.ocsp");
 
     fn verifier(ca: &[u8]) -> (ServerVerifier, PeerState) {
         let ca = CertificateDer::from_pem_slice(ca).unwrap();
@@ -1037,7 +1036,7 @@ mod server_ocsp_tests {
         );
         assert!(peer.authorities.lock().unwrap().remote.is_none());
         let (untrusted, peer) =
-            self::verifier(include_bytes!("../../tests/keychain/root/rootCA-ECC.crt"));
+            self::verifier(include_bytes!("../tests/keychain/root/rootCA-ECC.crt"));
         assert!(
             untrusted
                 .verify_server_cert(&certificate, &[], &name, &[], UnixTime::now())

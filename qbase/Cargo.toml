@@ -1,9 +1,8 @@
 [package]
-# Temporarily unpublished while qtls depends on the rustls Git fork.
-publish = false
 name = "qbase"
-version = "0.6.4"
+version = "0.7.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "Core structure of the QUIC protocol, a part of dquic"
 readme.workspace = true
 repository.workspace = true
@@ -30,7 +29,7 @@ futures = { workspace = true }
 getset = { workspace = true }
 nom = { workspace = true }
 qmacro = { workspace = true }
-qtls = { path = "../qtls" }
+qtls = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }

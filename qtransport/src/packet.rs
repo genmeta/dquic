@@ -16,12 +16,12 @@ use qevent::quic::{
 pub mod assemble;
 pub mod channel;
 
-pub trait RcvdPacketHeader {
+pub trait LogPacketHeader {
     fn qlog_header(&self) -> PacketHeader;
     fn qlog_header_with_pn(&self, pn: u64) -> PacketHeader;
 }
 
-impl<H> RcvdPacketHeader for H
+impl<H> LogPacketHeader for H
 where
     PacketHeaderBuilder: for<'a> From<&'a H>,
 {
@@ -63,7 +63,7 @@ impl<H> CipherPacket<H> {
 
 impl<H> CipherPacket<H>
 where
-    H: RcvdPacketHeader,
+    H: LogPacketHeader,
 {
     pub fn new(header: H, payload: BytesMut, payload_offset: usize) -> Self {
         Self {
@@ -292,7 +292,7 @@ impl<H> PlainPacket<H> {
 
 impl<H> PlainPacket<H>
 where
-    H: RcvdPacketHeader,
+    H: LogPacketHeader,
 {
     pub fn qlog_header(&self) -> PacketHeader {
         self.header.qlog_header_with_pn(self.decoded_pn)

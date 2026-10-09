@@ -5,7 +5,7 @@ use qtls::{
 };
 use rustls::pki_types::pem::PemObject;
 
-const CA_CERT: &[u8] = include_bytes!("../../tests/keychain/localhost/ca.cert");
+const CA_CERT: &[u8] = include_bytes!("keychain/localhost/ca.cert");
 
 #[test]
 fn tls_endpoints_require_an_explicit_nonempty_root_store() {

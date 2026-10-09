@@ -190,12 +190,11 @@ mod tests {
 
     #[test]
     fn response_must_be_current() {
-        let issuer = CertificateDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/ca.cert"
-        ))
-        .unwrap();
+        let issuer =
+            CertificateDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/ca.cert"))
+                .unwrap();
         let certificate = CertificateDer::from_pem_slice(include_bytes!(
-            "../../tests/keychain/localhost/server.cert"
+            "../tests/keychain/localhost/server.cert"
         ))
         .unwrap();
         let mut store = RootCertStore::empty();
@@ -205,7 +204,7 @@ mod tests {
             certificates: vec![issuer].into(),
         };
         let algorithms = crate::default_provider().signature_verification_algorithms;
-        let response = include_bytes!("../../tests/keychain/localhost/server.ocsp");
+        let response = include_bytes!("../tests/keychain/localhost/server.ocsp");
 
         for now in [1_700_000_000, 2_200_000_000] {
             assert!(
