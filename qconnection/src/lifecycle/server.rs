@@ -242,7 +242,7 @@ pub async fn server_growing(
             // Receiving Finished selects the handshake path before waking TLS.
             // Until then, Handshake keeps the first flight independent of path CIDs.
             let summary = tls_ctx.finished().await?;
-            paths.assign_initial_dcid(&cid_registry.remote);
+            paths.cids.attach_remote(cid_registry.remote.clone());
             phase.enter_mature(Arc::new(MaturePhase {
                 parameters,
                 flow_ctrl,

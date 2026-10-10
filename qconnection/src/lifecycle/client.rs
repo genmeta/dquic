@@ -142,7 +142,7 @@ pub async fn client_growing(
                 parameters.local(ParameterId::ActiveConnectionIdLimit),
                 reliable_frames.clone(),
             );
-            paths.assign_initial_dcid(&remote_cids);
+            paths.cids.attach_remote(remote_cids.clone());
             let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
             let keys = ArcOneRttKeys::from(tls_context.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(

@@ -59,6 +59,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         Arc::new(qcongestion::HandshakeStatus::new(false)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Arc::default(),
+        &qtransport::path::PathCids::new(Default::default()),
     );
     path.client_handshaking();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.

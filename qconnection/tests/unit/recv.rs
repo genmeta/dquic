@@ -408,8 +408,9 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
                 let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
                     panic!("expected Initial");
                 };
+                assert_eq!(initial.dcid(), paths.cids.initial_dcid());
                 assert_eq!(
-                    initial.dcid(),
+                    paths.cids.initial_dcid(),
                     ConnectionId::from_slice(if !corrupt && epoch == Epoch::Initial {
                         b"peercid0"
                     } else {
@@ -429,29 +430,51 @@ async fn client_selects_handshake_but_not_initial_ping() {
         let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
             panic!("expected Initial");
         };
-        let original_dcid = initial.dcid();
+        assert_eq!(initial.dcid(), paths.cids.initial_dcid());
+        let original_dcid = paths.cids.initial_dcid();
         assert_eq!(
-            (first.selected(), second.selected()),
-            (Path::MP_INITIAL, Path::MP_INITIAL)
+            (
+                super::selection(&paths, &first),
+                super::selection(&paths, &second)
+            ),
+            (u8::MAX, u8::MAX)
         );
         receive_ping(Role::Client, epoch, true, &paths, &first).await;
         assert_eq!(
-            (first.selected(), second.selected()),
-            (Path::MP_INITIAL, Path::MP_INITIAL)
+            (
+                super::selection(&paths, &first),
+                super::selection(&paths, &second)
+            ),
+            (u8::MAX, u8::MAX)
         );
-        assert_eq!(initial.dcid(), original_dcid);
+        assert_eq!(paths.cids.initial_dcid(), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
         let expected = if epoch == Epoch::Handshake {
-            (Path::SUSPEND, Path::SELECTED)
+            (0, 1)
         } else {
-            (Path::MP_INITIAL, Path::MP_INITIAL)
+            (u8::MAX, u8::MAX)
         };
-        assert_eq!((first.selected(), second.selected()), expected);
+        assert_eq!(
+            (
+                super::selection(&paths, &first),
+                super::selection(&paths, &second)
+            ),
+            expected
+        );
         if epoch == Epoch::Initial {
-            assert_eq!(initial.dcid(), ConnectionId::from_slice(b"peercid0"));
+            assert_eq!(
+                paths.cids.initial_dcid(),
+                ConnectionId::from_slice(b"peercid0")
+            );
         }
         receive_ping(Role::Client, epoch, false, &paths, &first).await;
-        assert_eq!((first.selected(), second.selected()), expected);
+        assert_eq!(
+            (
+                super::selection(&paths, &first),
+                super::selection(&paths, &second)
+            ),
+            expected
+        );
         paths.retire_all();
     }
 }
@@ -503,8 +526,11 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     receive_bytes(bytes, space.clone(), &paths, &ipv6).await;
 
     assert_eq!(
-        (ipv6.selected(), ipv4.selected()),
-        (Path::MP_INITIAL, Path::MP_INITIAL)
+        (
+            super::selection(&paths, &ipv6),
+            super::selection(&paths, &ipv4)
+        ),
+        (u8::MAX, u8::MAX)
     );
     assert!(space.sent_journal.lock_guard().packet(0).is_none());
     assert_eq!(
@@ -513,7 +539,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     );
     assert!(ipv6.cc.need_ack(Epoch::Initial).is_none());
     assert_eq!(
-        crate::common::initial_phase(&paths).dcid(),
+        paths.cids.initial_dcid(),
         ConnectionId::from_slice(b"peercid0")
     );
 
@@ -524,8 +550,11 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     let bytes = seal(header(), &peer.sealing, &journal, [&mut crypto]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv4).await;
     assert_eq!(
-        (ipv6.selected(), ipv4.selected()),
-        (Path::SUSPEND, Path::SELECTED)
+        (
+            super::selection(&paths, &ipv6),
+            super::selection(&paths, &ipv4)
+        ),
+        (0, 1)
     );
     let mut received = [0; 4];
     space
@@ -544,18 +573,27 @@ async fn server_initial_does_not_select_but_authenticated_handshake_does() {
     let (paths, first, second) = paths(Role::Server);
     receive_ping(Role::Server, Epoch::Initial, false, &paths, &first).await;
     assert_eq!(
-        (first.selected(), second.selected()),
-        (Path::MP_INITIAL, Path::MP_INITIAL)
+        (
+            super::selection(&paths, &first),
+            super::selection(&paths, &second)
+        ),
+        (u8::MAX, u8::MAX)
     );
     receive_ping(Role::Server, Epoch::Handshake, true, &paths, &first).await;
     assert_eq!(
-        (first.selected(), second.selected()),
-        (Path::MP_INITIAL, Path::MP_INITIAL)
+        (
+            super::selection(&paths, &first),
+            super::selection(&paths, &second)
+        ),
+        (u8::MAX, u8::MAX)
     );
     receive_ping(Role::Server, Epoch::Handshake, false, &paths, &second).await;
     assert_eq!(
-        (first.selected(), second.selected()),
-        (Path::SUSPEND, Path::SELECTED)
+        (
+            super::selection(&paths, &first),
+            super::selection(&paths, &second)
+        ),
+        (0, 1)
     );
     paths.retire_all();
 }
@@ -626,12 +664,11 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
         )
         .await;
         assert_eq!(
-            (first.selected(), second.selected()),
-            if pn == 1 {
-                (Path::SUSPEND, Path::SELECTED)
-            } else {
-                (Path::MP_INITIAL, Path::MP_INITIAL)
-            }
+            (
+                super::selection(&paths, &first),
+                super::selection(&paths, &second)
+            ),
+            if pn == 1 { (0, 1) } else { (u8::MAX, u8::MAX) }
         );
     }
     assert!(second.cc.need_ack(Epoch::Initial).is_none());
@@ -659,6 +696,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.resender.clone(),
+            &paths.cids,
         ));
         path.validate();
         paths
@@ -696,11 +734,18 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         paths.phase().get(),
         crate::ConnPhase::Handshake(_)
     ));
-    assert!(first.dcid_cell.read().unwrap().is_none());
-    assert!(second.dcid_cell.read().unwrap().is_none());
+    assert!(
+        matches!(super::borrow(&first), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+    );
+    assert!(
+        matches!(super::borrow(&second), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+    );
     assert_eq!(
-        (first.selected(), second.selected()),
-        (Path::MP_INITIAL, Path::MP_INITIAL)
+        (
+            super::selection(&paths, &first),
+            super::selection(&paths, &second)
+        ),
+        (u8::MAX, u8::MAX)
     );
 
     mature
@@ -746,20 +791,23 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     .unwrap();
     receive_bytes(bytes, mature.spaces.initial.clone(), &paths, &second).await;
     assert_eq!(
-        (first.selected(), second.selected()),
-        (Path::SUSPEND, Path::SELECTED)
+        (
+            super::selection(&paths, &first),
+            super::selection(&paths, &second)
+        ),
+        (0, 1)
     );
-    assert!(second.dcid_cell.read().unwrap().is_none());
+    assert!(
+        matches!(super::borrow(&second), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+    );
 
     // Growing assigns only after selection and before publishing Mature.
-    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    paths.cids.attach_remote(mature.cid_registry.remote.clone());
     paths.phase().enter_mature(mature.phase.clone());
     assert!(matches!(paths.phase().get(), crate::ConnPhase::Mature(_)));
-    assert!(first.dcid_cell.read().unwrap().is_none());
-    assert!(
-        matches!(second.dcid_cell.read().unwrap().as_ref().unwrap().borrow_cid(second.send_waker.clone()),
-        Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
-    );
+    assert!(super::borrow(&first).is_pending());
+    assert!(matches!(super::borrow(&second),
+        Poll::Ready(Some(cid)) if *cid == mature.peer_cid()));
     mature
         .spaces
         .handshake
@@ -806,6 +854,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
                 paths.resender.clone(),
+                &paths.cids,
             ));
             paths
                 .entries

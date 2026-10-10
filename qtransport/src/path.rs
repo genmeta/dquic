@@ -2,10 +2,7 @@
 use std::{
     collections::VecDeque,
     future::poll_fn,
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicU8, AtomicU16, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU16},
     task::{Context, Poll},
     time::Duration,
 };
@@ -13,7 +10,6 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     Epoch,
-    cid::{ArcCidCell, ArcRemoteCids},
     frame::{Frame, PathChallengeFrame, PathResponseFrame, io::ReceiveFrame},
     net::{route::Pathway, tx::ArcSendWakers},
     packet::{self, Package, PacketBuffer, assemble::Metadata},
@@ -26,7 +22,10 @@ use qcongestion::{
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
-use crate::{ArcReliableFrames, Error};
+use crate::Error;
+mod cids;
+pub use cids::{PathCid, PathCids};
+
 mod anti_amplifier;
 pub use anti_amplifier::AntiAmplifier;
 
@@ -44,11 +43,7 @@ pub enum PathState {
 
 pub struct Path {
     pub pathway: Pathway,
-    pub dcid_cell: RwLock<Option<ArcCidCell<ArcReliableFrames>>>,
-    // 0xff: undecided, 0: suspended, 1: selected, 2: released after handshake
-    // confirmation and the selected sender's CID allocation.
-    selected: AtomicU8,
-    handshake: Arc<HandshakeStatus>,
+    pub cid: Arc<PathCid>,
     pub cc: ArcCC,
     challenge: Mutex<Option<(PathChallengeFrame, bool)>>,
     pub send_waker: ArcSendWakers,
@@ -58,20 +53,16 @@ pub struct Path {
 }
 
 impl Path {
-    pub const MP_INITIAL: u8 = 0xFF;
-    pub const SUSPEND: u8 = 0;
-    pub const SELECTED: u8 = 1;
-    pub const HANDSHAKED: u8 = 2;
-
     /// Construct a path using the connection's shared handshake lifecycle.
     pub fn new(
         pathway: Pathway,
         handshake: Arc<HandshakeStatus>,
         heartbeat: ArcHeartbeat,
         trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+        cids: &Arc<PathCids>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
-        let status = PathStatus::new(handshake.clone(), Arc::new(AtomicU16::new(1200)));
+        let status = PathStatus::new(handshake, Arc::new(AtomicU16::new(1200)));
         let cc = ArcCC::new(
             Algorithm::NewReno,
             Duration::from_millis(25),
@@ -81,22 +72,13 @@ impl Path {
         );
         Self {
             pathway,
-            dcid_cell: RwLock::new(None),
-            selected: AtomicU8::new(u8::MAX),
-            handshake,
+            cid: cids.register(pathway, send_waker.clone()),
             cc,
             challenge: Mutex::new(None),
             send_waker,
             responses: Mutex::new(VecDeque::new()),
             anti_amplifier: Arc::new(AntiAmplifier::new(status)),
             heartbeat,
-        }
-    }
-
-    pub fn assign_dcid(&self, remote: &ArcRemoteCids<ArcReliableFrames>) {
-        let mut cell = self.dcid_cell.write().unwrap();
-        if self.state() != PathState::Retired {
-            cell.get_or_insert_with(|| remote.apply_dcid());
         }
     }
 
@@ -110,32 +92,6 @@ impl Path {
             }
         })
         .await
-    }
-
-    pub fn decide(&self, selected: bool) {
-        self.selected.store(
-            if selected {
-                Self::SELECTED
-            } else {
-                Self::SUSPEND
-            },
-            Ordering::Release,
-        );
-        self.send_waker.wake_all();
-    }
-
-    pub fn selected(&self) -> u8 {
-        self.selected.load(Ordering::Acquire)
-    }
-
-    pub fn got_handshake_key(&self) {
-        self.handshake.got_handshake_key();
-    }
-
-    pub fn handshake_confirmed(&self) {
-        self.handshake.handshake_confirmed();
-        self.selected.store(Self::HANDSHAKED, Ordering::Release);
-        self.send_waker.wake_all();
     }
 
     pub fn state(&self) -> PathState {
@@ -239,10 +195,8 @@ impl Path {
     }
 
     pub fn retire(&self) {
+        self.cid.retire();
         self.anti_amplifier.retire();
-        if let Some(cell) = self.dcid_cell.write().unwrap().take() {
-            cell.retire();
-        }
         self.heartbeat.stop();
         self.clear_challenge();
         self.responses.lock().unwrap().clear();
@@ -350,7 +304,10 @@ impl<B: BufMut + ?Sized> Package<B> for &Path {
 
 #[cfg(test)]
 mod package_tests {
-    use std::{sync::atomic::AtomicUsize, task::Waker};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Waker,
+    };
 
     use qbase::{
         net::addr::EndpointAddr,
@@ -369,21 +326,23 @@ mod package_tests {
     #[tokio::test(start_paused = true)]
     async fn handshake_confirmation_stops_early_epoch_pto() {
         use qbase::Epoch;
+        let handshake = Arc::new(HandshakeStatus::new(false));
         let path = Path::new(
             Pathway::new(
                 EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
                 EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
             ),
-            Arc::new(HandshakeStatus::new(false)),
+            handshake.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Arc::new(RwLock::new(IndexDeque::with_capacity(3))),
+            &crate::path::PathCids::new(Default::default()),
         );
         path.client_handshaking();
-        path.got_handshake_key();
+        handshake.got_handshake_key();
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
         }
-        path.handshake_confirmed();
+        handshake.handshake_confirmed();
         for _ in 0..8 {
             tokio::time::advance(Duration::from_secs(1)).await;
             path.cc.do_tick().unwrap();
@@ -404,6 +363,7 @@ mod package_tests {
                     Arc::new(HandshakeStatus::new(true)),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     Arc::default(),
+                    &crate::path::PathCids::new(Default::default()),
                 );
                 if queued {
                     path.recv_frame(PathChallengeFrame::from_slice(&[1; 8]))

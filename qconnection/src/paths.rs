@@ -6,7 +6,7 @@ use std::{
 
 use qbase::{
     ArcReceiving, Epoch,
-    cid::{ArcRemoteCids, ConnectionId},
+    cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
@@ -17,7 +17,7 @@ use qbase::{
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
     keys::ArcKeys,
-    path::{Path, PathState},
+    path::{Path, PathCids, PathState},
     space::{ArcSpaces, InitialSpace, Spaces},
     terminate::ArcTerminator,
 };
@@ -29,6 +29,7 @@ use crate::{
 /// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
+    pub cids: Arc<PathCids>,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
     pub(crate) resender: ArcResend,
@@ -66,6 +67,7 @@ impl Paths {
         let phase = ArcConnPhase::initial(InitialPhase::new(dcid, local_cids));
         let paths = Arc::new(Self {
             phase,
+            cids: PathCids::new(dcid),
             spaces: Arc::new(RwLock::new(spaces)),
             reliable_frames,
             resender: Arc::new(RwLock::new(resender)),
@@ -144,25 +146,14 @@ impl Paths {
                 *self.max_idle_timeout.lock().unwrap(),
             ),
             self.resender.clone(),
+            &self.cids,
         ));
-        if entries
-            .values()
-            .any(|path| path.selected() == Path::HANDSHAKED)
-        {
-            path.handshake_confirmed();
+        if self.cids.is_confirmed() {
             if self.role == Role::Client {
                 path.client_validating();
             }
-        } else if entries
-            .values()
-            .any(|path| path.selected() != Path::MP_INITIAL)
-        {
-            path.decide(false);
-        } else if handshaking {
+        } else if self.cids.is_initial() && handshaking {
             path.client_handshaking();
-        }
-        if let ConnPhase::Mature(phase) = self.phase.get() {
-            path.assign_dcid(&phase.cid_registry.remote);
         }
         entries.insert(pathway, path.clone());
         drop(entries);
@@ -174,16 +165,15 @@ impl Paths {
 
     pub(crate) fn select_path(&self, path: &Arc<Path>) {
         let entries = self.entries.lock().unwrap();
-        if path.selected() != Path::MP_INITIAL
-            || !entries
-                .get(&path.pathway)
-                .is_some_and(|current| Arc::ptr_eq(current, path))
+        if !entries
+            .get(&path.pathway)
+            .is_some_and(|current| Arc::ptr_eq(current, path))
+            || !self.cids.select(&path.cid)
         {
             return;
         }
         for other in entries.values() {
-            other.decide(other.pathway == path.pathway);
-            if other.selected() == 0 {
+            if !Arc::ptr_eq(other, path) {
                 other.guard_amplification();
             }
         }
@@ -244,37 +234,31 @@ impl Paths {
         }
     }
 
-    /// Growing reserves sequence zero for the selected handshake path before Mature.
-    pub(crate) fn assign_initial_dcid(&self, remote: &ArcRemoteCids<ArcReliableFrames>) {
-        let entries = self.entries.lock().unwrap();
-        if let Some(path) = entries
-            .values()
-            .find(|path| path.selected() == Path::SELECTED)
-        {
-            path.assign_dcid(remote);
-        }
-    }
-
     pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
         self.handshake.handshake_confirmed();
-        let ConnPhase::Mature(phase) = self.phase.get() else {
+        let ConnPhase::Mature(_) = self.phase.get() else {
             return;
         };
         let entries = self.entries.lock().unwrap();
+        if self.cids.is_confirmed() {
+            return;
+        }
+        // Prepare per-path state before releasing suspended senders.
         for path in entries.values() {
-            path.assign_dcid(&phase.cid_registry.remote);
-            if path.selected() == Path::SELECTED {
+            if self.cids.is_selected(&path.cid) {
                 path.validate();
             } else if self.role == Role::Client {
                 path.client_validating();
             }
-            path.handshake_confirmed();
+        }
+        self.cids.confirm_handshake();
+        for path in entries.values() {
             self.start_validation(path);
         }
     }
 
     pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if path.selected() != 2 {
+        if !self.cids.is_confirmed() {
             return;
         }
         if !matches!(
