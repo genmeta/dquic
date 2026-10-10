@@ -296,7 +296,13 @@ impl ServerRegistry {
                 let router = QuicRouter::global();
                 let reliable_frames = ArcReliableFrames::with_capacity(0);
                 let router_registry =
-                    router.insert(odcid.into(), inbox.clone(), reliable_frames.clone());
+                    match router.try_insert(odcid.into(), inbox.clone(), reliable_frames.clone()) {
+                        Ok(registry) => registry,
+                        Err(existing) => {
+                            existing.try_send_initial(packet, pathway, link);
+                            return;
+                        }
+                    };
                 let initial_scid = router_registry.gen_unique_cid();
                 let local_cids =
                     ArcLocalCids::new(Role::Server, odcid, initial_scid, router_registry);
@@ -312,9 +318,9 @@ impl ServerRegistry {
                     Duration::ZERO,
                     Duration::ZERO,
                 );
-                if !inbox.try_send_initial(packet, pathway, link) {
-                    return;
-                }
+                // Other receivers may already have filled the published inbox.
+                // Drive the connection even if this particular Initial is dropped.
+                inbox.try_send_initial(packet, pathway, link);
 
                 let tick = crate::recv::tick(paths.clone());
                 let growing = crate::server_growing(

@@ -113,7 +113,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
         paths
             .snapshot()
             .iter()
-            .all(|path| super::selection(&paths, &path) == 2)
+            .all(|path| super::selection(&paths, path) == 2)
     );
     assert!(first.is_validated());
     assert!(!second.is_validated());
@@ -127,7 +127,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
         paths
             .snapshot()
             .iter()
-            .all(|path| super::selection(&paths, &path) == 2)
+            .all(|path| super::selection(&paths, path) == 2)
     );
     let validating = paths.responses.lock().unwrap().len();
     assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway)));
@@ -193,7 +193,7 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
         paths
             .snapshot()
             .iter()
-            .all(|path| super::selection(&paths, &path) == 0)
+            .all(|path| super::selection(&paths, path) == 0)
     );
     paths.retire_all();
 }
