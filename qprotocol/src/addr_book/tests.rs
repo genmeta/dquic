@@ -470,30 +470,22 @@ fn concurrent_subscription_and_updates_have_no_gap_or_duplicate_additions() {
 }
 
 #[test]
-fn direct_pathways_select_existing_endpoints_by_family_without_scope_restrictions() {
+fn direct_pathways_exclude_loopback_for_non_loopback_peers_and_allow_nat() {
     let book = AddressBook::new();
     let first = addr("192.168.1.10:4433");
     let second = addr("192.168.1.20:4433");
     let loopback = addr("127.0.0.1:4433");
     let v6 = addr("[fd00::1]:4433");
-    for bound in [second, first, loopback, v6] {
+    let v6_loopback = addr("[::1]:4433");
+    for bound in [second, first, loopback, v6, v6_loopback] {
         book.insert(bound, EndpointAddr::direct(bound), Scope::Internal, None)
             .unwrap();
     }
     book.insert(first, direct("8.8.4.4:50000"), Scope::External, None)
         .unwrap();
-    for peer in [
-        direct("1.1.1.1:443"),
-        direct("192.168.1.30:443"),
-        direct("127.0.0.1:4434"),
-    ] {
-        let mut expected = [
-            first.into(),
-            second.into(),
-            loopback.into(),
-            direct("8.8.4.4:50000"),
-        ]
-        .map(|local| Pathway::new(local, peer));
+    for peer in [direct("1.1.1.1:443"), direct("192.168.1.30:443")] {
+        let mut expected = [first.into(), second.into(), direct("8.8.4.4:50000")]
+            .map(|local| Pathway::new(local, peer));
         expected.sort_unstable();
         assert_eq!(book.pathways_to(peer, &Source::System), expected);
     }
@@ -502,10 +494,21 @@ fn direct_pathways_select_existing_endpoints_by_family_without_scope_restriction
         book.pathways_to(v6_peer, &Source::System),
         vec![Pathway::new(v6.into(), v6_peer)]
     );
-    let mut expected = [first.into(), second.into(), direct("8.8.4.4:50000")]
-        .map(|local| Pathway::new(local, loopback.into()));
-    expected.sort_unstable();
-    assert_eq!(book.pathways_to(loopback.into(), &Source::System), expected);
+    assert!(
+        book.pathways_to(loopback.into(), &Source::System)
+            .is_empty()
+    );
+    for (peer, locals) in [
+        (direct("127.0.0.1:4434"), vec![loopback.into()]),
+        (direct("[::1]:4434"), vec![v6_loopback.into()]),
+    ] {
+        let mut expected = locals
+            .into_iter()
+            .map(|local| Pathway::new(local, peer))
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        assert_eq!(book.pathways_to(peer, &Source::System), expected);
+    }
 }
 
 #[test]
@@ -564,11 +567,7 @@ async fn different_relays_keep_registered_local_endpoints_for_every_nat_type() {
             &socket
         ));
         let direct_peer = direct("127.0.0.1:1");
-        let mut expected = vec![
-            Pathway::new(bound.into(), direct_peer),
-            Pathway::new(outer, direct_peer),
-        ];
-        expected.sort_unstable();
+        let expected = vec![Pathway::new(bound.into(), direct_peer)];
         assert_eq!(book.pathways_to(direct_peer, &Source::System), expected);
     }
     book.remove(local);
@@ -650,8 +649,7 @@ async fn public_insertions_read_the_socket_binding_and_do_not_retain_it() {
     assert_eq!(book.mdns_endpoints(bound).as_ref(), &[inner]);
     assert_eq!(book.ddns_endpoints().as_ref(), &[outer]);
     let peer = direct("127.0.0.1:1");
-    let mut expected = vec![Pathway::new(inner, peer), Pathway::new(outer, peer)];
-    expected.sort_unstable();
+    let expected = vec![Pathway::new(inner, peer)];
     assert_eq!(
         book.pathways_to(peer, &mdns(device.name(), Family::V4)),
         expected
@@ -683,11 +681,7 @@ async fn an_unscoped_socket_does_not_satisfy_an_mdns_interface_constraint() {
         Some(&None)
     );
     let peer = direct("127.0.0.1:1");
-    let mut expected = vec![
-        Pathway::new(bound.into(), peer),
-        Pathway::new(direct("8.8.4.4:50000"), peer),
-    ];
-    expected.sort_unstable();
+    let expected = vec![Pathway::new(bound.into(), peer)];
     assert_eq!(book.pathways_to(peer, &Source::System), expected);
     assert!(
         book.pathways_to(peer, &mdns(loopback_device().name(), Family::V4))
@@ -773,9 +767,9 @@ fn dns_sources_select_registered_interfaces_without_ip_inference() {
         book.pathways_to(direct("[fd00::10]:443"), &mdns("lan0", Family::V6))
             .is_empty()
     );
-    assert_eq!(
-        book.pathways_to(direct("127.0.0.1:443"), &mdns("lan0", Family::V4)),
-        vec![Pathway::new(lan0.into(), direct("127.0.0.1:443"))]
+    assert!(
+        book.pathways_to(direct("127.0.0.1:443"), &mdns("lan0", Family::V4))
+            .is_empty()
     );
     let public_peer = direct("1.1.1.1:443");
     assert_eq!(
