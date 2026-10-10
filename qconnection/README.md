@@ -69,7 +69,7 @@ DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignore
 
 `QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，由客户端生命周期启动并持有 DNS 查询任务。查询使用全局 Resolver 的快照调用 `lookup(server_name, "", None)`，持续消费返回的流；每条 DNS 记录与当前 AddressBook 配对后调用 `paths.add_path`，重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；客户端在握手失败或连接关闭时取消并等待查询任务退出，再回收路径。服务端不启动 DNS 查询，Paths 仅管理路径。
 
-客户端将 DNS 来源直接交给 `AddressBook::pathways_to(peer, &source)`。AddressBook 按来源、地址族、通信范围和已登记的网卡信息生成候选；客户端检查候选对应的 socket 注册是否仍有效，然后添加路径。mDNS 的 `nic` 精确匹配登记时的网卡名称，缺少网卡信息时跳过候选；其他 DNS 来源沿用地址范围和地址族匹配，也可以返回内网地址。配对时不枚举系统网卡，不根据 IP 推断网卡，也不改写网卡名称。
+客户端将 DNS 来源直接交给 `AddressBook::pathways_to(peer, &source)`。AddressBook 使用 `EndpointAddr::matches_peer` 匹配端点类型和地址族，回环与非回环端点在两个方向都不配对；其他 scope 不要求相同，保留私网端点经 NAT 访问公网的候选。客户端检查候选对应的 socket 注册是否仍有效，然后添加路径。mDNS 的 `nic` 精确匹配登记时的网卡名称，缺少网卡信息时跳过候选；其他 DNS 来源也可以返回内网地址。配对时不枚举系统网卡，不根据 IP 推断网卡，也不改写网卡名称。
 
 `insert_inner / insert_outer` 直接接收已创建的 socket，例如 `addresses.insert_inner(&socket, endpoint)`。目录读取其 `local_addr()` 和 `bound_device()`，与端点发布原子地记录绑定信息，不持有 socket。同一绑定的 aliases 必须使用一致的网卡信息；普通 socket 的网卡信息记为未知。冲突会导致登记失败；`remove_bound` 同时清除端点、NAT 和网卡记录。`BindUri` 的解析结果保留 `netdev` 返回的原始网卡名称和索引。后绑定网卡的 `UdpSocket::bind_device` 要求可变引用，并在成功时同步元数据；已发布的绑定需要先撤销再重新登记。
 

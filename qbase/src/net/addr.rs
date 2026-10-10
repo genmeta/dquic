@@ -125,6 +125,8 @@ impl EndpointAddr {
     }
 
     /// Whether this local endpoint matches a peer's kind and address family.
+    /// Loopback endpoints only pair with loopback endpoints in either direction;
+    /// other scopes may differ for NAT.
     /// Mediated endpoints retain their own agents and outer mappings.
     /// Socket binding, interface constraints and reachability are checked by the caller.
     pub fn matches_peer(&self, peer: Self) -> bool {
@@ -133,6 +135,7 @@ impl EndpointAddr {
             && self.addr().family() == peer.addr().family()
             && self.is_usable()
             && peer.is_usable()
+            && ((self.scope() == Some(Scope::Loopback)) == (peer.scope() == Some(Scope::Loopback)))
     }
 
     /// Classifies the network scope of this endpoint for listening and advertisement.
@@ -291,14 +294,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_peer_does_not_restrict_scope() {
-        let endpoints = [
-            "192.168.1.10:4433",
-            "8.8.4.4:50000",
-            "127.0.0.1:4433",
-            "100.64.0.1:4433",
-        ]
-        .map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
+    fn matches_peer_allows_nat_across_non_loopback_scopes() {
+        let endpoints = ["192.168.1.10:4433", "8.8.4.4:50000", "100.64.0.1:4433"]
+            .map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
         for local in endpoints {
             for peer in endpoints {
                 assert_eq!(local.matches_peer(peer), local != peer);
@@ -314,6 +312,27 @@ mod tests {
             "[::1]:443",
         ] {
             assert!(!local.matches_peer(EndpointAddr::direct(invalid_peer.parse().unwrap())));
+        }
+    }
+
+    #[test]
+    fn loopback_peers_match_in_both_families_including_mapped_ipv4() {
+        for (local, peer, non_loopback) in [
+            ("127.0.0.1:4433", "127.0.0.2:443", "1.1.1.1:443"),
+            ("127.0.0.1:4433", "127.0.0.2:443", "192.168.1.10:443"),
+            ("[::1]:4433", "[::1]:443", "[2001:4860:4860::8888]:443"),
+            (
+                "[::ffff:127.0.0.1]:4433",
+                "[::ffff:127.0.0.2]:443",
+                "[fd00::1]:443",
+            ),
+        ] {
+            let local = EndpointAddr::direct(local.parse().unwrap());
+            let peer = EndpointAddr::direct(peer.parse().unwrap());
+            let non_loopback = EndpointAddr::direct(non_loopback.parse().unwrap());
+            assert!(local.matches_peer(peer));
+            assert!(!local.matches_peer(non_loopback));
+            assert!(!non_loopback.matches_peer(local));
         }
     }
 

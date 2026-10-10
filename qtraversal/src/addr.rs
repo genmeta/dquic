@@ -97,8 +97,8 @@ impl PunchAddresses {
             .values()
             .filter(|local| {
                 local.frame.tire() == remote.tire()
-                    && local.frame.is_ipv4() == remote.is_ipv4()
-                    && *local.frame != *remote
+                    && EndpointAddr::direct(*local.frame)
+                        .matches_peer(EndpointAddr::direct(*remote))
             })
             .min_by_key(|local| {
                 (
@@ -182,5 +182,41 @@ mod tests {
         assert!(!addresses.add_remote(remote));
         assert_eq!(addresses.remove_local_endpoint(endpoint).len(), 1);
         assert!(addresses.pick_local(remote).is_none());
+    }
+
+    #[test]
+    fn loopback_and_bridge_candidates_cannot_pair_in_either_direction() {
+        let loopback = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
+        let bridge = EndpointAddr::direct("192.168.215.0:5001".parse().unwrap());
+        for (local, remote) in [(loopback, bridge), (bridge, loopback)] {
+            let mut addresses = PunchAddresses::default();
+            addresses.add_local(
+                local.addr(),
+                local,
+                local.addr(),
+                0,
+                NatType::RestrictedPort,
+            );
+            let remote = AddAddressFrame::new(9, remote.addr(), 0, NatType::RestrictedPort);
+            assert!(addresses.pick_local(remote).is_none());
+        }
+        let mut addresses = PunchAddresses::default();
+        addresses.add_local(
+            bridge.addr(),
+            bridge,
+            bridge.addr(),
+            0,
+            NatType::RestrictedPort,
+        );
+        let public = AddAddressFrame::new(
+            9,
+            "8.8.8.8:6000".parse().unwrap(),
+            0,
+            NatType::RestrictedPort,
+        );
+        assert!(
+            addresses.pick_local(public).is_some(),
+            "private-to-public NAT candidates remain valid"
+        );
     }
 }

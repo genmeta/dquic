@@ -317,7 +317,9 @@ impl AddressBook {
     /// Direct peers match Direct endpoints; mediated peers match Mediate endpoints and
     /// retain each local endpoint's own agent and outer mapping. No endpoint is synthesized.
     /// mDNS sources restrict the address family and interface using registered binding metadata;
-    /// missing metadata cannot match. The caller checks socket liveness and reachability.
+    /// missing metadata cannot match. Loopback endpoints only match loopback peers;
+    /// other scopes may differ, as with NAT.
+    /// The caller checks socket liveness and reachability.
     pub fn pathways_to(&self, peer: EndpointAddr, source: &Source) -> Vec<Pathway> {
         let state = self.state.lock().unwrap();
         let mut pathways = state
