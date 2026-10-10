@@ -423,7 +423,7 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
 }
 
 #[tokio::test]
-async fn client_selects_authenticated_initial_or_handshake_instead_of_first_added_path() {
+async fn client_selects_handshake_but_not_initial_ping() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let (paths, first, second) = paths(Role::Client);
         let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
@@ -441,20 +441,102 @@ async fn client_selects_authenticated_initial_or_handshake_instead_of_first_adde
         );
         assert_eq!(initial.dcid(), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
-        assert_eq!(
-            (first.selected(), second.selected()),
+        let expected = if epoch == Epoch::Handshake {
             (Path::SUSPEND, Path::SELECTED)
-        );
+        } else {
+            (Path::MP_INITIAL, Path::MP_INITIAL)
+        };
+        assert_eq!((first.selected(), second.selected()), expected);
         if epoch == Epoch::Initial {
             assert_eq!(initial.dcid(), ConnectionId::from_slice(b"peercid0"));
         }
         receive_ping(Role::Client, epoch, false, &paths, &first).await;
-        assert_eq!(
-            (first.selected(), second.selected()),
-            (Path::SUSPEND, Path::SELECTED)
-        );
+        assert_eq!((first.selected(), second.selected()), expected);
         paths.retire_all();
     }
+}
+
+#[tokio::test]
+async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
+    use qbase::{
+        frame::CryptoFrame,
+        packet::{InvalidPacketNumber, PacketNumber},
+    };
+    use qcongestion::Transport as _;
+    use tokio::io::AsyncReadExt;
+
+    let paths = crate::common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"localcid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let ipv6 = paths.add_path(Pathway::new(
+        "[::1]:30001".parse::<EndpointAddr>().unwrap(),
+        "[::1]:30002".parse().unwrap(),
+    ));
+    let ipv4 = paths.add_path(Pathway::new(
+        "127.0.0.1:30001".parse::<EndpointAddr>().unwrap(),
+        "127.0.0.1:30002".parse().unwrap(),
+    ));
+    let space = crate::common::initial_space(&paths.spaces);
+    let header = || {
+        LongHeaderBuilder::with_cid(
+            ConnectionId::from_slice(b"localcid"),
+            ConnectionId::from_slice(b"peercid0"),
+        )
+        .initial(vec![])
+    };
+    // Give the peer a submitted packet to acknowledge.
+    seal(
+        header(),
+        &keys(false).sealing,
+        &space.sent_journal,
+        [&mut PingFrame],
+    )
+    .unwrap();
+    space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+    let peer = keys(true);
+    let journal = ArcSentJournal::default();
+    let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+    let bytes = seal(header(), &peer.sealing, &journal, [&mut ack]).unwrap();
+    receive_bytes(bytes, space.clone(), &paths, &ipv6).await;
+
+    assert_eq!(
+        (ipv6.selected(), ipv4.selected()),
+        (Path::MP_INITIAL, Path::MP_INITIAL)
+    );
+    assert!(space.sent_journal.lock_guard().packet(0).is_none());
+    assert_eq!(
+        space.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
+        Err(InvalidPacketNumber::Duplicate)
+    );
+    assert!(ipv6.cc.need_ack(Epoch::Initial).is_none());
+    assert_eq!(
+        crate::common::initial_phase(&paths).dcid(),
+        ConnectionId::from_slice(b"peercid0")
+    );
+
+    let mut crypto = (
+        CryptoFrame::new(0u32.into(), 4u32.into()),
+        b"data".as_slice(),
+    );
+    let bytes = seal(header(), &peer.sealing, &journal, [&mut crypto]).unwrap();
+    receive_bytes(bytes, space.clone(), &paths, &ipv4).await;
+    assert_eq!(
+        (ipv6.selected(), ipv4.selected()),
+        (Path::SUSPEND, Path::SELECTED)
+    );
+    let mut received = [0; 4];
+    space
+        .crypto
+        .reader()
+        .read_exact(&mut received)
+        .await
+        .unwrap();
+    assert_eq!(&received, b"data");
+    assert!(ipv4.cc.need_ack(Epoch::Initial).is_some());
+    paths.retire_all();
 }
 
 #[tokio::test]
@@ -553,6 +635,146 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
         );
     }
     assert!(second.cc.need_ack(Epoch::Initial).is_none());
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
+    use std::task::{Context, Waker};
+
+    use qbase::time::heartbeat::ArcHeartbeat;
+    use tokio::io::AsyncWriteExt;
+
+    use crate::send::{Burst, MAX_BURST_PACKETS};
+
+    let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+    crate::common::initial_phase(&paths).set_dcid(mature.peer_cid());
+    super::enter_handshake(&paths, mature.spaces.handshake.clone());
+    let make_path = |port| {
+        let path = Arc::new(Path::new(
+            Pathway::new(
+                EndpointAddr::direct(([127, 0, 0, 1], port).into()),
+                "127.0.0.1:34300".parse().unwrap(),
+            ),
+            paths.handshake.clone(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+            paths.resender.clone(),
+        ));
+        path.validate();
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.pathway, path.clone());
+        path
+    };
+    let first = make_path(34301);
+    let second = make_path(34302);
+    // Data keys can be installed while the server is still completing TLS.
+    paths
+        .resender
+        .write()
+        .unwrap()
+        .push_back(mature.spaces.data.clone())
+        .unwrap();
+    paths
+        .spaces
+        .write()
+        .unwrap()
+        .0
+        .push_back(mature.spaces.data.clone())
+        .unwrap();
+    mature
+        .spaces
+        .data
+        .crypto
+        .writer()
+        .write_all(b"application crypto")
+        .await
+        .unwrap();
+    assert!(matches!(
+        paths.phase().get(),
+        crate::ConnPhase::Handshake(_)
+    ));
+    assert!(first.dcid_cell.read().unwrap().is_none());
+    assert!(second.dcid_cell.read().unwrap().is_none());
+    assert_eq!(
+        (first.selected(), second.selected()),
+        (Path::MP_INITIAL, Path::MP_INITIAL)
+    );
+
+    mature
+        .spaces
+        .initial
+        .crypto
+        .writer()
+        .write_all(b"server hello")
+        .await
+        .unwrap();
+    let mut datagrams =
+        std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    let mut frames = Vec::new();
+    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut burst = Burst::new(&paths, &second, &mut datagrams, &mut frames, &mut packets);
+    assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
+    assert!(burst.packets.iter().all(|p| p[Epoch::Data].is_none()));
+    let initial = burst.packets[0][Epoch::Initial].take().unwrap();
+    mature.spaces.initial.on_sent(
+        initial.pn,
+        initial.in_flight,
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+    );
+    burst.cancel();
+
+    // The client's ACK of that CRYPTO flight selects the second path.
+    let mut ack = AckFrame::new(
+        initial.pn.try_into().unwrap(),
+        0u32.into(),
+        0u32.into(),
+        vec![],
+        None,
+    );
+    let bytes = seal(
+        LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"server00"), mature.peer_cid())
+            .initial(vec![]),
+        &keys(false).sealing,
+        &ArcSentJournal::default(),
+        [&mut ack],
+    )
+    .unwrap();
+    receive_bytes(bytes, mature.spaces.initial.clone(), &paths, &second).await;
+    assert_eq!(
+        (first.selected(), second.selected()),
+        (Path::SUSPEND, Path::SELECTED)
+    );
+    assert!(second.dcid_cell.read().unwrap().is_none());
+
+    // Growing assigns only after selection and before publishing Mature.
+    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    paths.phase().enter_mature(mature.phase.clone());
+    assert!(matches!(paths.phase().get(), crate::ConnPhase::Mature(_)));
+    assert!(first.dcid_cell.read().unwrap().is_none());
+    assert!(
+        matches!(second.dcid_cell.read().unwrap().as_ref().unwrap().borrow_cid(second.send_waker.clone()),
+        Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
+    );
+    mature
+        .spaces
+        .handshake
+        .crypto
+        .writer()
+        .write_all(b"remaining handshake")
+        .await
+        .unwrap();
+    assert!(
+        matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0),
+        "the selected path must have its CID before entering Mature"
+    );
+    assert!(burst.packets.iter().any(|p| p[Epoch::Handshake].is_some()));
+    assert!(burst.packets.iter().any(|p| p[Epoch::Data].is_some()));
+    burst.cancel();
     paths.retire_all();
 }
 

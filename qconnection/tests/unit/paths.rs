@@ -152,6 +152,24 @@ async fn removed_undecided_path_cannot_override_selection() {
 }
 
 #[tokio::test]
+async fn initial_cid_is_reserved_only_after_path_selection() {
+    let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
+    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    assert!(first.dcid_cell.read().unwrap().is_none());
+    assert!(second.dcid_cell.read().unwrap().is_none());
+    paths.select_path(&second);
+    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    assert!(first.dcid_cell.read().unwrap().is_none());
+    assert!(
+        matches!(second.dcid_cell.read().unwrap().as_ref().unwrap().borrow_cid(second.send_waker.clone()),
+        std::task::Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
+    );
+    paths.retire_all();
+}
+
+#[tokio::test]
 async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     let paths = paths(Role::Client);
     let first = paths.add_path(pathway(30002));

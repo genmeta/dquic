@@ -244,17 +244,12 @@ impl Paths {
         }
     }
 
-    /// Growing reserves sequence zero before publishing the remote CID registry.
+    /// Growing reserves sequence zero for the selected handshake path before Mature.
     pub(crate) fn assign_initial_dcid(&self, remote: &ArcRemoteCids<ArcReliableFrames>) {
         let entries = self.entries.lock().unwrap();
         if let Some(path) = entries
             .values()
             .find(|path| path.selected() == Path::SELECTED)
-            .or_else(|| {
-                entries
-                    .values()
-                    .find(|path| path.selected() == Path::MP_INITIAL)
-            })
         {
             path.assign_dcid(remote);
         }
