@@ -218,6 +218,7 @@ async fn receive(
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.resender.clone(),
+        &paths.cids,
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -356,6 +357,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.resender.clone(),
+        &paths.cids,
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     let terminator = paths.terminator.clone();
@@ -705,7 +707,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         .await;
         tokio::task::yield_now().await;
         let path = paths.get(&link.into()).unwrap();
-        assert_eq!(path.selected(), Path::HANDSHAKED);
+        assert_eq!(super::selection(&paths, &path), 2);
         assert!(
             path.challenge().is_some(),
             "authenticated ingress must start validation"
@@ -899,6 +901,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
             paths.resender.clone(),
+            &paths.cids,
         ));
         paths
             .entries

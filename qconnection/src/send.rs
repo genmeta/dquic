@@ -144,8 +144,10 @@ impl Burst<'_, '_> {
     }
 
     pub(crate) fn poll_collect(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, Error>> {
-        let phase = self.paths.phase().poll_phase(cx).clone();
         let path = self.path;
+        let cid = ready!(path.cid.borrow_cid(cx))
+            .ok_or_else(|| no_viable_path("path CID binding retired"))?;
+        let phase = self.paths.phase().poll_phase(cx).clone();
         let mut limits = Constraints {
             send_quota: ready!(path.cc.poll_send_quota(cx)).map_err(no_viable_path)?,
             credit: ready!(path.anti_amplifier.poll_credit(cx))?,
@@ -159,59 +161,44 @@ impl Burst<'_, '_> {
             flow_ctrl: 0,
             overhead: QuicProtocol::packet_overhead(path.pathway),
         };
-        if path.selected() == Path::SUSPEND {
-            return Poll::Pending;
-        }
         self.spaces = Some(self.paths.spaces.read().unwrap().snapshot());
-        match phase {
-            ConnPhase::Initial(phase) => self.collect_depth(
-                cx,
+        let mut flow = if let ConnPhase::Mature(phase) = &phase {
+            let requested = self
+                .spaces
+                .as_ref()
+                .unwrap()
+                .0
+                .get(Epoch::Data as u64)
+                .filter(|_| limits.send_quota >= 1200)
+                .map_or(0, |data| data.fresh_bytes_up_to(limits.send_quota));
+            Some(ready!(phase.flow_ctrl.sender.poll_credit(cx, requested)))
+        } else {
+            None
+        };
+        limits.flow_ctrl = flow.as_ref().map_or(0, |credit| credit.available());
+        let (depth, exponent, multipath) = match &phase {
+            ConnPhase::Initial(_) => (
                 1,
-                phase.dcid(),
-                &mut limits,
                 0,
-                path.selected() == Path::MP_INITIAL && self.paths.role() == Role::Client,
+                self.paths.role() == Role::Client && self.paths.cids.is_initial(),
             ),
-            ConnPhase::Handshake(phase) => {
-                self.collect_depth(cx, 2, phase.dcid, &mut limits, 0, false)
-            }
-            ConnPhase::Mature(phase) => {
-                if self.dcid.is_none() {
-                    path.send_waker.register(cx.waker());
-                    let cell = path.dcid_cell.read().unwrap();
-                    let Some(cell) = cell.as_ref() else {
-                        return Poll::Pending;
-                    };
-                    self.dcid = Some(
-                        ready!(cell.borrow_cid(path.send_waker.clone()))
-                            .ok_or_else(|| no_viable_path("path CID retired"))?,
-                    );
-                }
-                let requested = self
-                    .spaces
-                    .as_ref()
-                    .unwrap()
-                    .0
-                    .get(Epoch::Data as u64)
-                    .filter(|_| limits.send_quota >= 1200)
-                    .map_or(0, |data| data.fresh_bytes_up_to(limits.send_quota));
-                let mut flow = ready!(phase.flow_ctrl.sender.poll_credit(cx, requested));
-                limits.flow_ctrl = flow.available();
-                let result = self.collect_depth(
-                    cx,
-                    3,
-                    **self.dcid.as_ref().unwrap(),
-                    &mut limits,
-                    phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-                    false,
-                );
-                flow.post_sent(flow.available() - limits.flow_ctrl);
-                if result.is_pending() {
-                    self.dcid.take();
-                }
-                result
-            }
+            ConnPhase::Handshake(_) => (2, 0, false),
+            ConnPhase::Mature(phase) => (
+                3,
+                phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
+                false,
+            ),
+        };
+        let result = self.collect_depth(cx, depth, *cid, &mut limits, exponent, multipath);
+        if let Some(flow) = &mut flow {
+            flow.post_sent(flow.available() - limits.flow_ctrl);
         }
+        // On assembly errors a prefix can already be sealed. Keep its borrow
+        // until cancel() recovers it; Pending has no sealed packets.
+        if !result.is_pending() {
+            self.dcid = Some(cid);
+        }
+        result
     }
 
     fn collect_depth(
