@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Barrier, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use bytes::BytesMut;
 use qbase::{
@@ -112,6 +115,117 @@ async fn incoming_initial_uses_the_router_callback() {
     let (received, pathway, link) = incoming.lock().unwrap().take().unwrap();
     assert_eq!(*received.dcid(), cid);
     assert_eq!((pathway, link), way());
+}
+
+#[test]
+fn concurrent_initials_share_one_connection_and_preserve_both_paths() {
+    let router = router();
+    let odcid = ConnectionId::from_slice(b"original");
+    let barrier = Barrier::new(2);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let connections = Arc::new(Mutex::new(Vec::new()));
+    let created = connections.clone();
+    let weak_router = Arc::downgrade(&router);
+    router.on_incoming(move |packet, pathway, link| {
+        // Both deliveries have already missed the route before either can register it.
+        if observed.fetch_add(1, Ordering::SeqCst) < 2 {
+            barrier.wait();
+        }
+        let router = weak_router.upgrade().unwrap();
+        let (inbox, received) = channel::new();
+        let registry = match router.try_insert((*packet.dcid()).into(), inbox.clone(), ()) {
+            Ok(registry) => registry,
+            Err(existing) => {
+                assert!(existing.try_send_initial(packet, pathway, link));
+                return;
+            }
+        };
+        let scid = registry.gen_unique_cid();
+        assert!(inbox.try_send_initial(packet, pathway, link));
+        created.lock().unwrap().push((scid, registry, received));
+    });
+
+    let links = [
+        way().1,
+        Link::new("[::1]:4434".parse().unwrap(), "[::1]:9001".parse().unwrap()),
+    ];
+    std::thread::scope(|scope| {
+        for link in links {
+            let router = &router;
+            scope.spawn(move || router.deliver(packet(odcid), link.into(), link));
+        }
+    });
+
+    let mut connections = connections.lock().unwrap();
+    assert_eq!(connections.len(), 1, "only one connection may be created");
+    let (scid, registry, received) = connections.first_mut().unwrap();
+    let mut delivered_links = Vec::new();
+    for _ in 0..2 {
+        let (initial, pathway, link) = received.initial.try_recv().unwrap();
+        assert_eq!(*initial.dcid(), odcid);
+        assert_eq!(pathway, Pathway::from(link));
+        delivered_links.push(link);
+    }
+    assert!(links.iter().all(|link| delivered_links.contains(link)));
+    assert!(received.initial.try_recv().is_err());
+
+    for cid in [odcid, *scid] {
+        let (pathway, link) = way();
+        router.deliver(packet(cid), pathway, link);
+        assert_eq!(*received.initial.try_recv().unwrap().0.dcid(), cid);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    for cid in [odcid, *scid] {
+        registry.retire_cid(cid);
+        assert!(!is_routed(&router, &packet(cid)));
+    }
+}
+
+#[test]
+fn try_insert_keeps_full_or_closed_inboxes_until_retirement() {
+    for closed in [false, true] {
+        let router = router();
+        let odcid = ConnectionId::from_slice(b"original");
+        let (inbox, received) = channel::new();
+        let registry = router.try_insert(odcid.into(), inbox.clone(), ()).unwrap();
+        let mut received = Some(received);
+        let (pathway, link) = way();
+        if closed {
+            drop(received.take());
+        } else {
+            for _ in 0..8 {
+                assert!(inbox.try_send(packet(odcid), pathway, link));
+            }
+        }
+        assert!(!inbox.try_send(packet(odcid), pathway, link));
+
+        // A caller that missed the route earlier must not replace it, even now.
+        let (candidate, _) = channel::new();
+        let Err(existing) = router.try_insert(odcid.into(), candidate, ()) else {
+            panic!("an occupied route must not create another connection");
+        };
+        assert!(!existing.try_send(packet(odcid), pathway, link));
+        assert!(is_routed(&router, &packet(odcid)));
+        if let Some(received) = received.as_mut() {
+            for _ in 0..8 {
+                assert_eq!(*received.initial.try_recv().unwrap().0.dcid(), odcid);
+            }
+            assert!(received.initial.try_recv().is_err());
+        }
+
+        registry.retire_cid(odcid);
+        let (replacement, mut received) = channel::new();
+        let replacement = router.try_insert(odcid.into(), replacement, ()).unwrap();
+        router.deliver(packet(odcid), pathway, link);
+        assert_eq!(*received.initial.try_recv().unwrap().0.dcid(), odcid);
+        // The previous owner cannot delete the new registration.
+        registry.retire_cid(odcid);
+        assert!(is_routed(&router, &packet(odcid)));
+        replacement.retire_cid(odcid);
+        assert!(!is_routed(&router, &packet(odcid)));
+    }
 }
 
 #[derive(Clone, Default)]

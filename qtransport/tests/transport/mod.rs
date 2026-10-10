@@ -1837,14 +1837,13 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_validated() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
-        let path = Arc::new(Path::new(
+        Arc::new(Path::new(
             pathway,
             confirmed_handshake(transport.parameters.role() == Role::Server),
             path_heartbeat(),
             data_trackers(transport),
             &qtransport::path::PathCids::new(Default::default()),
-        ));
-        path
+        ))
     });
     let [cp, sp] = paths;
     cp.on_datagram_received(400);
