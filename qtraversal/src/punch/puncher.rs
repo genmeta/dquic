@@ -149,8 +149,7 @@ where
 
     fn try_start_active(&self, local: LocalAddress, remote: AddAddressFrame) {
         if local.frame.tire() != remote.tire()
-            || local.frame.is_ipv4() != remote.is_ipv4()
-            || *local.frame == *remote
+            || !EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote))
         {
             return;
         }

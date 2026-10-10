@@ -14,7 +14,6 @@ use qcongestion::Transport as _;
 use qtransport::{
     keys::ArcKeys,
     packet::LogPacketHeader,
-    path::Path,
     recv,
     space::{DataSpace, Space},
 };
@@ -87,12 +86,20 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 && let ConnPhase::Initial(initial) = paths.phase().get()
             {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
+                paths.cids.update_initial_dcid(dcid);
                 initial.set_dcid(dcid);
             }
-            if role == Role::Client || epoch == Epoch::Handshake {
+            // An Initial ACK proves receipt, but does not identify the path
+            // carrying the server's TLS flight. Keep racing until CRYPTO arrives.
+            let has_crypto_data = parsed_frames
+                .iter()
+                .any(|frame| matches!(frame, Frame::Crypto(_, bytes) if !bytes.is_empty()));
+            if epoch == Epoch::Handshake
+                || (role == Role::Client && epoch == Epoch::Initial && has_crypto_data)
+            {
                 paths.select_path(&path);
             }
-            if epoch == Epoch::Handshake && path.selected() == Path::SELECTED {
+            if epoch == Epoch::Handshake && paths.cids.is_selected(&path.cid) {
                 path.validate();
                 paths.on_handshake_received();
             }

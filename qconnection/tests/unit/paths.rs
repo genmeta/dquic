@@ -8,7 +8,7 @@ use qbase::{
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
 };
-use qtransport::path::{Path, PathState};
+use qtransport::path::PathState;
 
 use crate::Paths;
 
@@ -84,12 +84,12 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert_eq!(second.amplification_credit(), usize::MAX);
     let incoming = paths.on_incoming_path(pathway(30004));
     assert_eq!(incoming.amplification_credit(), 0);
-    assert_eq!(first.selected(), u8::MAX);
-    assert_eq!(second.selected(), u8::MAX);
+    assert_eq!(super::selection(&paths, &first), u8::MAX);
+    assert_eq!(super::selection(&paths, &second), u8::MAX);
     paths.select_path(&first);
-    assert_eq!(first.selected(), 1);
-    assert_eq!(second.selected(), 0);
-    assert_eq!(incoming.selected(), 0);
+    assert_eq!(super::selection(&paths, &first), 1);
+    assert_eq!(super::selection(&paths, &second), 0);
+    assert_eq!(super::selection(&paths, &incoming), 0);
     assert_eq!(first.state(), PathState::ClientHandshaking);
     assert_eq!(
         second.state(),
@@ -104,23 +104,30 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert_eq!(second.amplification_credit(), 100);
     super::enter_mature(&paths, &mature);
     assert_eq!(paths.add_path(pathway(30005)).amplification_credit(), 0);
-    assert!(first.dcid_cell.read().unwrap().is_some());
-    assert!(second.dcid_cell.read().unwrap().is_none());
+    assert!(
+        matches!(super::borrow(&first), std::task::Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
+    );
+    assert!(super::borrow(&second).is_pending());
     super::confirm_handshake(&paths);
-    assert!(paths.snapshot().iter().all(|path| path.selected() == 2));
+    assert!(
+        paths
+            .snapshot()
+            .iter()
+            .all(|path| super::selection(&paths, path) == 2)
+    );
     assert!(first.is_validated());
     assert!(!second.is_validated());
     assert_eq!(second.state(), PathState::ClientValidating);
     assert_eq!(second.amplification_credit(), usize::MAX);
     let added = paths.add_path(pathway(30006));
-    assert_eq!(added.selected(), 2);
+    assert_eq!(super::selection(&paths, &added), 2);
     assert_eq!(added.state(), PathState::ClientValidating);
     paths.select_path(&added);
     assert!(
         paths
             .snapshot()
             .iter()
-            .all(|path| path.selected() == Path::HANDSHAKED)
+            .all(|path| super::selection(&paths, path) == 2)
     );
     let validating = paths.responses.lock().unwrap().len();
     assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway)));
@@ -134,7 +141,7 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert!(second.is_validated());
     paths.remove(&first);
     let after_removal = paths.add_path(pathway(30008));
-    assert_eq!(after_removal.selected(), Path::HANDSHAKED);
+    assert_eq!(super::selection(&paths, &after_removal), 2);
     assert_eq!(after_removal.state(), PathState::ClientValidating);
     paths.retire_all();
 }
@@ -147,7 +154,27 @@ async fn removed_undecided_path_cannot_override_selection() {
     paths.remove(&stale);
     paths.select_path(&selected);
     paths.select_path(&stale);
-    assert_eq!(selected.selected(), Path::SELECTED);
+    assert_eq!(super::selection(&paths, &selected), 1);
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn initial_cid_is_reserved_only_after_path_selection() {
+    let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
+    paths.cids.attach_remote(mature.cid_registry.remote.clone());
+    assert!(
+        matches!(super::borrow(&first), std::task::Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+    );
+    assert!(
+        matches!(super::borrow(&second), std::task::Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+    );
+    paths.select_path(&second);
+    assert!(super::borrow(&first).is_pending());
+    assert!(
+        matches!(super::borrow(&second), std::task::Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
+    );
     paths.retire_all();
 }
 
@@ -159,14 +186,14 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     paths.select_path(&first);
     paths.remove(&first);
     let added = paths.add_path(pathway(30004));
-    assert_eq!(added.selected(), Path::SUSPEND);
+    assert_eq!(super::selection(&paths, &added), 0);
     paths.select_path(&second);
     paths.select_path(&added);
     assert!(
         paths
             .snapshot()
             .iter()
-            .all(|path| path.selected() == Path::SUSPEND)
+            .all(|path| super::selection(&paths, path) == 0)
     );
     paths.retire_all();
 }
@@ -179,7 +206,7 @@ async fn server_paths_start_guarded_and_only_the_correct_path_response_validates
     assert_eq!(first.amplification_credit(), 0);
     paths.start_validation(&first);
     assert!(paths.responses.lock().unwrap().is_empty());
-    first.handshake_confirmed();
+    confirm_validation(&paths);
     paths.start_validation(&first);
     paths.start_validation(&first);
     tokio::task::yield_now().await;
@@ -201,7 +228,7 @@ async fn server_paths_start_guarded_and_only_the_correct_path_response_validates
 async fn validation_times_out_after_three_attempts_and_retirement_cancels_waiting() {
     let paths = paths(Role::Server);
     let path = paths.add_path(pathway(30002));
-    path.handshake_confirmed();
+    confirm_validation(&paths);
     paths.start_validation(&path);
     tokio::task::yield_now().await;
     for _ in 0..3 {
@@ -217,7 +244,7 @@ async fn validation_times_out_after_three_attempts_and_retirement_cancels_waitin
     );
     let paths = self::paths(Role::Server);
     let replacement = paths.add_path(pathway(30002));
-    replacement.handshake_confirmed();
+    confirm_validation(&paths);
     paths.start_validation(&replacement);
     tokio::task::yield_now().await;
     let response = paths
@@ -304,4 +331,25 @@ async fn terminator_does_not_retain_paths() {
         Duration::from_secs(1),
     );
     assert_eq!(terminator.await.kind(), ErrorKind::Internal);
+}
+
+// Validation tests do not run TLS or a real handshake sender. Finish a separate
+// handshake path so the tested paths remain unvalidated and wait for extra CIDs.
+fn confirm_validation(paths: &Arc<Paths>) {
+    let selected = qtransport::path::Path::new(
+        pathway(39999),
+        paths.handshake.clone(),
+        qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        paths.resender.clone(),
+        &paths.cids,
+    );
+    paths.cids.select(&selected.cid);
+    paths.cids.attach_remote(qbase::cid::ArcRemoteCids::new(
+        paths.cids.initial_dcid(),
+        2,
+        paths.reliable_frames.clone(),
+    ));
+    paths.handshake.handshake_confirmed();
+    paths.cids.confirm_handshake();
+    selected.retire();
 }

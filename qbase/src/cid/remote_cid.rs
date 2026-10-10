@@ -188,9 +188,12 @@ where
             // retire the cids before seq, including the applied and unapplied
             for _ in self.ready_cells.offset()..need_reassigned {
                 let (_, cell) = self.ready_cells.pop_front().unwrap();
-                if cell.is_retired() {
+                let mut guard = cell.0.lock().unwrap();
+                if guard.is_retired {
                     continue;
                 }
+                guard.invalidate();
+                drop(guard);
                 self.pending_cells.push_back(cell);
             }
             if actual_applied < tomb_seq {
@@ -242,8 +245,8 @@ where
     ///
     /// Construction does not request a CID cell. The first [`Self::apply_dcid`]
     /// gets sequence zero unless the peer has already retired it through a
-    /// NEW_CONNECTION_ID frame's retire_prior_to field. With multiple paths,
-    /// the selected sender must request its cell before the other senders.
+    /// NEW_CONNECTION_ID frame's retire_prior_to field. The connection's path
+    /// CID policy reserves this first cell for its selected handshake path.
     pub fn new(initial_dcid: ConnectionId, active_cid_limit: u64, retired_cids: RETIRED) -> Self {
         Self(Arc::new(Mutex::new(RemoteCids::new(
             initial_dcid,
@@ -281,6 +284,8 @@ where
     waker: Option<ArcSendWakers>,
     is_retired: bool,
     is_using: bool,
+    // Old allocations may remain pinned by a borrower while replacement is pending.
+    is_pending: bool,
 }
 
 impl<RETIRED> CidCell<RETIRED>
@@ -290,15 +295,8 @@ where
     fn assign(&mut self, seq: u64, cid: ConnectionId) {
         assert!(!self.is_retired);
         self.allocated_cids.push_front((seq, cid));
-        if !self.is_using {
-            while self.allocated_cids.len() > 1 {
-                let (seq, _) = self.allocated_cids.pop_back().unwrap();
-                let sequence = VarInt::try_from(seq)
-                    .expect("Sequence of connection id is very hard to exceed VARINT_MAX");
-                self.retired_cids
-                    .send_frame([RetireConnectionIdFrame::new(sequence)]);
-            }
-        }
+        self.is_pending = false;
+        self.release_retired_cids();
 
         if let Some(waker) = self.waker.take() {
             waker.wake_all();
@@ -310,7 +308,7 @@ where
             return Poll::Ready(None);
         }
 
-        if self.allocated_cids.is_empty() {
+        if self.is_pending {
             self.waker = Some(tx_waker);
             Poll::Pending
         } else {
@@ -323,11 +321,21 @@ where
     fn renew(&mut self) {
         assert!(self.is_using);
         self.is_using = false;
-        if self.is_retired {
-            self.retire();
+        self.release_retired_cids();
+    }
+
+    /// Stop new borrows without closing this path's binding.
+    fn invalidate(&mut self) {
+        self.is_pending = true;
+        self.release_retired_cids();
+    }
+
+    fn release_retired_cids(&mut self) {
+        if self.is_using {
             return;
         }
-        while self.allocated_cids.len() > 1 {
+        let keep = usize::from(!self.is_pending && !self.is_retired);
+        while self.allocated_cids.len() > keep {
             let (seq, _) = self.allocated_cids.pop_back().unwrap();
             let sequence = VarInt::try_from(seq)
                 .expect("Sequence of connection id is very hard to exceed VARINT_MAX");
@@ -338,17 +346,9 @@ where
 
     fn retire(&mut self) {
         self.is_retired = true;
-        if !self.is_using {
-            while let Some((seq, _)) = self.allocated_cids.pop_front() {
-                let sequence = VarInt::try_from(seq)
-                    .expect("Sequence of connection id is very hard to exceed VARINT_MAX");
-                self.retired_cids
-                    .send_frame([RetireConnectionIdFrame::new(sequence)]);
-            }
-
-            if let Some(waker) = self.waker.take() {
-                waker.wake_all();
-            }
+        self.release_retired_cids();
+        if let Some(waker) = self.waker.take() {
+            waker.wake_all();
         }
     }
 }
@@ -375,6 +375,7 @@ where
             waker: None,
             is_retired: false,
             is_using: false,
+            is_pending: true,
         })))
     }
 
@@ -382,7 +383,8 @@ where
         self.0.lock().unwrap().is_retired
     }
 
-    /// Asynchronously get the connection ID, if it is not ready, return Pending.
+    /// Borrow the current CID. Returns Pending both before its first allocation
+    /// and while an invalidated CID is waiting for a replacement.
     ///
     /// If the corresponding path which applied this cid is inactive,
     /// then this cid apply is retired.
@@ -390,7 +392,7 @@ where
     pub fn borrow_cid(&self, tx_waker: ArcSendWakers) -> Poll<Option<BorrowedCid<RETIRED>>> {
         self.0.lock().unwrap().borrow_cid(tx_waker).map(|cid| {
             cid.map(|cid| BorrowedCid {
-                cid_cell: self.0.clone(),
+                cid_cell: Some(self.0.clone()),
                 cid,
             })
         })
@@ -405,14 +407,27 @@ where
 
 /// A borrowed connection ID, which will be returned back when it is dropped.
 ///
-/// While the connection ID is borrowed, the retired cids will not be truly retired. The retire will be delayed until
-/// the [`BorrowedCid`] is dropped, a [`RetireConnectionIdFrame`] will be sent to the peer.
+/// Registry-backed borrows defer CID retirement until they are dropped. Shared
+/// handshake snapshots keep the CID chosen when the batch was assembled.
 pub struct BorrowedCid<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
     cid: ConnectionId,
-    cid_cell: Arc<Mutex<CidCell<RETIRED>>>,
+    cid_cell: Option<Arc<Mutex<CidCell<RETIRED>>>>,
+}
+
+impl<RETIRED> BorrowedCid<RETIRED>
+where
+    RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
+{
+    /// Snapshot of the shared handshake CID before a registry cell takes over.
+    pub fn shared(cid: ConnectionId) -> Self {
+        Self {
+            cid,
+            cid_cell: None,
+        }
+    }
 }
 
 impl<RETIRED> Deref for BorrowedCid<RETIRED>
@@ -431,7 +446,9 @@ where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
     fn drop(&mut self) {
-        self.cid_cell.lock().unwrap().renew();
+        if let Some(cell) = &self.cid_cell {
+            cell.lock().unwrap().renew();
+        }
     }
 }
 
@@ -574,10 +591,7 @@ mod tests {
         remote_cids.retire_prior_to(1);
         let cid_apply2 = remote_cids.apply_dcid();
         assert!(cid_apply2.borrow_cid(waker.clone()).is_pending());
-        assert!(matches!(
-            cid_apply0.borrow_cid(waker.clone()),
-            Poll::Ready(Some(cid)) if *cid == initial_dcid
-        ));
+        assert!(cid_apply0.borrow_cid(waker.clone()).is_pending());
     }
 
     #[test]
@@ -600,16 +614,12 @@ mod tests {
         let cid_apply1 = guard.apply_dcid();
 
         let waker = ArcSendWakers::default();
-        assert_eq!(cid_apply0.0.lock().unwrap().allocated_cids[0].0, 0);
-        assert!(matches!(
-            cid_apply0.borrow_cid(waker.clone()),
-            Poll::Ready(Some(cid)) if *cid == cids[0]
-        ));
-        assert_eq!(cid_apply1.0.lock().unwrap().allocated_cids[0].0, 1);
-        assert!(matches!(
-            cid_apply1.borrow_cid(waker.clone()),
-            Poll::Ready(Some(cid)) if *cid == cids[1]
-        ));
+        let Poll::Ready(Some(borrowed0)) = cid_apply0.borrow_cid(waker.clone()) else {
+            panic!("initial CID is ready");
+        };
+        let Poll::Ready(Some(borrowed1)) = cid_apply1.borrow_cid(waker.clone()) else {
+            panic!("second CID is ready");
+        };
 
         guard.retire_prior_to(4);
         assert_eq!(guard.cid_deque.offset(), 4);
@@ -620,16 +630,15 @@ mod tests {
         assert_eq!(cid_apply0.0.lock().unwrap().allocated_cids[0].0, 0);
         assert_eq!(cid_apply1.0.lock().unwrap().allocated_cids[0].0, 1);
 
-        assert!(matches!(
-            cid_apply0.borrow_cid(waker.clone()),
-            Poll::Ready(Some(cid)) if *cid == cids[0]
-        ));
-        assert!(matches!(
-            cid_apply1.borrow_cid(waker.clone()),
-            Poll::Ready(Some(cid)) if *cid == cids[1]
-        ));
+        assert!(cid_apply0.borrow_cid(waker.clone()).is_pending());
+        assert!(cid_apply1.borrow_cid(waker.clone()).is_pending());
+        assert_eq!(*borrowed0, cids[0]);
+        assert_eq!(*borrowed1, cids[1]);
 
         guard.arrange_idle_cid();
+        assert_eq!(guard.retired_cids.0.lock().unwrap().len(), 2);
+        drop(borrowed0);
+        drop(borrowed1);
         assert_eq!(guard.retired_cids.0.lock().unwrap().len(), 4);
 
         let retired_cids = [1, 0, 3, 2];
@@ -678,7 +687,7 @@ mod tests {
         guard.retire_prior_to(4);
         assert_eq!(guard.cid_deque.offset(), 4);
         assert_eq!(guard.ready_cells.offset(), 4);
-        assert_eq!(guard.retired_cids.0.lock().unwrap().len(), 3);
+        assert_eq!(guard.retired_cids.0.lock().unwrap().len(), 4);
 
         let cid_apply1 = guard.apply_dcid();
         assert_eq!(cid_apply0.0.lock().unwrap().allocated_cids[0].0, 4);

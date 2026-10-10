@@ -74,6 +74,24 @@ impl QuicRouter {
         self.table.remove(signpost);
     }
 
+    /// Atomically claim a route, returning its registry or the existing inbox.
+    /// A full or closed inbox remains registered until its owner retires the route.
+    pub fn try_insert<T>(
+        self: &Arc<Self>,
+        signpost: Signpost,
+        inbox: Inbox,
+        issued_cids: T,
+    ) -> Result<QuicRouterRegistry<T>, Inbox> {
+        match self.table.entry(signpost) {
+            dashmap::Entry::Occupied(entry) => return Err(entry.get().clone()),
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(inbox.clone());
+            }
+        }
+        // Release the entry lock before the caller issues any additional CIDs.
+        Ok(self.registry_on_issuing_scid(inbox, issued_cids))
+    }
+
     fn signpost(packet: &Packet, link: &Link) -> Signpost {
         let dcid = match packet {
             Packet::VN(packet) => packet.dcid(),

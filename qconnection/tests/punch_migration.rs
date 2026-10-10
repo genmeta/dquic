@@ -18,10 +18,7 @@ use qconnection::{
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
-    StreamReader, StreamWriter,
-    packet::channel,
-    path::{Path, PathState},
-    router::QuicRouter,
+    StreamReader, StreamWriter, packet::channel, path::PathState, router::QuicRouter,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -301,10 +298,11 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let (mut client, mut server) = connect(&server_socket).await;
     let old_route = Pathway::new(old_socket.endpoint(), server_socket.endpoint());
     assert!(
-        wait_for(|| client
-            .paths
-            .get(&old_route)
-            .is_some_and(|p| p.selected() == Path::HANDSHAKED && p.is_validated()))
+        wait_for(|| client.paths.cids.is_confirmed()
+            && client
+                .paths
+                .get(&old_route)
+                .is_some_and(|p| p.is_validated()))
         .await,
         "stage 1: handshake confirmation missing"
     );

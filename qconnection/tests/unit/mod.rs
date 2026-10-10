@@ -90,7 +90,7 @@ pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
         .0
         .push_back(mature.spaces.data.clone())
         .unwrap();
-    paths.assign_initial_dcid(&mature.cid_registry.remote);
+    paths.cids.attach_remote(mature.cid_registry.remote.clone());
     paths.phase().enter_mature(mature.phase.clone());
 }
 
@@ -134,4 +134,22 @@ pub fn retire_spaces(paths: &Paths, end: qbase::Epoch) {
 pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {
     retire_spaces(paths, qbase::Epoch::Data);
     paths.handshake_confirmed();
+}
+
+/// Observe the same four scenarios across existing sending and receiving tests.
+fn selection(paths: &Paths, path: &qtransport::path::Path) -> u8 {
+    if paths.cids.is_confirmed() {
+        2
+    } else if paths.cids.is_initial() {
+        u8::MAX
+    } else {
+        u8::from(paths.cids.is_selected(&path.cid))
+    }
+}
+
+fn borrow(
+    path: &qtransport::path::Path,
+) -> std::task::Poll<Option<qbase::cid::BorrowedCid<crate::ArcReliableFrames>>> {
+    path.cid
+        .borrow_cid(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 }

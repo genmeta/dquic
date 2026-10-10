@@ -255,13 +255,11 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     );
     let path = Arc::new(Path::new(
         pathway,
-        Arc::new(qcongestion::HandshakeStatus::new(
-            transport.parameters.role() == Role::Server,
-        )),
+        confirmed_handshake(transport.parameters.role() == Role::Server),
         path_heartbeat(),
         data_trackers(transport),
+        &qtransport::path::PathCids::new(Default::default()),
     ));
-    path.handshake_confirmed();
     path.validate();
     path
 }
@@ -1774,11 +1772,11 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     protocol.register(local, &socket).unwrap();
     let path = Arc::new(Path::new(
         pathway,
-        Arc::new(qcongestion::HandshakeStatus::new(false)),
+        confirmed_handshake(false),
         path_heartbeat(),
         data_trackers(&ct),
+        &qtransport::path::PathCids::new(Default::default()),
     ));
-    path.handshake_confirmed();
     path.validate();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
@@ -1839,16 +1837,13 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_validated() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
-        let path = Arc::new(Path::new(
+        Arc::new(Path::new(
             pathway,
-            Arc::new(qcongestion::HandshakeStatus::new(
-                transport.parameters.role() == Role::Server,
-            )),
+            confirmed_handshake(transport.parameters.role() == Role::Server),
             path_heartbeat(),
             data_trackers(transport),
-        ));
-        path.handshake_confirmed();
-        path
+            &qtransport::path::PathCids::new(Default::default()),
+        ))
     });
     let [cp, sp] = paths;
     cp.on_datagram_received(400);
@@ -1882,11 +1877,11 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
     let [(_client, transport, original), _] = pair(1);
     let path = Arc::new(Path::new(
         original.pathway,
-        Arc::new(qcongestion::HandshakeStatus::new(false)),
+        confirmed_handshake(false),
         path_heartbeat(),
         data_trackers(&transport),
+        &qtransport::path::PathCids::new(Default::default()),
     ));
-    path.handshake_confirmed();
     path.on_datagram_received(400);
     path.set_challenge(qbase::frame::PathChallengeFrame::random());
     let mut sender = Sender::new(keys(&transport), transport, path.clone()).unwrap();
@@ -2007,4 +2002,10 @@ async fn sealing_does_not_wait_for_socket_submission() {
         Poll::Ready(Ok(true))
     ));
     worker.join().unwrap();
+}
+
+fn confirmed_handshake(server: bool) -> Arc<qcongestion::HandshakeStatus> {
+    let handshake = Arc::new(qcongestion::HandshakeStatus::new(server));
+    handshake.handshake_confirmed();
+    handshake
 }

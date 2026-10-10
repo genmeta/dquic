@@ -55,6 +55,11 @@ async fn dns_records_are_consumed_in_order_without_delaying_relays() {
     let public = EndpointAddr::direct("8.8.8.8:41000".parse().unwrap());
     book.insert_outer(&local.0, public).unwrap();
     QuicProtocol::global().register(public, &local.0).unwrap();
+    let local_relay = EndpointAddr::mediate("127.0.0.1:20003".parse().unwrap(), public.addr());
+    book.insert_outer(&local.0, local_relay).unwrap();
+    QuicProtocol::global()
+        .register(local_relay, &local.0)
+        .unwrap();
     let paths = paths();
     let direct = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
     let relay = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), direct.addr());
@@ -67,12 +72,17 @@ async fn dns_records_are_consumed_in_order_without_delaying_relays() {
     ));
     send.unbounded_send((Source::Dht, relay)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
+    assert!(paths.get(&Pathway::new(public, relay)).is_none());
+    assert_eq!(paths.snapshot().len(), 1);
     assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_none());
     send.unbounded_send((Source::System, direct)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
     assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_some());
-    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    assert!(paths.get(&Pathway::new(public, direct)).is_none());
+    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
+    assert!(paths.get(&Pathway::new(local_relay, direct)).is_none());
+    assert_eq!(paths.snapshot().len(), 2);
     drop(send);
     discovery.await.unwrap();
     paths.retire_all();
@@ -85,6 +95,11 @@ async fn relay_only_dns_creates_a_path_without_waiting() {
     let public = EndpointAddr::direct("8.8.8.8:42000".parse().unwrap());
     book.insert_outer(&local.0, public).unwrap();
     QuicProtocol::global().register(public, &local.0).unwrap();
+    let local_relay = EndpointAddr::mediate("127.0.0.1:20003".parse().unwrap(), public.addr());
+    book.insert_outer(&local.0, local_relay).unwrap();
+    QuicProtocol::global()
+        .register(local_relay, &local.0)
+        .unwrap();
     let paths = paths();
     let relay = EndpointAddr::mediate(
         "127.0.0.1:20002".parse().unwrap(),
@@ -99,8 +114,35 @@ async fn relay_only_dns_creates_a_path_without_waiting() {
     .now_or_never()
     .expect("relay-only discovery must not wait for a timer")
     .unwrap();
-    assert!(paths.get(&Pathway::new(public, relay)).is_some());
+    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
+    assert!(paths.get(&Pathway::new(public, relay)).is_none());
+    assert_eq!(paths.snapshot().len(), 1);
     paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_only_dns_without_a_local_relay_reports_no_viable_path() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let public = EndpointAddr::direct("8.8.8.8:43000".parse().unwrap());
+    book.insert_outer(&local.0, public).unwrap();
+    QuicProtocol::global().register(public, &local.0).unwrap();
+    let paths = paths();
+    let relay = EndpointAddr::mediate(
+        "127.0.0.1:20002".parse().unwrap(),
+        "127.0.0.1:8443".parse().unwrap(),
+    );
+    let error = resolve_paths(
+        &paths,
+        &book,
+        resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())),
+        "example.test:8443",
+    )
+    .now_or_never()
+    .expect("relay-only discovery must not wait for a timer")
+    .unwrap_err();
+    assert!(matches!(error, Error::Quic(error) if error.kind() == ErrorKind::NoViablePath));
+    assert!(paths.snapshot().is_empty());
 }
 
 fn paths() -> Arc<Paths> {
@@ -263,5 +305,31 @@ async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     assert_eq!(paths.snapshot().len(), 1);
     drop(send);
     discovery.await.unwrap();
+    paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn loopback_dns_excludes_non_loopback_local_endpoints() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let bridge = EndpointAddr::direct("192.168.215.0:65096".parse().unwrap());
+    // Publish a controlled private alias on a live socket to exercise selection
+    // without creating a host bridge or changing the operating system's routes.
+    book.insert_inner(&local.0, bridge).unwrap();
+    QuicProtocol::global().register(bridge, &local.0).unwrap();
+    let paths = paths();
+    let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
+    resolve_paths(
+        &paths,
+        &book,
+        resolver(Ok(stream::iter([(Source::System, peer)]).boxed())),
+        "example.test:8443",
+    )
+    .now_or_never()
+    .unwrap()
+    .unwrap();
+    assert_eq!(paths.snapshot().len(), 1);
+    assert!(paths.get(&Pathway::new(local.endpoint(), peer)).is_some());
+    assert!(paths.get(&Pathway::new(bridge, peer)).is_none());
     paths.retire_all();
 }

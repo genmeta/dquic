@@ -152,7 +152,6 @@ pub async fn server_growing(
                 parameters.local(ParameterId::ActiveConnectionIdLimit),
                 reliable_frames.clone(),
             );
-            paths.assign_initial_dcid(&remote_cids);
             let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
             let keys = ArcOneRttKeys::from(tls_ctx.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
@@ -240,6 +239,10 @@ pub async fn server_growing(
                 handshake_done.clone(),
             ));
 
+            // Receiving Finished selects the handshake path before waking TLS.
+            // Until then, Handshake keeps the first flight independent of path CIDs.
+            let summary = tls_ctx.finished().await?;
+            paths.cids.attach_remote(cid_registry.remote.clone());
             phase.enter_mature(Arc::new(MaturePhase {
                 parameters,
                 flow_ctrl,
@@ -247,7 +250,6 @@ pub async fn server_growing(
                 puncher: puncher.clone(),
             }));
 
-            let summary = tls_ctx.finished().await?;
             data.keys.get().expect("live Data keys").allow_update();
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
