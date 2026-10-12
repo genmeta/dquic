@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.8.0] - 2026-10-12
+
+### Added
+
+- Introduce `qtls` for connection-independent QUIC TLS 1.3 handshakes,
+  certificate and OCSP validation, and session resumption storage.
+- Introduce `qtransport` for packet spaces, routing, path state, packet
+  protection, recovery feedback, and connection shutdown.
+- Add streaming DNS discovery and scoped AddressBook subscriptions for
+  selecting connection paths and advertising NAT traversal candidates.
+- Add `Anonymous` endpoints for clients that omit client credentials while
+  still verifying the server's identity and OCSP response.
+- Add a standalone STUN server with optional forwarding, deployment examples,
+  and an isolated Docker NAT traversal test matrix.
+
+### Changed
+
+- Rebuild `qconnection` around sequential handshake phases, shared transport
+  components, and connection-scoped hole punching.
+- Make `dquic` the public entry point for `QuicEndpoint`, `Connected`, `Accepted`,
+  and the related connection, socket, resolver, and TLS APIs.
+- Remove the previous `dquic` Client/Server builder APIs, `qinterface`, and
+  `h3-shim`. Applications must migrate to `QuicEndpoint` and explicitly configure
+  trust roots, socket registrations, local addresses, and resolution sources;
+  see [the public API guide](dquic/README.md).
+- Use the crates.io `qrustls =0.23.45` package for the custom TLS backend and
+  restore CI publication of the full workspace dependency chain.
+- Require peer certificate OCSP validation by default. Servers can explicitly
+  allow missing client OCSP during rollouts with
+  `TlsServer::with_optional_client_ocsp`; supplied responses are still validated.
+- Update dependencies and move affected crates to new minor versions for the
+  public API and shared-type changes.
+
+### Fixed
+
+- Coordinate path CID allocation and retirement, selecting the handshake path
+  before assigning its peer CID.
+- Prevent duplicate server connections when concurrent Initial packets carry
+  the same original destination connection ID.
+- Select registered endpoints by endpoint kind and address family, and reject
+  candidate pairs that mix loopback and non-loopback addresses.
+- Refine path validation, ACK and congestion feedback, stream scheduling, and
+  recovery ticks across handshake transitions and path changes.
+- Preserve pending packet data across partial UDP sends and wake concurrent
+  senders when sockets become writable.
+- Clean up cancelled connection attempts and propagate connection termination
+  to waiting stream and transport tasks.
+
+### Published crates
+
+- `qmacro` v0.6.0
+- `qtls` v0.1.0 (first release)
+- `qbase` v0.7.0
+- `qdatagram` v0.7.0
+- `qevent` v0.7.0
+- `qresolve` v0.9.0
+- `qudp` v0.8.0
+- `qprotocol` v0.7.0
+- `qcongestion` v0.7.0
+- `qrecovery` v0.7.0
+- `qtransport` v0.1.0 (first release)
+- `qtraversal` v0.8.0
+- `qconnection` v0.9.0
+- `dquic` v0.8.0
+
 ## [0.7.2] - 2026-08-24
 
 ### Added
