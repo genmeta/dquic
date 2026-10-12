@@ -424,7 +424,11 @@ fn parse_cmsg(cmsg: ControlMessageOwned, line: &mut Line) {
             if let SocketAddr::V6(dst) = &mut line.link.dst
                 && dst.ip().is_unicast_link_local()
             {
-                dst.set_scope_id(pktinfo6.ipi6_ifindex);
+                #[cfg(target_os = "android")]
+                let scope_id = pktinfo6.ipi6_ifindex as u32;
+                #[cfg(not(target_os = "android"))]
+                let scope_id = pktinfo6.ipi6_ifindex;
+                dst.set_scope_id(scope_id);
             }
         }
         _ => {}
