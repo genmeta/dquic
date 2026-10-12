@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.1] - 2026-10-12
+
+### Fixed
+
+- Convert Android's signed IPv6 packet-info interface index to the unsigned
+  socket scope ID without changing the UDP or QUIC interfaces.
+
+### Published crates
+
+- `qudp` v0.8.1
+- `dquic` v0.8.1
+
+Unchanged workspace crates remain on their existing published versions.
+
 ## [0.8.0] - 2026-10-12
 
 ### Added

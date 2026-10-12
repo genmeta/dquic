@@ -69,3 +69,8 @@ Local checks may use `cargo test --workspace --all-features --all-targets --
 --test-threads=1`, `cargo +1.88.0 check --workspace`, and `cargo package`. Actual
 publication stays in CI. A local package check with uncommitted changes requires
 `--allow-dirty`; the CI checkout must be clean.
+
+## v0.8.1 patch release
+
+Publish qudp 0.8.1 and dquic 0.8.1 for Android IPv6 packet-info compatibility.
+All other workspace versions remain unchanged and are skipped during upload.

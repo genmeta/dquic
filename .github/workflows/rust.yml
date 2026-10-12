@@ -74,3 +74,21 @@ jobs:
           toolchain: 1.88.0
       - name: Build with msrv
         run: cargo build --workspace --release
+
+  android:
+    name: Android UDP compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27d
+      - name: Check Android UDP
+        env:
+          TARGET_CC: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          TARGET_AR: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+        run: cargo check -p qudp --all-features --lib --target aarch64-linux-android
