@@ -15,9 +15,10 @@
 
 **English** | [简体中文](README_CN.md)
 
-The current development workspace uses a custom rustls Git fork through `qtls`.
-`qtls` and its dependent crates are temporarily marked `publish = false`; use this
-repository through Git or local paths until the dependency chain can be published to crates.io.
+The 0.8.0 release uses the crates.io `qrustls` package through `qtls` for its
+custom TLS backend. All workspace crates are configured for publication through
+CI. See [the changelog](CHANGELOG.md) for API migration notes and
+[the release guide](RELEASING.md) for crate versions and the publication procedure.
 
 **Is the Internet really interconnected?** At the data-link layer, many paths exist between any two endpoints; at the transport layer, it is not quite so — not all such paths are traversable, leaving the Internet only partially interconnected.
 Reachability is predicated on listening for inbound connections — a capability the architecture has systematically reserved for servers alone.
