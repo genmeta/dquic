@@ -22,6 +22,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate release tag version
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          manifest = tomllib.loads(Path("dquic/Cargo.toml").read_text())
+          package = manifest.get("package", manifest.get("workspace", {}).get("package", {}))
+          expected = f"v{package['version']}"
+          if sys.argv[1] != expected:
+              raise SystemExit(f"release tag {sys.argv[1]} must match {expected}")
+          PY
+
       - name: Install Rust stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
