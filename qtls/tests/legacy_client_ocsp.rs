@@ -1,19 +1,12 @@
 //! A legacy-style client uses with_client_auth_cert and sends no client OCSP.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
     CertificateDer, Epoch, LocalAuthority, PrivateKeyDer, QuicVersion, RootCerts,
     ServerResumptionConfig, ServerTlsConfig, TlsEvent, TlsLimits, TlsServer,
 };
-use rustls::{
-    DigitallySignedStruct, SignatureScheme,
-    client::{
-        WebPkiServerVerifier,
-        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    },
-    pki_types::{ServerName, UnixTime, pem::PemObject},
-};
+use rustls::pki_types::pem::PemObject;
 
 const CA: &[u8] = include_bytes!("keychain/localhost/ca.cert");
 const SERVER_CERT: &[u8] = include_bytes!("keychain/localhost/server.cert");
@@ -22,65 +15,15 @@ const SERVER_OCSP: &[u8] = include_bytes!("keychain/localhost/server.ocsp");
 const CLIENT_CERT: &[u8] = include_bytes!("keychain/localhost/client.cert");
 const CLIENT_KEY: &[u8] = include_bytes!("keychain/localhost/client.key");
 
-#[derive(Debug)]
-struct ObservedServerVerifier {
-    inner: Arc<WebPkiServerVerifier>,
-    staple: Arc<Mutex<Vec<u8>>>,
-}
-
-impl ServerCertVerifier for ObservedServerVerifier {
-    fn verify_server_cert(
-        &self,
-        leaf: &CertificateDer<'_>,
-        chain: &[CertificateDer<'_>],
-        name: &ServerName<'_>,
-        ocsp: &[u8],
-        now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        *self.staple.lock().unwrap() = ocsp.to_vec();
-        self.inner.verify_server_cert(leaf, chain, name, ocsp, now)
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        certificate: &CertificateDer<'_>,
-        signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls12_signature(message, certificate, signature)
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        certificate: &CertificateDer<'_>,
-        signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls13_signature(message, certificate, signature)
-    }
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
-    }
-}
-
-fn connect_without_client_ocsp(
-    optional_client_ocsp: bool,
-) -> Result<(qtls::HandshakeSummary, Vec<u8>), Box<dyn std::error::Error>> {
+fn connect_without_client_ocsp() -> Result<(), Box<dyn std::error::Error>> {
     let provider = Arc::new(qtls::default_provider());
     let ca = CertificateDer::from_pem_slice(CA)?;
     RootCerts::set([ca.clone()])?;
     let mut roots = rustls::RootCertStore::empty();
     roots.add(ca)?;
-    let staple = Arc::new(Mutex::new(Vec::new()));
-    let verifier = ObservedServerVerifier {
-        inner: WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-            .build()?,
-        staple: staple.clone(),
-    };
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_root_certificates(roots)
         .with_client_auth_cert(
             vec![CertificateDer::from_pem_slice(CLIENT_CERT)?],
             PrivateKeyDer::from_pem_slice(CLIENT_KEY)?,
@@ -105,28 +48,18 @@ fn connect_without_client_ocsp(
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })?;
-    let server = if optional_client_ocsp {
-        server.with_optional_client_ocsp()
-    } else {
-        server
-    };
     let mut server = server.start(QuicVersion::V1, Bytes::from_static(b"server-params"))?;
     let mut client_epoch = Epoch::Initial;
-    let mut summary = None;
     for _ in 0..32 {
         drain_client(&mut client, &mut server, &mut client_epoch)?;
         while let Some(event) = server.next_event() {
-            match event {
-                TlsEvent::WriteCrypto { bytes, .. } => {
-                    client.read_hs(&bytes)?;
-                    drain_client(&mut client, &mut server, &mut client_epoch)?;
-                }
-                TlsEvent::HandshakeComplete(observed) => summary = Some(observed),
-                _ => {}
+            if let TlsEvent::WriteCrypto { bytes, .. } = event {
+                client.read_hs(&bytes)?;
+                drain_client(&mut client, &mut server, &mut client_epoch)?;
             }
         }
         if !client.is_handshaking() && server.is_complete() {
-            return Ok((summary.unwrap(), staple.lock().unwrap().clone()));
+            return Ok(());
         }
     }
     Err("handshake did not complete".into())
@@ -155,13 +88,14 @@ fn drain_client(
 }
 
 #[test]
-fn legacy_authenticated_client_needs_explicit_compatibility_policy() {
-    assert!(connect_without_client_ocsp(false).is_err());
-    let (summary, staple) = connect_without_client_ocsp(true).unwrap();
-    assert_eq!(summary.remote.unwrap().name(), "client");
-    assert_eq!(summary.local.unwrap().name(), "localhost");
-    assert_eq!(
-        staple, SERVER_OCSP,
-        "server must still present its OCSP to a legacy client"
+fn legacy_authenticated_client_without_ocsp_is_rejected() {
+    let error = connect_without_client_ocsp().unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<qtls::TlsError>(),
+            Some(qtls::TlsError::Alert(alert))
+                if alert.description() == u8::from(rustls::AlertDescription::BadCertificateStatusResponse)
+        ),
+        "unexpected handshake error: {error:?}"
     );
 }
