@@ -1725,10 +1725,10 @@ async fn close_wakers_are_independent_and_fire_without_repolling() {
     let [(client, _transport, _), _] = pair(0);
     let counts: [_; 4] = std::array::from_fn(|_| Arc::new(Count(AtomicUsize::new(0))));
     let wakers = counts.each_ref().map(|counter| waker(counter.clone()));
-    let mut bi = Box::pin(client.accept_bi_stream());
-    let mut uni = Box::pin(client.accept_uni_stream());
-    let mut open_bi = Box::pin(client.open_bi_stream());
-    let mut open_uni = Box::pin(client.open_uni_stream());
+    let mut bi = std::pin::pin!(client.accept_bi_stream());
+    let mut uni = std::pin::pin!(client.accept_uni_stream());
+    let mut open_bi = std::pin::pin!(client.open_bi_stream());
+    let mut open_uni = std::pin::pin!(client.open_uni_stream());
     use std::future::Future;
     assert!(
         bi.as_mut()

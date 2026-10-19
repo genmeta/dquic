@@ -41,9 +41,7 @@ Unchanged workspace crates remain on their existing published versions.
   see [the public API guide](dquic/README.md).
 - Use the crates.io `qrustls =0.23.45` package for the custom TLS backend and
   restore CI publication of the full workspace dependency chain.
-- Require peer certificate OCSP validation by default. Servers can explicitly
-  allow missing client OCSP during rollouts with
-  `TlsServer::with_optional_client_ocsp`; supplied responses are still validated.
+- Require peer certificate OCSP validation.
 - Update dependencies and move affected crates to new minor versions for the
   public API and shared-type changes.
 

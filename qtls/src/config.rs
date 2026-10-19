@@ -71,7 +71,6 @@ pub struct TlsServer {
     authority: LocalAuthority,
     resumption: ServerResumptionConfig,
     limits: TlsLimits,
-    require_client_ocsp: bool,
 }
 
 impl TlsClient {
@@ -187,16 +186,7 @@ impl TlsServer {
             authority: config.authority,
             resumption: config.resumption,
             limits: config.limits,
-            require_client_ocsp: true,
         })
-    }
-
-    /// Allow verified client certificates without a staple during a compatibility rollout.
-    /// Supplied staples are still validated; local/server OCSP requirements are unchanged.
-    /// The default created by `new` requires client OCSP.
-    pub fn with_optional_client_ocsp(mut self) -> Self {
-        self.require_client_ocsp = false;
-        self
     }
 
     pub fn initial_keys(
@@ -231,17 +221,12 @@ impl TlsServer {
         let builder = ServerConfig::builder_with_provider(self.provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
-        let verify_client = crate::handshake::ClientVerifier::new(
+        let verify_client = Arc::new(crate::handshake::ClientVerifier::new(
             self.roots.clone(),
             self.provider.clone(),
             peer.clone(),
             self.limits,
-        )?;
-        let verify_client = Arc::new(if self.require_client_ocsp {
-            verify_client
-        } else {
-            verify_client.with_optional_ocsp()
-        });
+        )?);
         let mut config = builder
             .with_client_cert_verifier(verify_client)
             .with_cert_resolver(server_cert);
