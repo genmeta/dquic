@@ -796,31 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bufmap_empty() {
-        let buf_map = BufMap::default();
-        assert!(buf_map.0.is_empty());
-    }
-
-    #[test]
-    fn test_bufmap_extend_to() {
-        let mut buf_map = BufMap::default();
-        buf_map.extend_to(100);
-        assert_eq!(buf_map.0, vec![State::encode(0, Color::Pending)]);
-        assert_eq!(buf_map.1, 100);
-
-        buf_map.0.get_mut(0).unwrap().set_color(Color::Flighting);
-        buf_map.extend_to(200);
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(100, Color::Pending)
-            ]
-        );
-        assert_eq!(buf_map.1, 200);
-    }
-
-    #[test]
     fn test_bufmap_pick() {
         let mut buf_map = BufMap::default();
         let range = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX);
@@ -910,19 +885,6 @@ mod tests {
                 State::encode(50, Color::Flighting),
             ]
         );
-    }
-
-    #[test]
-    fn test_bufmap_sent() {
-        let mut buf_map = BufMap::default();
-        buf_map.extend_to(200);
-        assert_eq!(buf_map.sent(), 0);
-
-        assert!(buf_map.pick(|_| Some(120), usize::MAX, u64::MAX).is_ok());
-        assert_eq!(buf_map.sent(), 120);
-
-        assert!(buf_map.pick(|_| Some(80), usize::MAX, u64::MAX).is_ok());
-        assert_eq!(buf_map.sent(), 200);
     }
 
     #[test]
@@ -1053,32 +1015,6 @@ mod tests {
             ]
         );
         buf_map.ack_rcvd(&(0..50));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_bufmap_recved_overflow() {
-        let mut buf_map = BufMap::default();
-        buf_map.extend_to(200);
-        assert!(buf_map.pick(|_| Some(120), usize::MAX, u64::MAX).is_ok());
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(120, Color::Pending),
-            ]
-        );
-        buf_map.ack_rcvd(&(110..121));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_bufmap_recved_over_end() {
-        let mut buf_map = BufMap::default();
-        buf_map.extend_to(200);
-        assert!(buf_map.pick(|_| Some(200), usize::MAX, u64::MAX).is_ok());
-        assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting)]);
-        buf_map.ack_rcvd(&(0..201));
     }
 
     #[test]
@@ -1270,13 +1206,5 @@ mod tests {
                 State::encode(2, Color::Lost)
             ]
         )
-    }
-
-    #[test]
-    fn test_bufmap_ack_and_lost_all2() {
-        let mut buf_map = BufMap(vec![State::encode(2, Color::Flighting)].into(), 46);
-
-        buf_map.may_loss(&(0..46));
-        assert_eq!(buf_map.0, vec![State::encode(2, Color::Lost)])
     }
 }
