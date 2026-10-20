@@ -48,29 +48,3 @@ impl<T: bytes::BufMut> WriteFrame<RemoveAddressFrame> for T {
         self.put_varint(&frame.seq_num);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use bytes::BytesMut;
-
-    use super::*;
-    use crate::frame::{GetFrameType, be_frame_type, io::WriteFrame};
-
-    #[test]
-    fn test_remove_address_frame() {
-        let frame = RemoveAddressFrame {
-            seq_num: VarInt::from_u32(0x1234),
-        };
-
-        assert_eq!(frame.max_encoding_size(), 12);
-        assert_eq!(frame.encoding_size(), 6);
-
-        let mut buf = BytesMut::new();
-        buf.put_frame(&frame);
-
-        let (remain, frame_type) = be_frame_type(&buf).unwrap();
-        assert_eq!(frame_type, frame.frame_type());
-        let frame2 = be_remove_address_frame(remain).unwrap().1;
-        assert_eq!(frame, frame2);
-    }
-}

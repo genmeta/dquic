@@ -35,3 +35,19 @@ fn test_write_streams_blocked_frame() {
     expected.extend_from_slice(&[0x52, 0x34]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_streams_blocked_frame() {
+    assert_eq!(
+        super::parse_frame(&[22, 0x52, 52], FrameType::StreamsBlocked(Dir::Bi)),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::StreamsBlocked(
+            StreamsBlockedFrame::Bi(VarInt::from_u32(4660))
+        ))
+    );
+    assert_eq!(
+        super::parse_frame(&[23, 0x52, 52], FrameType::StreamsBlocked(Dir::Uni)),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::StreamsBlocked(
+            StreamsBlockedFrame::Uni(VarInt::from_u32(4660))
+        ))
+    );
+}

@@ -60,17 +60,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<DataBlockedFrame> for T {
         self.put_varint(&frame.limit);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::DataBlockedFrame;
-    use crate::varint::VarInt;
-
-    #[test]
-    fn test_read_data_blocked_frame() {
-        use super::be_data_blocked_frame;
-        let buf = vec![0x52, 0x34];
-        let (_, frame) = be_data_blocked_frame(&buf).unwrap();
-        assert_eq!(frame, DataBlockedFrame::new(VarInt::from_u32(0x1234)));
-    }
-}

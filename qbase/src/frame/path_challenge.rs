@@ -64,38 +64,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<PathChallengeFrame> for T {
         self.put_slice(&frame.data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use nom::{Parser, combinator::flat_map};
-
-    use super::be_path_challenge_frame;
-    use crate::{
-        frame::{FrameType, io::WriteFrameType},
-        varint::{VarInt, be_varint},
-    };
-
-    #[test]
-    fn test_read_path_challenge_frame() {
-        let path_challenge_frame_type = VarInt::from(FrameType::PathChallenge);
-        let mut buf = Vec::new();
-        buf.put_frame_type(FrameType::PathChallenge);
-        buf.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
-        let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type == path_challenge_frame_type {
-                be_path_challenge_frame
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(
-            frame,
-            super::PathChallengeFrame {
-                data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
-            }
-        );
-    }
-}

@@ -255,37 +255,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<ConnectionCloseFrame> for T {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        frame::{FrameType, io::WriteFrameType},
-        varint::VarInt,
-    };
-
-    #[test]
-    fn test_read_connection_close_frame() {
-        use nom::{Parser, combinator::flat_map};
-
-        use crate::varint::be_varint;
-        let mut buf = Vec::new();
-        buf.put_frame_type(FrameType::ConnectionClose(Layer::App));
-        buf.extend_from_slice(&[0x0c, 5, b'w', b'r', b'o', b'n', b'g']);
-        let app_close_frame_type = VarInt::from(FrameType::ConnectionClose(Layer::App));
-        let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type == app_close_frame_type {
-                connection_close_frame_at_layer(Layer::App)
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(
-            frame,
-            super::ConnectionCloseFrame::new_app(VarInt::from_u32(0x0c), "wrong",)
-        );
-    }
-}

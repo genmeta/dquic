@@ -18,3 +18,11 @@ fn test_write_padding_frame() {
     expected.put_frame_type(FrameType::Padding);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_padding_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x00], FrameType::Padding),
+        qbase::frame::Frame::Padding(PaddingFrame)
+    );
+}

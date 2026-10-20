@@ -42,3 +42,20 @@ fn test_write_reset_stream_frame() {
     expected.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78, 0x80, 0, 0x9a, 0xbc]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_reset_stream_frame() {
+    assert_eq!(
+        super::parse_frame(
+            &[0x04, 0x52, 0x34, 0x80, 0, 0x56, 0x78, 0x80, 0, 0x9a, 0xbc],
+            FrameType::ResetStream
+        ),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::ResetStream(
+            ResetStreamFrame::new(
+                VarInt::from_u32(0x1234).into(),
+                VarInt::from_u32(0x5678),
+                VarInt::from_u32(0x9abc)
+            )
+        ))
+    );
+}

@@ -78,3 +78,39 @@ fn test_ack_frame_into_iter() {
     assert_eq!(iter.next(), Some(911..=951));
     assert_eq!(iter.next(), None);
 }
+
+#[test]
+fn test_read_ecn_count() {
+    let frame = super::parse_frame(
+        &[0x03, 0, 0, 0, 0, 0x52, 0x34, 0x52, 0x34, 0x52, 0x34],
+        FrameType::Ack(Ecn::Exist),
+    );
+    let Frame::Ack(frame) = frame else {
+        panic!("expected ACK frame")
+    };
+    assert_eq!(
+        frame.ecn(),
+        Some(EcnCounts::new(
+            VarInt::from_u32(0x1234),
+            VarInt::from_u32(0x1234),
+            VarInt::from_u32(0x1234)
+        ))
+    );
+}
+
+#[test]
+fn test_read_ack_frame() {
+    assert_eq!(
+        super::parse_frame(
+            &[0x02, 0x52, 0x34, 0x52, 0x34, 0x01, 0x52, 0x34, 3, 20],
+            FrameType::Ack(Ecn::None)
+        ),
+        Frame::Ack(AckFrame::new(
+            VarInt::from_u32(0x1234),
+            VarInt::from_u32(0x1234),
+            VarInt::from_u32(0x1234),
+            vec![(VarInt::from_u32(3), VarInt::from_u32(20))],
+            None
+        ))
+    );
+}

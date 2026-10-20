@@ -99,3 +99,48 @@ fn test_resize() {
     }
     assert_eq!(deque.resize(0, 10), Err(IndexError::TooSmall(0, 5)));
 }
+
+#[test]
+fn test_index_queue() {
+    let mut deque = IndexDeque::<u64, 19>::default();
+    for i in 0..10 {
+        assert_eq!(deque.push_back(i + 1), Ok(i));
+    }
+    assert_eq!(deque.offset(), 0);
+
+    for i in 0..10 {
+        assert_eq!(deque.pop_front(), Some((i, i + 1)));
+        assert_eq!(deque.offset(), i + 1);
+    }
+    assert_eq!(deque.pop_front(), None);
+    assert_eq!(deque.offset(), 10);
+
+    for i in 10..20 {
+        assert_eq!(deque.push_back(i + 1), Ok(i));
+    }
+    assert_eq!(deque.push_back(21), Err(IndexError::ExceedLimit(20, 19)));
+    assert_eq!(deque.offset(), 10);
+
+    assert!(!deque.contain(0));
+    assert!(!deque.contain(9));
+    assert!(deque.contain(10));
+    assert!(deque.contain(19));
+    assert!(!deque.contain(21));
+
+    assert_eq!(deque[10], 11);
+    assert_eq!(deque[19], 20);
+
+    assert_eq!(deque.drain_to(10).count(), 0);
+    let mut i = 10;
+    for item in deque.drain_to(15) {
+        i += 1;
+        assert_eq!(item, i);
+    }
+    assert_eq!(i, 15);
+    assert!(deque.contain(15));
+    assert_eq!(deque.offset(), 15);
+
+    assert_eq!(deque.drain_to(20).count(), 5);
+    assert_eq!(deque.offset(), 20);
+    assert!(deque.is_empty());
+}

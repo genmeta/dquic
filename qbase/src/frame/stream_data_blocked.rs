@@ -79,20 +79,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<StreamDataBlockedFrame> for T {
         self.put_varint(&frame.maximum_stream_data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::StreamDataBlockedFrame;
-    use crate::varint::VarInt;
-
-    #[test]
-    fn test_read_stream_data_blocked() {
-        use super::be_stream_data_blocked_frame;
-        let buf = [0x52, 0x34, 0x80, 0, 0x56, 0x78];
-        let (_, frame) = be_stream_data_blocked_frame(&buf).unwrap();
-        assert_eq!(
-            frame,
-            StreamDataBlockedFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678))
-        );
-    }
-}

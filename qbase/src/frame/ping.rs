@@ -32,29 +32,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<PingFrame> for T {
         self.put_frame_type(frame.frame_type());
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::PingFrame;
-    use crate::{frame::FrameType, varint::VarInt};
-
-    #[test]
-    fn test_read_ping_frame() {
-        use nom::{Parser, combinator::flat_map};
-
-        use super::be_ping_frame;
-        use crate::varint::be_varint;
-        let ping_frame_type = VarInt::from(FrameType::Ping);
-        let buf = vec![ping_frame_type.into_u64() as u8];
-        let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type == ping_frame_type {
-                be_ping_frame
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(frame, PingFrame);
-    }
-}
