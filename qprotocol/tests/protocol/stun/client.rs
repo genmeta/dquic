@@ -417,5 +417,8 @@ async fn mapping_timeout_is_an_error() {
     };
     // Only the first server answers; the second mapping probe must time out.
     let (result, ()) = tokio::join!(protocol.detect_nat(local, first), reply);
-    assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::TimedOut));
+    assert!(
+        matches!(&result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+        "expected the second mapping probe to time out, got {result:?}"
+    );
 }
