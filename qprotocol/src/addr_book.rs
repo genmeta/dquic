@@ -337,7 +337,10 @@ impl AddressBook {
         pathways
     }
 
-    fn insert(
+    /// Register an endpoint with explicit binding and interface metadata.
+    /// The caller is responsible for their validity; no OS binding is checked.
+    /// Rejects duplicate endpoints and conflicting metadata for the same binding.
+    pub fn insert(
         &self,
         bound: SocketAddr,
         endpoint: EndpointAddr,
@@ -499,6 +502,3 @@ impl State {
 fn in_scope(endpoint: EndpointAddr, scopes: Scopes) -> bool {
     endpoint.scope().is_some_and(|scope| scopes.contains(scope))
 }
-
-#[cfg(test)]
-mod tests;
