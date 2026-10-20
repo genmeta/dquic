@@ -32,7 +32,3 @@ pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ArcRelia
 pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ArcReliableFrames>>;
 
 pub use qbase::frame::GuaranteedFrame;
-
-#[cfg(test)]
-#[path = "../tests/unit/mod.rs"]
-mod tests;
