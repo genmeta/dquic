@@ -1,38 +1,7 @@
-mod space;
-
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
-use qbase::{
-    frame::Frame,
-    packet::OneRttHeader,
-    param::{ClientParameters, ParameterId, ServerParameters},
-    sid::handy::DemandConcurrency,
-};
-use qrecovery::streams::DataStreams;
+use bytes::Bytes;
 use tls_backend::pki_types::pem::PemObject;
-
-use crate::{ArcParameters, ArcReliableFrames, Role, keys::ArcOneRttKeys, space::DataSpace};
-
-pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
-    use qbase::packet::{Constraints, GetType, PacketBuffer};
-    let mut bytes = BytesMut::with_capacity(1200);
-    let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 1200,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
-    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
-    let result = source.poll_dump(
-        &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
-    );
-    assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
-    frames.into_iter().map(Into::into).collect()
-}
 
 const CERT: &[u8] = include_bytes!("../keychain/localhost/server.cert");
 const KEY: &[u8] = include_bytes!("../keychain/localhost/server.key");
@@ -60,7 +29,12 @@ fn tls_server(provider: Arc<qtls::CryptoProvider>, alpn: Vec<Vec<u8>>) -> qtls::
 }
 
 pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSummary; 2]) {
-    let provider = Arc::new(qtls::default_provider());
+    handshake_with(Arc::new(qtls::default_provider()))
+}
+
+pub fn handshake_with(
+    provider: Arc<qtls::CryptoProvider>,
+) -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSummary; 2]) {
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
@@ -104,28 +78,4 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
         }
     }
     (keys.map(Option::unwrap), summaries.map(Option::unwrap))
-}
-
-pub(crate) fn data() -> Arc<DataSpace> {
-    let ([keys, _], _) = handshake();
-    let client = ClientParameters::default();
-    let mut server = ServerParameters::default();
-    server
-        .set(ParameterId::InitialMaxStreamsBidi, 1u32)
-        .unwrap();
-    server.set(ParameterId::InitialMaxStreamsUni, 1u32).unwrap();
-    let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
-    let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = DataStreams::new(
-        parameters,
-        Box::new(DemandConcurrency),
-        reliable.clone(),
-        None,
-    );
-    Arc::new(DataSpace::new(
-        Default::default(),
-        ArcOneRttKeys::from(keys),
-        streams,
-        reliable,
-    ))
 }
