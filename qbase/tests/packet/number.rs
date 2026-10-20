@@ -68,3 +68,14 @@ fn test_encode_packet_number() {
 fn test_encode_packet_number_overflow() {
     PacketNumber::encode(1 << 31, 0);
 }
+
+#[test]
+fn pn_encoding_selects_two_three_and_four_bytes_from_the_ack_gap() {
+    let largest = 1 << 40;
+    for (gap, size) in [(32767, 2), (32768, 3), (8388607, 3), (8388608, 4)] {
+        let pn = largest + gap;
+        let encoded = PacketNumber::encode(pn, largest);
+        assert_eq!(encoded.size(), size);
+        assert_eq!(encoded.decode(pn), pn);
+    }
+}
