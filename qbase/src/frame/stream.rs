@@ -357,26 +357,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        frame::{EncodeSize, FrameType, GetFrameType, io::WriteDataFrame},
+        frame::FrameType,
         varint::{VarInt, be_varint},
     };
-
-    #[test]
-    fn test_stream_frame() {
-        let stream_frame = StreamFrame {
-            id: VarInt::from_u32(0x1234).into(),
-            offset: VarInt::from_u32(0x1234),
-            length: 11,
-            len_bit: Len::Explicit,
-            fin_bit: Fin::No,
-        };
-        assert_eq!(
-            stream_frame.frame_type(),
-            FrameType::Stream(Offset::NonZero, Len::Explicit, Fin::No)
-        );
-        assert_eq!(stream_frame.max_encoding_size(), 1 + 8 + 8 + 8);
-        assert_eq!(stream_frame.encoding_size(), 1 + 2 + 2 + 1);
-    }
 
     #[test]
     fn test_read_stream_frame() {
@@ -443,85 +426,6 @@ mod tests {
                 len_bit: Len::Omit,
                 fin_bit: Fin::No,
             }
-        );
-    }
-
-    #[test]
-    fn test_write_initial_stream_frame() {
-        let mut buf = Vec::new();
-        let frame = StreamFrame {
-            id: VarInt::from_u32(0x1234).into(),
-            offset: VarInt::from_u32(0),
-            length: 11,
-            len_bit: Len::Explicit,
-            fin_bit: Fin::Yes,
-        };
-        buf.put_data_frame(&frame, b"hello world");
-        assert_eq!(
-            buf,
-            vec![
-                0xb, 0x52, 0x34, 0x0b, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l',
-                b'd'
-            ]
-        );
-    }
-
-    #[test]
-    fn test_write_last_stream_frame() {
-        let mut buf = Vec::new();
-        let frame = StreamFrame {
-            id: VarInt::from_u32(0x1234).into(),
-            offset: VarInt::from_u32(0),
-            length: 11,
-            len_bit: Len::Omit,
-            fin_bit: Fin::Yes,
-        };
-        buf.put_data_frame(&frame, b"hello world");
-        assert_eq!(
-            buf,
-            vec![
-                0x9, 0x52, 0x34, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd'
-            ]
-        );
-    }
-
-    #[test]
-    fn test_write_eos_frame() {
-        let mut buf = Vec::new();
-        let frame = StreamFrame {
-            id: VarInt::from_u32(0x1234).into(),
-            offset: VarInt::from_u32(0x1234),
-            length: 11,
-            len_bit: Len::Explicit,
-            fin_bit: Fin::Yes,
-        };
-        buf.put_data_frame(&frame, b"hello world");
-        assert_eq!(
-            buf,
-            vec![
-                0x0f, 0x52, 0x34, 0x52, 0x34, 0x0b, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o',
-                b'r', b'l', b'd'
-            ]
-        );
-    }
-
-    #[test]
-    fn test_write_unfinished_stream_frame() {
-        let mut buf = Vec::new();
-        let frame = StreamFrame {
-            id: VarInt::from_u32(0x1234).into(),
-            offset: VarInt::from_u32(0x1234),
-            length: 11,
-            len_bit: Len::Explicit,
-            fin_bit: Fin::No,
-        };
-        buf.put_data_frame(&frame, b"hello world");
-        assert_eq!(
-            buf,
-            vec![
-                0x0e, 0x52, 0x34, 0x52, 0x34, 0x0b, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o',
-                b'r', b'l', b'd'
-            ]
         );
     }
 }

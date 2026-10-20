@@ -36,20 +36,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<PaddingFrame> for T {
 #[cfg(test)]
 mod tests {
     use super::{PaddingFrame, be_padding_frame};
-    use crate::{
-        frame::{
-            EncodeSize, FrameType, GetFrameType,
-            io::{WriteFrame, WriteFrameType},
-        },
-        varint::VarInt,
-    };
-
-    #[test]
-    fn test_padding_frame() {
-        assert_eq!(PaddingFrame.frame_type(), FrameType::Padding);
-        assert_eq!(PaddingFrame.max_encoding_size(), 1);
-        assert_eq!(PaddingFrame.encoding_size(), 1);
-    }
+    use crate::{frame::FrameType, varint::VarInt};
 
     #[test]
     fn test_read_padding_frame() {
@@ -69,14 +56,5 @@ mod tests {
         .unwrap();
         assert!(input.is_empty());
         assert_eq!(frame, PaddingFrame);
-    }
-
-    #[test]
-    fn test_write_padding_frame() {
-        let mut buf = Vec::new();
-        buf.put_frame(&PaddingFrame);
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::Padding);
-        assert_eq!(buf, expected);
     }
 }

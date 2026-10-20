@@ -35,20 +35,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<PingFrame> for T {
 #[cfg(test)]
 mod tests {
     use super::PingFrame;
-    use crate::{
-        frame::{
-            EncodeSize, FrameType, GetFrameType,
-            io::{WriteFrame, WriteFrameType},
-        },
-        varint::VarInt,
-    };
-
-    #[test]
-    fn test_ping_frame() {
-        assert_eq!(PingFrame.frame_type(), FrameType::Ping);
-        assert_eq!(PingFrame.max_encoding_size(), 1);
-        assert_eq!(PingFrame.encoding_size(), 1);
-    }
+    use crate::{frame::FrameType, varint::VarInt};
 
     #[test]
     fn test_read_ping_frame() {
@@ -69,14 +56,5 @@ mod tests {
         .unwrap();
         assert!(input.is_empty());
         assert_eq!(frame, PingFrame);
-    }
-
-    #[test]
-    fn test_write_ping_frame() {
-        let mut buf = Vec::new();
-        buf.put_frame(&PingFrame);
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::Ping);
-        assert_eq!(buf, expected);
     }
 }

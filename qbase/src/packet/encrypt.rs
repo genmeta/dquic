@@ -70,6 +70,3 @@ pub fn encode_short_first_byte(first_byte: &mut u8, pn_len: usize, key_phase: Ke
     specific_bits.set_key_phase(key_phase);
     *first_byte |= specific_bits.deref();
 }
-
-#[cfg(test)]
-mod tests {}

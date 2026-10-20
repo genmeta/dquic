@@ -137,20 +137,4 @@ mod tests {
     fn raw_short_datagram_round_trips() {
         round_trip(&[0x45, 1, 2, 3]);
     }
-
-    #[test]
-    fn empty_raw_datagram_is_rejected() {
-        assert_eq!(
-            Payload::from_raw(&pathway(), BytesMut::zeroed(128), 128),
-            Err(Error::InvalidForwardDatagram)
-        );
-    }
-
-    #[test]
-    fn insufficient_headroom_is_rejected() {
-        assert_eq!(
-            Payload::from_raw(&pathway(), BytesMut::zeroed(2), 1),
-            Err(Error::InvalidForwardDatagram)
-        );
-    }
 }

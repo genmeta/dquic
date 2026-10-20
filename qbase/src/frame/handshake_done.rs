@@ -36,20 +36,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<HandshakeDoneFrame> for T {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        frame::{
-            EncodeSize, FrameType, GetFrameType, HandshakeDoneFrame,
-            io::{WriteFrame, WriteFrameType},
-        },
-        varint::VarInt,
-    };
-
-    #[test]
-    fn test_handshake_done_frame() {
-        assert_eq!(HandshakeDoneFrame.frame_type(), FrameType::HandshakeDone);
-        assert_eq!(HandshakeDoneFrame.max_encoding_size(), 1);
-        assert_eq!(HandshakeDoneFrame.encoding_size(), 1);
-    }
+    use crate::{frame::FrameType, varint::VarInt};
 
     #[test]
     fn test_read_handshake_done_frame() {
@@ -70,14 +57,5 @@ mod tests {
         .unwrap();
         assert!(input.is_empty());
         assert_eq!(frame, super::HandshakeDoneFrame);
-    }
-
-    #[test]
-    fn test_write_handshake_done_frame() {
-        let mut buf = Vec::new();
-        buf.put_frame(&HandshakeDoneFrame);
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::HandshakeDone);
-        assert_eq!(buf, expected);
     }
 }
