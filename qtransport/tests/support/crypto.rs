@@ -1,8 +1,11 @@
 //! Real packet protection with small usage limits for boundary tests.
-use std::{cell::Cell, sync::Arc};
+use std::{
+    cell::Cell,
+    sync::{Arc, LazyLock},
+};
 
 use tls_backend::{
-    SupportedCipherSuite, Tls13CipherSuite,
+    CipherSuite, SupportedCipherSuite, Tls13CipherSuite,
     crypto::{
         CipherSuiteCommon,
         cipher::{AeadKey, Iv},
@@ -20,12 +23,17 @@ pub fn opened() -> usize {
     OPENED.get()
 }
 
-const BASE: &Tls13CipherSuite =
-    match tls_backend::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256 {
-        SupportedCipherSuite::Tls13(suite) => suite,
-    };
+static BASE: LazyLock<&Tls13CipherSuite> = LazyLock::new(|| {
+    qtls::default_provider()
+        .cipher_suites
+        .into_iter()
+        .find(|suite| suite.suite() == CipherSuite::TLS13_AES_128_GCM_SHA256)
+        .unwrap()
+        .tls13()
+        .unwrap()
+});
 
-static SUITE: Tls13CipherSuite = Tls13CipherSuite {
+static SUITE: LazyLock<Tls13CipherSuite> = LazyLock::new(|| Tls13CipherSuite {
     common: CipherSuiteCommon {
         suite: BASE.common.suite,
         hash_provider: BASE.common.hash_provider,
@@ -34,7 +42,7 @@ static SUITE: Tls13CipherSuite = Tls13CipherSuite {
     hkdf_provider: BASE.hkdf_provider,
     aead_alg: BASE.aead_alg,
     quic: Some(&LimitedAlgorithm),
-};
+});
 
 pub fn provider() -> Arc<qtls::CryptoProvider> {
     let mut provider = qtls::default_provider();
@@ -55,6 +63,10 @@ impl Algorithm for LimitedAlgorithm {
 
     fn aead_key_len(&self) -> usize {
         BASE.quic.unwrap().aead_key_len()
+    }
+
+    fn fips(&self) -> bool {
+        BASE.quic.unwrap().fips()
     }
 }
 
