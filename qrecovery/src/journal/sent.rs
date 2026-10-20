@@ -15,16 +15,6 @@ use qbase::{
 };
 use tokio::time::Instant;
 
-/// Errors from reserving a packet in recovery test fixtures.
-#[cfg(any(test, feature = "test-util"))]
-#[derive(Debug, thiserror::Error)]
-pub enum RecordError {
-    #[error("packet journal is full")]
-    Blocked,
-    #[error(transparent)]
-    Connection(#[from] Error),
-}
-
 const MAX_RECORDS: usize = 8192;
 const MAX_SKIPPED_PNS: usize = 256;
 // Includes empty slots pinned behind an earlier retained packet.
@@ -209,60 +199,9 @@ impl ArcSentJournal {
         }
     }
 
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn starting_at(pn: u64) -> Self {
-        Self(Arc::new(Mutex::new(SentJournal {
-            next_pn: pn,
-            ..Default::default()
-        })))
-    }
-
     pub fn has_capacity(&self) -> bool {
         let records = self.0.lock().unwrap();
         records.packets.len() < MAX_RECORDS && records.frames.len() < MAX_FRAMES
-    }
-
-    /// Allocate and encode a PN and retain its descriptors in one operation.
-    /// The caller fixes the sealing generation while this operation runs.
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn record_pending(
-        &self,
-        generation: impl Into<Option<u64>>,
-        frames: &mut Vec<GuaranteedFrame>,
-    ) -> Result<(u64, PacketNumber), RecordError> {
-        let mut records = self.0.lock().unwrap();
-        if records.packets.len() >= MAX_RECORDS || records.frames.len() + frames.len() > MAX_FRAMES
-        {
-            return Err(RecordError::Blocked);
-        }
-        let pn = records.next_pn;
-        if pn > VARINT_MAX {
-            return Err(Error::from(QuicError::with_default_fty(
-                ErrorKind::AeadLimitReached,
-                "packet numbers exhausted",
-            ))
-            .into());
-        }
-        let encoded = PacketNumber::encode(pn, records.largest_acked);
-        records.next_pn += 1;
-        let start = records.frames.largest();
-        for frame in frames.drain(..) {
-            records.frames.push_back(Some(frame)).unwrap();
-        }
-        let frame_range = start..records.frames.largest();
-        records.packets.insert(
-            pn,
-            SentPacket {
-                size: 0,
-                content: PacketContent::default(),
-                in_flight: false,
-                ack: None,
-                generation: generation.into(),
-                frame_range,
-                state: SentPacketState::Pending,
-            },
-        );
-        Ok((pn, encoded))
     }
 
     /// Reserve a unique packet number before constructing a packet.
@@ -340,19 +279,6 @@ impl ArcSentJournal {
             .on_sent(pn, in_flight, retransmit_after, retention);
     }
 
-    /// Failed or abandoned submission: return its frames before reclaiming the record.
-    /// Called by the Sender that still owns this pending packet.
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn cancel_pending(&self, pn: u64, frames: &mut Vec<GuaranteedFrame>) {
-        let mut records = self.0.lock().unwrap();
-        if let Some(record) = records.remove_packet(pn, SentPacketState::Failed) {
-            records.skipped_pns.insert(pn);
-            if records.skipped_pns.len() > MAX_SKIPPED_PNS {
-                records.skipped_pns.pop_first();
-            }
-            records.take_frames(record.frame_range, |frame| frames.push(frame));
-        }
-    }
     /// Report loss directly to frame owners while retaining the original for late ACKs.
     /// Like acknowledge, callbacks must not call back into CC or this journal.
     pub fn resend(

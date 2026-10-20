@@ -1,14 +1,25 @@
+use qbase::{
+    error::Error,
+    packet::{PacketNumber, Type, assemble::Metadata, r#type::short::OneRtt},
+};
 pub use qrecovery::journal::*;
 
 use super::write::PacketError;
 
-impl From<RecordError> for PacketError {
-    fn from(error: RecordError) -> Self {
-        match error {
-            RecordError::Blocked => Self::Blocked(std::task::Poll::Pending),
-            RecordError::Connection(error) => Self::Connection(error),
-        }
-    }
+pub fn record_pending(
+    journal: &ArcSentJournal,
+    generation: impl Into<Option<u64>>,
+    records: &mut Vec<qtransport::GuaranteedFrame>,
+) -> Result<(u64, PacketNumber), Error> {
+    let number = journal.next_pn()?;
+    journal.on_sealed(
+        number.0,
+        generation.into(),
+        0,
+        Metadata::new(Type::Short(OneRtt(0.into()))),
+        records.drain(..),
+    );
+    Ok(number)
 }
 
 pub fn reserve(
@@ -22,18 +33,6 @@ pub fn reserve(
     ),
     PacketError,
 > {
-    let mut record_error = None;
-    keys.reserve(|generation| {
-        journal
-            .record_pending(generation, records)
-            .map_err(|error| {
-                record_error = Some(error);
-                // Return the journal error without counting an AEAD use.
-                qtransport::keys::PacketError::Layout
-            })
-    })
-    .map_err(|error| match record_error {
-        Some(error) => error.into(),
-        None => error.into(),
-    })
+    keys.reserve(|generation| record_pending(journal, generation, records).map_err(Into::into))
+        .map_err(Into::into)
 }

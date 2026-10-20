@@ -23,6 +23,5 @@ tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-qrecovery = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "io-util", "net"] }
 tls-backend = { package = "qrustls", version = "=0.23.45", default-features = false, features = ["std", "ring"] }

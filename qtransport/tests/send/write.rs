@@ -385,7 +385,12 @@ mod tests {
                 .on_acked(&ack, |_| panic!("failed packet acknowledged"))
                 .is_err()
         );
-        assert_eq!(journal.record_pending(0, &mut frames).unwrap().0, 1);
+        assert_eq!(
+            super::super::records::record_pending(&journal, 0, &mut frames)
+                .unwrap()
+                .0,
+            1
+        );
     }
 
     #[test]

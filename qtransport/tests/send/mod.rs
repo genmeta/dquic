@@ -73,7 +73,8 @@ where
         constraints,
         sources,
         |packet, records| {
-            let (pn, encoded) = journal.record_pending(None, records)?;
+            let (pn, encoded) =
+                records::record_pending(journal, None, records).map_err(PacketError::Connection)?;
             finish_sealing(packet.seal_long(keys, pn, encoded), pn, journal, records)
         },
     )
@@ -378,7 +379,7 @@ pub(crate) fn finish_sealing(
             Ok(packet)
         }
         Err(error) => {
-            journal.cancel_pending(pn, records);
+            journal.cancel(pn, |frame| records.push(frame));
             Err(error)
         }
     }
