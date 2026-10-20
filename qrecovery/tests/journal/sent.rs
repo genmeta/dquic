@@ -399,6 +399,45 @@ async fn terminal_slots_are_reclaimed_only_when_the_live_prefix_finishes() {
     assert!(records.has_capacity());
 }
 
+// Run with --features test-util: this tests the fixture's capacity guard, not on_sealed.
+#[cfg(feature = "test-util")]
+#[tokio::test]
+async fn pinned_empty_slots_are_bounded_and_failed_append_preserves_frames() {
+    use qrecovery::journal::RecordError;
+
+    const FRAME_CAPACITY: usize = 32768;
+    let records = ArcSentJournal::default();
+    let mut scratch = vec![frame(0)];
+    assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
+    scratch.resize(FRAME_CAPACITY - 1, frame(1));
+    assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
+    records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+    records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
+    assert_eq!(acknowledged_values(&records, 1).len(), FRAME_CAPACITY - 1);
+    assert!(!records.has_capacity());
+    scratch.push(frame(2));
+    assert!(matches!(
+        records.record_pending(0, &mut scratch),
+        Err(RecordError::Blocked)
+    ));
+    assert_eq!(scratch, [frame(2)]);
+    assert_eq!(acknowledged_values(&records, 0), [0]);
+    assert!(records.has_capacity());
+    assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
+    assert!(scratch.is_empty());
+    records.cancel_pending(2, &mut scratch);
+    assert_eq!(scratch, [frame(2)]);
+    assert!((0..3).all(|pn| records.lock_guard().packet(pn).is_none()));
+
+    // A full budget fits again, including the slot released by cancel_pending.
+    scratch.resize(FRAME_CAPACITY, frame(3));
+    let pn = records.record_pending(0, &mut scratch).unwrap().0;
+    assert_eq!(pn, 3);
+    assert!(!records.has_capacity());
+    records.cancel(pn, drop);
+    assert!(records.has_capacity());
+}
+
 #[tokio::test(start_paused = true)]
 async fn loss_retains_frames_for_late_ack_and_expiration_removes_records() {
     let records = ArcSentJournal::default();
