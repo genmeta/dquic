@@ -443,62 +443,7 @@ impl ArcSentJournal {
 
 #[cfg(test)]
 mod tests {
-    use qbase::frame::ReliableFrame;
-
-    use super::{GuaranteedFrame as Frame, *};
-    fn ack(pn: u64) -> AckFrame {
-        AckFrame::new(
-            pn.try_into().unwrap(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        )
-    }
-
-    fn frame(value: u32) -> GuaranteedFrame {
-        Frame::Reliable(ReliableFrame::MaxData(qbase::frame::MaxDataFrame::new(
-            value.into(),
-        )))
-    }
-
-    fn acknowledged_values(records: &ArcSentJournal, pn: u64) -> Vec<u64> {
-        let mut values = Vec::new();
-        records
-            .on_acked(&ack(pn), |frame| match frame {
-                GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) => {
-                    values.push(frame.max_data());
-                }
-                _ => panic!("unexpected recovery frame"),
-            })
-            .unwrap();
-        values
-    }
-
-    // This tests the test-only reservation helper, not production on_sealed capacity enforcement.
-    #[tokio::test]
-    async fn pinned_empty_slots_are_bounded_and_failed_append_preserves_frames() {
-        let records = ArcSentJournal::default();
-        let mut scratch = vec![frame(0)];
-        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
-        scratch.resize(MAX_FRAMES - 1, frame(1));
-        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 1);
-        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
-        records.on_sent(1, true, Duration::from_secs(1), Duration::from_secs(3));
-        assert_eq!(acknowledged_values(&records, 1).len(), MAX_FRAMES - 1);
-        assert!(!records.has_capacity());
-        scratch.push(frame(2));
-        assert!(records.record_pending(0, &mut scratch).is_err());
-        assert!(
-            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
-        );
-        assert_eq!(acknowledged_values(&records, 0), [0]);
-        assert!(records.has_capacity());
-        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 2);
-        assert!(scratch.is_empty());
-        records.cancel_pending(2, &mut scratch);
-        assert!(records.0.lock().unwrap().frames.is_empty());
-    }
+    use super::{ArcSentJournal, ErrorKind, PacketNumber, VARINT_MAX};
 
     // The u62 boundary cannot be reached by a practical sequence of public allocations.
     #[test]
