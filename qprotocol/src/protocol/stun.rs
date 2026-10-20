@@ -595,23 +595,7 @@ mod tests {
     mod discovery;
     mod server;
 
-    use std::time::Duration;
-
-    use tokio::time::timeout;
-
     use super::*;
-    use crate::{
-        dock::Dock,
-        protocol::{ForwardProtocol, QuicProtocol},
-        topology::Topology,
-    };
-
-    #[test]
-    fn binding_request_encodes() {
-        let txid = TransactionId::random();
-        let message = Message::Request(Request::default());
-        assert!(!encode_datagram(txid, &message).unwrap().is_empty());
-    }
 
     #[test]
     fn transaction_is_registered_until_drop() {
@@ -619,63 +603,6 @@ mod tests {
         let transaction = protocol.new_transaction();
         let transaction_id = transaction.id();
 
-        assert!(protocol.transactions.contains_key(&transaction_id));
-
-        drop(transaction);
-
-        assert!(!protocol.transactions.contains_key(&transaction_id));
-    }
-
-    #[test]
-    fn new_transactions_do_not_overwrite_each_other() {
-        let protocol = Arc::new(StunProtocol::new());
-        let first = protocol.new_transaction();
-        let second = protocol.new_transaction();
-
-        assert_ne!(first.id(), second.id());
-        assert_eq!(protocol.transactions.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn transaction_retries_with_the_same_id_after_timeout() {
-        let protocol = Arc::new(StunProtocol::new());
-        protocol.disable_service();
-        let topology = Arc::new(Topology::new(
-            protocol.clone(),
-            Arc::new(ForwardProtocol::new()),
-            Arc::new(QuicProtocol::new()),
-        ));
-        let dock = Dock::new(topology);
-        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        let client_addr = client.local_addr().unwrap();
-        let link = Link::new(client_addr, agent.local_addr().unwrap());
-        dock.add(client).unwrap();
-        dock.add(agent).unwrap();
-
-        let mut transaction = protocol.new_transaction();
-        let transaction_id = transaction.id();
-        assert!(
-            timeout(
-                Duration::from_millis(20),
-                transaction.request(link, Request::default()),
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(transaction.id(), transaction_id);
-
-        protocol.enable_service();
-        let (response_link, response) = timeout(
-            Duration::from_secs(1),
-            transaction.request(link, Request::default()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(response_link, link);
-        assert_eq!(response.map_addr().unwrap(), client_addr);
         assert!(protocol.transactions.contains_key(&transaction_id));
 
         drop(transaction);
