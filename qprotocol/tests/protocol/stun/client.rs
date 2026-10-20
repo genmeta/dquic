@@ -392,7 +392,10 @@ async fn mapping_timeout_is_an_error() {
     dock.add(client.clone()).unwrap();
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let first = server.local_addr().unwrap();
-    let second = SocketAddr::from(([127, 0, 0, 2], first.port() ^ 1));
+    // Listen without replying. An unbound port can produce an ICMP error on
+    // Windows and unregister the client's receive socket before the timeout.
+    let silent = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let second = SocketAddr::from(([127, 0, 0, 2], silent.local_addr().unwrap().port()));
     let reply = async {
         let mut bytes = [0; 512];
         let (len, source) = server.recv_from(&mut bytes).await.unwrap();
@@ -421,4 +424,5 @@ async fn mapping_timeout_is_an_error() {
         matches!(&result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
         "expected the second mapping probe to time out, got {result:?}"
     );
+    assert!(dock.find_socket(local).is_some());
 }
