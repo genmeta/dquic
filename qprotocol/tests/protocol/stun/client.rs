@@ -382,3 +382,40 @@ async fn missing_attributes_and_invalid_first_server_topology_are_errors() {
             .is_err()
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn mapping_timeout_is_an_error() {
+    let protocol = Arc::new(StunProtocol::new());
+    let dock = isolated_dock(&protocol);
+    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let local = client.local_addr().unwrap();
+    dock.add(client.clone()).unwrap();
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let first = server.local_addr().unwrap();
+    let second = SocketAddr::from(([127, 0, 0, 2], first.port() ^ 1));
+    let reply = async {
+        let mut bytes = [0; 512];
+        let (len, source) = server.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(source, local);
+        let Datagram::Stun(id, Message::Request(_)) =
+            be_datagram(BytesMut::from(&bytes[..len])).unwrap()
+        else {
+            panic!("expected STUN binding request");
+        };
+        protocol
+            .on_datagram(
+                &client,
+                id,
+                Message::Response(Response::with(vec![
+                    Attr::MappedAddress("203.0.113.1:40000".parse().unwrap()),
+                    Attr::ChangedAddress(second),
+                ])),
+                Link::new(local, first),
+            )
+            .await
+            .unwrap();
+    };
+    // Only the first server answers; the second mapping probe must time out.
+    let (result, ()) = tokio::join!(protocol.detect_nat(local, first), reply);
+    assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::TimedOut));
+}

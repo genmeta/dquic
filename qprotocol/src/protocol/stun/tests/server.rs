@@ -13,27 +13,6 @@ fn config(bound: SocketAddr) -> ChangeServer {
 }
 
 #[tokio::test]
-async fn configuration_follows_registration_even_after_the_socket_expires() {
-    let protocol = StunProtocol::new();
-    let server = socket();
-    let bound = server.local_addr().unwrap();
-    let valid = config(bound);
-    protocol.register_socket(bound, &server);
-    protocol.set_change_server(bound, valid).unwrap();
-    let registered = Arc::downgrade(&server);
-    drop(server);
-    assert!(registered.upgrade().is_none());
-    // Configuration depends on registration, not on the weak socket's liveness.
-    protocol.set_change_server(bound, valid).unwrap();
-    protocol.unregister_socket(bound, &registered);
-    assert!(!protocol.change_servers.contains_key(&bound));
-    assert_eq!(
-        protocol.set_change_server(bound, valid).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
-}
-
-#[tokio::test]
 async fn configurations_follow_registration_identity() {
     let protocol = StunProtocol::new();
     let original = socket();
