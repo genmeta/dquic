@@ -313,3 +313,54 @@ pub fn initial_space(
         .unwrap();
     Arc::new(initial.space.clone())
 }
+
+pub mod phase;
+
+pub fn take_heartbeat(path: &qtransport::path::Path) -> bool {
+    use std::task::{Context, Poll, Waker};
+
+    use bytes::BytesMut;
+    use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
+
+    let mut bytes = BytesMut::new();
+    let mut frames = Vec::new();
+    let mut limits = Constraints {
+        send_quota: 1,
+        credit: 1,
+        max_size: 1,
+        ..Default::default()
+    };
+    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    match path.heartbeat.clone().poll_dump(
+        &mut Context::from_waker(Waker::noop()),
+        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+    ) {
+        Poll::Ready(Ok(1)) => {
+            assert!(frames.is_empty());
+            assert_eq!(&bytes[..], &[1]);
+            true
+        }
+        Poll::Pending => false,
+        other => panic!("unexpected heartbeat result: {other:?}"),
+    }
+}
+
+/// Wait for the sending task started by Paths::add_path to release its path.
+pub async fn wait_for_sender_exit(path: &Arc<qtransport::path::Path>) {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        while Arc::strong_count(path) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("sending task must release its path");
+}
+
+pub fn retire_all(paths: &qconnection::Paths) {
+    paths.terminator.terminate();
+    for path in paths.snapshot() {
+        paths.remove(&path);
+    }
+}
+
+pub mod path_fixtures;
