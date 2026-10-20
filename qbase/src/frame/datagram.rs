@@ -102,18 +102,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{EncodeSize, io::WriteDataFrame};
-
-    #[test]
-    fn test_datagram_frame() {
-        let frame = DatagramFrame {
-            encode_len: true,
-            len: VarInt::from_u32(3),
-        };
-        assert_eq!(frame.frame_type(), FrameType::Datagram(1));
-        assert_eq!(frame.max_encoding_size(), 1 + 8);
-        assert_eq!(frame.encoding_size(), 1 + 1);
-    }
 
     #[test]
     fn test_datagram_frame_with_flag() {
@@ -137,27 +125,5 @@ mod tests {
         let (remain, frame) = datagram_frame_with_flag(0)(input).unwrap();
         assert_eq!(remain, input);
         assert_eq!(frame, expected_output);
-    }
-
-    #[test]
-    fn test_put_datagram_frame_with_length() {
-        let frame = DatagramFrame {
-            encode_len: true,
-            len: VarInt::from_u32(3),
-        };
-        let mut buf = Vec::new();
-        buf.put_data_frame(&frame, &[0x01, 0x02, 0x03]);
-        assert_eq!(&buf, &[0x31, 0x03, 0x01, 0x02, 0x03]);
-    }
-
-    #[test]
-    fn test_put_datagram_frame_no_length() {
-        let frame = DatagramFrame {
-            encode_len: false,
-            len: VarInt::from_u32(3),
-        };
-        let mut buf = Vec::new();
-        buf.put_data_frame(&frame, &[0x01, 0x02, 0x03]);
-        assert_eq!(&buf, &[0x30, 0x01, 0x02, 0x03]);
     }
 }

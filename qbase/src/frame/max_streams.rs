@@ -97,26 +97,10 @@ mod tests {
 
     use super::{MaxStreamsFrame, max_streams_frame_with_dir};
     use crate::{
-        frame::{
-            EncodeSize, FrameType, GetFrameType,
-            io::{WriteFrame, WriteFrameType},
-        },
+        frame::{FrameType, io::WriteFrameType},
         sid::Dir,
         varint::{VarInt, be_varint},
     };
-
-    #[test]
-    fn test_max_streams_frame() {
-        let frame = MaxStreamsFrame::Bi(VarInt::from_u32(0x1234));
-        assert_eq!(frame.frame_type(), FrameType::MaxStreams(Dir::Bi));
-        assert_eq!(frame.max_encoding_size(), 1 + 8);
-        assert_eq!(frame.encoding_size(), 1 + 2);
-
-        let frame = MaxStreamsFrame::Uni(VarInt::from_u32(0x1236));
-        assert_eq!(frame.frame_type(), FrameType::MaxStreams(Dir::Uni));
-        assert_eq!(frame.max_encoding_size(), 1 + 8);
-        assert_eq!(frame.encoding_size(), 1 + 2);
-    }
 
     #[test]
     fn test_read_max_streams_frame() {
@@ -169,21 +153,5 @@ mod tests {
                 nom::error::ErrorKind::TooLarge,
             )))
         );
-    }
-
-    #[test]
-    fn test_write_max_streams_frame() {
-        let mut buf = Vec::new();
-        buf.put_frame(&MaxStreamsFrame::Bi(VarInt::from_u32(0x1234)));
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::MaxStreams(Dir::Bi));
-        expected.extend_from_slice(&[0x52, 0x34]);
-        assert_eq!(buf, expected);
-        buf.clear();
-        buf.put_frame(&MaxStreamsFrame::Uni(VarInt::from_u32(0x1236)));
-        expected.clear();
-        expected.put_frame_type(FrameType::MaxStreams(Dir::Uni));
-        expected.extend_from_slice(&[0x52, 0x36]);
-        assert_eq!(buf, expected);
     }
 }

@@ -88,23 +88,9 @@ impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {
 mod tests {
     use super::{StopSendingFrame, be_stop_sending_frame};
     use crate::{
-        frame::{
-            EncodeSize, FrameType, GetFrameType,
-            io::{WriteFrame, WriteFrameType},
-        },
+        frame::{FrameType, io::WriteFrame},
         varint::{VarInt, be_varint},
     };
-
-    #[test]
-    fn test_stop_sending_frame() {
-        let frame =
-            StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
-        assert_eq!(frame.stream_id(), VarInt::from_u32(0x1234).into());
-        assert_eq!(frame.app_err_code(), 0x5678);
-        assert_eq!(frame.frame_type(), FrameType::StopSending);
-        assert_eq!(frame.max_encoding_size(), 1 + 8 + 8);
-        assert_eq!(frame.encoding_size(), 1 + 2 + 4);
-    }
 
     #[test]
     fn test_parse_stop_sending_frame() {
@@ -126,19 +112,5 @@ mod tests {
         .unwrap();
         assert!(input.is_empty());
         assert_eq!(parsed, frame);
-    }
-
-    #[test]
-    fn test_write_stop_sending_frame() {
-        let mut buf = Vec::new();
-        let frame = StopSendingFrame {
-            stream_id: VarInt::from_u32(0x1234).into(),
-            app_err_code: VarInt::from_u32(0x5678),
-        };
-        buf.put_frame(&frame);
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::StopSending);
-        expected.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78]);
-        assert_eq!(buf, expected);
     }
 }

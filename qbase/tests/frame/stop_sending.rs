@@ -1,0 +1,28 @@
+use qbase::{
+    frame::{
+        EncodeSize, FrameType, GetFrameType, StopSendingFrame,
+        io::{WriteFrame, WriteFrameType},
+    },
+    varint::VarInt,
+};
+
+#[test]
+fn test_stop_sending_frame() {
+    let frame = StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
+    assert_eq!(frame.stream_id(), VarInt::from_u32(0x1234).into());
+    assert_eq!(frame.app_err_code(), 0x5678);
+    assert_eq!(frame.frame_type(), FrameType::StopSending);
+    assert_eq!(frame.max_encoding_size(), 1 + 8 + 8);
+    assert_eq!(frame.encoding_size(), 1 + 2 + 4);
+}
+
+#[test]
+fn test_write_stop_sending_frame() {
+    let mut buf = Vec::new();
+    let frame = StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
+    buf.put_frame(&frame);
+    let mut expected = Vec::new();
+    expected.put_frame_type(FrameType::StopSending);
+    expected.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78]);
+    assert_eq!(buf, expected);
+}

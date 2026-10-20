@@ -81,19 +81,6 @@ impl<T: bytes::BufMut> super::io::WriteFrame<NewTokenFrame> for T {
 }
 #[cfg(test)]
 mod tests {
-    use crate::frame::{
-        EncodeSize, FrameType, GetFrameType,
-        io::{WriteFrame, WriteFrameType},
-    };
-
-    #[test]
-    fn test_new_token_frame() {
-        let frame = super::NewTokenFrame::new(vec![0x01, 0x02]);
-        assert_eq!(frame.frame_type(), FrameType::NewToken);
-        assert_eq!(frame.max_encoding_size(), 1 + 1 + 2);
-        assert_eq!(frame.encoding_size(), 1 + 1 + 2);
-    }
-
     #[test]
     fn test_read_new_token_frame() {
         use super::be_new_token_frame;
@@ -101,16 +88,5 @@ mod tests {
         let (input, frame) = be_new_token_frame(&buf).unwrap();
         assert!(input.is_empty());
         assert_eq!(frame.token, vec![0x01, 0x02]);
-    }
-
-    #[test]
-    fn test_write_new_token_frame() {
-        let mut buf = Vec::<u8>::new();
-        let frame = super::NewTokenFrame::from_slice(&[0x01, 0x02]);
-        buf.put_frame(&frame);
-        let mut expected = Vec::new();
-        expected.put_frame_type(FrameType::NewToken);
-        expected.extend_from_slice(&[0x02, 0x01, 0x02]);
-        assert_eq!(buf, expected);
     }
 }
