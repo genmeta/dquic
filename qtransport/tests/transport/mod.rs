@@ -385,6 +385,16 @@ pub(crate) fn seal_packet(
     send::finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
 }
 
+// Receive and encoding tests supply packet numbers without constructing recovery history.
+fn seal_packet_with_pn(
+    packet: SendingPacket,
+    keys: &OneRttKeys,
+    pn: u64,
+) -> Result<send::write::PendingPacket, PacketError> {
+    let ((pn, encoded), key) = keys.reserve(|_| Ok((pn, PacketNumber::encode(pn, 0))))?;
+    packet.seal(&key, pn, encoded)
+}
+
 fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
     let mut recorded = Vec::new();
     let mut packet = SendingPacket::new(
@@ -405,14 +415,7 @@ fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
             [&mut PingFrame],
         )
         .unwrap();
-    seal_packet(
-        packet,
-        keys,
-        &send::records::ArcSentJournal::starting_at(pn),
-        &mut recorded,
-    )
-    .unwrap()
-    .into_buffer()
+    seal_packet_with_pn(packet, keys, pn).unwrap().into_buffer()
 }
 
 #[test]
@@ -515,14 +518,7 @@ fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    seal_packet(
-        packet,
-        keys,
-        &send::records::ArcSentJournal::starting_at(pn),
-        &mut recorded,
-    )
-    .unwrap()
-    .into_buffer()
+    seal_packet_with_pn(packet, keys, pn).unwrap().into_buffer()
 }
 
 #[tokio::test]
@@ -1266,13 +1262,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             }
             result.unwrap();
             assert!(!recorded.is_empty());
-            let pending = seal_packet(
-                packet,
-                &sealing,
-                &send::records::ArcSentJournal::starting_at(pn),
-                &mut recorded,
-            )
-            .unwrap();
+            let pending = seal_packet_with_pn(packet, &sealing, pn).unwrap();
             assert!(pending.bytes().len() <= 80);
             let (_, frames) = opening
                 .open(parse(pending.bytes()), |_| Ok(pn), Duration::from_secs(1))
@@ -1441,13 +1431,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             [&mut PingFrame, &mut close],
         )
         .unwrap();
-    let bytes = seal_packet(
-        packet,
-        &keys(&ct),
-        &send::records::ArcSentJournal::starting_at(1),
-        &mut recorded,
-    )
-    .unwrap();
+    let bytes = seal_packet_with_pn(packet, &keys(&ct), 1).unwrap();
     assert!(enqueue(&inbox, Packet::Data(parse(bytes.bytes()))));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 2)))));
     drop(inbox);

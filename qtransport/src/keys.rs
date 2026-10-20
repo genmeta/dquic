@@ -747,11 +747,11 @@ mod tests {
         keys.allow_update();
         let records = qrecovery::journal::ArcSentJournal::default();
         let ((earlier, _), old) = keys
-            .reserve(|generation| Ok(records.record_pending(generation, &mut Vec::new()).unwrap()))
+            .reserve(|_| records.next_pn().map_err(Into::into))
             .unwrap();
         keys.update().unwrap();
         let ((later, _), new) = keys
-            .reserve(|generation| Ok(records.record_pending(generation, &mut Vec::new()).unwrap()))
+            .reserve(|_| records.next_pn().map_err(Into::into))
             .unwrap();
         assert_eq!((earlier, later), (0, 1));
         let mut bytes = [0; 22];
