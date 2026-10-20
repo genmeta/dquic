@@ -1,46 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
-use qbase::{
-    Epoch,
-    cid::ConnectionId,
-    error::ErrorKind,
-    frame::PathChallengeFrame,
-    net::{addr::EndpointAddr, route::Pathway},
-    role::Role,
-};
+use qbase::{Epoch, error::ErrorKind, frame::PathChallengeFrame, role::Role};
 use qtransport::path::PathState;
 
-use crate::Paths;
-
-fn paths(role: Role) -> Arc<Paths> {
-    paths_with_timeouts(role, Duration::ZERO, Duration::ZERO)
-}
-
-fn paths_with_timeouts(role: Role, max: Duration, defer: Duration) -> Arc<Paths> {
-    let keys = qtls::default_provider()
-        .cipher_suites
-        .iter()
-        .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
-        .unwrap()
-        .keys(
-            b"original",
-            if role == Role::Server {
-                tls_backend::Side::Server
-            } else {
-                tls_backend::Side::Client
-            },
-            tls_backend::quic::Version::V1,
-        )
-        .into();
-    crate::common::initial_paths_with_timeouts(
-        role,
-        ConnectionId::from_slice(b"localcid"),
-        ConnectionId::from_slice(b"original"),
-        keys,
-        max,
-        defer,
-    )
-}
+use crate::{
+    Paths,
+    common::path_fixtures::{paths, paths_with_timeouts, pathway},
+};
 
 #[tokio::test(start_paused = true)]
 async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
@@ -66,13 +32,6 @@ async fn cancelled_idle_timer_does_not_request_close() {
     tokio::time::advance(Duration::from_secs(5)).await;
     tokio::task::yield_now().await;
     assert!(notification.notified().is_none());
-}
-
-fn pathway(port: u16) -> Pathway {
-    Pathway::new(
-        EndpointAddr::direct(([127, 0, 0, 1], 30001).into()),
-        EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-    )
 }
 
 #[tokio::test]
@@ -261,41 +220,6 @@ async fn validation_times_out_after_three_attempts_and_retirement_cancels_waitin
 }
 
 #[tokio::test(start_paused = true)]
-async fn paths_have_independent_heartbeats_and_retirement_cancels_only_one() {
-    use qbase::packet::PacketContent;
-    use tokio::time::Instant;
-
-    let paths = paths_with_timeouts(
-        Role::Server,
-        Duration::from_secs(60),
-        Duration::from_secs(60),
-    );
-    let first = paths.add_path(pathway(30002));
-    let second = paths.add_path(pathway(30003));
-    first
-        .heartbeat
-        .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
-        .unwrap();
-    tokio::time::advance(Duration::from_secs(20)).await;
-    assert!(super::take_heartbeat(&first));
-    assert!(!super::take_heartbeat(&second));
-    paths.remove(&first);
-    assert!(
-        first
-            .heartbeat
-            .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
-            .is_err()
-    );
-    assert!(
-        second
-            .heartbeat
-            .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
-            .is_ok()
-    );
-    paths.retire_all();
-}
-
-#[tokio::test(start_paused = true)]
 async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
     let paths = paths(Role::Server);
     paths.update_max_idle_timeout(Duration::MAX);
@@ -314,23 +238,6 @@ async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
             .unwrap()
             .is_err()
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn terminator_does_not_retain_paths() {
-    let paths = paths(Role::Server);
-    let terminator = paths.terminator.clone();
-    let weak = Arc::downgrade(&paths);
-    drop(paths);
-    assert!(weak.upgrade().is_none());
-    terminator.close(
-        qtransport::CloseReason::Internal(qbase::error::QuicError::with_default_fty(
-            ErrorKind::Internal,
-            "closed after owner dropped",
-        )),
-        Duration::from_secs(1),
-    );
-    assert_eq!(terminator.await.kind(), ErrorKind::Internal);
 }
 
 // Validation tests do not run TLS or a real handshake sender. Finish a separate

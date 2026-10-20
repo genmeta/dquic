@@ -17,61 +17,8 @@ impl Paths {
     }
 }
 
-fn take_heartbeat(path: &qtransport::path::Path) -> bool {
-    use std::task::{Context, Poll, Waker};
-
-    use bytes::BytesMut;
-    use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
-
-    let mut bytes = BytesMut::new();
-    let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 1,
-        credit: 1,
-        max_size: 1,
-        ..Default::default()
-    };
-    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
-    match path.heartbeat.clone().poll_dump(
-        &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
-    ) {
-        Poll::Ready(Ok(1)) => {
-            assert!(frames.is_empty());
-            assert_eq!(&bytes[..], &[1]);
-            true
-        }
-        Poll::Pending => false,
-        other => panic!("unexpected heartbeat result: {other:?}"),
-    }
-}
-
-/// Concrete handles owned by the receive side, including already retired spaces.
-pub struct SpaceFixture {
-    pub initial: std::sync::Arc<qtransport::space::Space<qtransport::keys::ArcKeys>>,
-    pub handshake: std::sync::Arc<qtransport::space::HandshakeSpace>,
-    pub data: std::sync::Arc<qtransport::space::DataSpace>,
-}
-
-pub struct MatureFixture {
-    pub paths: std::sync::Arc<Paths>,
-    pub phase: std::sync::Arc<crate::MaturePhase>,
-    pub spaces: SpaceFixture,
-}
-
-impl MatureFixture {
-    pub fn peer_cid(&self) -> qbase::cid::ConnectionId {
-        self.parameters
-            .remote(qbase::param::ParameterId::InitialSourceConnectionId)
-    }
-}
-
-impl std::ops::Deref for MatureFixture {
-    type Target = crate::MaturePhase;
-    fn deref(&self) -> &Self::Target {
-        &self.phase
-    }
-}
+pub use crate::common::phase::{MatureFixture, SpaceFixture};
+use crate::common::take_heartbeat;
 
 pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
     if matches!(paths.phase().get(), crate::ConnPhase::Initial(_)) {
