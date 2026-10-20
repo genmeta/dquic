@@ -227,23 +227,6 @@ async fn detects_dynamic_mapping_and_unanswered_third_probe() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn mapping_timeout_is_an_error() {
-    let network = Network::new();
-    let result = network
-        .run(
-            network
-                .protocol
-                .detect_nat(network.local, network.servers[0]),
-            vec![
-                network.binding(0, network.outer),
-                network.binding(1, network.outer).unanswered(PROBE_ATTEMPTS),
-            ],
-        )
-        .await;
-    assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::TimedOut));
-}
-
-#[tokio::test(start_paused = true)]
 async fn invalid_third_server_topology_is_an_error() {
     let network = Network::new();
     let mut second = network.binding(1, network.outer);

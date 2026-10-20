@@ -396,3 +396,50 @@ async fn configuration_rejects_invalid_addresses_and_requires_registration() {
         io::ErrorKind::NotFound
     );
 }
+
+#[tokio::test]
+async fn configuration_follows_registration_even_after_the_socket_expires() {
+    let protocol = Arc::new(StunProtocol::new());
+    let dock = isolated_dock(&protocol);
+    let server = socket();
+    let bound = server.local_addr().unwrap();
+    let valid = config(bound);
+    let receiver = dock.add(server.clone()).unwrap().unwrap();
+    protocol.set_change_server(bound, valid).unwrap();
+    let registered = Arc::downgrade(&server);
+    receiver.abort();
+    drop(server);
+    timeout(Duration::from_secs(1), async {
+        while registered.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Aborting reception releases the socket without withdrawing its registration.
+    protocol.set_change_server(bound, valid).unwrap();
+    assert!(dock.remove_bound(bound));
+    assert_eq!(
+        protocol.set_change_server(bound, valid).unwrap_err().kind(),
+        io::ErrorKind::NotFound,
+    );
+
+    // A request on the same address must not inherit the withdrawn configuration.
+    let server = Arc::new(UdpSocket::bind(bound).unwrap());
+    let client = socket();
+    protocol
+        .on_datagram(
+            &server,
+            TransactionId::random(),
+            Message::Request(Request::default()),
+            Link::new(bound, client.local_addr().unwrap()),
+        )
+        .await
+        .unwrap();
+    let (_, Message::Response(response), _) = receive(&client).await else {
+        panic!("expected binding response");
+    };
+    assert_eq!(response.source_addr().unwrap(), bound);
+    assert!(response.changed_addr().is_err());
+}
