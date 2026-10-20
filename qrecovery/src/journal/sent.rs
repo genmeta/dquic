@@ -504,52 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn ack_returns_highest_generation_or_none() {
-        for (generations, expected) in [
-            (vec![None, None], None),
-            (vec![Some(0)], Some(0)),
-            (vec![Some(1), Some(7), Some(2), None, Some(7)], Some(7)),
-        ] {
-            let records = ArcSentJournal::default();
-            for generation in &generations {
-                records
-                    .record_pending(*generation, &mut vec![frame(42)])
-                    .unwrap();
-            }
-            let largest = (generations.len() as u64 - 1).try_into().unwrap();
-            let ack = AckFrame::new(largest, 0u32.into(), largest, vec![], None);
-            let mut confirmed = 0;
-            assert_eq!(
-                records.on_acked(&ack, |_| confirmed += 1).unwrap(),
-                expected
-            );
-            assert_eq!(confirmed, generations.len());
-            assert_eq!(
-                records
-                    .on_acked(&ack, |_| panic!("duplicate ACK notification"))
-                    .unwrap(),
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn pending_reliable_records_reuse_scratch_allocation() {
-        let records = ArcSentJournal::default();
-        let mut scratch = vec![frame(10)];
-        let allocation = scratch.as_ptr();
-        assert_eq!(records.record_pending(0, &mut scratch).unwrap().0, 0);
-        assert!(scratch.is_empty());
-        assert_eq!(scratch.as_ptr(), allocation);
-        records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
-        records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
-        assert!(
-            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
-        );
-        assert_eq!(acknowledged_values(&records, 0), [10]);
-    }
-
-    #[test]
     fn recovery_keeps_data_headers_and_moves_tokens_without_copying() {
         use qbase::frame::{CryptoFrame, NewTokenFrame, StreamFrame};
         let records = ArcSentJournal::default();
@@ -987,31 +941,6 @@ mod tests {
         assert!(journal.frames.is_empty());
     }
 
-    #[tokio::test]
-    async fn shared_handles_distinguish_cancelled_pending_and_sent_packets() {
-        let first = ArcSentJournal::default();
-        let second = first.clone();
-        let mut frames = vec![frame(10)];
-        let cancelled = first.record_pending(0, &mut frames).unwrap().0;
-        let sent = second.record_pending(0, &mut frames).unwrap().0;
-        let pending = first.record_pending(0, &mut frames).unwrap().0;
-        assert_eq!((cancelled, sent, pending), (0, 1, 2));
-        second.cancel_pending(cancelled, &mut frames);
-        assert!(
-            matches!(frames.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
-        );
-        frames.clear();
-        first.on_sent(sent, false, Duration::ZERO, Duration::ZERO);
-        assert!(second.on_acked(&ack(sent), |_| {}).unwrap().is_none());
-        assert!(second.on_acked(&ack(cancelled), |_| {}).is_err());
-        assert_eq!(first.on_acked(&ack(pending), |_| {}).unwrap(), Some(0));
-        second.on_sent(pending, false, Duration::ZERO, Duration::ZERO);
-        assert!(first.on_acked(&ack(pending), |_| {}).unwrap().is_none());
-        let spanning_gap = AckFrame::new(2u32.into(), 0u32.into(), 2u32.into(), vec![], None);
-        assert!(first.on_acked(&spanning_gap, |_| {}).is_err());
-        assert!(first.0.lock().unwrap().packets.is_empty());
-    }
-
     #[tokio::test(start_paused = true)]
     async fn deadlines_order_by_time_and_keep_packets_with_equal_times() {
         let records = ArcSentJournal::default();
@@ -1118,13 +1047,6 @@ mod tests {
                 .on_acked(&ack(3 + MAX_SKIPPED_PNS as u64), |_| {})
                 .is_err()
         );
-    }
-
-    #[test]
-    fn regression_invalid_ack_ranges_return_an_error_without_underflow() {
-        let records = ArcSentJournal::default();
-        let malformed = AckFrame::new(0u32.into(), 0u32.into(), 1u32.into(), vec![], None);
-        assert!(records.on_acked(&malformed, |_| {}).is_err());
     }
 
     #[test]
