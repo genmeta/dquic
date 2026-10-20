@@ -205,3 +205,42 @@ async fn unrepresentable_deadline_does_not_panic() {
     assert!(timer.on_rcvd_at(now()).unwrap().unwrap());
     assert!(futures::poll!(&mut waiter).is_pending());
 }
+
+#[tokio::test(start_paused = true)]
+async fn activity_cannot_revive_an_expired_timer_without_waiting() {
+    for update in [ArcIdleTimer::on_sent_at, ArcIdleTimer::on_rcvd_at] {
+        for elapsed in [5, 6] {
+            let timer = ArcIdleTimer::new(Duration::from_secs(5));
+            assert!(timer.on_sent_at(now()).unwrap().unwrap());
+            tokio::time::advance(Duration::from_secs(elapsed)).await;
+            assert!(matches!(update(&timer, now()), Ok(Err(Timeout))));
+            let waiter = timer.timeout();
+            tokio::pin!(waiter);
+            assert!(matches!(
+                futures::poll!(&mut waiter),
+                std::task::Poll::Ready(Ok(Timeout))
+            ));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn detached_timeout_task_stops_at_expiry_or_cancellation() {
+    for cancelled in [false, true] {
+        let timer = ArcIdleTimer::new(Duration::from_secs(10));
+        timer.on_sent_at(now()).unwrap().unwrap();
+        tokio::spawn(timer.clone().timeout());
+        let metrics = tokio::runtime::Handle::current().metrics();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        if cancelled {
+            timer.cancel();
+        }
+        drop(timer);
+        tokio::task::yield_now().await;
+        assert_eq!(metrics.num_alive_tasks(), 1);
+        tokio::time::advance(Duration::from_secs(8)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(metrics.num_alive_tasks(), 0);
+    }
+}

@@ -31,3 +31,17 @@ fn test_write_connection_close_frame() {
     expected.extend_from_slice(&[0x03, 0xe, 5, b'w', b'r', b'o', b'n', b'g']);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_connection_close_frame() {
+    assert_eq!(
+        super::parse_frame(
+            &[0x1d, 0x0c, 5, b'w', b'r', b'o', b'n', b'g'],
+            FrameType::ConnectionClose(Layer::App)
+        ),
+        qbase::frame::Frame::Close(ConnectionCloseFrame::new_app(
+            VarInt::from_u32(0x0c),
+            "wrong"
+        ))
+    );
+}

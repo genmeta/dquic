@@ -140,28 +140,3 @@ impl<T: bytes::BufMut> WriteFrame<PunchMeNowFrame> for T {
         self.put_varint(&VarInt::from(frame.nat_type));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use bytes::BytesMut;
-
-    use super::*;
-    use crate::frame::{GetFrameType, be_frame_type, io::WriteFrame};
-
-    #[test]
-    fn test_punch_me_now_frame() {
-        let frame = PunchMeNowFrame {
-            local_seq: VarInt::from_u32(1),
-            remote_seq: VarInt::from_u32(2),
-            address: "127.0.0.1:12345".parse().unwrap(),
-            tire: VarInt::from_u32(0x01u32),
-            nat_type: NatType::FullCone,
-        };
-        let mut buf = BytesMut::with_capacity(frame.max_encoding_size());
-        buf.put_frame(&frame);
-        let (remain, frame_type) = be_frame_type(&buf).unwrap();
-        assert_eq!(frame_type, frame.frame_type());
-        let frame2 = be_punch_me_now_frame(Family::V4)(remain).unwrap().1;
-        assert_eq!(frame, frame2);
-    }
-}

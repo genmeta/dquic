@@ -60,30 +60,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxDataFrame> for T {
         self.put_varint(&frame.max_data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::MaxDataFrame;
-    use crate::{frame::FrameType, varint::VarInt};
-
-    #[test]
-    fn test_read_max_data_frame() {
-        use nom::{Parser, combinator::flat_map};
-
-        use super::be_max_data_frame;
-        use crate::varint::be_varint;
-        let max_data_frame_type = VarInt::from(FrameType::MaxData);
-        let buf = vec![max_data_frame_type.into_u64() as u8, 0x52, 0x34];
-        let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type == max_data_frame_type {
-                be_max_data_frame
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(frame, MaxDataFrame::new(VarInt::from_u32(0x1234),));
-    }
-}

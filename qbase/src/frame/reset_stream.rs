@@ -130,39 +130,3 @@ impl From<&ResetStreamFrame> for ResetStreamError {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use nom::{Parser, combinator::flat_map};
-
-    use super::ResetStreamFrame;
-    use crate::{
-        frame::{FrameType, io::WriteFrameType},
-        varint::{VarInt, be_varint},
-    };
-
-    #[test]
-    fn test_read_reset_stream_frame() {
-        let mut buf = Vec::new();
-        buf.put_frame_type(FrameType::ResetStream);
-        buf.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78, 0x80, 0, 0x9a, 0xbc]);
-        let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type == VarInt::from(FrameType::ResetStream) {
-                super::be_reset_stream_frame
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(
-            frame,
-            ResetStreamFrame::new(
-                VarInt::from_u32(0x1234).into(),
-                VarInt::from_u32(0x5678),
-                VarInt::from_u32(0x9abc),
-            )
-        );
-    }
-}

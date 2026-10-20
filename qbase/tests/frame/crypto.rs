@@ -56,3 +56,17 @@ fn test_encoding_with_offset_exceeded() {
 fn test_encoding_with_length_too_large() {
     CryptoFrame::estimate_max_capacity(1 << 31, 20);
 }
+
+#[test]
+fn test_read_crypto_frame() {
+    let mut buf = vec![0x06, 0x52, 0x34, 0x80, 0x00, 0x56, 0x78];
+    let data = bytes::Bytes::from(vec![0; 0x5678]);
+    buf.extend_from_slice(&data);
+    assert_eq!(
+        super::parse_frame(&buf, FrameType::Crypto),
+        qbase::frame::Frame::Crypto(
+            CryptoFrame::new(VarInt::from_u32(0x1234), VarInt::from_u32(0x5678)),
+            data
+        )
+    );
+}

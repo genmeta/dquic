@@ -83,34 +83,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {
         self.put_varint(&frame.app_err_code);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{StopSendingFrame, be_stop_sending_frame};
-    use crate::{
-        frame::{FrameType, io::WriteFrame},
-        varint::{VarInt, be_varint},
-    };
-
-    #[test]
-    fn test_parse_stop_sending_frame() {
-        use nom::{Parser, combinator::flat_map};
-
-        let frame =
-            StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
-        let mut buf = Vec::new();
-        buf.put_frame(&frame);
-        let stop_sending_frame_type = VarInt::from(FrameType::StopSending);
-        let (input, parsed) = flat_map(be_varint, |frame_type| {
-            if frame_type == stop_sending_frame_type {
-                be_stop_sending_frame
-            } else {
-                panic!("wrong frame type: {frame_type}")
-            }
-        })
-        .parse(buf.as_ref())
-        .unwrap();
-        assert!(input.is_empty());
-        assert_eq!(parsed, frame);
-    }
-}

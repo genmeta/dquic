@@ -26,3 +26,14 @@ fn test_write_stop_sending_frame() {
     expected.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_parse_stop_sending_frame() {
+    let frame = StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
+    let mut buf = Vec::new();
+    buf.put_frame(&frame);
+    assert_eq!(
+        super::parse_frame(&buf, FrameType::StopSending),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::StopSending(frame))
+    );
+}

@@ -125,21 +125,3 @@ where
         self.put_data(data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::CryptoFrame;
-    use crate::varint::VarInt;
-
-    #[test]
-    fn test_read_crypto_frame() {
-        use super::be_crypto_frame;
-        let buf = vec![0x52, 0x34, 0x80, 0x00, 0x56, 0x78];
-        let (remain, frame) = be_crypto_frame(&buf).unwrap();
-        assert_eq!(remain, &[]);
-        assert_eq!(
-            frame,
-            CryptoFrame::new(VarInt::from_u32(0x1234), VarInt::from_u32(0x5678))
-        );
-    }
-}

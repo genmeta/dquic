@@ -79,17 +79,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamDataFrame> for T {
         self.put_varint(&frame.max_stream_data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::varint::VarInt;
-
-    #[test]
-    fn test_read_max_stream_data_frame() {
-        use super::be_max_stream_data_frame;
-        let buf = vec![0x52, 0x34, 0x80, 0, 0x56, 0x78];
-        let (_, frame) = be_max_stream_data_frame(&buf).unwrap();
-        assert_eq!(frame.stream_id(), VarInt::from_u32(0x1234).into());
-        assert_eq!(frame.max_stream_data(), 0x5678);
-    }
-}

@@ -60,20 +60,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<RetireConnectionIdFrame> for T {
         self.put_varint(&frame.sequence);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{RetireConnectionIdFrame, be_retire_connection_id_frame};
-    use crate::varint::VarInt;
-
-    #[test]
-    fn test_read_retire_connection_id_frame() {
-        let buf = vec![0x52, 0x34];
-        let (remain, frame) = be_retire_connection_id_frame(&buf).unwrap();
-        assert!(remain.is_empty());
-        assert_eq!(
-            frame,
-            RetireConnectionIdFrame::new(VarInt::from_u32(0x1234))
-        );
-    }
-}

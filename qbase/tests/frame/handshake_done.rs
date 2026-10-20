@@ -18,3 +18,11 @@ fn test_write_handshake_done_frame() {
     expected.put_frame_type(FrameType::HandshakeDone);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_handshake_done_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x1e], FrameType::HandshakeDone),
+        qbase::frame::Frame::HandshakeDone(HandshakeDoneFrame)
+    );
+}

@@ -18,3 +18,11 @@ fn test_write_ping_frame() {
     expected.put_frame_type(FrameType::Ping);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_ping_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x01], FrameType::Ping),
+        qbase::frame::Frame::Ping(PingFrame)
+    );
+}

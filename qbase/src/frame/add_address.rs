@@ -116,30 +116,3 @@ impl<T: bytes::BufMut> WriteFrame<AddAddressFrame> for T {
         self.put_varint(&VarInt::from(frame.nat_type));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::net::Ipv4Addr;
-
-    use bytes::BytesMut;
-
-    use super::*;
-    use crate::frame::{GetFrameType, be_frame_type, io::WriteFrame};
-
-    #[test]
-    fn test_add_address_frame() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let frame = AddAddressFrame {
-            seq_num: VarInt::from_u32(1u32),
-            address: addr,
-            tire: VarInt::from_u32(1u32),
-            nat_type: NatType::FullCone,
-        };
-        let mut buf = BytesMut::new();
-        buf.put_frame(&frame);
-        let (remain, frame_type) = be_frame_type(&buf).unwrap();
-        assert_eq!(frame_type, frame.frame_type());
-        let frame2 = be_add_address_frame(Family::V4)(remain).unwrap().1;
-        assert_eq!(frame, frame2);
-    }
-}

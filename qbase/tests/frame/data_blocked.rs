@@ -18,3 +18,11 @@ fn test_write_data_blocked_frame() {
     let frame_type: VarInt = FrameType::DataBlocked.into();
     assert_eq!(buf, vec![frame_type.into_u64() as u8, 0x52, 0x34]);
 }
+
+#[test]
+fn test_read_data_blocked_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x14, 0x52, 0x34], FrameType::DataBlocked),
+        qbase::frame::Frame::DataBlocked(DataBlockedFrame::new(VarInt::from_u32(0x1234)))
+    );
+}

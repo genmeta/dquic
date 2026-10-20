@@ -79,14 +79,3 @@ impl<T: bytes::BufMut> super::io::WriteFrame<NewTokenFrame> for T {
         self.put_slice(&frame.token);
     }
 }
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_read_new_token_frame() {
-        use super::be_new_token_frame;
-        let buf = vec![0x02, 0x01, 0x02];
-        let (input, frame) = be_new_token_frame(&buf).unwrap();
-        assert!(input.is_empty());
-        assert_eq!(frame.token, vec![0x01, 0x02]);
-    }
-}

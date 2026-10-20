@@ -25,3 +25,13 @@ fn test_write_retire_connection_id_frame() {
     expected.extend_from_slice(&[0x52, 0x34]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_retire_connection_id_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x19, 0x52, 0x34], FrameType::RetireConnectionId),
+        qbase::frame::Frame::RetireConnectionId(RetireConnectionIdFrame::new(VarInt::from_u32(
+            0x1234
+        )))
+    );
+}

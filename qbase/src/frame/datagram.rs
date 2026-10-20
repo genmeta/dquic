@@ -98,32 +98,3 @@ where
         self.put_data(data);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_datagram_frame_with_flag() {
-        let input = [0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let expected_output = DatagramFrame {
-            encode_len: true,
-            len: VarInt::from_u32(5),
-        };
-        let (remain, frame) = datagram_frame_with_flag(1)(&input).unwrap();
-        assert_eq!(remain, &[0x00, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(frame, expected_output);
-    }
-
-    #[test]
-    fn test_datagram_frame_with_flag_no_length() {
-        let input = b"114514";
-        let expected_output = DatagramFrame {
-            encode_len: false,
-            len: VarInt::from_u32(6),
-        };
-        let (remain, frame) = datagram_frame_with_flag(0)(input).unwrap();
-        assert_eq!(remain, input);
-        assert_eq!(frame, expected_output);
-    }
-}

@@ -328,36 +328,3 @@ impl From<ConnectionCloseFrame> for Error {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_kind_conversion() {
-        // Test VarInt to ErrorKind
-        assert_eq!(
-            ErrorKind::try_from(VarInt::from(0x00u8)).unwrap(),
-            ErrorKind::None
-        );
-        assert_eq!(
-            ErrorKind::try_from(VarInt::from(0x10u8)).unwrap(),
-            ErrorKind::NoViablePath
-        );
-        assert_eq!(
-            ErrorKind::try_from(VarInt::from(0x0100u16)).unwrap(),
-            ErrorKind::Crypto(0)
-        );
-
-        // Test invalid error code
-        assert_eq!(
-            ErrorKind::try_from(VarInt::from(0x1000u16)).unwrap_err(),
-            InvalidErrorKind(0x1000)
-        );
-
-        // Test ErrorKind to VarInt
-        assert_eq!(VarInt::from(ErrorKind::None), VarInt::from(0x00u8));
-        assert_eq!(VarInt::from(ErrorKind::NoViablePath), VarInt::from(0x10u8));
-        assert_eq!(VarInt::from(ErrorKind::Crypto(5)), VarInt::from(0x0105u16));
-    }
-}

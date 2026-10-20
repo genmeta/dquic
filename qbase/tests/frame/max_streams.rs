@@ -35,3 +35,31 @@ fn test_write_max_streams_frame() {
     expected.extend_from_slice(&[0x52, 0x36]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_max_streams_frame() {
+    assert_eq!(
+        super::parse_frame(&[18, 0x52, 52], FrameType::MaxStreams(Dir::Bi)),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::MaxStreams(
+            MaxStreamsFrame::Bi(VarInt::from_u32(4660))
+        ))
+    );
+    assert_eq!(
+        super::parse_frame(&[19, 0x52, 54], FrameType::MaxStreams(Dir::Uni)),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::MaxStreams(
+            MaxStreamsFrame::Uni(VarInt::from_u32(4662))
+        ))
+    );
+}
+
+#[test]
+fn test_read_too_large_max_streams_frame() {
+    let buf = bytes::Bytes::from_static(&[0x12, 0xd0, 0x34, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]);
+    assert_eq!(
+        qbase::frame::io::be_frame(&buf, super::Type::Short(super::OneRtt(0.into()))),
+        Err(qbase::frame::Error::ParseError(
+            FrameType::MaxStreams(Dir::Bi),
+            nom::error::ErrorKind::TooLarge.description().to_owned()
+        ))
+    );
+}

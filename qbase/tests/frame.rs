@@ -1,5 +1,7 @@
 #[path = "frame/ack.rs"]
 mod ack;
+#[path = "frame/add_address.rs"]
+mod add_address;
 #[path = "frame/connection_close.rs"]
 mod connection_close;
 #[path = "frame/crypto.rs"]
@@ -30,6 +32,10 @@ mod path_challenge;
 mod path_response;
 #[path = "frame/ping.rs"]
 mod ping;
+#[path = "frame/punch_me_now.rs"]
+mod punch_me_now;
+#[path = "frame/remove_address.rs"]
+mod remove_address;
 #[path = "frame/reset_stream.rs"]
 mod reset_stream;
 #[path = "frame/retire_connection_id.rs"]
@@ -283,4 +289,15 @@ fn test_frame_reader_stops_at_unknown_custom_frame() {
     );
 
     assert_eq!(padding_count, 2);
+}
+
+fn parse_frame(input: &[u8], expected_type: FrameType) -> Frame<bytes::Bytes> {
+    let (consumed, frame, frame_type) = io::be_frame(
+        &bytes::Bytes::copy_from_slice(input),
+        Type::Short(OneRtt(0.into())),
+    )
+    .unwrap();
+    assert_eq!(frame_type, expected_type);
+    assert_eq!(consumed, input.len());
+    frame
 }

@@ -21,3 +21,11 @@ fn test_write_new_token_frame() {
     expected.extend_from_slice(&[0x02, 0x01, 0x02]);
     assert_eq!(buf, expected);
 }
+
+#[test]
+fn test_read_new_token_frame() {
+    assert_eq!(
+        super::parse_frame(&[0x07, 0x02, 0x01, 0x02], FrameType::NewToken),
+        qbase::frame::Frame::NewToken(qbase::frame::NewTokenFrame::from_slice(&[0x01, 0x02]))
+    );
+}
