@@ -186,7 +186,7 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
             parameters,
             Box::new(DemandConcurrency),
             reliable.clone(),
-            None,
+            Default::default(),
         );
         let space = DataSpace::new(Default::default(), keys, streams, reliable);
         let (paths, closed) = common::paths(role);

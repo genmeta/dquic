@@ -23,7 +23,7 @@ pub(crate) fn data() -> Arc<DataSpace> {
         parameters,
         Box::new(DemandConcurrency),
         reliable.clone(),
-        None,
+        Default::default(),
     );
     Arc::new(DataSpace::new(
         Default::default(),

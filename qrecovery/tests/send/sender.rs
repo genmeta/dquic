@@ -31,7 +31,7 @@ pub(super) fn stream(window: u64) -> (DataStreams<Broker>, Writer<Ext<Broker>>) 
         ),
         Box::new(DemandConcurrency),
         Broker,
-        None,
+        Default::default(),
     );
     let Poll::Ready(Ok(Some((_, (_, writer))))) =
         streams.poll_open_bi_with_limit(&mut Context::from_waker(Waker::noop()), window)

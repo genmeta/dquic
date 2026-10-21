@@ -99,7 +99,7 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
                     parameters.local(qbase::param::ParameterId::InitialMaxStreamsUni),
                 )),
                 reliable_frames.clone(),
-                None,
+                Default::default(),
             );
             let flow = qconnection::FlowController::new(
                 parameters.remote(qbase::param::ParameterId::InitialMaxData),

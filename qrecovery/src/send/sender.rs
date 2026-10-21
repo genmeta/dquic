@@ -47,7 +47,7 @@ pub struct ReadySender<TX> {
     broker: TX,
     tx_wakers: ArcSendWakers,
     writable_waker: Option<Waker>,
-    metrics: Option<ArcConnectionMetrics>,
+    metrics: ArcConnectionMetrics,
 }
 
 impl<TX> ReadySender<TX> {
@@ -55,7 +55,7 @@ impl<TX> ReadySender<TX> {
         stream_id: StreamId,
         buf_size: u64,
         broker: TX,
-        metrics: Option<ArcConnectionMetrics>,
+        metrics: ArcConnectionMetrics,
     ) -> ReadySender<TX> {
         ReadySender {
             stream_id,
@@ -117,9 +117,7 @@ impl<TX> ReadySender<TX> {
         });
 
         // Update metrics when application writes data
-        if let Some(metrics) = &self.metrics {
-            metrics.new_pending(data_len);
-        }
+        self.metrics.add_pending(data_len);
 
         self.tx_wakers.wake_all();
         self.sndbuf.write(data);
@@ -239,7 +237,7 @@ pub struct SendingSender<TX> {
     broker: TX,
     tx_wakers: ArcSendWakers,
     writable_waker: Option<Waker>,
-    metrics: Option<ArcConnectionMetrics>,
+    metrics: ArcConnectionMetrics,
 }
 
 pub type StreamData<'s> = (Range<u64>, bool, Vec<Bytes>, bool);
@@ -279,9 +277,7 @@ impl<TX> SendingSender<TX> {
         });
 
         // Update metrics when application writes data
-        if let Some(metrics) = &self.metrics {
-            metrics.new_pending(data_len);
-        }
+        self.metrics.add_pending(data_len);
 
         self.tx_wakers.wake_all();
         self.sndbuf.write(data);
@@ -629,7 +625,7 @@ impl<TX> Sender<TX> {
         stream_id: StreamId,
         buf_size: u64,
         broker: TX,
-        metrics: Option<ArcConnectionMetrics>,
+        metrics: ArcConnectionMetrics,
     ) -> Self {
         Sender::Ready(ReadySender::new(stream_id, buf_size, broker, metrics))
     }
@@ -654,7 +650,7 @@ impl<TX> ArcSender<TX> {
         stream_id: StreamId,
         buf_size: u64,
         broker: TX,
-        metrics: Option<ArcConnectionMetrics>,
+        metrics: ArcConnectionMetrics,
     ) -> Self {
         ArcSender(Arc::new(Mutex::new(Ok(Sender::new(
             stream_id, buf_size, broker, metrics,

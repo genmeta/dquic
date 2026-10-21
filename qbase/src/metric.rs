@@ -23,26 +23,26 @@ impl ConnectionMetrics {
     /// Increments the pending send bytes counter when application writes data.
     ///
     /// Called when application layer writes data to a stream.
-    pub fn new_pending(&self, bytes: u64) {
-        self.pending_bytes.fetch_add(bytes, Ordering::Relaxed);
+    pub fn add_pending(&self, amount: u64) {
+        self.pending_bytes.fetch_add(amount, Ordering::Relaxed);
     }
 
     /// Updates counters when transport layer sends new data.
     ///
     /// Increments sent_unacked_bytes and decrements pending_send_bytes.
     /// Called when transport layer sends new stream data.
-    pub fn on_data_sent(&self, bytes: u64) {
-        self.inflight_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.pending_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    pub fn on_data_sent(&self, amount: u64) {
+        self.inflight_bytes.fetch_add(amount, Ordering::Relaxed);
+        self.pending_bytes.fetch_sub(amount, Ordering::Relaxed);
     }
 
     /// Updates counters when data is acknowledged by peer.
     ///
     /// Increments sent_acked_bytes and decrements sent_unacked_bytes.
     /// Called when receiving acknowledgment for stream data.
-    pub fn on_data_acked(&self, bytes: u64) {
-        self.acked_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.inflight_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    pub fn on_data_acked(&self, amount: u64) {
+        self.acked_bytes.fetch_add(amount, Ordering::Relaxed);
+        self.inflight_bytes.fetch_sub(amount, Ordering::Relaxed);
     }
 
     /// Gets the current amount of data pending to be sent.

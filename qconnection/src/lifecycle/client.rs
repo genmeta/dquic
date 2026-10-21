@@ -139,7 +139,7 @@ pub async fn client_growing(
                 parameters.clone(),
                 concurrency,
                 reliable_frames.clone(),
-                None,
+                Default::default(),
             );
             terminator.register(Arc::new(streams.clone()));
             let flow_ctrl = FlowController::new(
