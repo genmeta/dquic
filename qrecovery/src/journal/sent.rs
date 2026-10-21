@@ -59,6 +59,33 @@ pub struct SentJournal {
 }
 
 impl SentJournal {
+    /// Reserve a unique packet number before constructing a packet.
+    pub fn next_pn(&mut self) -> Result<(u64, PacketNumber), Error> {
+        let pn = self.next_pn;
+        if pn > VARINT_MAX {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::AeadLimitReached,
+                "packet numbers exhausted",
+            )
+            .into());
+        }
+        self.next_pn += 1;
+        let start = self.frames.largest();
+        self.packets.insert(
+            pn,
+            SentPacket {
+                size: 0,
+                content: PacketContent::default(),
+                in_flight: false,
+                ack: None,
+                generation: None,
+                frame_range: start..start,
+                state: SentPacketState::Pending,
+            },
+        );
+        Ok((pn, PacketNumber::encode(pn, self.largest_acked)))
+    }
+
     pub fn frames(&self, pn: u64) -> impl Iterator<Item = &GuaranteedFrame> {
         self.packets[&pn]
             .frame_range
@@ -206,30 +233,7 @@ impl ArcSentJournal {
 
     /// Reserve a unique packet number before constructing a packet.
     pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
-        let mut records = self.lock_guard();
-        let pn = records.next_pn;
-        if pn > VARINT_MAX {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::AeadLimitReached,
-                "packet numbers exhausted",
-            )
-            .into());
-        }
-        records.next_pn += 1;
-        let start = records.frames.largest();
-        records.packets.insert(
-            pn,
-            SentPacket {
-                size: 0,
-                content: PacketContent::default(),
-                in_flight: false,
-                ack: None,
-                generation: None,
-                frame_range: start..start,
-                state: SentPacketState::Pending,
-            },
-        );
-        Ok((pn, PacketNumber::encode(pn, records.largest_acked)))
+        self.lock_guard().next_pn()
     }
 
     /// Retain recovery descriptors and the properties accumulated during encoding.

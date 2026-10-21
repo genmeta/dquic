@@ -16,7 +16,6 @@ use qbase::{
 };
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
-    keys::ArcKeys,
     path::{Path, PathCids, PathState},
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
@@ -45,9 +44,9 @@ pub struct Paths {
 
 impl Paths {
     pub fn new(
+        initial_space: Arc<InitialSpace>,
         role: Role,
-        (scid, dcid): (ConnectionId, ConnectionId),
-        keys: qtls::BidirectionalKeys,
+        dcid: ConnectionId,
         reliable_frames: ArcReliableFrames,
         local_cids: ArcLocalCids,
         max_idle_timeout: Duration,
@@ -55,7 +54,6 @@ impl Paths {
     ) -> Arc<Self> {
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         let idle = ArcIdleTimer::new(max_idle_timeout);
-        let initial_space = Arc::new(InitialSpace::new(scid, ArcKeys::new(Arc::new(keys)), None));
         let mut resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
         resender
             .push_back(initial_space.clone())

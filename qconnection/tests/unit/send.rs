@@ -587,7 +587,8 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     assert_eq!(second.0.load(Ordering::Relaxed), 0);
     drop(phase.poll_phase(&mut Context::from_waker(&b)));
 
-    phase.enter_handshake();
+    let dcid = phase.enter_handshake();
+    assert_eq!(dcid, ConnectionId::from_slice(b"peer0000"));
     assert_eq!(paths.spaces.read_guard().len(), 1);
     assert_eq!(paths.resender.read_guard().len(), 1);
     assert_eq!(first.0.load(Ordering::Relaxed), 2);
@@ -608,7 +609,7 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     let ConnPhase::Handshake(handshake) = phase.get() else {
         panic!("expected Handshake");
     };
-    assert_eq!(handshake.dcid, ConnectionId::from_slice(b"peer0000"));
+    assert_eq!(handshake.dcid, dcid);
     handshake.upgrade_wakers.unregister(&b);
     drop(phase.poll_phase(&mut cx));
     drop(phase.poll_phase(&mut cx));

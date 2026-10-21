@@ -48,17 +48,19 @@ Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器�
 
 路由保留 `Signpost` 和 `QuicRouterRegistry`，不包含 `QuicRouterComponent`、admissibility 或 handler。`Way = (Pathway, Link)`。`receive` 解析 datagram 并为同一连接的 CID 别名只记一次字节数；未知包直接 `try_send` 到 connectless channel。`packet::channel::Inbox` 将 Data packet 按 header 类型投递，满 channel 时直接丢包。
 
-1-RTT 密钥分为固定的 `HeaderKeys { opening, sealing }` 和共享的 `OneRttPacketKeys`。
-`qtls::DirectionalKeys` 与 `OneRttKeys` 均实现 `keys::OpenPacket`、`keys::SealPacket`，
-分别提供 `open`、`seal`。`open` 统一接收 PTO，固定密钥忽略它；`SealPacket::Output`
-分别为 `()` 和 `(u64, KeyPhaseBit)`。两类 `open` 共用本模块的私有函数 `open_with`，仅接收 `decode_pn` 闭包；
-journal 在接线处捕获，不传入密钥层。使用扩展方法分别导入 `OpenPacket`、`SealPacket`。
-`CipherPacket` 直接使用 qtls 的 `DirectionalKeys`、`HeaderProtectionKey` 和 `PacketKey`，qtransport 不直接依赖 rustls。`ArcOneRttKeys::try_get()` 返回 `Result<OneRttKeys, KeyRetired>`，Data 接收接入 `OneRttKeys::open_packet` 并产出 `PlainPacket<OneRttHeader>`。
-`OneRttKeys::reserve` 在同一锁内固定密钥代次、领取 PN 并预留 AEAD 用量；返回的
-`OneRttSealingKey` 在锁外执行加密和头保护。`update/allow_update/on_ack/seal/tag_len` 均属于已就绪的
-`OneRttKeys`；`ArcOneRttKeys` 是 `ArcKeys<OneRttKeys>` 的别名，只构造、同步取材和淘汰，不提供密钥操作的转调。包对象只提供
-buffer 与布局。Data ACK 回调捕获本次解密的就绪材料；Space 的停止开关阻止淘汰后发送。
-包密钥用一个 `VecDeque` 保存成对的 opening/sealing，新 PN 领取队尾 sealing 快照，
+1-RTT 的 `OneRttKeys` 保存固定一代的双向密钥、代次和共享的加密次数；头保护
+`HeaderKeys { opening, sealing }` 在更新时保持不变。`ArcOneRttKeys` 管理各代密钥、
+更新权限和淘汰，`get()` 返回 `Result<Arc<OneRttKeys>, PacketError>`，接近使用上限时
+在允许的情况下更新。淘汰返回 `PacketError::Retired`。
+`qtls::DirectionalKeys` 实现 `Open`、`Seal`；`ArcOneRttKeys` 实现 `Open`，负责接收时
+选择旧代、当前代或验证下一代；固定的 `OneRttKeys` 实现 `Seal`，返回 `(u64, KeyPhaseBit)`。
+Data 接收使用 `ArcOneRttKeys::open_packet` 产出 `PlainPacket<OneRttHeader>`，ACK 通过
+管理器的 `on_ack` 授权后续更新。密钥层不接收 journal，也不分配包号。
+`DataSpace::pn_and_keys()` 持有发送 journal 的 guard，先取得固定代次密钥，再调用
+`SentJournal::next_pn()`；普通发送和打洞共用这一入口。组帧和加密不持有 journal 锁。
+AEAD 用量在 `OneRttKeys::seal` 中以原子计数限制，未使用的密钥句柄不消耗加密次数；
+同代的所有句柄共享限制，已经取得的旧代句柄也不能超限。
+包密钥用一个 `VecDeque` 保存成对的 opening/sealing，发送取得队尾的 `Arc<OneRttKeys>`，
 `next_secret` 独立保存后续派生材料。主动更新直接派生一对入队；被动更新先临时派生，
 认证成功才入队并推进 secret，失败不改变正式状态。双方同时更新时使用已有队尾 opening，
 不重复入队。队列最多三对；收到新代认证包后，旧对按 3 PTO 淘汰。已领取包的密钥和相位固定，旧密文可以晚于新代包提交。
@@ -80,7 +82,7 @@ buffer 与布局。Data ACK 回调捕获本次解密的就绪材料；Space 的�
 - 组包按 ACK → CRYPTO → Path 帧 → reliable frames → streams 依次读取异构 `Package` 源，不设来源配额；装不下的数据留待后续包。流数据通过已有 `Repeat` 使用剩余容量，不同流的公平调度由 streams 组件负责。发送等待只订阅本次阻塞所需的信号，避免退还流控信用导致空闲空转。
 - `Space<ArcKeys<K>>` 与 `DataSpace` 直接实现 `qcongestion::Feedback`，各自处理 ACK、判丢和重传。所有路径的 CC 共享 `Arc<RwLock<IndexDeque<Arc<dyn Feedback>, 2>>>`，阶段升级时追加实际空间，握手空间退役时移除队头而保留 Data 的索引；CC 释放读锁后才调用反馈。空间密钥退役后停止丢包和定时恢复。
 - 每空间使用一份可克隆的 `qrecovery::journal::ArcSentJournal`，只共享一份 Mutex<SentJournal>；skipped_pns: BTreeSet<u64> 只保存明确放弃的 PN，最多保留 256 项，不再保存成功发送区间或提交上界。发送 journal 位于 qrecovery，GuaranteedFrame 位于 qbase::frame；旧泛型 journal 及 Journal<T> 已移除。
-- `Packet::new(buffer, header, tag_len)` 预留 4 字节 PN 后组帧；空组包或约束不足不领号。Sender 在 OneRttKeys::reserve 内调用 `record_pending(generation, records)`，一并固定密钥代次、领取 PN/编码、建立恢复记录。随后调用 `packet.seal(&key, pn, encoded_pn)`；长包调用 `seal_long(&keys, pn, encoded_pn)`。两者只返回封包结果，由 Sender 的 finish_sealing 在失败时 cancel_pending、取回帧描述，成功时接入待提交包的取消清理。按实际 2/3/4 字节 PN 右移小段包头、裁掉头部余量，不搬动帧数据，不二次补装帧。HP 和显式 padding 都在组帧阶段预留预算。ACK 拒绝未领取、Pending 和保留的 skipped PN；合法 ACK 单调更新 largest_acked 供后续编码。跨路径允许 PN10 晚于 PN11 提交，密钥更新不作废已经封好的包。
+- `Packet::new(buffer, header, tag_len)` 预留 4 字节 PN 后组帧；空组包或约束不足不领号。DataSpace 在 `pn_and_keys()` 中持有 journal 锁，依次取得固定代次密钥和 PN/编码。随后调用 `packet.seal(&key, pn, encoded_pn)`；长包调用 `seal_long(&keys, pn, encoded_pn)`。两者只返回封包结果，由 Sender 的 finish_sealing 在失败时 cancel_pending、取回帧描述，成功时接入待提交包的取消清理。按实际 2/3/4 字节 PN 右移小段包头、裁掉头部余量，不搬动帧数据，不二次补装帧。HP 和显式 padding 都在组帧阶段预留预算。ACK 拒绝未领取、Pending 和保留的 skipped PN；合法 ACK 单调更新 largest_acked 供后续编码。跨路径允许 PN10 晚于 PN11 提交，密钥更新不作废已经封好的包。
 - Sender 复用一个帧描述数组；assemble 将 packet、Constraints 和该数组借用组合为 PacketWriter，数据源只调用 dump(&mut writer)，由 writer 检查约束并记录帧；Packet 和 PendingPacket 均不保存帧或帧数组的引用。领取 PN 时可靠描述以 GuaranteedFrame 批量移动到 journal；加密失败则取消记录、归还描述；路径描述单独保存在 PendingPacket，发送成功后通过回调通知 Path。PacketWriter.datagram().msg 可访问当前数据报 buffer。未提交的 PendingPacket 在 Drop 时通过 journal 回投可靠数据，成功提交后解除此取消责任。ACK/PING/PADDING/DATAGRAM 不进入恢复记录。记录范围使用帧追加下标，独立于 PN 顺序。frames 使用 Option<GuaranteedFrame>：ACK/Failed 通过 take 移出描述，Retired 清空槽位；重传保留 Some 以接收迟到 ACK。回收只弹出队头连续 None，不再扫描包寻找最小帧范围；非队头发送失败也直接移出帧。被前面记录挡住的 None 仍占槽位并计入存储上限，底层容量继续复用。SentPacketState 明确区分 Pending、Flighting、Retransmitted、Failed、Acked、Retired；Flighting 保存 retrans_at 与 expire_after 两个 Instant；发送成功时分别按 CC 的重传等待时间和 3 PTO 确定。Retransmitted 只保留 expire_after，判丢后原样沿用；journal 不重复保存 CC 已有的发送时间。判丢时立即转为 Retransmitted，并由 Space 或 DataSpace 直接通知 CryptoStream、DataStreams 和 ArcReliableFrames，不使用 Lost 中间态或 loss_pending 标记。每个旧 PN 只交回一次重传数据，保留原记录处理延迟 ACK；重复判丢不延长保留期，发送失败或撤销提交进入 Failed，归还帧；Failed/Acked/Retired 按 PN 直接删除记录、截止时间索引；reclaim 只回收帧队列的空槽位前缀。
 - 外部连接任务定期调用 `DataSpace::on_tick(now)`，从 `BTreeSet<(Instant, u64)>` 队头处理到期项，遇到截止时间大于 now 即停止；Flighting 登记 retrans_at，Retransmitted 改登记 expire_after，每包最多一项，同一时刻按 PN 区分。CC 提前判丢与 tick 共用状态转换和同步回投闭包：CryptoStream/DataStreams 标记数据范围可能丢失，可靠帧克隆回原队列；组件负责唤醒发送。不设 retransmissions 集合、take_lost 接口或定时回投临时数组。ACK 直接取消截止时间索引；Sender 只读取组件待发数据。Path::retire 不再强制判丢，无需交接，全部路径销毁后定时驱动仍可继续；qtransport 不自动启动该任务。
 - qcongestion 直接按发送队列中的位置间距判断包阈值丢失。ACK 保留原最大 PN 和范围，使用已有 `on_ack_rcvd` 及最大 PN 匹配条件采样 RTT。

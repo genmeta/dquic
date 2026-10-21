@@ -28,11 +28,12 @@ pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
 pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     (mut packets, scopes): (PacketReceiver<H>, Option<Scopes>),
-    space: Arc<Space<ArcKeys>>,
+    space: Arc<impl AsRef<Space<ArcKeys>> + Send + Sync>,
     paths: Arc<Paths>,
 ) where
     H: GetScid + GetType + LogPacketHeader,
 {
+    let space = space.as_ref().as_ref();
     let epoch = space.epoch;
     let role = paths.role();
     let terminator = paths.terminator.clone();
@@ -168,9 +169,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     } {
         parsed_frames.clear();
         let received_bytes = packet.payload_len();
-        let Ok(keys) = data.keys.get() else {
+        let keys = &data.keys;
+        if keys.is_retired() {
             break;
-        };
+        }
         if scopes.is_some_and(|scopes| !pathway.belongs_to(scopes)) {
             continue;
         }

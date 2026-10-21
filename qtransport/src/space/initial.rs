@@ -36,6 +36,12 @@ impl InitialSpace {
     }
 }
 
+impl AsRef<Space<ArcKeys>> for InitialSpace {
+    fn as_ref(&self) -> &Space<ArcKeys> {
+        &self.space
+    }
+}
+
 impl qcongestion::Resend for InitialSpace {
     fn resend(&self, trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
         self.space.resend(trigger, pns);

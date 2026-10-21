@@ -18,7 +18,8 @@ use qconnection::{
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
-    StreamReader, StreamWriter, packet::channel, path::PathState, router::QuicRouter,
+    StreamReader, StreamWriter, keys::ArcKeys, packet::channel, path::PathState,
+    router::QuicRouter, space::InitialSpace,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -113,13 +114,20 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let registry = router.insert(odcid.into(), inbox.clone(), reliable.clone());
         let scid = registry.gen_unique_cid();
         let local_cids = ArcLocalCids::new(Role::Server, odcid, scid, registry);
+        let initial_space = Arc::new(InitialSpace::new(
+            scid,
+            ArcKeys::new(Arc::new(
+                server
+                    .tls_server
+                    .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
+                    .unwrap(),
+            )),
+            None,
+        ));
         let paths = Paths::new(
+            initial_space.clone(),
             Role::Server,
-            (scid, *packet.scid()),
-            server
-                .tls_server
-                .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-                .unwrap(),
+            *packet.scid(),
             reliable,
             local_cids,
             Duration::ZERO,
@@ -130,6 +138,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
         let growing = server_growing(
+            initial_space,
             received,
             paths.clone(),
             ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
@@ -150,12 +159,19 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
     let local_cids = ArcLocalCids::new(Role::Client, odcid, scid, registry);
+    let initial_space = Arc::new(InitialSpace::new(
+        scid,
+        ArcKeys::new(Arc::new(
+            client
+                .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
+                .unwrap(),
+        )),
+        None,
+    ));
     let paths = Paths::new(
+        initial_space.clone(),
         Role::Client,
-        (scid, odcid),
-        client
-            .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-            .unwrap(),
+        odcid,
         reliable,
         local_cids,
         Duration::ZERO,
@@ -166,6 +182,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
     let (deliver, connected) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
+        initial_space,
         format!("localhost:{}", server_socket.0.local_addr().unwrap().port()),
         parameters,
         paths.clone(),

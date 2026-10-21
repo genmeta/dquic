@@ -219,10 +219,15 @@ pub fn initial_paths_with_timeouts(
         scid,
         router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
     );
+    let initial_space = Arc::new(qtransport::space::InitialSpace::new(
+        scid,
+        qtransport::keys::ArcKeys::new(Arc::new(keys)),
+        None,
+    ));
     qconnection::Paths::new(
+        initial_space,
         role,
-        (scid, odcid),
-        keys,
+        odcid,
         reliable_frames,
         local_cids,
         max_idle_timeout,

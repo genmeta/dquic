@@ -65,7 +65,7 @@ impl TestSender {
 
     pub fn assemble_1rtt_packet<const N: usize>(
         &mut self,
-        keys: &OneRttKeys,
+        keys: &ArcOneRttKeys,
         header: OneRttHeader,
         journal: &ArcSentJournal,
         constraints: &Constraints,

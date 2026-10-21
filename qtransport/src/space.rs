@@ -27,7 +27,7 @@ use tokio::time::Instant;
 
 use crate::{
     Error, GuaranteedFrame,
-    keys::{ArcKeys, ArcOneRttKeys, OneRttSealingKey, Seal},
+    keys::{ArcKeys, OneRttKeys, Seal},
 };
 
 pub mod assemble;
@@ -48,6 +48,12 @@ pub struct Space<K> {
     pub crypto: CryptoStream,
     pub sent_journal: ArcSentJournal,
     pub rcvd_journal: ArcRcvdJournal,
+}
+
+impl<K> AsRef<Space<K>> for Space<K> {
+    fn as_ref(&self) -> &Space<K> {
+        self
+    }
 }
 
 impl<K> Space<K> {
@@ -138,18 +144,6 @@ impl Allocate for Space<ArcKeys> {
     }
 }
 
-impl Allocate for Space<ArcOneRttKeys> {
-    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
-        let Ok(keys) = self.keys.get() else {
-            return Ok(None);
-        };
-        let (pn, keys) = keys
-            .reserve(|_| self.next_pn().map_err(Into::into))
-            .map_err(packet_error)?;
-        Ok(Some((pn, Keys::Short(keys))))
-    }
-}
-
 impl<K> UnregisterWaker for Space<K> {
     fn unregister(&self, waker: &Waker) {
         self.crypto.outgoing().unregister(waker);
@@ -204,7 +198,7 @@ pub trait Recover {
     }
 }
 
-/// Reserve a packet number together with its sealing-key snapshot.
+/// Reserve a packet number together with its fixed key generation.
 pub trait Allocate {
     /// Returns `None` when the space's keys have been retired.
     #[allow(clippy::type_complexity)]
@@ -316,7 +310,7 @@ pub trait Encapsulate: Transmit {
 
 pub enum Keys {
     Long(Arc<qtls::BidirectionalKeys>),
-    Short(OneRttSealingKey),
+    Short(Arc<OneRttKeys>),
 }
 
 impl Keys {

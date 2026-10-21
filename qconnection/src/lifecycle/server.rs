@@ -13,7 +13,7 @@ use qbase::{
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     packet::channel::RcvdPacket,
-    space::{DataSpace, HandshakeSpace, InitialSpace, Spaces},
+    space::{DataSpace, HandshakeSpace, InitialSpace},
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::io::AsyncWriteExt;
@@ -30,6 +30,7 @@ use crate::{
 /// The caller runs [`crate::recv::tick`] alongside this future.
 #[allow(clippy::too_many_arguments)]
 pub async fn server_growing(
+    initial_space: Arc<InitialSpace>,
     rcvd_pkt: RcvdPacket,
     paths: Arc<Paths>,
     token: ArcTokenRegistry,
@@ -40,25 +41,22 @@ pub async fn server_growing(
     };
     let terminator = paths.terminator.clone();
     let spaces = paths.spaces.clone();
-    let initial =
-        Spaces::get::<InitialSpace>(&spaces.read_guard(), Epoch::Initial).expect("Initial space");
-    let initial = Arc::new(initial.space.clone());
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
-    let resender = paths.resender.clone();
-    let scid = initial.initial_scid;
+    let loss_resender = paths.resender.clone();
+    let scid = initial_space.initial_scid;
     let origin_dcid = local_cids.origin_dcid();
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
-        initial.clone(),
+        initial_space.clone(),
         paths.clone(),
     ));
 
     let interceptor = Interceptor::new();
     tokio::spawn(read_crypto_stream_to_interceptor(
         interceptor.clone(),
-        initial.crypto.clone(),
+        initial_space.crypto.clone(),
         paths.clone(),
     ));
 
@@ -114,29 +112,29 @@ pub async fn server_growing(
             parameters.authenticate_cids(Requirements::require_client(initial_phase.dcid()))?;
             drop(initial_phase);
 
-            let handshake_keys = tls_ctx.read_keys().await?;
-            let handshake = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys)));
-            resender
+            let hs_keys = tls_ctx.read_keys().await?;
+            let hs_space = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(hs_keys)));
+            loss_resender
                 .write_guard()
-                .push_back(handshake.clone())
+                .push_back(hs_space.clone())
                 .expect("Handshake epoch");
             spaces
                 .write_guard()
-                .push_back(handshake.clone())
+                .push_back(hs_space.clone())
                 .expect("Handshake epoch");
-            terminator.register(Arc::new(handshake.crypto.clone()));
+            terminator.register(Arc::new(hs_space.crypto.clone()));
             paths.handshake.got_handshake_key();
             phase.enter_handshake();
-            initial.crypto.recver.retire();
+            initial_space.crypto.recver.retire();
 
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
-                handshake.as_ref(),
+                hs_space.as_ref(),
                 paths.clone(),
             ));
             tokio::spawn(recv_ih_pkt_and_deliver_frames(
                 (rcvd_pkt.handshake, Some(scopes)),
-                Arc::new(handshake.0.clone()),
+                hs_space.clone(),
                 paths.clone(),
             ));
 
@@ -164,24 +162,24 @@ pub async fn server_growing(
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
-            let data = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
-            resender
+            let data_space = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
+            loss_resender
                 .write_guard()
-                .push_back(data.clone())
+                .push_back(data_space.clone())
                 .expect("Data epoch");
             spaces
                 .write_guard()
-                .push_back(data.clone())
+                .push_back(data_space.clone())
                 .expect("Data epoch");
-            terminator.register(Arc::new(data.crypto.clone()));
+            terminator.register(Arc::new(data_space.crypto.clone()));
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
-                ProbeEncoder::new(data.clone(), client_scid),
+                ProbeEncoder::new(data_space.clone(), client_scid),
             );
             local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
-            for space in [initial.as_ref(), handshake.as_ref()] {
+            for space in [&initial_space.space, &hs_space.0] {
                 let flight = tls_ctx.read_msg_at(space.epoch).await?;
                 space
                     .crypto
@@ -203,24 +201,24 @@ pub async fn server_growing(
                 }
             }
 
-            for space in [initial.as_ref(), handshake.as_ref()] {
+            for space in [&initial_space.space, &hs_space.0] {
                 tokio::spawn(read_tls_to_space(tls_ctx.clone(), space, paths.clone()));
             }
             tokio::spawn(read_tls_to_space(
                 tls_ctx.clone(),
-                data.as_ref(),
+                data_space.as_ref(),
                 paths.clone(),
             ));
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
-                data.as_ref(),
+                data_space.as_ref(),
                 paths.clone(),
             ));
 
             let handshake_done = ArcHandshake::new_server(reliable_frames.clone());
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, Some(scopes)),
-                data.clone(),
+                data_space.clone(),
                 flow_ctrl.clone(),
                 puncher.clone(),
                 paths.clone(),
@@ -241,14 +239,14 @@ pub async fn server_growing(
                 puncher: puncher.clone(),
             }));
 
-            data.keys.get().expect("live Data keys").allow_update();
+            data_space.keys.allow_update();
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
             handshake_done.done();
             {
                 let mut spaces = spaces.write_guard();
-                let mut resender = resender.write_guard();
+                let mut resender = loss_resender.write_guard();
                 while spaces
                     .front()
                     .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
@@ -266,7 +264,7 @@ pub async fn server_growing(
                     local,
                     qtransport::ArcConnection::new(
                         summary.alpn.unwrap_or_default(),
-                        data.streams.clone(),
+                        data_space.streams.clone(),
                         terminator.clone(),
                     )
                     .with_path_observer({

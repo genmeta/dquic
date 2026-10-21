@@ -13,7 +13,6 @@ use qrecovery::journal::ArcRcvdJournal;
 
 use crate::{
     Error,
-    keys::ArcKeys,
     packet::{CipherPacket, PlainPacket, channel::PacketReceiver},
     path::Path,
 };
@@ -22,7 +21,7 @@ use crate::{
 pub(super) async fn receive_packets<H, M>(
     mut packets: PacketReceiver<H>,
     epoch: Epoch,
-    keys: ArcKeys<M>,
+    mut keys: impl FnMut() -> Option<M>,
     journal: ArcRcvdJournal,
     mut admit_path: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
     mut open: impl FnMut(&M, CipherPacket<H>, Pathway) -> Result<Option<PlainPacket<H>>, Error>,
@@ -31,13 +30,12 @@ pub(super) async fn receive_packets<H, M>(
     mut on_error: impl FnMut(Error),
 ) where
     H: GetType,
-    M: Clone,
 {
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = packets.recv().await {
         parsed_frames.clear();
         let received_bytes = packet.payload_len();
-        let Ok(keys) = keys.get() else {
+        let Some(keys) = keys() else {
             break;
         };
         let result = open(&keys, packet, pathway).and_then(|opened| {

@@ -23,16 +23,27 @@ pub fn record_pending(
 }
 
 pub fn reserve(
-    keys: &qtransport::keys::OneRttKeys,
+    keys: &qtransport::keys::ArcOneRttKeys,
     journal: &ArcSentJournal,
     records: &mut Vec<qtransport::GuaranteedFrame>,
 ) -> Result<
     (
         (u64, qbase::packet::PacketNumber),
-        qtransport::keys::OneRttSealingKey,
+        std::sync::Arc<qtransport::keys::OneRttKeys>,
     ),
     PacketError,
 > {
-    keys.reserve(|generation| record_pending(journal, generation, records).map_err(Into::into))
-        .map_err(Into::into)
+    let (number, keys) = {
+        let mut journal = journal.lock_guard();
+        let keys = keys.get()?;
+        (journal.next_pn().map_err(PacketError::Connection)?, keys)
+    };
+    journal.on_sealed(
+        number.0,
+        Some(keys.generation),
+        0,
+        Metadata::new(Type::Short(OneRtt(0.into()))),
+        records.drain(..),
+    );
+    Ok((number, keys))
 }

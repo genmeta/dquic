@@ -79,11 +79,13 @@ impl ArcConnPhase {
         phase
     }
 
-    pub(crate) fn enter_handshake(&self) {
+    /// Enter Handshake and return the peer CID fixed for this phase.
+    pub(crate) fn enter_handshake(&self) -> ConnectionId {
         let mut phase = self.0.write().unwrap();
         let ConnPhase::Initial(initial) = &*phase else {
             unreachable!("enter_handshake starts with InitialPhase")
         };
+        let server_scid = initial.dcid();
         let upgrade_wakers = initial.upgrade_wakers.clone();
         *phase = ConnPhase::Handshake(Arc::new(HandshakePhase {
             dcid: initial.dcid(),
@@ -92,6 +94,7 @@ impl ArcConnPhase {
         }));
         drop(phase);
         upgrade_wakers.wake_all();
+        server_scid
     }
 
     pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
