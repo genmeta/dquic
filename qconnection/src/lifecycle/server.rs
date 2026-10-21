@@ -69,24 +69,13 @@ pub async fn server_growing(
             return shutdown(&paths, &local_cids, reason).await;
         }
     };
-    let Some(server_name) = hello.server_name() else {
+    let Some(server) = ServerRegistry::global().get(hello.server_name()) else {
         return shutdown(
             &paths,
             &local_cids,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
-                "ClientHello has no server name",
-            )),
-        )
-        .await;
-    };
-    let Some(server) = ServerRegistry::global().get(server_name) else {
-        return shutdown(
-            &paths,
-            &local_cids,
-            Error::from(QuicError::with_default_fty(
-                ErrorKind::ConnectionRefused,
-                "server name is not listening",
+                "no matching server is listening",
             )),
         )
         .await;

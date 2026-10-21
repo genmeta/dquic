@@ -104,7 +104,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             accepted.send(result).unwrap();
         })
         .unwrap();
-    let server = ServerRegistry::global().get("localhost").unwrap();
+    let server = ServerRegistry::global().get(Some("localhost")).unwrap();
     let (created, mut server_state) = mpsc::unbounded_channel();
     QuicRouter::global().on_incoming(move |packet, pathway, link| {
         let odcid = *packet.dcid();
