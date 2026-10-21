@@ -1,8 +1,16 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Poll,
+};
+
 use bytes::Bytes;
 use qrecovery::send::SendBuf;
 
 fn buffer(size: usize) -> SendBuf {
-    let mut buf = SendBuf::with_capacity(size as u64);
+    let mut buf = SendBuf::with_capacity(size as u64, Default::default());
     buf.write(Bytes::from(vec![0; size]));
     buf
 }
@@ -63,4 +71,40 @@ fn test_bufmap_ack_and_lost_all2() {
     let (range, fresh, _) = buf.pick_up(|_| Some(46), usize::MAX).unwrap();
     assert_eq!(range, 2..46);
     assert!(!fresh);
+}
+
+#[test]
+fn pending_as_lost_preserves_unsent_and_acked_ranges_across_policy_changes() {
+    let pending_as_lost = Arc::new(AtomicBool::new(false));
+    let mut buf = SendBuf::with_capacity(30, pending_as_lost.clone());
+    buf.write(Bytes::from_static(&[42; 30]));
+    assert_eq!(buf.pick_up(|_| Some(10), 30).unwrap().0, 0..10);
+    buf.resend_flighting();
+    assert_eq!(buf.pick_up(|_| Some(10), 30).unwrap().0, 10..20);
+
+    pending_as_lost.store(true, Ordering::Relaxed);
+    buf.resend_flighting();
+    buf.on_data_acked(&(5..15));
+    // An ACK disables replay, leaving Lost ranges available for retransmission.
+    assert!(!pending_as_lost.load(Ordering::Relaxed));
+    for expected in [0..5, 15..20] {
+        let (range, fresh, data) = buf.pick_up(|_| Some(30), 0).unwrap();
+        assert_eq!(range, expected);
+        assert!(!fresh);
+        assert_eq!(data.concat(), [42; 5]);
+        buf.resend_flighting();
+    }
+    // Unsent data remains fresh and subject to flow control.
+    assert_eq!(buf.pick_up(|_| Some(30), 0), Err(Poll::Ready(())));
+    let (range, fresh, _) = buf.pick_up(|_| Some(30), 30).unwrap();
+    assert_eq!(range, 20..30);
+    assert!(fresh);
+    buf.resend_flighting();
+    assert_eq!(buf.pick_up(|_| Some(30), 30), Err(Poll::Pending));
+
+    buf.on_data_acked(&(0..30));
+    pending_as_lost.store(true, Ordering::Relaxed);
+    buf.resend_flighting();
+    assert_eq!(buf.pick_up(|_| Some(30), 30), Err(Poll::Pending));
+    assert!(buf.is_all_rcvd());
 }

@@ -123,6 +123,7 @@ async fn retiring_initial_reader_leaves_other_tls_input_alive() {
         Epoch::Initial,
         Default::default(),
         ArcKeys::new(Arc::new(common::initial_keys(true))),
+        Default::default(),
     );
     let crypto = &space.crypto;
     let (paths, closed) = common::paths(qbase::role::Role::Server);
@@ -188,7 +189,13 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
             reliable.clone(),
             Default::default(),
         );
-        let space = DataSpace::new(Default::default(), keys, streams, reliable);
+        let space = DataSpace::new(
+            Default::default(),
+            keys,
+            streams,
+            reliable,
+            Default::default(),
+        );
         let (paths, closed) = common::paths(role);
         closed.register(Arc::new(space.crypto.clone()));
         closed.register(Arc::new(tls.clone()));

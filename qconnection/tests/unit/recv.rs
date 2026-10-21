@@ -1,4 +1,8 @@
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    task::Poll,
+    time::Duration,
+};
 
 use bytes::BytesMut;
 use qbase::{
@@ -77,6 +81,7 @@ async fn receive_ping(
         epoch,
         Default::default(),
         ArcKeys::new(Arc::new(keys(role == Role::Server))),
+        Default::default(),
     ));
     let keys = keys(role != Role::Server);
     let header = LongHeaderBuilder::with_cid(
@@ -172,6 +177,7 @@ async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
                     Epoch::Handshake,
                     Default::default(),
                     ArcKeys::new(Arc::new(keys(role == Role::Server))),
+                    Default::default(),
                 ));
                 paths
                     .terminator
@@ -246,6 +252,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 epoch,
                 Default::default(),
                 ArcKeys::new(Arc::new(keys(true))),
+                Default::default(),
             ));
             terminator.register(Arc::new(space.crypto.clone()));
             super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
@@ -440,6 +447,7 @@ async fn client_selects_handshake_but_not_initial_ping() {
             (u8::MAX, u8::MAX)
         );
         receive_ping(Role::Client, epoch, true, &paths, &first).await;
+        assert!(paths.is_mp_handshaking.load(Ordering::Relaxed));
         assert_eq!(
             (
                 super::selection(&paths, &first),
@@ -449,6 +457,10 @@ async fn client_selects_handshake_but_not_initial_ping() {
         );
         assert_eq!(paths.cids.initial_dcid(), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
+        assert_eq!(
+            paths.is_mp_handshaking.load(Ordering::Relaxed),
+            epoch == Epoch::Initial
+        );
         let expected = if epoch == Epoch::Handshake {
             (0, 1)
         } else {
@@ -524,6 +536,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
     let bytes = seal(header(), &peer.sealing, &journal, [&mut ack]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv6).await;
+    assert!(paths.is_mp_handshaking.load(Ordering::Relaxed));
 
     assert_eq!(
         (
@@ -549,6 +562,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     );
     let bytes = seal(header(), &peer.sealing, &journal, [&mut crypto]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv4).await;
+    assert!(!paths.is_mp_handshaking.load(Ordering::Relaxed));
     assert_eq!(
         (
             super::selection(&paths, &ipv6),
@@ -572,6 +586,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
 async fn server_initial_does_not_select_but_authenticated_handshake_does() {
     let (paths, first, second) = paths(Role::Server);
     receive_ping(Role::Server, Epoch::Initial, false, &paths, &first).await;
+    assert!(paths.is_mp_handshaking.load(Ordering::Relaxed));
     assert_eq!(
         (
             super::selection(&paths, &first),
@@ -580,6 +595,7 @@ async fn server_initial_does_not_select_but_authenticated_handshake_does() {
         (u8::MAX, u8::MAX)
     );
     receive_ping(Role::Server, Epoch::Handshake, true, &paths, &first).await;
+    assert!(paths.is_mp_handshaking.load(Ordering::Relaxed));
     assert_eq!(
         (
             super::selection(&paths, &first),
@@ -588,6 +604,7 @@ async fn server_initial_does_not_select_but_authenticated_handshake_does() {
         (u8::MAX, u8::MAX)
     );
     receive_ping(Role::Server, Epoch::Handshake, false, &paths, &second).await;
+    assert!(!paths.is_mp_handshaking.load(Ordering::Relaxed));
     assert_eq!(
         (
             super::selection(&paths, &first),
@@ -603,11 +620,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     use tokio::io::AsyncWriteExt;
 
     let (paths, first, second) = paths(Role::Server);
-    let space = Arc::new(Space::<ArcKeys>::new(
-        Epoch::Initial,
-        Default::default(),
-        ArcKeys::new(Arc::new(keys(true))),
-    ));
+    let space = crate::common::initial_space(&paths.spaces);
     let server_keys = keys(true);
     first.validate();
     let header = || {
@@ -663,6 +676,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
             &second,
         )
         .await;
+        assert_eq!(paths.is_mp_handshaking.load(Ordering::Relaxed), pn == 0);
         assert_eq!(
             (
                 super::selection(&paths, &first),
@@ -672,6 +686,50 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
         );
     }
     assert!(second.cc.need_ack(Epoch::Initial).is_none());
+    paths.retire_all();
+}
+
+#[tokio::test]
+async fn client_initial_crypto_ack_stops_replay_without_selecting_a_path() {
+    use tokio::io::AsyncWriteExt;
+
+    let (paths, first, second) = paths(Role::Client);
+    let space = crate::common::initial_space(&paths.spaces);
+    let header = || {
+        LongHeaderBuilder::with_cid(
+            ConnectionId::from_slice(b"localcid"),
+            ConnectionId::from_slice(b"peercid0"),
+        )
+        .initial(vec![])
+    };
+    space
+        .crypto
+        .writer()
+        .write_all(b"client hello")
+        .await
+        .unwrap();
+    seal(
+        header(),
+        &keys(false).sealing,
+        &space.sent_journal,
+        [&mut space.crypto.outgoing()],
+    )
+    .unwrap();
+    space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
+    assert!(paths.is_mp_handshaking.load(Ordering::Relaxed));
+
+    let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
+    let packet = seal(
+        header(),
+        &keys(true).sealing,
+        &ArcSentJournal::default(),
+        [&mut ack],
+    )
+    .unwrap();
+    receive_bytes(packet, space, &paths, &first).await;
+    assert!(!paths.is_mp_handshaking.load(Ordering::Relaxed));
+    assert_eq!(super::selection(&paths, &first), u8::MAX);
+    assert_eq!(super::selection(&paths, &second), u8::MAX);
     paths.retire_all();
 }
 
@@ -695,7 +753,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
             ),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.resender.clone(),
+            paths.loss_resender.clone(),
             &paths.cids,
         ));
         path.validate();
@@ -710,7 +768,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     let second = make_path(34302);
     // Data keys can be installed while the server is still completing TLS.
     paths
-        .resender
+        .loss_resender
         .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
@@ -841,6 +899,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 keys(true),
                 Duration::from_secs(5),
                 Duration::from_secs(60),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             );
             let link = Link::new(
                 "127.0.0.1:30001".parse().unwrap(),
@@ -850,7 +909,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 link.into(),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-                paths.resender.clone(),
+                paths.loss_resender.clone(),
                 &paths.cids,
             ));
             paths
@@ -862,6 +921,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 epoch,
                 Default::default(),
                 ArcKeys::new(Arc::new(keys(true))),
+                Default::default(),
             ));
             let pn = space.next_pn().unwrap().0;
             let header = LongHeaderBuilder::with_cid(Default::default(), Default::default());

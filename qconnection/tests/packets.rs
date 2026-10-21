@@ -99,10 +99,12 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
+    let pending_as_lost = Arc::new(AtomicBool::new(true));
     let initial_space = Arc::new(InitialSpace::new(
         cid,
         ArcKeys::new(Arc::new(initial_keys(false))),
         None,
+        pending_as_lost.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
@@ -112,6 +114,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
+        pending_as_lost,
     );
     let phase = paths.phase();
     let (endpoint, _) = common::endpoints(false);
@@ -188,10 +191,12 @@ async fn close_at_client_stage(wait: ClientWait) {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
+    let pending_as_lost = Arc::new(AtomicBool::new(true));
     let initial_space = Arc::new(InitialSpace::new(
         cid,
         ArcKeys::new(Arc::new(initial_keys(false))),
         None,
+        pending_as_lost.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
@@ -201,6 +206,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
+        pending_as_lost,
     );
     let phase = paths.phase();
 

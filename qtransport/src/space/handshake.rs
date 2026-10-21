@@ -1,5 +1,8 @@
 //! Handshake packet-number space.
-use std::task::{Context, Poll, Waker};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    task::{Context, Poll, Waker},
+};
 
 use derive_more::Deref;
 use qbase::{
@@ -24,8 +27,13 @@ use crate::{Error, GuaranteedFrame, keys::ArcKeys};
 pub struct HandshakeSpace<K = ArcKeys>(pub Space<K>);
 
 impl<K> HandshakeSpace<K> {
-    pub fn new(initial_scid: ConnectionId, keys: K) -> Self {
-        Self(Space::new(Epoch::Handshake, initial_scid, keys))
+    pub fn new(initial_scid: ConnectionId, keys: K, is_mp_handshaking: Arc<AtomicBool>) -> Self {
+        Self(Space::new(
+            Epoch::Handshake,
+            initial_scid,
+            keys,
+            is_mp_handshaking,
+        ))
     }
 }
 
@@ -78,7 +86,6 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
-        _: bool,
     ) -> Poll<Result<usize, Error>> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
         if !buffer.begin(&header, pn.1, min_size) {

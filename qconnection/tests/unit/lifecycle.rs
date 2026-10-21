@@ -17,7 +17,7 @@ async fn packet_events_retire_initial_but_leave_queue_removal_to_growing() {
         );
         let space = crate::common::initial_space(&paths.spaces);
         let spaces = paths.spaces.clone();
-        let resender = paths.resender.clone();
+        let resender = paths.loss_resender.clone();
         if role == Role::Client {
             paths.on_handshake_received();
         } else {

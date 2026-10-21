@@ -2,7 +2,7 @@
 use std::{
     any::Any,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -58,12 +58,17 @@ impl<K> AsRef<Space<K>> for Space<K> {
 
 impl<K> Space<K> {
     /// Create a packet-number space with ready keys.
-    pub fn new(epoch: Epoch, initial_scid: ConnectionId, keys: K) -> Self {
+    pub fn new(
+        epoch: Epoch,
+        initial_scid: ConnectionId,
+        keys: K,
+        is_mp_handshaking: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             initial_scid,
             epoch,
             keys,
-            crypto: CryptoStream::new(),
+            crypto: CryptoStream::new(is_mp_handshaking),
             sent_journal: ArcSentJournal::default(),
             rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
         }
@@ -304,7 +309,6 @@ pub trait Encapsulate: Transmit {
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
-        multipath: bool,
     ) -> Poll<Result<usize, Error>>;
 }
 

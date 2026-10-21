@@ -109,7 +109,7 @@ async fn receive(
         pathway,
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
@@ -248,7 +248,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         pathway,
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
@@ -765,7 +765,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             link.into(),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            paths.resender.clone(),
+            paths.loss_resender.clone(),
             &paths.cids,
         ));
         paths

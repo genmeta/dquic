@@ -95,10 +95,12 @@ async fn mixed_packets_consume_shared_budget_once() {
         Default::default(),
         ArcKeys::new(Arc::new(keys(false))),
         None,
+        Default::default(),
     ));
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         initial.keys.clone(),
+        Default::default(),
     ));
     initial.crypto.writer().write_all(b"hello").await.unwrap();
     handshake
@@ -129,7 +131,6 @@ async fn mixed_packets_consume_shared_budget_once() {
             &mut limits,
             &mut frames,
             &mut pns,
-            false,
         )
         .unwrap();
     assert_eq!(size, 1200);
@@ -381,7 +382,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
                 &mut limits,
                 &mut frames,
                 &mut pns,
-                false,
             )
             .unwrap();
         assert_eq!(size, expected.iter().sum::<usize>());
@@ -517,7 +517,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
                 &mut limits,
                 &mut frames,
                 &mut pns,
-                false,
             )
             .unwrap();
         assert!(pns[0].is_none());
@@ -544,7 +543,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
                 },
                 &mut frames,
                 &mut [None; 3],
-                false,
             )
             .unwrap();
         assert!(size > 0 && size < 1200);
@@ -560,8 +558,13 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         scid,
         ArcKeys::new(Arc::new(keys(false))),
         Some(b"token".to_vec()),
+        Default::default(),
     ));
-    let handshake = Arc::new(HandshakeSpace::new(scid, initial.keys.clone()));
+    let handshake = Arc::new(HandshakeSpace::new(
+        scid,
+        initial.keys.clone(),
+        Default::default(),
+    ));
     let mut spaces = Spaces(qbase::util::IndexDeque::with_capacity(3));
     spaces.0.push_back(initial.clone()).unwrap();
     spaces.0.push_back(handshake.clone()).unwrap();
@@ -585,7 +588,6 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
                 },
                 &mut frames,
                 &mut pns,
-                false,
             )
             .unwrap();
         let ParsedPacket::Data(packet) = PacketReader::new(BytesMut::from(bytes.as_slice()), 8)
@@ -650,7 +652,6 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         &mut limits,
         &mut frames,
         &mut pns,
-        false,
     );
     assert!(result.is_err());
     assert!(pns.iter().all(Option::is_none));
@@ -665,7 +666,6 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
             &mut limits,
             &mut frames,
             &mut pns,
-            false,
         )
         .unwrap();
     assert!(initial.sent_journal.lock_guard().frames(pns[0].unwrap().pn)
@@ -684,6 +684,7 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         .push_back(Arc::new(HandshakeSpace::new(
             Default::default(),
             ArcKeys::new(Arc::new(keys(false))),
+            Default::default(),
         )))
         .unwrap();
     for flight in [false, true] {
@@ -717,7 +718,6 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
                 &mut limits,
                 &mut frames,
                 &mut pns,
-                false,
             )
             .unwrap();
         assert!(size > 0);
@@ -734,7 +734,6 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
                 &mut limits,
                 &mut frames,
                 &mut [None; 3],
-                false,
             )
             .unwrap();
         assert_eq!(size, 0);

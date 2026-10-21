@@ -77,11 +77,15 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
             );
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
-            let paths = super::initial_paths(
+            let pending_as_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let paths = super::initial_paths_with_timeouts(
                 role,
                 scid,
                 ConnectionId::from_slice(b"original"),
                 super::initial_keys(role == Role::Server),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                pending_as_lost.clone(),
             );
             let registry = qconnection::CidRegistry::new(
                 super::initial_phase(&paths).local_cids.clone(),
@@ -90,6 +94,7 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(super::initial_keys(role == Role::Server))),
+                pending_as_lost.clone(),
             ));
             let reliable_frames = paths.reliable_frames.clone();
             let streams = qconnection::DataStreams::new(
@@ -111,6 +116,7 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
                 keys.unwrap().into(),
                 streams,
                 reliable_frames.clone(),
+                pending_as_lost,
             ));
             let puncher = qtraversal::punch::ArcPuncher::new(
                 reliable_frames,

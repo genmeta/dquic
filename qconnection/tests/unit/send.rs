@@ -39,12 +39,13 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let trackers = paths.resender.clone();
+    let trackers = paths.loss_resender.clone();
     super::enter_handshake(
         &paths,
         Arc::new(HandshakeSpace::new(
             Default::default(),
             ArcKeys::new(Arc::new(keys(false))),
+            Default::default(),
         )),
     );
     let path = Arc::new(Path::new(
@@ -90,11 +91,14 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
 
 #[tokio::test]
 async fn collector_mixes_spaces_and_selected_crypto_advances() {
-    let paths = crate::common::initial_paths(
+    let paths = crate::common::initial_paths_with_timeouts(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
+        Duration::ZERO,
+        Duration::ZERO,
+        Default::default(),
     );
     let message = vec![42; 7200];
     crate::common::initial_space(&paths.spaces)
@@ -106,6 +110,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         ArcKeys::new(Arc::new(keys(false))),
+        Default::default(),
     ));
     handshake
         .crypto
@@ -119,7 +124,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     handshake
         .rcvd_journal
         .on_rcvd_pn(7, true, Duration::from_secs(1));
-    let trackers = paths.resender.clone();
+    let trackers = paths.loss_resender.clone();
     super::enter_handshake(&paths, handshake);
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()),
@@ -196,7 +201,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
 }
 
 #[tokio::test]
-async fn only_undecided_client_initial_replays_flighting_crypto() {
+async fn crypto_replays_until_ack_or_path_selection() {
     for role in [Role::Client, Role::Server] {
         for handshaking in [false, true] {
             for selected in [u8::MAX, 0, 1, 2] {
@@ -218,6 +223,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         Arc::new(HandshakeSpace::new(
                             Default::default(),
                             crate::common::initial_space(&paths.spaces).keys.clone(),
+                            paths.is_mp_handshaking.clone(),
                         )),
                     );
                 }
@@ -228,29 +234,34 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                     ),
                     paths.handshake.clone(),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                    paths.resender.clone(),
+                    paths.loss_resender.clone(),
                     &paths.cids,
                 ));
                 path.validate();
-                let competitor = Path::new(
+                let competitor = Arc::new(Path::new(
                     Pathway::new(
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:35003".parse().unwrap()),
                     ),
                     paths.handshake.clone(),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                    paths.resender.clone(),
+                    paths.loss_resender.clone(),
                     &paths.cids,
-                );
+                ));
+                {
+                    let mut entries = paths.entries.lock().unwrap();
+                    entries.insert(path.pathway, path.clone());
+                    entries.insert(competitor.pathway, competitor.clone());
+                }
                 match selected {
                     0 => {
-                        paths.cids.select(&competitor.cid);
+                        paths.select_path(&competitor);
                     }
                     1 => {
-                        paths.cids.select(&path.cid);
+                        paths.select_path(&path);
                     }
                     2 => {
-                        paths.cids.select(&path.cid);
+                        paths.select_path(&path);
                         paths.cids.attach_remote(qbase::cid::ArcRemoteCids::new(
                             paths.cids.initial_dcid(),
                             2,
@@ -264,7 +275,7 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                 let mut datagrams = [BytesMut::with_capacity(1200)];
                 let mut frames = Vec::new();
                 let mut pns = [[None; 3]; MAX_BURST_PACKETS];
-                for attempt in 0..2 {
+                for attempt in 0..4 {
                     let result = collect(Burst::new(
                         &paths,
                         &path,
@@ -273,8 +284,9 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         &mut pns,
                     ))
                     .now_or_never();
-                    let replays = role == Role::Client && !handshaking && selected == u8::MAX;
-                    if selected != 0 && (attempt == 0 || replays) {
+                    if (selected == u8::MAX && attempt < 3)
+                        || (matches!(selected, 1 | 2) && attempt == 0)
+                    {
                         assert!(
                             matches!(result, Some(Ok(1))),
                             "{role:?} {handshaking} {selected} {attempt}"
@@ -289,10 +301,19 @@ async fn only_undecided_client_initial_replays_flighting_crypto() {
                         );
                         assert!(pns.iter().flatten().all(Option::is_none));
                     }
+                    if selected != 0 && attempt == 1 {
+                        crate::common::initial_space(&paths.spaces)
+                            .crypto
+                            .outgoing()
+                            .on_data_acked(&qbase::frame::CryptoFrame::new(
+                                0u32.into(),
+                                1u32.into(),
+                            ));
+                    }
                     assert!(frames.is_empty());
                 }
                 task::cancel_waiters(&paths, &path);
-                path.retire();
+                paths.retire_all();
             }
         }
     }
@@ -309,11 +330,12 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         );
         let terminator = paths.terminator.clone();
         let mut space = crate::common::initial_space(&paths.spaces);
-        let trackers = paths.resender.clone();
+        let trackers = paths.loss_resender.clone();
         if epoch == Epoch::Handshake {
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(keys(true))),
+                Default::default(),
             ));
             super::enter_handshake(&paths, handshake.clone());
             space.retire();
@@ -468,6 +490,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
 
 pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::MatureFixture) {
     use qbase::param::{ArcParameters, ClientParameters, ServerParameters};
+    let pending_as_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let paths = crate::common::initial_paths_with_timeouts(
         role,
         ConnectionId::from_slice(b"server00"),
@@ -475,6 +498,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
         keys(true),
         Duration::ZERO,
         defer,
+        pending_as_lost.clone(),
     );
     let mut client = ClientParameters::default();
     client
@@ -500,6 +524,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         ArcKeys::new(Arc::new(keys(true))),
+        pending_as_lost.clone(),
     ));
     terminator.register(Arc::new(handshake.crypto.clone()));
     let reliable_frames = paths.reliable_frames.clone();
@@ -523,6 +548,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
         qtransport::keys::ArcOneRttKeys::from(server_one_rtt_keys()),
         streams,
         reliable_frames.clone(),
+        pending_as_lost,
     ));
     terminator.register(Arc::new(data.crypto.clone()));
     let puncher = qtraversal::punch::ArcPuncher::new(
@@ -590,7 +616,7 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     let dcid = phase.enter_handshake();
     assert_eq!(dcid, ConnectionId::from_slice(b"peer0000"));
     assert_eq!(paths.spaces.read_guard().len(), 1);
-    assert_eq!(paths.resender.read_guard().len(), 1);
+    assert_eq!(paths.loss_resender.read_guard().len(), 1);
     assert_eq!(first.0.load(Ordering::Relaxed), 2);
     assert_eq!(second.0.load(Ordering::Relaxed), 1);
     assert_eq!(
@@ -617,7 +643,7 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
 
     phase.enter_mature(mature.phase.clone());
     assert_eq!(paths.spaces.read_guard().len(), 1);
-    assert_eq!(paths.resender.read_guard().len(), 1);
+    assert_eq!(paths.loss_resender.read_guard().len(), 1);
     assert_eq!(first.0.load(Ordering::Relaxed), 3);
     assert_eq!(second.0.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -667,7 +693,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     path.validate();
@@ -758,7 +784,7 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
             ),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.resender.clone(),
+            paths.loss_resender.clone(),
             &paths.cids,
         ));
         paths
@@ -811,7 +837,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     paths.cids.select(&path.cid);
@@ -930,7 +956,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     path.validate();
@@ -996,7 +1022,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     waiting_path.validate();
@@ -1099,7 +1125,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
             ),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            paths.resender.clone(),
+            paths.loss_resender.clone(),
             &paths.cids,
         ));
         path.validate();
@@ -1181,11 +1207,11 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
                 ),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                paths.resender.clone(),
+                paths.loss_resender.clone(),
                 &paths.cids,
             );
             paths.cids.select(&selected.cid);
-            let trackers = paths.resender.clone();
+            let trackers = paths.loss_resender.clone();
             let epochs = || {
                 trackers
                     .read_guard()
@@ -1254,7 +1280,7 @@ async fn path_validation_respects_small_amplification_credit() {
                 ),
                 paths.handshake.clone(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                paths.resender.clone(),
+                paths.loss_resender.clone(),
                 &paths.cids,
             ));
             paths.cids.select(&path.cid);
@@ -1337,7 +1363,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     path.client_handshaking();
@@ -1430,6 +1456,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         initial.keys.clone(),
+        Default::default(),
     ));
     initial.crypto.writer().write_all(b"initial").await.unwrap();
     handshake
@@ -1443,7 +1470,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
         paths.handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     ));
     path.on_datagram_received(1200);
@@ -1496,7 +1523,7 @@ async fn retired_cid_keeps_sender_pending_until_a_replacement_arrives() {
             ),
             paths.handshake.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.resender.clone(),
+            paths.loss_resender.clone(),
             &paths.cids,
         ));
         path.validate();

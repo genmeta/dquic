@@ -1,5 +1,6 @@
 //! Application-data space and its CRYPTO, reliable-frame and stream sources.
 use std::{
+    sync::{Arc, atomic::AtomicBool},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -42,9 +43,10 @@ impl DataSpace {
         keys: ArcOneRttKeys,
         streams: DataStreams<ArcReliableFrames>,
         reliable_frames: ArcReliableFrames,
+        is_mp_handshaking: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            space: Space::new(Epoch::Data, initial_scid, keys),
+            space: Space::new(Epoch::Data, initial_scid, keys, is_mp_handshaking),
             streams,
             reliable_frames,
         }
@@ -160,7 +162,6 @@ impl Encapsulate for DataSpace {
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
-        _: bool,
     ) -> Poll<Result<usize, Error>> {
         let header = OneRttHeader::new(Default::default(), dcid);
         if !buffer.begin(&header, pn.1, min_size) {

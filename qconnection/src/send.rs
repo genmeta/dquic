@@ -16,7 +16,6 @@ use qbase::{
     frame::{GuaranteedFrame, PingFrame},
     packet::{Package, assemble::Metadata},
     param::ParameterId,
-    role::Role,
 };
 use qcongestion::Transport as _;
 use qprotocol::QuicProtocol;
@@ -176,20 +175,15 @@ impl Burst<'_, '_> {
             None
         };
         limits.flow_ctrl = flow.as_ref().map_or(0, |credit| credit.available());
-        let (depth, exponent, multipath) = match &phase {
-            ConnPhase::Initial(_) => (
-                1,
-                0,
-                self.paths.role() == Role::Client && self.paths.cids.is_initial(),
-            ),
-            ConnPhase::Handshake(_) => (2, 0, false),
+        let (depth, exponent) = match &phase {
+            ConnPhase::Initial(_) => (1, 0),
+            ConnPhase::Handshake(_) => (2, 0),
             ConnPhase::Mature(phase) => (
                 3,
                 phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-                false,
             ),
         };
-        let result = self.collect_depth(cx, depth, *cid, &mut limits, exponent, multipath);
+        let result = self.collect_depth(cx, depth, *cid, &mut limits, exponent);
         if let Some(flow) = &mut flow {
             flow.post_sent(flow.available() - limits.flow_ctrl);
         }
@@ -208,7 +202,6 @@ impl Burst<'_, '_> {
         dcid: ConnectionId,
         limits: &mut Constraints,
         exponent: u32,
-        multipath: bool,
     ) -> Poll<Result<usize, Error>> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
@@ -255,7 +248,6 @@ impl Burst<'_, '_> {
                 limits,
                 self.frames,
                 packets,
-                multipath,
             )?;
             buffer.truncate(size);
             if size == 0 {

@@ -1,5 +1,8 @@
 //! Initial packet-number space and token-bearing headers.
-use std::task::{Context, Poll, Waker};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    task::{Context, Poll, Waker},
+};
 
 use derive_more::Deref;
 use qbase::{
@@ -28,9 +31,14 @@ pub struct InitialSpace {
 }
 
 impl InitialSpace {
-    pub fn new(initial_scid: ConnectionId, keys: ArcKeys, token: Option<Vec<u8>>) -> Self {
+    pub fn new(
+        initial_scid: ConnectionId,
+        keys: ArcKeys,
+        token: Option<Vec<u8>>,
+        is_mp_handshaking: Arc<AtomicBool>,
+    ) -> Self {
         Self {
-            space: Space::new(Epoch::Initial, initial_scid, keys),
+            space: Space::new(Epoch::Initial, initial_scid, keys, is_mp_handshaking),
             token,
         }
     }
@@ -85,20 +93,14 @@ impl Encapsulate for InitialSpace {
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
-        multipath: bool,
     ) -> Poll<Result<usize, Error>> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid)
             .initial(self.token.clone().unwrap_or_default());
         if !buffer.begin(&header, pn.1, min_size) {
             return Poll::Ready(Ok(0));
         }
-        let mut outgoing = self.crypto.outgoing();
-        let mut replay = self.crypto.multipath();
-        let crypto: &mut dyn for<'b> Package<&'b mut [u8]> = if multipath {
-            &mut replay
-        } else {
-            &mut outgoing
-        };
+        let mut crypto = self.crypto.outgoing();
+        let crypto: &mut dyn for<'b> Package<&'b mut [u8]> = &mut crypto;
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)

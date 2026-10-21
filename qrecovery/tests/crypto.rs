@@ -3,7 +3,7 @@ mod tests {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::{Context, Wake, Waker},
     };
@@ -84,7 +84,7 @@ mod tests {
             },
         };
 
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         stream.writer().write_all(&[42; 20]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
@@ -112,17 +112,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipath_leaves_data_available_for_the_selected_path_and_acknowledgment() {
-        let stream = CryptoStream::new();
+    async fn ack_in_any_crypto_stream_stops_replay_in_every_stream() {
+        for acknowledged in 0..3 {
+            let pending_as_lost = Arc::new(AtomicBool::new(true));
+            let streams =
+                std::array::from_fn::<_, 3, _>(|_| CryptoStream::new(pending_as_lost.clone()));
+            for stream in &streams {
+                stream.writer().write_all(b"hello world").await.unwrap();
+                for _ in 0..2 {
+                    let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+                    assert_eq!(packet.load(&mut stream.outgoing()), Ok(1));
+                }
+            }
+            streams[acknowledged]
+                .outgoing()
+                .on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
+            assert!(!pending_as_lost.load(Ordering::Relaxed));
+
+            // Previously Lost ranges can still be sent once; subsequent sends wait for recovery.
+            for stream in &streams {
+                let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+                assert_eq!(packet.load(&mut stream.outgoing()), Ok(1));
+                let mut empty = TestPacket(bytes::BytesMut::with_capacity(64));
+                assert!(empty.load(&mut stream.outgoing()).is_err());
+                let frame = CryptoFrame::new(5u32.into(), 6u32.into());
+                stream.outgoing().may_loss_data(&frame);
+                assert_eq!(empty.load(&mut stream.outgoing()), Ok(1));
+            }
+
+            // A later encryption level inherits the already-disabled policy.
+            let later = CryptoStream::new(pending_as_lost);
+            later.writer().write_all(b"ticket").await.unwrap();
+            let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+            assert_eq!(packet.load(&mut later.outgoing()), Ok(1));
+            let mut empty = TestPacket(bytes::BytesMut::with_capacity(64));
+            assert!(empty.load(&mut later.outgoing()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_as_lost_leaves_data_available_until_selection() {
+        let pending_as_lost = Arc::new(AtomicBool::new(true));
+        let stream = CryptoStream::new(pending_as_lost.clone());
         stream.writer().write_all(b"ClientHello").await.unwrap();
-        let mut multipath = stream.multipath();
+        let mut outgoing = stream.outgoing();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
-        first.load(&mut multipath).unwrap();
+        first.load(&mut outgoing).unwrap();
 
         let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
-        second.load(&mut stream.multipath()).unwrap();
+        second.load(&mut stream.outgoing()).unwrap();
         assert_eq!(second.0, first.0);
 
+        pending_as_lost.store(false, Ordering::Relaxed);
         let mut selected = TestPacket(bytes::BytesMut::with_capacity(64));
         selected.load(&mut stream.outgoing()).unwrap();
         assert_eq!(selected.0, first.0);
@@ -132,12 +173,12 @@ mod tests {
         stream
             .outgoing()
             .on_data_acked(&CryptoFrame::new(0u32.into(), 11u32.into()));
-        assert!(blocked.load(&mut multipath).is_err());
+        assert!(blocked.load(&mut outgoing).is_err());
         stream.writer().flush().await.unwrap();
     }
 
     #[tokio::test]
-    async fn multipath_marks_flighting_lost_after_loading_and_lost_data_can_be_acked() {
+    async fn enabling_pending_as_lost_preserves_acknowledgment_of_all_sent_ranges() {
         use qbase::{
             frame::{Frame, FrameReader},
             packet::{
@@ -157,14 +198,16 @@ mod tests {
             frame
         };
 
-        let stream = CryptoStream::new();
+        let pending_as_lost = Arc::new(AtomicBool::new(false));
+        let stream = CryptoStream::new(pending_as_lost.clone());
         stream.writer().write_all(&[42; 100]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
         let prefix = crypto_frame(&first);
+        pending_as_lost.store(true, Ordering::Relaxed);
 
         let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
-        second.load(&mut stream.multipath()).unwrap();
+        second.load(&mut stream.outgoing()).unwrap();
         let suffix = crypto_frame(&second);
         assert_eq!(suffix.offset(), prefix.range().end);
         assert_eq!(suffix.range().end, 100);
@@ -173,13 +216,13 @@ mod tests {
         stream.outgoing().on_data_acked(&prefix);
         stream.outgoing().on_data_acked(&suffix);
         let mut empty = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(empty.load(&mut stream.multipath()).is_err());
+        assert!(empty.load(&mut stream.outgoing()).is_err());
         stream.writer().flush().await.unwrap();
     }
 
     #[tokio::test]
     async fn receiver_retirement_wakes_reader_and_preserves_crypto_retransmission() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"ServerHello").await.unwrap();
@@ -223,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_retirement_wakes_flush_and_leaves_receiver_running() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
         let wakes = Arc::new(WakeCount::default());
@@ -241,7 +284,7 @@ mod tests {
             std::io::ErrorKind::BrokenPipe
         );
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(packet.load(&mut stream.multipath()).is_err());
+        assert!(packet.load(&mut stream.outgoing()).is_err());
         stream
             .outgoing()
             .on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
@@ -263,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_error_wakes_both_sides_and_preserves_the_cause() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
@@ -297,13 +340,13 @@ mod tests {
             assert_eq!(cause, &error);
         }
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
-        assert!(packet.load(&mut stream.multipath()).is_err());
+        assert!(packet.load(&mut stream.outgoing()).is_err());
         assert!(packet.0.is_empty());
     }
 
     #[tokio::test]
     async fn shutdown_is_unsupported_and_keeps_unacknowledged_data() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         stream.writer().write_all(b"outgoing").await.unwrap();
         assert_eq!(
             stream.writer().shutdown().await.unwrap_err().kind(),
@@ -317,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledging_crypto_wakes_flush() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         let mut writer = stream.writer();
         writer.write_all(b"hello").await.unwrap();
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
@@ -335,7 +378,7 @@ mod tests {
 
     #[test]
     fn sparse_crypto_cannot_allocate_an_unbounded_handshake_buffer() {
-        let stream = CryptoStream::new();
+        let stream = CryptoStream::default();
         let result = stream.incoming().recv_frame((
             CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)),
             bytes::Bytes::from_static(b"x"),
@@ -347,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read() {
-        let crypto_stream: CryptoStream = CryptoStream::new();
+        let crypto_stream: CryptoStream = CryptoStream::default();
         crypto_stream
             .writer()
             .write_all(b"hello world")
@@ -368,7 +411,13 @@ mod tests {
 }
 
 mod poll_tests {
-    use std::task::{Context, Poll, Waker};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Waker},
+    };
 
     use bytes::BytesMut;
     use qbase::packet::{Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer};
@@ -376,8 +425,9 @@ mod poll_tests {
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
-    async fn multipath_repeats_then_normal_outgoing_advances() {
-        let stream = CryptoStream::new();
+    async fn pending_as_lost_repeats_each_packet_once_then_stops() {
+        let pending_as_lost = Arc::new(AtomicBool::new(true));
+        let stream = CryptoStream::new(pending_as_lost.clone());
         stream.writer().write_all(b"client hello").await.unwrap();
         let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
             .initial(vec![])
@@ -396,11 +446,8 @@ mod poll_tests {
                 ..Default::default()
             };
             let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
-            let result = if pass < 2 {
-                stream.multipath().poll_dump(&mut cx, &mut buffer)
-            } else {
-                stream.outgoing().poll_dump(&mut cx, &mut buffer)
-            };
+            pending_as_lost.store(pass < 2, Ordering::Relaxed);
+            let result = stream.outgoing().poll_dump(&mut cx, &mut buffer);
             if pass == 3 {
                 assert!(result.is_pending());
                 assert!(frames.is_empty());

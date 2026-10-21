@@ -19,6 +19,7 @@ async fn tls_io_exits_naturally_when_the_context_fails() {
             epoch,
             Default::default(),
             ArcKeys::new(std::sync::Arc::new(common::initial_keys(true))),
+            Default::default(),
         )
     });
     let (paths, closed) = common::paths(qbase::role::Role::Server);
@@ -59,6 +60,7 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
             epoch,
             Default::default(),
             ArcKeys::new(std::sync::Arc::new(common::initial_keys(false))),
+            Default::default(),
         )
     });
     let (paths, closed) = common::paths(qbase::role::Role::Client);

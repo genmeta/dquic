@@ -51,7 +51,7 @@ pub async fn client_growing(
     let spaces = paths.spaces.clone();
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
-    let loss_resender = paths.resender.clone();
+    let loss_resender = paths.loss_resender.clone();
     let scid = initial_space.initial_scid;
     let odcid = local_cids.origin_dcid();
     drop(initial_phase);
@@ -86,7 +86,11 @@ pub async fn client_growing(
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
-            let hs_space = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys)));
+            let hs_space = Arc::new(HandshakeSpace::new(
+                scid,
+                ArcKeys::from(handshake_keys),
+                paths.is_mp_handshaking.clone(),
+            ));
             loss_resender
                 .write_guard()
                 .push_back(hs_space.clone())
@@ -147,7 +151,13 @@ pub async fn client_growing(
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
-            let data_space = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
+            let data_space = Arc::new(DataSpace::new(
+                scid,
+                keys,
+                streams,
+                reliable_frames.clone(),
+                paths.is_mp_handshaking.clone(),
+            ));
             loss_resender
                 .write_guard()
                 .push_back(data_space.clone())

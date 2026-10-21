@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use bytes::BytesMut;
 use qbase::{
@@ -199,6 +199,7 @@ pub fn initial_paths(
         keys,
         std::time::Duration::ZERO,
         std::time::Duration::ZERO,
+        Arc::new(AtomicBool::new(true)),
     )
 }
 
@@ -209,6 +210,7 @@ pub fn initial_paths_with_timeouts(
     keys: qtls::BidirectionalKeys,
     max_idle_timeout: std::time::Duration,
     defer_idle_timeout: std::time::Duration,
+    pending_as_lost: Arc<AtomicBool>,
 ) -> Arc<qconnection::Paths> {
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
     let router = Arc::new(qtransport::router::QuicRouter::new());
@@ -223,6 +225,7 @@ pub fn initial_paths_with_timeouts(
         scid,
         qtransport::keys::ArcKeys::new(Arc::new(keys)),
         None,
+        pending_as_lost.clone(),
     ));
     qconnection::Paths::new(
         initial_space,
@@ -232,6 +235,7 @@ pub fn initial_paths_with_timeouts(
         local_cids,
         max_idle_timeout,
         defer_idle_timeout,
+        pending_as_lost,
     )
 }
 

@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
     time::Duration,
@@ -55,23 +55,19 @@ fn poll(
 #[tokio::test]
 async fn crypto_registers_only_when_no_frame_was_written() {
     for quota in [0, 128] {
-        for multipath in [false, true] {
-            let stream = CryptoStream::new();
+        for pending_as_lost in [false, true] {
+            let stream = CryptoStream::new(Arc::new(AtomicBool::new(pending_as_lost)));
             let mut writer = stream.writer();
             writer.write_all(b"hello").await.unwrap();
             let counter = Arc::new(Counter::default());
             let waker = Waker::from(counter.clone());
-            let result = if multipath {
-                poll(&mut stream.multipath(), quota, &waker)
-            } else {
-                poll(&mut stream.outgoing(), quota, &waker)
-            };
+            let result = poll(&mut stream.outgoing(), quota, &waker);
             assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
             writer.write_all(b"next").await.unwrap();
             assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         }
     }
-    let stream = CryptoStream::new();
+    let stream = CryptoStream::default();
     let counter = Arc::new(Counter::default());
     let waker = Waker::from(counter.clone());
     assert!(poll(&mut stream.outgoing(), 128, &waker).is_pending());
@@ -121,16 +117,14 @@ async fn closed_crypto_sources_are_empty_for_every_close_reason() {
         QuicError::with_default_fty(ErrorKind::Internal, "failed").into(),
         AppError::new(42u32.into(), "application close").into(),
     ] {
-        let stream = CryptoStream::new();
+        let pending_as_lost = Arc::new(AtomicBool::new(true));
+        let stream = CryptoStream::new(pending_as_lost.clone());
         stream.writer().write_all(b"queued").await.unwrap();
         stream.on_error(&error);
-        for _ in 0..2 {
+        for enabled in [true, false] {
+            pending_as_lost.store(enabled, Ordering::Relaxed);
             assert_eq!(
                 poll(&mut stream.outgoing(), 128, Waker::noop()),
-                Poll::Ready(Ok(0))
-            );
-            assert_eq!(
-                poll(&mut stream.multipath(), 128, Waker::noop()),
                 Poll::Ready(Ok(0))
             );
         }

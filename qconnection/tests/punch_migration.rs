@@ -2,7 +2,10 @@
 //! Keep this in its own test process: Dock, AddressBook and the router are globals.
 mod common;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use qbase::{
     cid::{ConnectionId, GenUniqueCid},
@@ -114,6 +117,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let registry = router.insert(odcid.into(), inbox.clone(), reliable.clone());
         let scid = registry.gen_unique_cid();
         let local_cids = ArcLocalCids::new(Role::Server, odcid, scid, registry);
+        let pending_as_lost = Arc::new(AtomicBool::new(true));
         let initial_space = Arc::new(InitialSpace::new(
             scid,
             ArcKeys::new(Arc::new(
@@ -123,6 +127,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
                     .unwrap(),
             )),
             None,
+            pending_as_lost.clone(),
         ));
         let paths = Paths::new(
             initial_space.clone(),
@@ -132,6 +137,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             local_cids,
             Duration::ZERO,
             Duration::ZERO,
+            pending_as_lost,
         );
         let phase = paths.phase();
 
@@ -159,6 +165,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
     let local_cids = ArcLocalCids::new(Role::Client, odcid, scid, registry);
+    let pending_as_lost = Arc::new(AtomicBool::new(true));
     let initial_space = Arc::new(InitialSpace::new(
         scid,
         ArcKeys::new(Arc::new(
@@ -167,6 +174,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
                 .unwrap(),
         )),
         None,
+        pending_as_lost.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
@@ -176,6 +184,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         local_cids,
         Duration::ZERO,
         Duration::ZERO,
+        pending_as_lost,
     );
     let phase = paths.phase();
 

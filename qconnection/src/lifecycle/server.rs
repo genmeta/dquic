@@ -43,7 +43,7 @@ pub async fn server_growing(
     let spaces = paths.spaces.clone();
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
-    let loss_resender = paths.resender.clone();
+    let loss_resender = paths.loss_resender.clone();
     let scid = initial_space.initial_scid;
     let origin_dcid = local_cids.origin_dcid();
 
@@ -102,7 +102,11 @@ pub async fn server_growing(
             drop(initial_phase);
 
             let hs_keys = tls_ctx.read_keys().await?;
-            let hs_space = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(hs_keys)));
+            let hs_space = Arc::new(HandshakeSpace::new(
+                scid,
+                ArcKeys::from(hs_keys),
+                paths.is_mp_handshaking.clone(),
+            ));
             loss_resender
                 .write_guard()
                 .push_back(hs_space.clone())
@@ -151,7 +155,13 @@ pub async fn server_growing(
                 parameters.local(ParameterId::InitialMaxData),
                 reliable_frames.clone(),
             );
-            let data_space = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
+            let data_space = Arc::new(DataSpace::new(
+                scid,
+                keys,
+                streams,
+                reliable_frames.clone(),
+                paths.is_mp_handshaking.clone(),
+            ));
             loss_resender
                 .write_guard()
                 .push_back(data_space.clone())
@@ -198,13 +208,16 @@ pub async fn server_growing(
                 data_space.as_ref(),
                 paths.clone(),
             ));
+
+            // Receiving Finished selects the handshake path before waking TLS.
+            // Until then, Handshake keeps the first flight independent of path CIDs.
+            let summary = tls_ctx.finished().await?;
+            let handshake = ArcHandshake::new_server(reliable_frames.clone());
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 data_space.as_ref(),
                 paths.clone(),
             ));
-
-            let handshake_done = ArcHandshake::new_server(reliable_frames.clone());
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, Some(scopes)),
                 data_space.clone(),
@@ -214,12 +227,10 @@ pub async fn server_growing(
                 parameters.clone(),
                 cid_registry.clone(),
                 token,
-                handshake_done.clone(),
+                handshake.clone(),
             ));
+            handshake.done();
 
-            // Receiving Finished selects the handshake path before waking TLS.
-            // Until then, Handshake keeps the first flight independent of path CIDs.
-            let summary = tls_ctx.finished().await?;
             paths.cids.attach_remote(cid_registry.remote.clone());
             phase.enter_mature(Arc::new(MaturePhase {
                 parameters,
@@ -232,7 +243,6 @@ pub async fn server_growing(
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
-            handshake_done.done();
             {
                 let mut spaces = spaces.write_guard();
                 let mut resender = loss_resender.write_guard();
