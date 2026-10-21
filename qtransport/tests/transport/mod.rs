@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -23,7 +23,7 @@ use qbase::{
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
     time::heartbeat::ArcHeartbeat,
-    util::IndexDeque,
+    util::{ArcIndexDeque, IndexDeque},
 };
 use qcongestion::{Resend, Transport as _};
 use qrecovery::streams::DataStreams;
@@ -236,11 +236,11 @@ pub(crate) fn keys(transport: &Transport) -> OneRttKeys {
     transport.data.keys.get().unwrap()
 }
 
-fn data_trackers(transport: &Transport) -> Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>> {
+fn data_trackers(transport: &Transport) -> ArcIndexDeque<Arc<dyn Resend>, 2> {
     let mut trackers = IndexDeque::<Arc<dyn Resend>, 2>::with_capacity(1);
     trackers.reset_offset(Epoch::Data as u64);
     trackers.push_back(transport.data.clone()).unwrap();
-    Arc::new(RwLock::new(trackers))
+    ArcIndexDeque::from(trackers)
 }
 
 fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {

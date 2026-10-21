@@ -1,7 +1,7 @@
 //! Ordered packet-number spaces and recursive datagram assembly.
 use std::{
     any::Any,
-    sync::{Arc, RwLock},
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -13,7 +13,7 @@ use qbase::{
         GetType, OneRttHeader,
         assemble::{Limit, Metadata, Package, PacketBuffer},
     },
-    util::IndexDeque,
+    util::{ArcIndexDeque, IndexDeque},
 };
 
 use super::Encapsulate;
@@ -74,7 +74,7 @@ impl Limit for PacketLimit<'_> {
 }
 
 pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
-pub type ArcSpaces = Arc<RwLock<Spaces>>;
+pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
 
 impl Spaces {
     #[allow(clippy::too_many_arguments)]
@@ -330,18 +330,12 @@ impl Spaces {
         ))
     }
 
-    pub fn snapshot(&self) -> Self {
-        let mut spaces = IndexDeque::with_capacity(self.0.len());
-        spaces.reset_offset(self.0.offset());
-        for space in self.0.iter() {
-            spaces.push_back(space.clone()).expect("epoch index");
-        }
-        Self(spaces)
-    }
-
     /// Obtain a concrete handle when starting a receiver; phases retain only this queue.
-    pub fn get<T: Encapsulate>(&self, epoch: Epoch) -> Option<Arc<T>> {
-        let space: Arc<dyn Any + Send + Sync> = self.0.get(epoch as u64)?.clone();
+    pub fn get<T: Encapsulate>(
+        spaces: &IndexDeque<Arc<dyn Encapsulate>, 2>,
+        epoch: Epoch,
+    ) -> Option<Arc<T>> {
+        let space: Arc<dyn Any + Send + Sync> = spaces.get(epoch as u64)?.clone();
         space.downcast().ok()
     }
 }

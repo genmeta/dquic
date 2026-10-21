@@ -59,7 +59,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
         let phase = paths.phase();
         let phase = phase.get();
         path.cc.cancel(waker);
-        for space in paths.spaces.read().unwrap().0.iter() {
+        for space in paths.spaces.read_guard().iter() {
             space.unregister(waker);
         }
         paths.reliable_frames.unregister(waker);

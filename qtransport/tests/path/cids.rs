@@ -31,7 +31,7 @@ fn register(cids: &Arc<PathCids>, port: u16) -> Path {
         pathway(port),
         Arc::new(HandshakeStatus::new(true)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        Arc::default(),
+        Default::default(),
         cids,
     )
 }

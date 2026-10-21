@@ -1,7 +1,11 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use common::*;
-use qbase::{Epoch, frame::AckFrame, util::IndexDeque};
+use qbase::{
+    Epoch,
+    frame::AckFrame,
+    util::{ArcIndexDeque, IndexDeque},
+};
 use qcongestion::{ArcCC, HandshakeStatus, MSS, Resend, Transport};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
@@ -60,8 +64,14 @@ async fn shared_trackers_follow_append_and_retirement() {
     let handshake = Arc::new(HandshakeStatus::new(false));
     handshake.handshake_confirmed();
     let controllers = [
-        controller_with(path_status(handshake.clone()), trackers.clone()),
-        controller_with(path_status(handshake), trackers.clone()),
+        controller_with(
+            path_status(handshake.clone()),
+            ArcIndexDeque::from(trackers.clone()),
+        ),
+        controller_with(
+            path_status(handshake),
+            ArcIndexDeque::from(trackers.clone()),
+        ),
     ];
     let recovered = Arc::new(Mutex::new(Vec::new()));
     {

@@ -2,7 +2,7 @@
 use std::{
     collections::VecDeque,
     future::poll_fn,
-    sync::{Arc, Mutex, RwLock, atomic::AtomicU16},
+    sync::{Arc, Mutex, atomic::AtomicU16},
     task::{Context, Poll},
     time::Duration,
 };
@@ -14,7 +14,7 @@ use qbase::{
     net::{route::Pathway, tx::ArcSendWakers},
     packet::{self, Package, PacketBuffer, assemble::Metadata},
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
-    util::IndexDeque,
+    util::ArcIndexDeque,
 };
 use qcongestion::{
     Algorithm, ArcCC, CongestionController, HandshakeStatus, PathStatus, Resend, Transport as _,
@@ -58,7 +58,7 @@ impl Path {
         pathway: Pathway,
         handshake: Arc<HandshakeStatus>,
         heartbeat: ArcHeartbeat,
-        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
         cids: &Arc<PathCids>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();

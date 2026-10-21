@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
     keys::ArcKeys,
     path::{Path, PathCids, PathState},
-    space::{ArcSpaces, InitialSpace, Spaces},
+    space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
 
@@ -62,15 +62,18 @@ impl Paths {
             .expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
         terminator.register(Arc::new(initial_space.crypto.clone()));
-        let mut spaces = Spaces(IndexDeque::with_capacity(3));
-        spaces.0.push_back(initial_space).expect("Initial epoch");
+        let spaces = ArcSpaces::from(IndexDeque::with_capacity(3));
+        spaces
+            .write_guard()
+            .push_back(initial_space)
+            .expect("Initial epoch");
         let phase = ArcConnPhase::initial(InitialPhase::new(dcid, local_cids));
         let paths = Arc::new(Self {
             phase,
             cids: PathCids::new(dcid),
-            spaces: Arc::new(RwLock::new(spaces)),
+            spaces,
             reliable_frames,
-            resender: Arc::new(RwLock::new(resender)),
+            resender: ArcResend::from(resender),
             terminator: terminator.clone(),
             handshake,
             entries: Mutex::new(BTreeMap::new()),
@@ -217,8 +220,8 @@ impl Paths {
     pub(crate) fn on_handshake_sent(&self) {
         self.handshake.on_handshake_sent();
         if self.role == Role::Client {
-            let spaces = self.spaces.read().unwrap();
-            if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
+            let spaces = self.spaces.read_guard();
+            if let Some(initial) = spaces.get(Epoch::Initial as u64) {
                 initial.retire();
             }
         }
@@ -227,8 +230,8 @@ impl Paths {
     pub(crate) fn on_handshake_received(&self) {
         self.handshake.on_handshake_received();
         if self.role == Role::Server {
-            let spaces = self.spaces.read().unwrap();
-            if let Some(initial) = spaces.0.get(Epoch::Initial as u64) {
+            let spaces = self.spaces.read_guard();
+            if let Some(initial) = spaces.get(Epoch::Initial as u64) {
                 initial.retire();
             }
         }

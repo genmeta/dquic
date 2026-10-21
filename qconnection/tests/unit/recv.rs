@@ -711,15 +711,12 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     // Data keys can be installed while the server is still completing TLS.
     paths
         .resender
-        .write()
-        .unwrap()
+        .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
     paths
         .spaces
-        .write()
-        .unwrap()
-        .0
+        .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
     mature

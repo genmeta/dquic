@@ -284,7 +284,7 @@ pub async fn tick(paths: Arc<Paths>) {
     let terminator = paths.terminator.clone();
     loop {
         let now = Instant::now();
-        for space in paths.spaces.read().unwrap().0.iter() {
+        for space in paths.spaces.read_guard().iter() {
             space.on_tick(now);
         }
         tokio::select! {

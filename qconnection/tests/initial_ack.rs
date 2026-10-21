@@ -58,7 +58,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         pathway,
         Arc::new(qcongestion::HandshakeStatus::new(false)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        Arc::default(),
+        Default::default(),
         &qtransport::path::PathCids::new(Default::default()),
     );
     path.client_handshaking();
