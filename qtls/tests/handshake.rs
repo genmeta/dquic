@@ -1,3 +1,9 @@
+mod support;
+mod handshake {
+    mod client_ocsp;
+    mod server_ocsp;
+}
+
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -51,7 +57,7 @@ impl Observed {
 
 #[test]
 fn mutual_auth_publishes_both_authorities() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
     let client_authority = authority(&provider, "client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP);
@@ -119,7 +125,7 @@ fn mutual_auth_publishes_both_authorities() {
 
 #[test]
 fn anonymous_client_completes_without_remote_authority() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
     let client = TlsClient::new(ClientTlsConfig {
@@ -146,7 +152,7 @@ fn anonymous_client_completes_without_remote_authority() {
 
 #[test]
 fn supplied_server_ocsp_requires_current_matching_good_status() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
@@ -206,7 +212,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
 
 #[test]
 fn presented_client_certificate_requires_matching_ocsp() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
 
     assert!(
@@ -247,7 +253,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
 
 #[test]
 fn stateful_resumption_restores_authorities_without_revalidating_the_certificate() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let store = Arc::new(MemoryResumptionStore::new(16));
     let client_seal_keys = Arc::new(SessionSealKeyRing::new(7, [0x17; 32]));
@@ -323,7 +329,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
 
 #[test]
 fn stateless_resumption_restores_the_verified_client_authority() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
@@ -368,7 +374,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
 
 #[test]
 fn initial_keys_interoperate_for_v1_and_v2() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
@@ -420,7 +426,7 @@ fn initial_keys_interoperate_for_v1_and_v2() {
 
 #[test]
 fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
-    set_roots();
+    let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let client = TlsClient::new(ClientTlsConfig {
         provider,
@@ -447,8 +453,12 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
     assert!(terminal.to_string().contains("terminal state"));
 }
 
-fn set_roots() {
+fn set_roots() -> std::sync::MutexGuard<'static, ()> {
+    // RootCerts is process-global; one case installs an untrusted root.
+    static ROOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = ROOTS.lock().unwrap();
     RootCerts::set([CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();
+    guard
 }
 
 fn authority(
@@ -567,5 +577,16 @@ fn authority_signs_without_exposing_the_signing_key() {
         authority
             .sign(SignatureScheme::ED25519, b"message")
             .is_err()
+    );
+}
+
+fn assert_rejected(
+    result: Result<HandshakeSummary, qtls::TlsError>,
+    expected: rustls::AlertDescription,
+) {
+    let error = result.unwrap_err();
+    assert!(
+        matches!(error, qtls::TlsError::Alert(alert) if alert.description() == u8::from(expected)),
+        "unexpected handshake error: {error:?}"
     );
 }
