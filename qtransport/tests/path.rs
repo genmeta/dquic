@@ -4,7 +4,7 @@ mod path {
 
 use std::{
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
@@ -16,7 +16,7 @@ use qbase::{
     net::{addr::EndpointAddr, route::Pathway},
     packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     time::heartbeat::ArcHeartbeat,
-    util::IndexDeque,
+    util::{ArcIndexDeque, IndexDeque},
 };
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::path::Path;
@@ -39,7 +39,7 @@ async fn handshake_confirmation_stops_early_epoch_pto() {
         ),
         handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        Arc::new(RwLock::new(IndexDeque::with_capacity(3))),
+        ArcIndexDeque::from(IndexDeque::with_capacity(3)),
         &qtransport::path::PathCids::new(Default::default()),
     );
     path.client_handshaking();
@@ -67,7 +67,7 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 ),
                 Arc::new(HandshakeStatus::new(true)),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                Arc::default(),
+                ArcIndexDeque::default(),
                 &qtransport::path::PathCids::new(Default::default()),
             );
             if queued {

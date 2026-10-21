@@ -63,7 +63,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
     paths.on_handshake_sent();
     // Initial remains queued until growing cleans up; retired keys must already stop assembly.
-    assert_eq!(paths.spaces.read().unwrap().0.offset(), 0);
+    assert_eq!(paths.spaces.read_guard().offset(), 0);
     tokio::time::advance(Duration::from_secs(10)).await;
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
@@ -588,8 +588,8 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     drop(phase.poll_phase(&mut Context::from_waker(&b)));
 
     phase.enter_handshake();
-    assert_eq!(paths.spaces.read().unwrap().0.len(), 1);
-    assert_eq!(paths.resender.read().unwrap().len(), 1);
+    assert_eq!(paths.spaces.read_guard().len(), 1);
+    assert_eq!(paths.resender.read_guard().len(), 1);
     assert_eq!(first.0.load(Ordering::Relaxed), 2);
     assert_eq!(second.0.load(Ordering::Relaxed), 1);
     assert_eq!(
@@ -615,8 +615,8 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
     drop(phase.poll_phase(&mut Context::from_waker(&b)));
 
     phase.enter_mature(mature.phase.clone());
-    assert_eq!(paths.spaces.read().unwrap().0.len(), 1);
-    assert_eq!(paths.resender.read().unwrap().len(), 1);
+    assert_eq!(paths.spaces.read_guard().len(), 1);
+    assert_eq!(paths.resender.read_guard().len(), 1);
     assert_eq!(first.0.load(Ordering::Relaxed), 3);
     assert_eq!(second.0.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -1154,9 +1154,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         assert_eq!(
             paths
                 .spaces
-                .read()
-                .unwrap()
-                .0
+                .read_guard()
                 .get(epoch as u64)
                 .unwrap()
                 .sent_journal()
@@ -1189,8 +1187,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
             let trackers = paths.resender.clone();
             let epochs = || {
                 trackers
-                    .read()
-                    .unwrap()
+                    .read_guard()
                     .enumerate()
                     .map(|(epoch, _)| epoch)
                     .collect::<Vec<_>>()

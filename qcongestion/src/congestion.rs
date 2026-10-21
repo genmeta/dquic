@@ -1,9 +1,9 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard, RwLock, atomic::Ordering},
+    sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
     task::{Context, Poll},
 };
 
-use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, util::IndexDeque};
+use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, util::ArcIndexDeque};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ pub struct CongestionController {
     // The waker to notify when the controller is ready to send.
     pending_burst: bool,
     // Shared connection spaces, indexed by epoch even after early spaces retire.
-    trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+    trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
     path_status: PathStatus,
     tx_waker: ArcSendWakers,
@@ -51,7 +51,7 @@ impl CongestionController {
     fn init(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
         path_status: PathStatus,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -250,7 +250,7 @@ impl CongestionController {
 
         if loss_pns.peek().is_some() {
             self.rtt.try_backoff_rtt();
-            let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+            let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
             if let Some(tracker) = tracker {
                 tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
             }
@@ -340,7 +340,7 @@ impl CongestionController {
 
             if loss_pns.peek().is_some() {
                 self.rtt.try_backoff_rtt();
-                let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+                let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
                 if let Some(tracker) = tracker {
                     tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
                 }
@@ -585,7 +585,7 @@ impl CongestionController {
         for &epoch in Epoch::iter() {
             let packet_numbers = self.packet_spaces[epoch].discard(&mut self.algorithm);
             if epoch == Epoch::Data && !packet_numbers.is_empty() {
-                let tracker = self.trackers.read().unwrap().get(epoch as u64).cloned();
+                let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
                 if let Some(tracker) = tracker {
                     tracker.resend(
                         PacketLostTrigger::PtoExpired,
@@ -621,7 +621,7 @@ impl ArcCC {
     pub fn new(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
+        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
         path_status: PathStatus,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -787,7 +787,7 @@ impl super::Transport for ArcCC {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU16};
 
-    use qbase::net::tx::ArcSendWakers;
+    use qbase::{net::tx::ArcSendWakers, util::IndexDeque};
 
     use super::*;
     use crate::HandshakeStatus;
@@ -812,7 +812,7 @@ mod tests {
                 for tracker in [feedback.clone(), feedback.clone(), feedback] {
                     trackers.push_back(tracker).unwrap();
                 }
-                Arc::new(RwLock::new(trackers))
+                ArcIndexDeque::from(trackers)
             },
             path_status,
             ArcSendWakers::default(),

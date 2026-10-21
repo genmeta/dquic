@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     ops::{Index, IndexMut},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use thiserror::Error;
@@ -26,7 +27,7 @@ pub enum IndexError {
 ///
 /// [`IndexDeque`] is useful in many places in QUIC implementation,
 /// such as recording packet sending history.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IndexDeque<T, const LIMIT: u64> {
     deque: VecDeque<T>,
     offset: u64,
@@ -478,6 +479,45 @@ impl<T, const LIMIT: u64> Index<u64> for IndexDeque<T, LIMIT> {
 impl<T, const LIMIT: u64> IndexMut<u64> for IndexDeque<T, LIMIT> {
     fn index_mut(&mut self, index: u64) -> &mut Self::Output {
         &mut self.deque[(index - self.offset) as usize]
+    }
+}
+
+/// A shared indexed queue accessed through read and write guards.
+pub struct ArcIndexDeque<T, const LIMIT: u64>(Arc<RwLock<IndexDeque<T, LIMIT>>>);
+
+impl<T, const LIMIT: u64> Default for ArcIndexDeque<T, LIMIT> {
+    fn default() -> Self {
+        Self::from(IndexDeque::default())
+    }
+}
+
+impl<T, const LIMIT: u64> Clone for ArcIndexDeque<T, LIMIT> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T, const LIMIT: u64> From<IndexDeque<T, LIMIT>> for ArcIndexDeque<T, LIMIT> {
+    fn from(deque: IndexDeque<T, LIMIT>) -> Self {
+        Self(Arc::new(RwLock::new(deque)))
+    }
+}
+
+impl<T, const LIMIT: u64> From<Arc<RwLock<IndexDeque<T, LIMIT>>>> for ArcIndexDeque<T, LIMIT> {
+    fn from(deque: Arc<RwLock<IndexDeque<T, LIMIT>>>) -> Self {
+        Self(deque)
+    }
+}
+
+impl<T, const LIMIT: u64> ArcIndexDeque<T, LIMIT> {
+    /// Acquire a read guard. Panics if the lock is poisoned.
+    pub fn read_guard(&self) -> RwLockReadGuard<'_, IndexDeque<T, LIMIT>> {
+        self.0.read().unwrap()
+    }
+
+    /// Acquire a write guard. Panics if the lock is poisoned.
+    pub fn write_guard(&self) -> RwLockWriteGuard<'_, IndexDeque<T, LIMIT>> {
+        self.0.write().unwrap()
     }
 }
 

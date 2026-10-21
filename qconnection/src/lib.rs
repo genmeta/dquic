@@ -12,13 +12,13 @@ pub mod recv;
 pub mod send;
 pub mod tls;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
 pub use lifecycle::{Interceptor, client_growing, server_growing};
 pub use paths::Paths;
 pub use phase::{ArcConnPhase, ConnPhase, HandshakePhase, InitialPhase, MaturePhase};
-use qbase::util::IndexDeque;
+use qbase::util::ArcIndexDeque;
 pub use qbase::{
     error::Error,
     net::route::{Scope, Scopes},
@@ -33,7 +33,7 @@ pub type ArcLocalCids =
 pub type CidRegistry =
     qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
 pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
-pub type ArcResend = Arc<RwLock<IndexDeque<Arc<dyn qcongestion::Resend>, 2>>>;
+pub type ArcResend = ArcIndexDeque<Arc<dyn qcongestion::Resend>, 2>;
 
 pub type Connected = (
     Option<qtls::LocalAuthority>,

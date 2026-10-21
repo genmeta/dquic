@@ -40,13 +40,13 @@ async fn finish(paths: &Paths, error: Error) -> Error {
         }
     }
     {
-        let mut spaces = paths.spaces.write().unwrap();
-        while let Some((_, space)) = spaces.0.pop_front() {
+        let mut spaces = paths.spaces.write_guard();
+        while let Some((_, space)) = spaces.pop_front() {
             space.retire();
         }
     }
     {
-        let mut resender = paths.resender.write().unwrap();
+        let mut resender = paths.resender.write_guard();
         let end = resender.largest();
         resender.drain_to(end).for_each(drop);
     }

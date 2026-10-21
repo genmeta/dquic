@@ -1,6 +1,54 @@
 use qbase::util::*;
 
 #[test]
+fn shared_guards_preserve_indexes_across_clones() {
+    struct Entry(u64);
+
+    let deque = ArcIndexDeque::from(IndexDeque::<Entry, 2>::with_capacity(3));
+    let shared = deque.clone();
+    {
+        let mut guard = deque.write_guard();
+        guard.extend([Entry(10), Entry(20)]);
+        guard[1].0 += 1;
+        assert_eq!(guard.pop_front().unwrap().0, 0);
+    }
+
+    {
+        let guard = shared.read_guard();
+        assert_eq!(guard.offset(), 1);
+        assert_eq!(guard[1].0, 21);
+        assert_eq!(guard.iter().map(|entry| entry.0).collect::<Vec<_>>(), [21]);
+    }
+
+    assert_eq!(shared.write_guard().push_back(Entry(30)), Ok(2));
+    assert_eq!(
+        deque.write_guard().push_back(Entry(40)),
+        Err(IndexError::ExceedLimit(3, 2))
+    );
+    assert_eq!(deque.read_guard()[2].0, 30);
+}
+
+#[test]
+fn cloned_guard_contents_keep_offset_and_are_independent() {
+    let deque = ArcIndexDeque::from(IndexDeque::<u64, 2>::with_capacity(3));
+    {
+        let mut guard = deque.write_guard();
+        guard.extend([10, 20, 30]);
+        guard.pop_front();
+    }
+
+    let mut owned = deque.read_guard().clone();
+    owned[1] = 99;
+    deque.write_guard().pop_front();
+
+    assert_eq!(owned.offset(), 1);
+    assert_eq!(owned[1], 99);
+    assert_eq!(owned[2], 30);
+    assert_eq!(deque.read_guard().offset(), 2);
+    assert_eq!(deque.read_guard()[2], 30);
+}
+
+#[test]
 fn test_insert() {
     let mut deque = IndexDeque::<u64, 19>::default();
     deque.insert(10, 11).unwrap();

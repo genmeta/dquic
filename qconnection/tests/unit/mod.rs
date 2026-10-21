@@ -26,15 +26,12 @@ pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
     }
     paths
         .resender
-        .write()
-        .unwrap()
+        .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
     paths
         .spaces
-        .write()
-        .unwrap()
-        .0
+        .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
     paths.cids.attach_remote(mature.cid_registry.remote.clone());
@@ -48,31 +45,20 @@ pub fn enter_handshake(
 ) {
     paths
         .resender
-        .write()
-        .unwrap()
+        .write_guard()
         .push_back(handshake.clone())
         .unwrap();
-    paths
-        .spaces
-        .write()
-        .unwrap()
-        .0
-        .push_back(handshake)
-        .unwrap();
+    paths.spaces.write_guard().push_back(handshake).unwrap();
     paths.handshake.got_handshake_key();
     paths.phase().enter_handshake();
 }
 
 /// Emulate lifecycle retirement in tests that do not run growing.
 pub fn retire_spaces(paths: &Paths, end: qbase::Epoch) {
-    let mut spaces = paths.spaces.write().unwrap();
-    let mut resender = paths.resender.write().unwrap();
-    while spaces
-        .0
-        .front()
-        .is_some_and(|(epoch, _)| epoch < end as u64)
-    {
-        let (_, space) = spaces.0.pop_front().unwrap();
+    let mut spaces = paths.spaces.write_guard();
+    let mut resender = paths.resender.write_guard();
+    while spaces.front().is_some_and(|(epoch, _)| epoch < end as u64) {
+        let (_, space) = spaces.pop_front().unwrap();
         space.retire();
         resender.pop_front();
     }

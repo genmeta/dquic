@@ -241,12 +241,11 @@ async fn close_at_client_stage(wait: ClientWait) {
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if matches!(phase.get(), ConnPhase::Handshake(_)) {
-                break paths
-                    .spaces
-                    .read()
-                    .unwrap()
-                    .get::<qtransport::space::HandshakeSpace>(qbase::Epoch::Handshake)
-                    .unwrap();
+                break qtransport::space::Spaces::get::<qtransport::space::HandshakeSpace>(
+                    &paths.spaces.read_guard(),
+                    qbase::Epoch::Handshake,
+                )
+                .unwrap();
             }
             tokio::task::yield_now().await;
         }
@@ -322,15 +321,14 @@ async fn close_at_client_stage(wait: ClientWait) {
             panic!()
         };
         assert!(
-            paths
-                .spaces
-                .read()
-                .unwrap()
-                .get::<qtransport::space::DataSpace>(qbase::Epoch::Data)
-                .unwrap()
-                .keys
-                .get()
-                .is_ok()
+            qtransport::space::Spaces::get::<qtransport::space::DataSpace>(
+                &paths.spaces.read_guard(),
+                qbase::Epoch::Data,
+            )
+            .unwrap()
+            .keys
+            .get()
+            .is_ok()
         );
         assert!(matches!(
             handshake.crypto.reader().read(&mut [0; 1]).now_or_never(),

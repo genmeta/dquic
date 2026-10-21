@@ -1,6 +1,9 @@
-use std::sync::{Arc, Mutex, RwLock, atomic::AtomicU16};
+use std::sync::{Arc, Mutex, atomic::AtomicU16};
 
-use qbase::{net::tx::ArcSendWakers, util::IndexDeque};
+use qbase::{
+    net::tx::ArcSendWakers,
+    util::{ArcIndexDeque, IndexDeque},
+};
 use qcongestion::{Algorithm, ArcCC, HandshakeStatus, MSS, PathStatus, Resend};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Duration;
@@ -19,12 +22,12 @@ impl Resend for RecordingFeedback {
     }
 }
 
-pub fn trackers(feedback: Arc<dyn Resend>) -> Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>> {
+pub fn trackers(feedback: Arc<dyn Resend>) -> ArcIndexDeque<Arc<dyn Resend>, 2> {
     let mut entries = IndexDeque::with_capacity(3);
     for tracker in [feedback.clone(), feedback.clone(), feedback] {
         entries.push_back(tracker).unwrap();
     }
-    Arc::new(RwLock::new(entries))
+    ArcIndexDeque::from(entries)
 }
 
 pub fn path_status(handshake: Arc<HandshakeStatus>) -> PathStatus {
@@ -33,10 +36,7 @@ pub fn path_status(handshake: Arc<HandshakeStatus>) -> PathStatus {
     status
 }
 
-pub fn controller_with(
-    status: PathStatus,
-    trackers: Arc<RwLock<IndexDeque<Arc<dyn Resend>, 2>>>,
-) -> ArcCC {
+pub fn controller_with(status: PathStatus, trackers: ArcIndexDeque<Arc<dyn Resend>, 2>) -> ArcCC {
     ArcCC::new(
         Algorithm::NewReno,
         Duration::from_millis(25),

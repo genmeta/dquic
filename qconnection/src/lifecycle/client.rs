@@ -15,7 +15,7 @@ use qprotocol::{AddressBook, Dock, QuicProtocol};
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     packet::channel::RcvdPacket,
-    space::{DataSpace, HandshakeSpace, InitialSpace},
+    space::{DataSpace, HandshakeSpace, InitialSpace, Spaces},
 };
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
@@ -48,11 +48,8 @@ pub async fn client_growing(
     };
 
     let spaces = paths.spaces.clone();
-    let initial = spaces
-        .read()
-        .unwrap()
-        .get::<InitialSpace>(Epoch::Initial)
-        .expect("Initial space");
+    let initial =
+        Spaces::get::<InitialSpace>(&spaces.read_guard(), Epoch::Initial).expect("Initial space");
     let initial = Arc::new(initial.space.clone());
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
@@ -93,14 +90,11 @@ pub async fn client_growing(
             let handshake_keys = tls_context.read_keys().await?;
             let handshake = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys)));
             resender
-                .write()
-                .unwrap()
+                .write_guard()
                 .push_back(handshake.clone())
                 .expect("Handshake epoch");
             spaces
-                .write()
-                .unwrap()
-                .0
+                .write_guard()
                 .push_back(handshake.clone())
                 .expect("Handshake epoch");
             terminator.register(Arc::new(handshake.crypto.clone()));
@@ -163,14 +157,11 @@ pub async fn client_growing(
             );
             let data = Arc::new(DataSpace::new(scid, keys, streams, reliable_frames.clone()));
             resender
-                .write()
-                .unwrap()
+                .write_guard()
                 .push_back(data.clone())
                 .expect("Data epoch");
             spaces
-                .write()
-                .unwrap()
-                .0
+                .write_guard()
                 .push_back(data.clone())
                 .expect("Data epoch");
             terminator.register(Arc::new(data.crypto.clone()));
@@ -263,10 +254,10 @@ pub async fn client_growing(
                 .expect("live Data keys")
                 .allow_update();
             {
-                let mut spaces = spaces.write().unwrap();
-                let mut resender = resender.write().unwrap();
-                while spaces.0.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
-                    let (_, space) = spaces.0.pop_front().unwrap();
+                let mut spaces = spaces.write_guard();
+                let mut resender = resender.write_guard();
+                while spaces.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
+                    let (_, space) = spaces.pop_front().unwrap();
                     space.retire();
                     resender.pop_front();
                 }

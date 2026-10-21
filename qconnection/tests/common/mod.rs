@@ -306,11 +306,11 @@ pub fn observe_close(terminator: &qtransport::terminate::ArcTerminator) -> Arc<C
 pub fn initial_space(
     spaces: &qtransport::space::ArcSpaces,
 ) -> Arc<qtransport::space::Space<qtransport::keys::ArcKeys>> {
-    let initial = spaces
-        .read()
-        .unwrap()
-        .get::<qtransport::space::InitialSpace>(qbase::Epoch::Initial)
-        .unwrap();
+    let initial = qtransport::space::Spaces::get::<qtransport::space::InitialSpace>(
+        &spaces.read_guard(),
+        qbase::Epoch::Initial,
+    )
+    .unwrap();
     Arc::new(initial.space.clone())
 }
 

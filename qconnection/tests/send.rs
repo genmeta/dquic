@@ -305,7 +305,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         frame::{CryptoFrame, EncodeSize},
         packet::{GetType, HeaderSize, Package},
     };
-    use qtransport::space::assemble::Constraints;
+    use qtransport::space::{Spaces, assemble::Constraints};
     for (sizes, expected) in [
         ([700, 0, 0], [1200, 0, 0]),
         ([700, 200, 0], [700, 500, 0]),
@@ -315,7 +315,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         ([0, 0, 0], [0, 0, 0]),
     ] {
         let [sender, receiver] = common::phase::pair();
-        let mut spaces = sender.paths.spaces.read().unwrap().snapshot();
+        let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
         spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
         spaces.0.push_back(sender.spaces.data.clone()).unwrap();
         let mut sources = Epoch::EPOCHS.map(|epoch| {
@@ -487,10 +487,10 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         frame::{CryptoFrame, PathChallengeFrame},
         packet::Package,
     };
-    use qtransport::space::assemble::Constraints;
+    use qtransport::space::{Spaces, assemble::Constraints};
     for capacity in [1199, 1200] {
         let [sender, _] = common::phase::pair();
-        let mut spaces = sender.paths.spaces.read().unwrap().snapshot();
+        let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
         spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
         spaces.0.push_back(sender.spaces.data.clone()).unwrap();
         spaces.0.pop_front();

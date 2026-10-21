@@ -31,12 +31,12 @@ async fn packet_events_retire_initial_but_leave_queue_removal_to_growing() {
         }
         assert!(space.keys.get().is_err());
         paths.handshake_confirmed();
-        assert_eq!(spaces.read().unwrap().0.len(), 1);
-        assert_eq!(resender.read().unwrap().len(), 1);
+        assert_eq!(spaces.read_guard().len(), 1);
+        assert_eq!(resender.read_guard().len(), 1);
 
         super::retire_spaces(&paths, Epoch::Handshake);
-        assert!(spaces.read().unwrap().0.is_empty());
-        assert!(resender.read().unwrap().is_empty());
+        assert!(spaces.read_guard().is_empty());
+        assert!(resender.read_guard().is_empty());
         assert!(space.keys.get().is_err());
         paths.retire_all();
     }

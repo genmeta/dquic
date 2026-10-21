@@ -161,7 +161,7 @@ impl Burst<'_, '_> {
             flow_ctrl: 0,
             overhead: QuicProtocol::packet_overhead(path.pathway),
         };
-        self.spaces = Some(self.paths.spaces.read().unwrap().snapshot());
+        self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
         let mut flow = if let ConnPhase::Mature(phase) = &phase {
             let requested = self
                 .spaces
