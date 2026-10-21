@@ -689,9 +689,3 @@ impl<TX, PE> Drop for Puncher<TX, PE> {
 fn timed_out() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "punch timed out")
 }
-
-#[cfg(test)]
-mod observation_tests;
-
-#[cfg(test)]
-mod transaction_tests;

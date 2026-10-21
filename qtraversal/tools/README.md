@@ -60,8 +60,8 @@ A、B 表示两个 Puncher，没有 QUIC client/server 身份。
 单主动场景只给主动端交付对方的 ADD_ADDRESS，被动端通过 PUNCH_ME_NOW 启动。
 双主动场景先等待两端都实际发出 PUNCH_ME_NOW，再开放可靠帧交付；在公开 SendFrame / 编码器回调中记录发送任务：
 较大端点保留原主动发送任务，较小端点由新的被动任务发送。
-`tests/punch/puncher/transaction_tests.rs` 另外覆盖两种请求到达顺序；
-旧主动任务延迟清理的精确竞态注入仍保留在源码单元测试中。
+`tests/punch/puncher/transaction_tests.rs` 另外覆盖两种请求到达顺序，
+并在公开 SendFrame 回调中同步触发被动替换，重现旧主动任务随后清理的竞态。
 
 正例同时断言：
 
