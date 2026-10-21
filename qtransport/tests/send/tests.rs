@@ -64,7 +64,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
         None,
     );
     let fixed = crate::transport::fixed_keys();
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let limit = Constraints {
         flow_ctrl: std::cell::Cell::new(usize::MAX),
         capacity: 1200,
@@ -151,8 +151,6 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     assert!(
         peer.data
             .keys
-            .get()
-            .unwrap()
             .open(decode(one.bytes()), |_| Ok(1), Duration::ZERO)
             .unwrap()
             .is_some()
@@ -172,7 +170,7 @@ async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
 #[tokio::test]
 async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() {
     let [(_client, transport, path), _peer] = crate::transport::pair(1);
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
     let mut remaining = 16;
@@ -268,7 +266,7 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
 #[tokio::test]
 async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     let [(_client, transport, path), _peer] = crate::transport::pair(1);
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let status = qcongestion::PathStatus::new(
         Arc::new(qcongestion::HandshakeStatus::new(true)),
         Arc::new(std::sync::atomic::AtomicU16::new(1200)),
@@ -312,7 +310,7 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
 #[tokio::test]
 async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data() {
     let [(_client, transport, path), _peer] = crate::transport::pair(1);
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let journal = ArcSentJournal::default();
     let mut sender = sender(&transport, &path);
     let challenge = PathChallengeFrame::random();
@@ -428,7 +426,7 @@ async fn retired_space_is_removed_without_discarding_other_spaces_in_the_batch()
 async fn sent_callback_can_acknowledge_and_retire_path() {
     let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let mut sender = sender(&transport, &path);
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let mut ping = Some(PingFrame);
     assert_eq!(
         sender
@@ -486,7 +484,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
         path.anti_amplifier.clone(),
         Some(transport.data.clone()),
     );
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let mut packets = Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS);
     let allocation = packets.as_ptr();
     let frames = sender.send_frames.as_ptr();

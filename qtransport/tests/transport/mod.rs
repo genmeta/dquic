@@ -30,7 +30,7 @@ use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
-    keys::{ArcOneRttKeys, KeyRetired, OneRttKeys, Open, Seal},
+    keys::{ArcOneRttKeys, KeyRetired, Open, Seal},
     packet::channel,
     path::Path,
     send::{
@@ -200,7 +200,7 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         streams,
         reliable,
     ));
-    data.keys.get().unwrap().allow_update();
+    data.keys.allow_update();
     Arc::new(Transport {
         data,
         parameters: params,
@@ -232,8 +232,8 @@ pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 
     .ok()
     .unwrap()
 }
-pub(crate) fn keys(transport: &Transport) -> OneRttKeys {
-    transport.data.keys.get().unwrap()
+pub(crate) fn keys(transport: &Transport) -> ArcOneRttKeys {
+    transport.data.keys.clone()
 }
 
 fn data_trackers(transport: &Transport) -> ArcIndexDeque<Arc<dyn Resend>, 2> {
@@ -336,7 +336,10 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     receive_packets(
         packets.one_rtt,
         Epoch::Data,
-        transport.data.keys.clone(),
+        {
+            let keys = transport.data.keys.clone();
+            move || (!keys.is_retired()).then(|| keys.clone())
+        },
         transport.data.rcvd_journal.clone(),
         |_, _| Some(path.clone()),
         |keys, packet, _| {
@@ -377,25 +380,25 @@ fn ack(pn: u64) -> AckFrame {
 }
 pub(crate) fn seal_packet(
     packet: SendingPacket,
-    keys: &OneRttKeys,
+    keys: &ArcOneRttKeys,
     journal: &send::records::ArcSentJournal,
     records: &mut Vec<GuaranteedFrame>,
 ) -> Result<send::write::PendingPacket, PacketError> {
     let ((pn, encoded), key) = send::records::reserve(keys, journal, records)?;
-    send::finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
+    send::finish_sealing(packet.seal(key.as_ref(), pn, encoded), pn, journal, records)
 }
 
 // Receive and encoding tests supply packet numbers without constructing recovery history.
 fn seal_packet_with_pn(
     packet: SendingPacket,
-    keys: &OneRttKeys,
+    keys: &ArcOneRttKeys,
     pn: u64,
 ) -> Result<send::write::PendingPacket, PacketError> {
-    let ((pn, encoded), key) = keys.reserve(|_| Ok((pn, PacketNumber::encode(pn, 0))))?;
-    packet.seal(&key, pn, encoded)
+    let key = keys.get()?;
+    packet.seal(key.as_ref(), pn, PacketNumber::encode(pn, 0))
 }
 
-fn ping(keys: &OneRttKeys, pn: u64) -> BytesMut {
+fn ping(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
     let mut recorded = Vec::new();
     let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
@@ -494,7 +497,7 @@ fn initial_datagram(cid: ConnectionId, size: usize) -> BytesMut {
     bytes
 }
 
-fn close_packet(keys: &OneRttKeys, pn: u64) -> BytesMut {
+fn close_packet(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
     let mut recorded = Vec::new();
     let mut packet = SendingPacket::new(
         BytesMut::zeroed(1200),
@@ -594,7 +597,10 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             receive_packets(
                 rcvd_pkt.initial,
                 space.epoch,
-                space.keys.clone(),
+                {
+                    let keys = space.keys.clone();
+                    move || keys.get().ok()
+                },
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
@@ -613,7 +619,10 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             receive_packets(
                 rcvd_pkt.handshake,
                 space.epoch,
-                space.keys.clone(),
+                {
+                    let keys = space.keys.clone();
+                    move || keys.get().ok()
+                },
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
@@ -705,13 +714,16 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
-        st.data.keys.clone(),
+        {
+            let keys = st.data.keys.clone();
+            move || (!keys.is_retired()).then(|| keys.clone())
+        },
         st.data.rcvd_journal.clone(),
         {
             let sp = sp.clone();
             move |_, _| Some(sp.clone())
         },
-        move |keys: &OneRttKeys, packet, _| {
+        move |keys: &ArcOneRttKeys, packet, _| {
             keys.open_packet(
                 packet,
                 |pn| journal.decode_pn(pn),
@@ -796,10 +808,13 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
-        st.data.keys.clone(),
+        {
+            let keys = st.data.keys.clone();
+            move || (!keys.is_retired()).then(|| keys.clone())
+        },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
-        |keys: &OneRttKeys, packet, _| {
+        |keys: &ArcOneRttKeys, packet, _| {
             keys.open_packet(
                 packet,
                 |pn| st.data.rcvd_journal.decode_pn(pn),
@@ -848,8 +863,6 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
     let (_, frames) = st
         .data
         .keys
-        .get()
-        .unwrap()
         .open(
             parse(&bytes),
             |pn| st.data.rcvd_journal.decode_pn(pn),
@@ -1098,8 +1111,6 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
     assert!(
         st.data
             .keys
-            .get()
-            .unwrap()
             .open(
                 parse(&forged),
                 |pn| st.data.rcvd_journal.decode_pn(pn),
@@ -1377,13 +1388,16 @@ async fn receiving_starts_with_ready_keys() {
     let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
-        data.keys.clone(),
+        {
+            let keys = data.keys.clone();
+            move || (!keys.is_retired()).then(|| keys.clone())
+        },
         data.rcvd_journal.clone(),
         {
             let cp = cp.clone();
             move |_, _| Some(cp.clone())
         },
-        move |keys: &OneRttKeys, packet, _| {
+        move |keys: &ArcOneRttKeys, packet, _| {
             keys.open_packet(
                 packet,
                 |pn| journal.decode_pn(pn),
@@ -1441,7 +1455,10 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     receive_packets(
         packets.one_rtt,
         Epoch::Data,
-        st.data.keys.clone(),
+        {
+            let keys = st.data.keys.clone();
+            move || (!keys.is_retired()).then(|| keys.clone())
+        },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
         |keys, packet, _| {
@@ -1938,7 +1955,10 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     let mut task = tokio::spawn(receive_packets(
         rcvd_pkt.initial,
         space.epoch,
-        space.keys.clone(),
+        {
+            let keys = space.keys.clone();
+            move || keys.get().ok()
+        },
         space.rcvd_journal.clone(),
         |_, _| unreachable!(),
         |_: &Arc<qtls::BidirectionalKeys>, _, _| unreachable!(),
@@ -1963,7 +1983,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
 #[tokio::test]
 async fn sealing_does_not_wait_for_socket_submission() {
     let [(_client, transport, path), _] = pair(1);
-    let keys = transport.data.keys.get().unwrap();
+    let keys = transport.data.keys.clone();
     let mut sender = Sender::new(keys.clone(), transport, path).unwrap();
     sender.heartbeat();
     assert!(sender.prepare().unwrap());

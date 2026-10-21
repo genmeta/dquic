@@ -2,7 +2,10 @@
 use std::{
     collections::VecDeque,
     ops::RangeInclusive,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -21,6 +24,8 @@ use crate::Error;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketError {
+    #[error(transparent)]
+    Retired(#[from] KeyRetired),
     #[error(transparent)]
     Connection(#[from] crate::Error),
     #[error("invalid packet layout or capacity")]
@@ -73,32 +78,31 @@ pub struct HeaderKeys {
 }
 
 #[derive(Clone)]
-pub struct OneRttKeys {
+pub struct ArcOneRttKeys {
     pub headers: Arc<HeaderKeys>,
     packets: Arc<Mutex<OneRttPacketKeys>>,
 }
 
-/// A fixed sending generation, reserved together with its packet number.
-/// No key-manager lock is held while encrypting or submitting the packet.
-pub struct OneRttSealingKey {
-    headers: Arc<HeaderKeys>,
-    packet: qtls::PacketKey,
-    generation: u64,
+/// Bidirectional packet protection for one fixed generation.
+pub struct OneRttKeys {
+    pub headers: Arc<HeaderKeys>,
+    pub opening: qtls::PacketKey,
+    pub sealing: qtls::PacketKey,
+    pub generation: u64,
+    sealed_count: AtomicU64,
 }
 
 struct PacketKeys {
-    generation: u64,
+    keys: Arc<OneRttKeys>,
     /// Bounds of authenticated packet numbers, not the complete acceptable range.
     received: Option<RangeInclusive<u64>>,
-    opening: qtls::PacketKey,
-    sealing: qtls::PacketKey,
     expires: Option<Instant>,
 }
 
 struct OneRttPacketKeys {
     keys: VecDeque<PacketKeys>,
     next_secret: qtls::Secrets,
-    sealed_count: u64,
+    retired: bool,
     failed_opened: u64,
     can_update: bool,
 }
@@ -109,6 +113,7 @@ impl OneRttPacketKeys {
             .keys
             .back()
             .unwrap()
+            .keys
             .generation
             .checked_add(1)
             .ok_or_else(|| {
@@ -118,14 +123,17 @@ impl OneRttPacketKeys {
             self.keys.pop_front();
         }
         self.keys.push_back(PacketKeys {
-            generation,
+            keys: Arc::new(OneRttKeys {
+                headers: self.keys.back().unwrap().keys.headers.clone(),
+                opening: keys.opening,
+                sealing: keys.sealing,
+                generation,
+                sealed_count: AtomicU64::new(0),
+            }),
             received: None,
-            opening: keys.opening,
-            sealing: keys.sealing,
             expires: None,
         });
         self.next_secret = next_secret;
-        self.sealed_count = 0;
         self.can_update = false;
         Ok(())
     }
@@ -144,19 +152,14 @@ impl OneRttPacketKeys {
     }
 
     fn prepare_sealing(&mut self) -> Result<(), PacketError> {
-        let nearing_limit = self.sealed_count
-            >= self
-                .keys
-                .back()
-                .unwrap()
-                .sealing
-                .confidentiality_limit()
-                .saturating_sub(1);
+        let keys = &self.keys.back().unwrap().keys;
+        let nearing_limit = keys.sealed_count.load(Ordering::Relaxed)
+            >= keys.sealing.confidentiality_limit().saturating_sub(1);
         if nearing_limit && self.can_update {
             self.update()?;
         }
-        let keys = self.keys.back().unwrap();
-        if self.sealed_count >= keys.sealing.confidentiality_limit() {
+        let keys = &self.keys.back().unwrap().keys;
+        if keys.sealed_count.load(Ordering::Relaxed) >= keys.sealing.confidentiality_limit() {
             return Err(Error::from(QuicError::with_default_fty(
                 ErrorKind::AeadLimitReached,
                 "packet protection confidentiality limit",
@@ -174,6 +177,9 @@ impl OneRttPacketKeys {
         body: &mut [u8],
         pto: Duration,
     ) -> Result<Option<usize>, Error> {
+        if self.retired {
+            return Ok(None);
+        }
         let now = Instant::now();
         while self
             .keys
@@ -195,7 +201,7 @@ impl OneRttPacketKeys {
             })
             .unwrap_or(0);
         let keys = &self.keys[index];
-        if phase != KeyPhaseBit::from(keys.generation & 1 != 0) {
+        if phase != KeyPhaseBit::from(keys.keys.generation & 1 != 0) {
             if keys
                 .received
                 .as_ref()
@@ -212,7 +218,7 @@ impl OneRttPacketKeys {
         });
         let opening = match &candidate {
             Some((keys, _)) => &keys.opening,
-            None => &self.keys[index].opening,
+            None => &self.keys[index].keys.opening,
         };
         let plain_len = match opening.open(pn, header, body) {
             Ok(plain) => plain.len(),
@@ -245,31 +251,34 @@ impl OneRttPacketKeys {
     }
 }
 
-pub type ArcOneRttKeys = ArcKeys<OneRttKeys>;
-
 impl From<qtls::OneRttKeyMaterial> for ArcOneRttKeys {
     fn from(keys: qtls::OneRttKeyMaterial) -> Self {
+        let headers = Arc::new(HeaderKeys {
+            opening: keys.opening_header,
+            sealing: keys.sealing_header,
+        });
         let mut packets = VecDeque::with_capacity(3);
         packets.push_back(PacketKeys {
-            generation: 0,
+            keys: Arc::new(OneRttKeys {
+                headers: headers.clone(),
+                opening: keys.packet.opening,
+                sealing: keys.packet.sealing,
+                generation: 0,
+                sealed_count: AtomicU64::new(0),
+            }),
             received: None,
-            opening: keys.packet.opening,
-            sealing: keys.packet.sealing,
             expires: None,
         });
-        Self::new(OneRttKeys {
-            headers: Arc::new(HeaderKeys {
-                opening: keys.opening_header,
-                sealing: keys.sealing_header,
-            }),
+        Self {
+            headers,
             packets: Arc::new(Mutex::new(OneRttPacketKeys {
                 keys: packets,
                 next_secret: keys.next_secret,
-                sealed_count: 0,
+                retired: false,
                 failed_opened: 0,
                 can_update: false,
             })),
-        })
+        }
     }
 }
 
@@ -282,7 +291,7 @@ impl From<qtls::InstalledKeys> for ArcOneRttKeys {
     }
 }
 
-impl OneRttKeys {
+impl ArcOneRttKeys {
     pub fn open_packet<H>(
         &self,
         packet: crate::packet::CipherPacket<H>,
@@ -317,28 +326,27 @@ impl OneRttKeys {
 
     pub fn on_ack(&self, generation: u64) {
         let mut packets = self.packets.lock().unwrap();
-        if generation != 0 && packets.keys.back().unwrap().generation == generation {
+        if generation != 0 && packets.keys.back().unwrap().keys.generation == generation {
             packets.can_update = true;
         }
     }
 
-    /// Allocate the PN while the generation is fixed, then reserve one AEAD use.
-    /// The returned key remains valid across later local and peer key updates.
-    pub fn reserve<T>(
-        &self,
-        allocate: impl FnOnce(u64) -> Result<T, PacketError>,
-    ) -> Result<(T, OneRttSealingKey), PacketError> {
+    /// Select a fixed generation. The caller serializes this with PN allocation.
+    pub fn get(&self) -> Result<Arc<OneRttKeys>, PacketError> {
         let mut packets = self.packets.lock().unwrap();
+        if packets.retired {
+            return Err(KeyRetired.into());
+        }
         packets.prepare_sealing()?;
-        let keys = packets.keys.back().unwrap();
-        let allocated = allocate(keys.generation)?;
-        let sealing = OneRttSealingKey {
-            headers: self.headers.clone(),
-            packet: keys.sealing.clone(),
-            generation: keys.generation,
-        };
-        packets.sealed_count += 1;
-        Ok((allocated, sealing))
+        Ok(packets.keys.back().unwrap().keys.clone())
+    }
+
+    pub fn retire(&self) {
+        self.packets.lock().unwrap().retired = true;
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.packets.lock().unwrap().retired
     }
 
     pub fn tag_len(&self) -> usize {
@@ -348,6 +356,7 @@ impl OneRttKeys {
             .keys
             .back()
             .unwrap()
+            .keys
             .sealing
             .tag_len()
     }
@@ -434,7 +443,7 @@ impl Seal for OneRttKeys {
     type Output = (u64, KeyPhaseBit);
 
     fn tag_len(&self) -> usize {
-        OneRttKeys::tag_len(self)
+        self.sealing.tag_len()
     }
 
     fn seal(
@@ -445,26 +454,18 @@ impl Seal for OneRttKeys {
         body_offset: usize,
         tag_len: usize,
     ) -> Result<Self::Output, PacketError> {
-        let (_, key) = self.reserve(|_| Ok(()))?;
-        key.seal(pn, buffer, pn_offset, body_offset, tag_len)
-    }
-}
-
-impl Seal for OneRttSealingKey {
-    type Output = (u64, KeyPhaseBit);
-
-    fn tag_len(&self) -> usize {
-        self.packet.tag_len()
-    }
-
-    fn seal(
-        &self,
-        pn: u64,
-        buffer: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError> {
+        // fetch_update supports the workspace's Rust 1.88 minimum version.
+        #[allow(deprecated)]
+        self.sealed_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < self.sealing.confidentiality_limit()).then(|| count + 1)
+            })
+            .map_err(|_| {
+                Error::from(QuicError::with_default_fty(
+                    ErrorKind::AeadLimitReached,
+                    "packet protection confidentiality limit",
+                ))
+            })?;
         let tag_offset = buffer.len() - tag_len;
         let (header, body_tag) = buffer.split_at_mut(body_offset);
         let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
@@ -472,7 +473,7 @@ impl Seal for OneRttSealingKey {
         let mut specific_bits = ShortSpecificBits::from(header[0]);
         specific_bits.set_key_phase(phase);
         header[0] = *specific_bits;
-        self.packet.seal(pn, header, body, tag)?;
+        self.sealing.seal(pn, header, body, tag)?;
         let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
         let header_key = &self.headers.sealing;
         let sample_offset = 4 - pn_bytes.len();
@@ -485,7 +486,7 @@ impl Seal for OneRttSealingKey {
     }
 }
 
-impl Open for OneRttKeys {
+impl Open for ArcOneRttKeys {
     fn open(
         &self,
         packet: DataPacket,

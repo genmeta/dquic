@@ -47,10 +47,10 @@ fn encode_frames<const N: usize>(
     use qbase::packet::{Constraints, assemble::Assemble};
 
     let space = &phase.spaces.data;
-    let keys = space.keys.get().unwrap();
-    let (pn, key) = keys
-        .reserve(|_| space.next_pn().map_err(Into::into))
-        .unwrap();
+    use qtransport::space::{Allocate, Keys};
+    let (pn, Keys::Short(key)) = space.pn_and_keys().unwrap().unwrap() else {
+        unreachable!();
+    };
     let mut bytes = BytesMut::with_capacity(1200);
     let mut recorded = Vec::new();
     let packet = crate::send::Packet::new(
@@ -69,7 +69,7 @@ fn encode_frames<const N: usize>(
     };
     let mut sending = crate::send::Envelope {
         packet,
-        keys: &key,
+        keys: key.as_ref(),
         limits: &mut limits,
     };
     assert!(matches!(
@@ -732,8 +732,6 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
         .spaces
         .data
         .keys
-        .get()
-        .unwrap()
         .open_packet(
             qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
             |pn| sender.spaces.data.rcvd_journal.decode_pn(pn),

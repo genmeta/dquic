@@ -16,7 +16,7 @@ use qbase::{
 };
 use qtransport::{
     packet::assemble::{Envelope, Packet},
-    space::{DataSpace, Recover},
+    space::{Allocate, DataSpace, Keys, Recover},
 };
 
 use super::PunchPacketEncoder;
@@ -42,10 +42,13 @@ impl PunchPacketEncoder for ProbeEncoder {
         P: for<'b> Package<&'b mut BytesMut>,
     {
         let space = &self.space;
-        let keys = space.keys.get().map_err(io::Error::other)?;
-        let (pn, key) = keys
-            .reserve(|_| space.next_pn().map_err(Into::into))
-            .map_err(io::Error::other)?;
+        let (pn, Keys::Short(key)) = space
+            .pn_and_keys()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("keys retired"))?
+        else {
+            unreachable!("Data space uses 1-RTT keys");
+        };
         let result = (|| {
             let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
             let header = OneRttHeader::new(Default::default(), self.peer_cid);
@@ -62,7 +65,7 @@ impl PunchPacketEncoder for ProbeEncoder {
             };
             let mut sending = Envelope {
                 packet,
-                keys: &key,
+                keys: key.as_ref(),
                 limits: &mut limits,
             };
             match sending.assemble(&mut Context::from_waker(Waker::noop()), &mut [&mut frame]) {

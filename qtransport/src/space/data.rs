@@ -1,5 +1,8 @@
 //! Application-data space and its CRYPTO, reliable-frame and stream sources.
-use std::task::{Context, Poll, Waker};
+use std::{
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
 
 use derive_more::Deref;
 use qbase::{
@@ -13,11 +16,15 @@ use qbase::{
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;
-use qrecovery::streams::DataStreams;
+use qrecovery::{
+    crypto::CryptoStream,
+    journal::{ArcRcvdJournal, ArcSentJournal},
+    streams::DataStreams,
+};
 use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use super::{Encapsulate, Recover, Space};
+use super::{Allocate, Encapsulate, Keys, Recover, Space, Transmit};
 use crate::{ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys};
 
 /// Application-data space and all of its retransmittable frame sources.
@@ -44,9 +51,46 @@ impl DataSpace {
     }
 }
 
+impl Allocate for DataSpace {
+    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+        // Serialize generation selection and PN allocation across every sending path.
+        let mut journal = self.sent_journal.lock_guard();
+        let keys = match self.keys.get() {
+            Ok(keys) => keys,
+            Err(crate::keys::PacketError::Retired(_)) => return Ok(None),
+            Err(error) => return Err(super::packet_error(error)),
+        };
+        let pn = journal.next_pn()?;
+        Ok(Some((pn, Keys::Short(keys))))
+    }
+}
+
+impl Transmit for DataSpace {
+    fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    fn crypto(&self) -> &CryptoStream {
+        &self.crypto
+    }
+
+    fn sent_journal(&self) -> &ArcSentJournal {
+        &self.sent_journal
+    }
+
+    fn rcvd_journal(&self) -> &ArcRcvdJournal {
+        &self.rcvd_journal
+    }
+
+    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        self.space
+            .on_sent(pn, in_flight, retransmit_after, retention);
+    }
+}
+
 impl qcongestion::Resend for DataSpace {
     fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        if self.keys.get().is_ok() {
+        if !self.keys.is_retired() {
             self.sent_journal.resend(pns, |frame| self.recover(frame));
         }
     }
@@ -78,7 +122,7 @@ impl Recover for DataSpace {
     }
 
     fn on_tick(&self, now: Instant) {
-        if self.keys.get().is_ok() {
+        if !self.keys.is_retired() {
             self.sent_journal.on_tick(now, |frame| self.recover(frame));
         }
     }

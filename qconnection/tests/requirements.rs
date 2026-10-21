@@ -22,8 +22,10 @@ use qconnection::{ConnPhase, Error, Paths, Scope, ServerRegistry, TlsContext, se
 use qprotocol::{QuicProtocol, UdpSocket};
 use qrecovery::journal::ArcSentJournal;
 use qtransport::{
+    keys::ArcKeys,
     packet::{CipherPacket, channel},
     router::QuicRouter,
+    space::InitialSpace,
 };
 use tokio::sync::oneshot;
 
@@ -71,10 +73,15 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         scid,
         router.insert(odcid.into(), inbox.clone(), reliable_frames.clone()),
     );
+    let initial_space = Arc::new(InitialSpace::new(
+        scid,
+        ArcKeys::new(Arc::new(server_keys)),
+        None,
+    ));
     let paths = Paths::new(
+        initial_space.clone(),
         Role::Server,
-        (scid, ConnectionId::from_slice(b"wrongcid")),
-        server_keys,
+        ConnectionId::from_slice(b"wrongcid"),
         reliable_frames,
         local_cids,
         Duration::ZERO,
@@ -112,6 +119,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     ));
     let tick = qconnection::recv::tick(paths.clone());
     let growing = server_growing(
+        initial_space,
         received,
         paths.clone(),
         ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),

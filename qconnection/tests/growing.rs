@@ -8,7 +8,7 @@ use qbase::{
 };
 use qconnection::{Error, TlsContext};
 use qtls::InstalledKeys;
-use qtransport::space::Space;
+use qtransport::{keys::ArcKeys, space::Space};
 
 mod common;
 use common::backends;
@@ -119,7 +119,11 @@ async fn queued_output_is_bounded_without_waiting_for_its_reader() {
 #[tokio::test]
 async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
-    let space = Space::new(Epoch::Initial, Default::default(), ());
+    let space = Space::new(
+        Epoch::Initial,
+        Default::default(),
+        ArcKeys::new(Arc::new(common::initial_keys(true))),
+    );
     let crypto = &space.crypto;
     let (paths, closed) = common::paths(qbase::role::Role::Server);
     closed.register(Arc::new(space.crypto.clone()));

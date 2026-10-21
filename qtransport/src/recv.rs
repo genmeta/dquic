@@ -16,7 +16,7 @@ use crate::{
 
 /// Data ACK pipe target. Capture the original components when wiring reception.
 /// Lock the receiving path CC before the journal, so ACK observes committed sends.
-/// Report the highest acknowledged generation to the receive task's ready OneRttKeys.
+/// Report the highest acknowledged generation to the receive task's ArcOneRttKeys.
 pub fn acknowledge(
     data: &DataSpace,
     parameters: &ArcParameters,

@@ -9,7 +9,7 @@ use crate::{
 
 pub(crate) struct Sender {
     inner: PacketSender,
-    keys: OneRttKeys,
+    keys: ArcOneRttKeys,
     transport: Arc<Transport>,
     path: Arc<Path>,
     heartbeat: bool,
@@ -18,7 +18,7 @@ pub(crate) struct Sender {
 
 impl Sender {
     pub(crate) fn new(
-        keys: OneRttKeys,
+        keys: ArcOneRttKeys,
         transport: Arc<Transport>,
         path: Arc<Path>,
     ) -> Result<Self, Error> {
@@ -110,7 +110,7 @@ impl Drop for Sender {
 pub(crate) fn assemble_data(
     sender: &mut PacketSender,
     constraints: &Constraints,
-    keys: &OneRttKeys,
+    keys: &ArcOneRttKeys,
     transport: &Transport,
     path: &Path,
     heartbeat: bool,

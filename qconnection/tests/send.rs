@@ -453,8 +453,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
                         .spaces
                         .data
                         .keys
-                        .get()
-                        .unwrap()
                         .open_packet(
                             CipherPacket::new(header, packet.bytes, packet.offset),
                             |_| Ok(pns[2].unwrap().pn),

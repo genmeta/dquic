@@ -16,7 +16,7 @@ use qbase::{
 };
 use qconnection::{ConnPhase, Error, Paths, TlsContext, client_growing};
 use qprotocol::QuicProtocol;
-use qtransport::{packet::channel, router::QuicRouter};
+use qtransport::{keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::oneshot,
@@ -99,10 +99,15 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
+    let initial_space = Arc::new(InitialSpace::new(
+        cid,
+        ArcKeys::new(Arc::new(initial_keys(false))),
+        None,
+    ));
     let paths = Paths::new(
+        initial_space.clone(),
         Role::Client,
-        (cid, ConnectionId::from_slice(b"original")),
-        initial_keys(false),
+        ConnectionId::from_slice(b"original"),
         reliable_frames,
         local_cids,
         Duration::from_secs(5),
@@ -114,6 +119,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
 
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
+        initial_space,
         "localhost".into(),
         parameters,
         paths.clone(),
@@ -182,10 +188,15 @@ async fn close_at_client_stage(wait: ClientWait) {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
+    let initial_space = Arc::new(InitialSpace::new(
+        cid,
+        ArcKeys::new(Arc::new(initial_keys(false))),
+        None,
+    ));
     let paths = Paths::new(
+        initial_space.clone(),
         Role::Client,
-        (cid, ConnectionId::from_slice(b"original")),
-        initial_keys(false),
+        ConnectionId::from_slice(b"original"),
         reliable_frames,
         local_cids,
         Duration::from_secs(5),
@@ -208,6 +219,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let (delivered, mut delivery) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
     let growing = client_growing(
+        initial_space,
         "localhost".into(),
         parameters,
         paths.clone(),

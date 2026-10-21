@@ -29,6 +29,12 @@ impl<K> HandshakeSpace<K> {
     }
 }
 
+impl<K> AsRef<Space<K>> for HandshakeSpace<K> {
+    fn as_ref(&self) -> &Space<K> {
+        &self.0
+    }
+}
+
 impl<K: Clone + Send> qcongestion::Resend for HandshakeSpace<ArcKeys<K>> {
     fn resend(&self, trigger: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
         self.0.resend(trigger, pns);

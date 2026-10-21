@@ -13,7 +13,7 @@ use qbase::{
     param::{ClientParameters, ServerParameters, WriteParameters},
 };
 use qtls::{HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
-use qtransport::space::Space;
+use qtransport::space::Transmit;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{CloseReason, Paths};
@@ -387,14 +387,14 @@ pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
 }
 
 /// One detached input coroutine per space. Retiring the reader ends only that space.
-pub fn read_space_to_tls<K>(
+pub fn read_space_to_tls(
     tls: TlsContext,
-    space: &Space<K>,
+    space: &dyn Transmit,
     paths: Arc<Paths>,
-) -> impl Future<Output = ()> + Send + 'static + use<K> {
+) -> impl Future<Output = ()> + Send + 'static + use<> {
     let terminator = paths.terminator.clone();
-    let epoch = space.epoch;
-    let mut reader = space.crypto.reader();
+    let epoch = space.epoch();
+    let mut reader = space.crypto().reader();
     async move {
         let mut buffer = [0; 4096];
         while let Ok(length) = reader.read(&mut buffer).await {
@@ -410,14 +410,14 @@ pub fn read_space_to_tls<K>(
 }
 
 /// One detached TLS output coroutine per space.
-pub(crate) fn read_tls_to_space<K>(
+pub(crate) fn read_tls_to_space(
     tls: TlsContext,
-    space: &Space<K>,
+    space: &dyn Transmit,
     paths: Arc<Paths>,
-) -> impl Future<Output = ()> + Send + 'static + use<K> {
+) -> impl Future<Output = ()> + Send + 'static + use<> {
     let terminator = paths.terminator.clone();
-    let epoch = space.epoch;
-    let stream = space.crypto.clone();
+    let epoch = space.epoch();
+    let stream = space.crypto().clone();
     async move {
         loop {
             let bytes = match tls.read_msg_at(epoch).await {

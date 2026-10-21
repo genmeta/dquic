@@ -32,7 +32,7 @@ use write::{Packet, PacketError, PendingPacket};
 
 use crate::{
     Error, GuaranteedFrame,
-    keys::OneRttKeys,
+    keys::ArcOneRttKeys,
     path::Path,
     space::{DataSpace, Recover},
 };
@@ -90,7 +90,7 @@ pub fn assemble_1rtt_packet<const N: usize>(
     buffers: &mut Vec<BytesMut>,
     send_frames: &mut Vec<GuaranteedFrame>,
     pns: &mut VecDeque<PendingPacket>,
-    keys: &OneRttKeys,
+    keys: &ArcOneRttKeys,
     header: OneRttHeader,
     journal: &ArcSentJournal,
     recovery: &Option<Arc<DataSpace>>,
@@ -111,7 +111,7 @@ pub fn assemble_1rtt_packet<const N: usize>(
         sources,
         |packet, records| {
             let ((pn, encoded), key) = records::reserve(keys, journal, records)?;
-            finish_sealing(packet.seal(&key, pn, encoded), pn, journal, records)
+            finish_sealing(packet.seal(key.as_ref(), pn, encoded), pn, journal, records)
         },
     )
 }

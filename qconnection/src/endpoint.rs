@@ -15,7 +15,7 @@ use qbase::{
     role::Role,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qtransport::{packet::channel, router::QuicRouter};
+use qtransport::{keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -177,10 +177,15 @@ impl QuicEndpoint {
         )?;
         let local_cids =
             ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
+        let initial_space = Arc::new(InitialSpace::new(
+            initial_scid,
+            ArcKeys::new(Arc::new(initial_keys)),
+            None,
+        ));
         let paths = Paths::new(
+            initial_space.clone(),
             Role::Client,
-            (initial_scid, origin_dcid),
-            initial_keys,
+            origin_dcid,
             reliable_frames,
             local_cids,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
@@ -193,6 +198,7 @@ impl QuicEndpoint {
 
         let tick = crate::recv::tick(paths.clone());
         let growing = client_growing(
+            initial_space,
             server_name,
             client_params,
             paths,
@@ -309,10 +315,15 @@ impl ServerRegistry {
                 let Some(initial_keys) = ServerRegistry::global().initial_keys(odcid) else {
                     return;
                 };
+                let initial_space = Arc::new(InitialSpace::new(
+                    initial_scid,
+                    ArcKeys::new(Arc::new(initial_keys)),
+                    None,
+                ));
                 let paths = Paths::new(
+                    initial_space.clone(),
                     Role::Server,
-                    (initial_scid, client_scid),
-                    initial_keys,
+                    client_scid,
                     reliable_frames,
                     local_cids,
                     Duration::ZERO,
@@ -324,6 +335,7 @@ impl ServerRegistry {
 
                 let tick = crate::recv::tick(paths.clone());
                 let growing = crate::server_growing(
+                    initial_space,
                     rcvd_pkt,
                     paths,
                     ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),

@@ -29,6 +29,7 @@ impl From<qtransport::keys::PacketError> for PacketError {
         match error {
             qtransport::keys::PacketError::Connection(error) => Self::Connection(error),
             qtransport::keys::PacketError::Layout => Self::Layout,
+            qtransport::keys::PacketError::Retired(_) => Self::Blocked(Poll::Pending),
             qtransport::keys::PacketError::Crypto(error) => Self::Crypto(error),
         }
     }
@@ -371,7 +372,7 @@ mod tests {
             .unwrap();
         let ((pn, encoded), key) =
             super::super::records::reserve(&keys, &journal, &mut frames).unwrap();
-        let result = packet.seal(&key, pn, encoded);
+        let result = packet.seal(key.as_ref(), pn, encoded);
         assert!(result.is_err());
         // Sealing neither drains recovery records nor cancels their journal entry.
         assert!(frames.is_empty());
