@@ -1,9 +1,9 @@
-# qtraversal Docker 网络单元测试
+# qtraversal Docker 网络集成测试
 
 参考原来的 `build_nat.sh` 和固定地址表测试方式：在一个测试进程中构造两个
 `ArcPuncher`，可靠帧通过内存通道转发，真实 UDP 探测包经过两个独立 NAT。
-所有测试和本地 STUN helper 都在 `qtraversal/src/punch/puncher/network_tests.rs`
-的 `#[cfg(test)]` 模块内，不编译或运行 example，不依赖 qconnection。
+网络测试和本地 STUN helper 都在 `qtraversal/tests/punch/puncher/network_tests.rs`，
+通过公开 API 驱动独立编译的 qtraversal，不编译或运行 example，不依赖 qconnection。
 
 ## 运行
 
@@ -13,7 +13,8 @@
 bash qtraversal/tools/run.sh
 ```
 
-脚本编译 `cargo test -p qtraversal --lib` 的测试二进制，先运行普通单元测试，
+脚本先运行普通单元测试和集成测试，再编译 `cargo test -p qtraversal --test punch`
+的测试二进制。构建时显式启用已有的 `test-ttl` feature，保持原单测的 TTL=1 配置。
 再像旧 CI 一样用 `--list` 枚举网络用例，在虚拟网络中逐个执行
 `--exact <test> --ignored --nocapture`。每个用例使用新进程和新网络，
 避免全局 Dock、端口调度配额和 conntrack 在用例间串扰。
@@ -31,14 +32,14 @@ bash qtraversal/tools/run.sh nat_sym_rp_both_a_larger
 TRAVERSAL_SKIP_BUILD=1 bash qtraversal/tools/run.sh
 ```
 
-修改 Rust 代码后应重新构建。普通单元测试也可直接执行：
+修改 Rust 代码后应重新构建。普通测试也可直接执行：
 
 ```sh
-cargo test -p qtraversal --lib
+cargo test -p qtraversal -- --test-threads=1
 ```
 
 网络测试仅在 Linux 编译，默认标记 ignored；Docker 入口负责准备所需拓扑。
-STUN 服务本身是一个单独的 ignored 单元测试，由脚本在独立 namespace 启动并清理。
+STUN 服务本身是一个单独的 ignored 集成测试，由脚本在独立 namespace 启动并清理。
 首次构建需要网络下载镜像、系统包和依赖；实际测试使用 `--network none`，
 `nat.genmeta.net` 在容器内指向本地 STUN，不访问线上服务。
 
@@ -51,21 +52,22 @@ A、B 表示两个 Puncher，没有 QUIC client/server 身份。
 | RestrictedPort | RestrictedPort | A 主动、B 主动、双主动且 A 较大、双主动且 B 较大 | 4 |
 | RestrictedPort | Symmetric | 同上 | 4 |
 | Symmetric | RestrictedPort | 同上 | 4 |
-| Symmetric | Symmetric | 断言当前策略明确返回 unsupported NAT pair | 1 |
+| Symmetric | Symmetric | 断言双方不发送 NOW/HELLO，并拒绝同一地址对的重复请求 | 1 |
 | RestrictedPort | RestrictedPort | 阻断 NAT 间流量，断言没有任何直连成功证据 | 1 |
 
 共 14 个网络测试，另有本地 STUN helper。
 
 单主动场景只给主动端交付对方的 ADD_ADDRESS，被动端通过 PUNCH_ME_NOW 启动。
-双主动场景先等待两端都实际发出 PUNCH_ME_NOW，再开放可靠帧交付；直接检查事务实例：
-较大端点保留原主动事务，较小端点创建被动事务。
-`transaction_tests.rs` 另外覆盖两种请求到达顺序和旧主动任务延迟清理的竞态。
+双主动场景先等待两端都实际发出 PUNCH_ME_NOW，再开放可靠帧交付；在公开 SendFrame / 编码器回调中记录发送任务：
+较大端点保留原主动发送任务，较小端点由新的被动任务发送。
+`tests/punch/puncher/transaction_tests.rs` 另外覆盖两种请求到达顺序；
+旧主动任务延迟清理的精确竞态注入仍保留在源码单元测试中。
 
 正例同时断言：
 
 1. 两端真实 STUN 分类与测试配置一致。
-2. 双方收到经过 NAT 的直接探测报文，事务完成。
-3. Symmetric 一端保留获胜的临时 socket。
+2. 双方收到经过 NAT 的直接探测报文；15 秒转发窗口后，同一地址对的请求不会重新发起探测。
+3. 取消剩余任务后，Symmetric 一端仍保留获胜的临时 socket，显式释放后该 socket 消失。
 4. 在该真实 UDP 链路上完成三次完整回显，来源地址与获胜链路一致。
 
 测试的 Encoder 编解码真实 punch frame，用固定测试前缀替代 QUIC 包保护；
@@ -75,7 +77,7 @@ A、B 表示两个 Puncher，没有 QUIC client/server 身份。
 ## 虚拟网络
 
 ```text
-peers namespace（一个 qtraversal 单元测试进程）
+peers namespace（一个 qtraversal 集成测试进程）
   A: eth0 / 192.168.10.2  ---- NAT A: 192.168.10.1 / 11.0.0.10
   B: eth1 / 192.168.20.2  ---- NAT B: 192.168.20.1 / 11.0.0.20
                                          |
@@ -107,7 +109,7 @@ peers namespace（一个 qtraversal 单元测试进程）
 - `stun.log`：本地 STUN 服务输出。
 - `nat-a.rules`、`nat-b.rules`：iptables 规则及计数器。
 
-生日碰撞可能随机未命中。只有 Rust 测试确认双方事务结束且完全没有直接探测报文，
+生日碰撞可能随机未命中。只有 Rust 测试确认双方抑制重复请求、且完全没有直接探测报文，
 并输出 `NAT_RANDOM_MISS` 时，脚本才重新建立网络重试，最多 3 次；其他错误立即失败。
 `TRAVERSAL_ATTEMPTS=1` 禁用重试。每次 MISS 和最终结果都保留在汇总中。
 

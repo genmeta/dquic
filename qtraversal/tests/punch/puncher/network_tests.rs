@@ -1,71 +1,56 @@
 //! Docker/netns tests: mock the reliable broker and packet protection, but send
 //! actual encoded punch frames through UDP, STUN and two independent NATs.
-use std::task::{Context, Poll, Waker};
-
-use qbase::{
-    frame::{Frame, FrameReader},
-    packet::{Constraints, PacketBuffer, Type},
+use std::{
+    io::IoSlice,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use qprotocol::{StunProtocol, protocol::stun::ChangeServer};
+
+use bytes::BytesMut;
+use qbase::{
+    frame::{AddAddressFrame, Frame, PunchMeNowFrame, ReliableFrame, io::SendFrame},
+    net::{
+        NatType,
+        addr::EndpointAddr,
+        route::{Line, Link, Pathway},
+    },
+};
+use qprotocol::{
+    Dock, EphemeralSocket, QuicProtocol, StunProtocol, UdpSocket, protocol::stun::ChangeServer,
+};
+use qtraversal::punch::ArcPuncher;
 use tokio::{
     sync::mpsc,
+    task::Id,
     time::{Instant, timeout},
 };
 
-use super::*;
+use super::support::{Encoder, PROBE, decode};
 
 const STUN: &str = "11.0.0.1:20002";
-const PROBE: &[u8] = &[0x40, b'P'];
 const DATA: &[u8] = &[0x40, b'D'];
 type TestPuncher = ArcPuncher<Broker, Encoder>;
 
 #[derive(Clone)]
-struct Broker(mpsc::UnboundedSender<ReliableFrame>);
+struct Broker(mpsc::UnboundedSender<ReliableFrame>, Arc<Mutex<Vec<Id>>>);
 
 impl SendFrame<ReliableFrame> for Broker {
     fn send_frame<I: IntoIterator<Item = ReliableFrame>>(&self, frames: I) {
         for frame in frames {
+            if matches!(frame, ReliableFrame::PunchMeNow(_)) {
+                self.1.lock().unwrap().push(tokio::task::id());
+            }
             self.0.send(frame).expect("test broker remains connected");
         }
     }
 }
 
-#[derive(Clone)]
-struct Encoder;
-
-impl PunchPacketEncoder for Encoder {
-    fn encode_probe<P>(&self, mut frame: P) -> io::Result<BytesMut>
-    where
-        P: for<'b> Package<&'b mut BytesMut>,
-    {
-        let mut bytes = BytesMut::from(PROBE);
-        let mut limits = Constraints {
-            flow_ctrl: usize::MAX,
-            send_quota: 128,
-            credit: 128,
-            max_size: 128,
-            ..Default::default()
-        };
-        let mut output = &mut bytes;
-        let mut frames = Vec::new();
-        let mut buffer =
-            PacketBuffer::new(&mut output, &mut limits, &mut frames, packet_type(), 0, 0);
-        let result = frame.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer);
-        assert!(
-            matches!(result, Poll::Ready(Ok(1))),
-            "encode probe: {result:?}"
-        );
-        Ok(bytes)
-    }
-}
-
-fn packet_type() -> Type {
-    Type::Short(0.into())
-}
-
 struct Peer {
     socket: EphemeralSocket,
     puncher: TestPuncher,
+    encoder: Encoder,
+    request_tasks: Arc<Mutex<Vec<Id>>>,
     address: AddAddressFrame,
     nat: NatType,
     outer: SocketAddr,
@@ -90,7 +75,9 @@ impl Peer {
             .unwrap();
         println!("NAT {bound} -> {outer}: {nat:?}");
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let puncher = TestPuncher::new(Broker(sender), Encoder);
+        let encoder = Encoder::default();
+        let request_tasks = Arc::new(Mutex::new(Vec::new()));
+        let puncher = TestPuncher::new(Broker(sender, request_tasks.clone()), encoder.clone());
         puncher.on_local_added(bound, outer.into(), outer, 0, nat);
         let ReliableFrame::AddAddress(address) = receiver.recv().await.unwrap() else {
             panic!("first broker frame must advertise the endpoint");
@@ -99,6 +86,8 @@ impl Peer {
             Self {
                 socket,
                 puncher,
+                encoder,
+                request_tasks,
                 address,
                 nat,
                 outer,
@@ -109,14 +98,6 @@ impl Peer {
 
     fn bound(&self) -> SocketAddr {
         self.socket.udp_socket().local_addr().unwrap()
-    }
-
-    fn completed(&self) -> bool {
-        self.puncher
-            .0
-            .punch_history
-            .contains_key(&PunchId::new(0, 0))
-            && self.puncher.0.transaction.is_empty()
     }
 }
 
@@ -133,6 +114,7 @@ struct Harness {
     datagrams: mpsc::UnboundedReceiver<(BytesMut, Pathway, Link)>,
     direct: [Vec<Link>; 2],
     echoes: Vec<(u8, Link)>,
+    active_tasks: Option<[Id; 2]>,
 }
 
 impl Drop for Harness {
@@ -159,6 +141,7 @@ impl Harness {
             datagrams,
             direct: Default::default(),
             echoes: Vec::new(),
+            active_tasks: None,
         }
     }
 
@@ -211,27 +194,14 @@ impl Harness {
                 }
                 let [a_rx, b_rx] = &mut self.brokers;
                 let (a_now, b_now) = tokio::join!(next_now(a_rx), next_now(b_rx));
-                let id = PunchId::new(0, 0);
-                let original = [
-                    a.puncher.0.transaction.get(&id).unwrap().1.clone(),
-                    b.puncher.0.transaction.get(&id).unwrap().1.clone(),
-                ];
+                self.active_tasks = Some([
+                    a.request_tasks.lock().unwrap()[0],
+                    b.request_tasks.lock().unwrap()[0],
+                ]);
                 self.deliver(0, a_now);
                 self.deliver(1, b_now);
-                for (side, old) in original.iter().enumerate() {
-                    let current = self.peers[side]
-                        .puncher
-                        .0
-                        .transaction
-                        .get(&id)
-                        .unwrap()
-                        .1
-                        .clone();
-                    let remains_active = (side == 0) == a_larger;
-                    assert_eq!(Arc::ptr_eq(old, &current), remains_active);
-                }
                 println!(
-                    "DOUBLE_ACTIVE negotiated: active={}",
+                    "DOUBLE_ACTIVE expected active={}",
                     if a_larger { "A" } else { "B" }
                 );
             }
@@ -264,10 +234,8 @@ impl Harness {
                 );
                 if bytes.starts_with(PROBE) {
                     self.direct[side].push(link);
-                    for frame in
-                        FrameReader::new(bytes.split_off(PROBE.len()).freeze(), packet_type())
-                    {
-                        match frame.unwrap().0 {
+                    for frame in decode(bytes) {
+                        match frame {
                             Frame::PunchHello(frame) => {
                                 self.peers[side].puncher.recv_punch_hello(path, link, frame)
                             }
@@ -325,63 +293,98 @@ async fn run(a: NatType, b: NatType, start: Start, blocked: bool) {
     let mut test = Harness::new(a, b).await;
     let unsupported = a == NatType::Symmetric && b == NatType::Symmetric;
     if unsupported {
-        for side in 0..2 {
-            let peer = &test.peers[side];
-            let local = peer
-                .puncher
-                .0
-                .addresses
-                .lock()
-                .unwrap()
-                .local_for_seq(0)
-                .unwrap();
-            let error = peer
-                .puncher
-                .punch_actively(
-                    local,
-                    test.peers[1 - side].address,
-                    Arc::new(Transaction::new()),
-                )
-                .await
-                .expect_err("double Symmetric is unsupported");
-            assert_eq!(error.to_string(), "unsupported NAT pair");
-        }
-        assert!(test.direct.iter().all(Vec::is_empty));
-        return;
+        // Give both public entry points the unsupported pair. Neither strategy
+        // may send NOW or HELLO, and completion must still suppress replay.
+        test.peers[0]
+            .puncher
+            .recv_add_address(test.peers[1].address);
+        test.peers[1]
+            .puncher
+            .recv_add_address(test.peers[0].address);
+    } else {
+        test.start(start).await;
     }
-    test.start(start).await;
+    // Keep forwarding until the existing 15-second budget expires. Inspecting
+    // an internal transaction map used to shorten this wait. Public replay and
+    // socket lifetime checks below also detect unfinished/aborted transactions.
     let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let complete = test.peers.iter().all(Peer::completed);
-        if blocked && complete {
-            assert!(
-                test.direct.iter().all(Vec::is_empty),
-                "blocked topology must not pass probes"
-            );
-            return;
-        }
-        if !blocked && complete && test.direct.iter().all(|links| !links.is_empty()) {
-            for peer in &test.peers {
-                assert_eq!(
-                    peer.puncher.0.temporary_sockets.len(),
-                    usize::from(peer.nat == NatType::Symmetric)
-                );
-            }
-            test.verify_direct_echo().await;
-            println!("NAT_PUNCH_OK {a:?}/{b:?} {start:?}: bidirectional UDP and 3 direct echoes");
-            return;
-        }
-        if Instant::now() >= deadline {
-            if !blocked && a != b && test.direct.iter().all(Vec::is_empty) && complete {
-                println!("NAT_RANDOM_MISS");
-            }
-            panic!(
-                "punch did not complete: completed={complete}, direct={:?}",
-                test.direct
-            );
-        }
+    while Instant::now() < deadline {
         let _ = timeout(Duration::from_millis(20), test.step()).await;
     }
+    let counts = test
+        .peers
+        .each_ref()
+        .map(|peer| peer.encoder.hellos().len());
+    for (side, peer) in test.peers.iter().enumerate() {
+        peer.puncher.abort_transactions();
+        // Use a supported NAT to ensure a missing completion record would
+        // produce a HELLO, even for the double-Symmetric negative case.
+        peer.puncher.recv_punch_me_now(
+            test.pathway(side),
+            PunchMeNowFrame::new(0, 0, test.peers[1 - side].outer, 0, NatType::FullCone),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (side, peer) in test.peers.iter().enumerate() {
+        assert_eq!(
+            peer.encoder.hellos().len(),
+            counts[side],
+            "completed pair must not restart"
+        );
+    }
+    if blocked || unsupported {
+        assert!(
+            test.direct.iter().all(Vec::is_empty),
+            "negative topology must not pass probes"
+        );
+        if unsupported {
+            for peer in &test.peers {
+                assert!(peer.encoder.hellos().is_empty());
+                assert!(peer.request_tasks.lock().unwrap().is_empty());
+            }
+        }
+        return;
+    }
+    if a != b && test.direct.iter().all(Vec::is_empty) {
+        println!("NAT_RANDOM_MISS");
+    }
+    assert!(
+        test.direct.iter().all(|links| !links.is_empty()),
+        "missing bidirectional probes: {:?}",
+        test.direct
+    );
+    if let Some(active) = test.active_tasks {
+        for (side, peer) in test.peers.iter().enumerate() {
+            let larger = peer.outer > test.peers[1 - side].outer;
+            let hellos = peer.encoder.hellos();
+            if larger {
+                assert!(
+                    hellos.iter().all(|(task, _)| *task == active[side]),
+                    "larger peer keeps the active sender"
+                );
+            } else {
+                assert!(
+                    hellos.iter().any(|(task, _)| *task != active[side]),
+                    "smaller peer switches to a passive sender"
+                );
+            }
+        }
+    }
+    // Aborting any remaining tasks above must not destroy the winning socket:
+    // these round trips require ownership to have transferred to the puncher.
+    test.verify_direct_echo().await;
+    for (side, peer) in test.peers.iter().enumerate() {
+        let winning = test.direct[side].last().unwrap().src;
+        assert_eq!(winning != peer.bound(), peer.nat == NatType::Symmetric);
+        assert!(Dock::global().find_socket(winning).is_some());
+        peer.puncher.release_temporary_sockets();
+        assert_eq!(
+            Dock::global().find_socket(winning).is_none(),
+            peer.nat == NatType::Symmetric
+        );
+        assert!(Dock::global().find_socket(peer.bound()).is_some());
+    }
+    println!("NAT_PUNCH_OK {a:?}/{b:?} {start:?}: bidirectional UDP and 3 direct echoes");
 }
 
 macro_rules! case {
