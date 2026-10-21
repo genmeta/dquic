@@ -49,12 +49,19 @@ async fn next_now(
 
 #[tokio::test]
 async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     for (low_nat, high_nat) in [
         (NatType::RestrictedPort, NatType::RestrictedPort),
         (NatType::RestrictedPort, NatType::Symmetric),
         (NatType::Symmetric, NatType::RestrictedPort),
     ] {
         for deliver_to_larger_first in [false, true] {
+            println!(
+                "arbitration {low_nat:?}/{high_nat:?}, larger first: {deliver_to_larger_first}"
+            );
             let (received, mut datagrams) = mpsc::unbounded_channel();
             QuicProtocol::global().on_receive(move |bytes, _, link| {
                 if bytes.starts_with(PROBE) {
