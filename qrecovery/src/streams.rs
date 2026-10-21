@@ -101,7 +101,7 @@ where
         parameters: ArcParameters,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
-        metrics: Option<ArcConnectionMetrics>,
+        metrics: ArcConnectionMetrics,
     ) -> Self {
         Self(Arc::new(raw::DataStreams::new(
             parameters,

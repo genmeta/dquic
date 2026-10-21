@@ -121,7 +121,7 @@ pub struct DataStreams<TX> {
     tls_fin: AtomicBool,
     tx_wakers: ArcSendWakers,
 
-    metrics: Option<ArcConnectionMetrics>,
+    metrics: ArcConnectionMetrics,
 }
 
 fn wrapper_error(fty: FrameType) -> impl FnOnce(ExceedLimitError) -> QuicError {
@@ -223,10 +223,8 @@ where
 
         output.cursor = Some((sid, remain_tokens));
 
-        if fresh_bytes > 0
-            && let Some(metrics) = &self.metrics
-        {
-            metrics.on_data_sent(fresh_bytes as u64);
+        if fresh_bytes > 0 {
+            self.metrics.on_data_sent(fresh_bytes as u64);
         }
         Poll::Ready(Ok(buffer.meta.nframes - start))
     }
@@ -242,10 +240,8 @@ where
 
                 // Update metrics when data is acknowledged
                 let acked_len = frame.range().end - frame.range().start;
-                if acked_len > 0
-                    && let Some(metrics) = &self.metrics
-                {
-                    metrics.on_data_acked(acked_len);
+                if acked_len > 0 {
+                    self.metrics.on_data_acked(acked_len);
                 }
 
                 if is_all_rcvd {
@@ -499,7 +495,7 @@ where
         parameters: ArcParameters,
         ctrl: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
-        metrics: Option<qbase::metric::ArcConnectionMetrics>,
+        metrics: ArcConnectionMetrics,
     ) -> Self {
         let tx_wakers = ArcSendWakers::default();
         Self {

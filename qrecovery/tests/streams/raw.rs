@@ -66,7 +66,7 @@ fn busy_streams_take_turns_before_either_exhausts_its_window() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
     let mut writers = Vec::new();
@@ -127,7 +127,7 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let counter = Arc::new(Counter(AtomicUsize::new(0)));
     let waker = Waker::from(counter.clone());
@@ -162,6 +162,7 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
 
 #[test]
 fn idle_stream_resumes_for_writes_retransmission_and_fin() {
+    let metrics = qbase::metric::ArcConnectionMetrics::default();
     let mut streams = DataStreams::new(
         ArcParameters::new(
             Role::Client,
@@ -170,7 +171,7 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        metrics.clone(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
     let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
@@ -178,11 +179,14 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
         panic!("stream should open")
     };
     writer.write(bytes::Bytes::from_static(b"first")).unwrap();
+    assert_eq!(metrics.pending_bytes(), 5);
     let frames = packet_frames(&mut streams, cx.waker());
     let GuaranteedFrame::Stream(first) = frames[0] else {
         panic!("expected stream data")
     };
     assert_eq!(streams.fresh_bytes(), 0);
+    assert_eq!(metrics.pending_bytes(), 0);
+    assert_eq!(metrics.inflight_bytes(), 5);
 
     streams.may_loss_data(&first);
     assert_eq!(
@@ -195,9 +199,14 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
         panic!("expected retransmission")
     };
     assert_eq!(resent.range(), first.range());
+    assert_eq!(metrics.pending_bytes(), 0);
+    assert_eq!(metrics.inflight_bytes(), 5);
     streams.on_data_acked(resent);
+    assert_eq!(metrics.inflight_bytes(), 0);
+    assert_eq!(metrics.acked_bytes(), 5);
 
     writer.write(bytes::Bytes::from_static(b"next")).unwrap();
+    assert_eq!(metrics.pending_bytes(), 4);
     assert_eq!(streams.fresh_bytes(), 4);
     let frames = packet_frames(&mut streams, cx.waker());
     let GuaranteedFrame::Stream(next) = frames[0] else {
@@ -221,6 +230,9 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
     assert!(resent_fin.is_fin());
     assert_eq!(resent_fin.range(), fin.range());
     streams.on_data_acked(resent_fin);
+    assert_eq!(metrics.pending_bytes(), 0);
+    assert_eq!(metrics.inflight_bytes(), 0);
+    assert_eq!(metrics.acked_bytes(), 9);
     assert!(matches!(writer.poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
 }
 
@@ -253,7 +265,7 @@ fn receive_limits_follow_the_local_stream_direction() {
                 ArcParameters::new(role, Arc::new(client), Arc::new(server)),
                 Box::new(DemandConcurrency),
                 MockFrameSender,
-                None,
+                Default::default(),
             );
             let sid = if local {
                 let mut cx = Context::from_waker(futures::task::noop_waker_ref());
@@ -299,7 +311,7 @@ fn open_uni_uses_the_remote_unidirectional_limit() {
         ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server)),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
@@ -324,7 +336,7 @@ fn ready_streams_use_current_parameters_even_with_remembered_limits() {
         parameters,
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     let Poll::Ready(Ok(Some((_, (_, mut bi))))) = std::pin::pin!(streams.open_bi()).poll(&mut cx)
@@ -365,7 +377,7 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let a = Arc::new(Counter(AtomicUsize::new(0)));
     let b = Arc::new(Counter(AtomicUsize::new(0)));
@@ -448,7 +460,7 @@ fn connection_error_preserves_received_but_unread_stream() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
     let Poll::Ready(Ok(Some((sid, (mut reader, mut writer))))) =
@@ -490,7 +502,7 @@ fn empty_stream_fin_is_effective_packet_content() {
         ),
         Box::new(DemandConcurrency),
         MockFrameSender,
-        None,
+        Default::default(),
     );
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)

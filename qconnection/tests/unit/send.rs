@@ -510,7 +510,7 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
             parameters.local(qbase::param::ParameterId::InitialMaxStreamsUni),
         )),
         reliable_frames.clone(),
-        None,
+        Default::default(),
     );
     terminator.register(Arc::new(streams.clone()));
     let flow = crate::FlowController::new(

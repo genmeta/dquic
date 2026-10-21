@@ -96,7 +96,7 @@ async fn stream_ready_and_blocked_polls_do_not_subscribe() {
             ),
             Box::new(DemandConcurrency),
             Broker,
-            None,
+            Default::default(),
         );
         let (_, mut writer) = source.open_uni().await.unwrap().unwrap();
         // Keep data queued after assembly so the stream remains ready.
@@ -154,7 +154,7 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
         ),
         Box::new(DemandConcurrency),
         Broker,
-        None,
+        Default::default(),
     );
     let (_, mut writer) = streams.open_uni().await.unwrap().unwrap();
     writer.write_all(b"queued").await.unwrap();
