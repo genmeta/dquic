@@ -9,11 +9,14 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    frame::{AddAddressFrame, PunchMeNowFrame, ReliableFrame, io::SendFrame},
+    frame::{
+        AddAddressFrame, Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame,
+        io::SendFrame,
+    },
     net::{
         NatType,
         addr::EndpointAddr,
-        route::{Pathway, Scope, Scopes},
+        route::{Link, Pathway, Scope, Scopes},
     },
     packet::assemble::Package,
 };
@@ -360,4 +363,133 @@ async fn alias_probes_use_the_actual_socket_source_address() {
     puncher.abort_transactions();
     close.send(()).unwrap();
     observer.await.unwrap();
+}
+
+#[tokio::test]
+async fn nat_refresh_stops_old_probes_and_allows_new_address_transactions() {
+    async fn receive_hello(
+        peer: &tokio::net::UdpSocket,
+        local: u32,
+        remote: u32,
+    ) -> PunchHelloFrame {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut bytes = [0; 128];
+                let (len, _) = peer.recv_from(&mut bytes).await.unwrap();
+                for frame in super::support::decode(BytesMut::from(&bytes[..len])) {
+                    if let Frame::PunchHello(hello) = frame
+                        && hello.local_seq() == local
+                        && hello.remote_seq() == remote
+                    {
+                        return hello;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("requested address pair must send a HELLO")
+    }
+
+    let book = AddressBook::new();
+    let mut binding = Binding::new(None);
+    let outer = binding.outer([8, 8, 4, 4]);
+    binding.publish(&book, outer);
+    book.set_nat(binding.bound(), NatType::RestrictedCone);
+    let frames = Frames::default();
+    let encoder = super::support::Encoder::default();
+    let puncher = ArcPuncher::new(frames.clone(), encoder.clone());
+    let (close, closed) = oneshot::channel::<()>();
+    let observer = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
+    let old_seq = frames.advertised()[0].seq_num();
+    let active_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let finished_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for (peer, remote_seq, finish) in [(&active_peer, 10, false), (&finished_peer, 11, true)] {
+        let remote = peer.local_addr().unwrap();
+        puncher.recv_punch_me_now(
+            Pathway::new(outer, remote.into()),
+            PunchMeNowFrame::new(remote_seq, old_seq, remote, 0, NatType::FullCone),
+        );
+        let hello = receive_hello(peer, old_seq, remote_seq).await;
+        if finish {
+            puncher.recv_punch_done(
+                Link::new(binding.bound(), remote),
+                PunchDoneFrame::respond_to(&hello),
+            );
+        }
+    }
+    // Establish real completed history, instead of inserting a private map entry.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let finished_count = encoder
+        .hellos()
+        .iter()
+        .filter(|(_, hello)| hello.remote_seq() == 11)
+        .count();
+    assert_eq!(finished_count, 1, "DONE stops the completed peer's retries");
+    let remote = finished_peer.local_addr().unwrap();
+    puncher.recv_punch_me_now(
+        Pathway::new(outer, remote.into()),
+        PunchMeNowFrame::new(11, old_seq, remote, 0, NatType::FullCone),
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        encoder
+            .hellos()
+            .iter()
+            .filter(|(_, hello)| hello.remote_seq() == 11)
+            .count(),
+        finished_count,
+        "completed old pair suppresses replay"
+    );
+
+    book.set_nat(binding.bound(), NatType::Dynamic);
+    let recorded = frames.wait_for(3).await;
+    let [
+        ReliableFrame::RemoveAddress(removed),
+        ReliableFrame::AddAddress(added),
+    ] = &recorded[1..]
+    else {
+        panic!("NAT refresh withdraws the old address and advertises its replacement");
+    };
+    assert_eq!(removed.seq_num.into_u64(), u64::from(old_seq));
+    assert_eq!(**added, outer.addr());
+    assert_eq!(added.nat_type(), NatType::Dynamic);
+    let new_seq = added.seq_num();
+    assert_ne!(new_seq, old_seq);
+    let old_count = encoder
+        .hellos()
+        .iter()
+        .filter(|(_, hello)| hello.local_seq() == old_seq)
+        .count();
+
+    for (peer, remote_seq) in [(&active_peer, 10), (&finished_peer, 11)] {
+        let remote = peer.local_addr().unwrap();
+        let path = Pathway::new(outer, remote.into());
+        // An obsolete request cannot resurrect the retired address.
+        puncher.recv_punch_me_now(
+            path,
+            PunchMeNowFrame::new(remote_seq, old_seq, remote, 0, NatType::FullCone),
+        );
+        puncher.recv_punch_me_now(
+            path,
+            PunchMeNowFrame::new(remote_seq, new_seq, remote, 0, NatType::FullCone),
+        );
+        let hello = receive_hello(peer, new_seq, remote_seq).await;
+        puncher.recv_punch_done(
+            Link::new(binding.bound(), remote),
+            PunchDoneFrame::respond_to(&hello),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        encoder
+            .hellos()
+            .iter()
+            .filter(|(_, hello)| hello.local_seq() == old_seq)
+            .count(),
+        old_count,
+        "refresh cancels the old live probe, and old requests stay invalid"
+    );
+    close.send(()).unwrap();
+    observer.await.unwrap();
+    puncher.abort_transactions();
 }

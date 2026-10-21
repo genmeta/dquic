@@ -1,9 +1,15 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use bytes::BytesMut;
 use qbase::{
     frame::{
-        Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame, io::SendFrame,
+        AddAddressFrame, Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame,
+        io::SendFrame,
     },
     net::{
         NatType,
@@ -227,4 +233,110 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn stale_active_completion_preserves_passive_transaction_and_done_delivery() {
+    type DoneCallback = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    #[derive(Clone)]
+    struct CallbackFrames {
+        frames: Frames,
+        on_done: DoneCallback,
+    }
+
+    impl SendFrame<ReliableFrame> for CallbackFrames {
+        fn send_frame<I: IntoIterator<Item = ReliableFrame>>(&self, frames: I) {
+            for frame in frames {
+                if matches!(frame, ReliableFrame::PunchDone(_)) {
+                    let callback = self.on_done.lock().unwrap().take();
+                    if let Some(callback) = callback {
+                        callback();
+                    }
+                }
+                self.frames.send_frame([frame]);
+            }
+        }
+    }
+
+    let first = Binding::new();
+    let second = Binding::new();
+    let mut bounds = [first.bound(), second.bound()];
+    bounds.sort();
+    let [local, remote] = bounds;
+    let path = Pathway::new(local.into(), remote.into());
+    let link = Link::new(local, remote);
+    let (sender, mut received) = mpsc::unbounded_channel();
+    let on_done = DoneCallback::default();
+    let encoder = Encoder::default();
+    let puncher = ArcPuncher::new(
+        CallbackFrames {
+            frames: Frames(sender),
+            on_done: on_done.clone(),
+        },
+        encoder.clone(),
+    );
+    puncher.on_local_added(local, local.into(), local, 0, NatType::FullCone);
+    let ReliableFrame::AddAddress(address) = received.recv().await.unwrap().0 else {
+        panic!("expected ADD_ADDRESS");
+    };
+    let local_seq = address.seq_num();
+    let remote_seq = 7;
+    puncher.recv_add_address(AddAddressFrame::new(
+        remote_seq,
+        remote,
+        0,
+        NatType::RestrictedPort,
+    ));
+    let (_, active) = next_now(&mut received).await;
+    encoder.wait_for_hello(|task| task == active).await;
+
+    let replacement = PunchMeNowFrame::new(remote_seq, local_seq, remote, 0, NatType::FullCone);
+    *on_done.lock().unwrap() = Some(Box::new({
+        let puncher = puncher.clone();
+        move || puncher.recv_punch_me_now(path, replacement)
+    }));
+    // SendFrame runs synchronously after the active task receives HELLO and
+    // immediately before it returns. Reentering here installs a passive owner;
+    // abort cannot interrupt the old task's remaining synchronous cleanup.
+    let hello = PunchHelloFrame::new(remote_seq, local_seq, 19);
+    puncher.recv_punch_hello(path, link, hello);
+    let (frame, owner) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&hello))
+    );
+    assert_eq!(owner, Some(active));
+    assert!(on_done.lock().unwrap().is_none());
+
+    let passive_hello = encoder.wait_for_hello(|task| task != active).await;
+    puncher.recv_punch_done(link, PunchDoneFrame::respond_to(&passive_hello));
+    let sent = encoder.hellos().len();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        encoder.hellos().len(),
+        sent,
+        "DONE must reach the passive owner and stop its retries"
+    );
+
+    // Completion retires the selected owner and suppresses another request.
+    puncher.recv_punch_me_now(path, replacement);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        encoder.hellos().len(),
+        sent,
+        "completed replacement must not restart"
+    );
+    let late_hello = PunchHelloFrame::new(remote_seq, local_seq, 23);
+    puncher.recv_punch_hello(path, link, late_hello);
+    let (frame, owner) = received
+        .try_recv()
+        .expect("completed pair answers HELLO immediately");
+    assert!(
+        matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&late_hello))
+    );
+    assert_eq!(owner, tokio::task::try_id());
+    puncher.abort_transactions();
 }
