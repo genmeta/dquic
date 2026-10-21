@@ -38,14 +38,14 @@ async fn converted_identities_listen_and_anonymous_listen_preserves_the_listener
     ];
     for endpoint in endpoints {
         endpoint.listen(Scopes::ALL, |_| {}).unwrap();
-        let registered = ServerRegistry::global().get("localhost").unwrap();
+        let registered = ServerRegistry::global().get(Some("localhost")).unwrap();
         let anonymous: QuicEndpoint = Anonymous.into();
         anonymous
             .listen(UnusedScopes, |_| panic!("cannot accept"))
             .unwrap();
         assert!(Arc::ptr_eq(
             &registered,
-            &ServerRegistry::global().get("localhost").unwrap(),
+            &ServerRegistry::global().get(Some("localhost")).unwrap(),
         ));
         ServerRegistry::global().remove("localhost");
     }

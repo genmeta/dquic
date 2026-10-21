@@ -58,7 +58,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
         .unwrap();
     let server_keys = ServerRegistry::global()
-        .get("localhost")
+        .get(Some("localhost"))
         .unwrap()
         .tls_server
         .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())

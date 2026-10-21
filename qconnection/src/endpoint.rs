@@ -365,8 +365,14 @@ impl ServerRegistry {
         self.0.write().unwrap().remove(server_name)
     }
 
-    pub fn get(&self, server_name: &str) -> Option<Arc<Server>> {
-        self.0.read().unwrap().get(server_name).cloned()
+    /// Without a server name, select a listener only if it is the sole entry.
+    pub fn get(&self, server_name: Option<&str>) -> Option<Arc<Server>> {
+        let servers = self.0.read().unwrap();
+        match server_name {
+            Some(name) => servers.get(name).cloned(),
+            None if servers.len() == 1 => servers.values().next().cloned(),
+            None => None,
+        }
     }
 }
 

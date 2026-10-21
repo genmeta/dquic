@@ -49,9 +49,7 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
         client_parameters.get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
     );
 
-    let server = ServerRegistry::global()
-        .get(hello.server_name().unwrap())
-        .unwrap();
+    let server = ServerRegistry::global().get(hello.server_name()).unwrap();
     assert!(
         Pathway::new(
             "1.1.1.1:4433".parse().unwrap(),
@@ -94,7 +92,7 @@ async fn interceptor_upgrades_a_fragmented_client_hello_into_server_tls() {
         initial_max_data
     );
     endpoint.listen(Scope::External, |_| {}).unwrap();
-    let updated = ServerRegistry::global().get("localhost").unwrap();
+    let updated = ServerRegistry::global().get(Some("localhost")).unwrap();
     assert!(!Arc::ptr_eq(&server, &updated));
     assert_eq!(
         updated
