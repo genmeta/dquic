@@ -92,6 +92,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         keys(true),
         Duration::from_secs(5),
         Duration::ZERO,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
     );
     let space = crate::common::initial_space(&paths.spaces);
     let path = paths.add_path(Pathway::new(
@@ -289,11 +290,14 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
     let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
-    let paths = crate::common::initial_paths(
+    let paths = crate::common::initial_paths_with_timeouts(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
         ConnectionId::from_slice(b"original"),
         keys(false),
+        Duration::ZERO,
+        Duration::ZERO,
+        Default::default(),
     );
     let space = crate::common::initial_space(&paths.spaces);
     let path = paths.add_path(Pathway::new(

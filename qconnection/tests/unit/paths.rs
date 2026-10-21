@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use qbase::{Epoch, error::ErrorKind, frame::PathChallengeFrame, role::Role};
 use qtransport::path::PathState;
@@ -103,6 +109,30 @@ async fn only_client_initial_paths_are_exempt_and_losing_paths_reset_the_guard()
     assert_eq!(super::selection(&paths, &after_removal), 2);
     assert_eq!(after_removal.state(), PathState::ClientValidating);
     paths.retire_all();
+}
+
+#[tokio::test]
+async fn selecting_a_live_handshake_path_stops_crypto_replay() {
+    for role in [Role::Client, Role::Server] {
+        let is_mp_handshaking = Arc::new(AtomicBool::new(true));
+        let paths = crate::common::initial_paths_with_timeouts(
+            role,
+            qbase::cid::ConnectionId::from_slice(b"localcid"),
+            qbase::cid::ConnectionId::from_slice(b"original"),
+            crate::common::initial_keys(role == Role::Server),
+            Duration::ZERO,
+            Duration::ZERO,
+            is_mp_handshaking.clone(),
+        );
+        let stale = paths.add_path(pathway(30002));
+        paths.remove(&stale);
+        let selected = paths.add_path(pathway(30002));
+        paths.select_path(&stale);
+        assert!(is_mp_handshaking.load(Ordering::Relaxed));
+        paths.select_path(&selected);
+        assert!(!is_mp_handshaking.load(Ordering::Relaxed));
+        paths.retire_all();
+    }
 }
 
 #[tokio::test]
@@ -247,7 +277,7 @@ fn confirm_validation(paths: &Arc<Paths>) {
         pathway(39999),
         paths.handshake.clone(),
         qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.resender.clone(),
+        paths.loss_resender.clone(),
         &paths.cids,
     );
     paths.cids.select(&selected.cid);

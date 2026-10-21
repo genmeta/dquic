@@ -3,6 +3,10 @@ use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
     ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     task::Poll,
 };
 
@@ -581,16 +585,18 @@ pub struct SendBuf {
     // 对BufMap::size的限制
     max_data: u64,
     state: BufMap,
+    flighting_as_lost: Arc<AtomicBool>,
 }
 
 impl SendBuf {
     /// Create a new [`SendBuf`] with the given size.
-    pub fn with_capacity(capacity: u64) -> Self {
+    pub fn with_capacity(capacity: u64, flighting_as_lost: Arc<AtomicBool>) -> Self {
         Self {
             offset: 0,
             data: VecDeque::new(),
             max_data: capacity,
             state: BufMap::default(),
+            flighting_as_lost,
         }
     }
 
@@ -727,10 +733,14 @@ impl SendBuf {
     /// Called when the `range` of data sent is acknowledged by the peer.
     ///
     /// The `range` is the range of data that has been acknowledged.
+    /// A nonempty acknowledgment disables replay for every buffer sharing this policy.
     // 通过传输层接收到的对方的ack帧，确认某些包已经被接收到，这些包携带的数据即被确认。
     // ack只能确认Flighting/Lost状态的区间；如果确认的是Lost区间，意味着之前的判定丢包是错误的。
     pub fn on_data_acked(&mut self, range: &Range<u64>) {
         self.state.ack_rcvd(range);
+        if !range.is_empty() {
+            self.flighting_as_lost.store(false, AtomicOrdering::Relaxed);
+        }
         // 对于头部连续确认接收到的，还要前进，以免浪费空间
         let min_unrecved_pos = self.state.shift();
         if self.offset < min_unrecved_pos {
@@ -761,8 +771,12 @@ impl SendBuf {
         self.state.may_loss(range);
     }
 
+    /// Finish a CRYPTO packet, retaining unacknowledged ranges for other paths when enabled.
+    /// Call after all ranges have been picked so a packet cannot repeat its own data.
     pub fn resend_flighting(&mut self) {
-        self.state.resend_flighting()
+        if self.flighting_as_lost.load(AtomicOrdering::Relaxed) {
+            self.state.resend_flighting();
+        }
     }
 
     /// Return whether all data currently written has been received(acknowledged) by the peer.

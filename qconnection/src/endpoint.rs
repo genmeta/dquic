@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, OnceLock, RwLock, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -177,10 +177,12 @@ impl QuicEndpoint {
         )?;
         let local_cids =
             ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
+        let is_mp_handshaking = Arc::new(AtomicBool::new(true));
         let initial_space = Arc::new(InitialSpace::new(
             initial_scid,
             ArcKeys::new(Arc::new(initial_keys)),
             None,
+            is_mp_handshaking.clone(),
         ));
         let paths = Paths::new(
             initial_space.clone(),
@@ -190,6 +192,7 @@ impl QuicEndpoint {
             local_cids,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
+            is_mp_handshaking,
         );
         let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
@@ -315,10 +318,12 @@ impl ServerRegistry {
                 let Some(initial_keys) = ServerRegistry::global().initial_keys(odcid) else {
                     return;
                 };
+                let is_mp_handshaking = Arc::new(AtomicBool::new(true));
                 let initial_space = Arc::new(InitialSpace::new(
                     initial_scid,
                     ArcKeys::new(Arc::new(initial_keys)),
                     None,
+                    is_mp_handshaking.clone(),
                 ));
                 let paths = Paths::new(
                     initial_space.clone(),
@@ -328,6 +333,7 @@ impl ServerRegistry {
                     local_cids,
                     Duration::ZERO,
                     Duration::ZERO,
+                    is_mp_handshaking,
                 );
                 // Other receivers may already have filled the published inbox.
                 // Drive the connection even if this particular Initial is dropped.

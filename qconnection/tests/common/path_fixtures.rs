@@ -34,6 +34,7 @@ pub fn paths_with_timeouts(role: Role, max: Duration, defer: Duration) -> Arc<Pa
         keys,
         max,
         defer,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
     )
 }
 

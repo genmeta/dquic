@@ -199,6 +199,7 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         ArcOneRttKeys::from(keys),
         streams,
         reliable,
+        Default::default(),
     ));
     data.keys.allow_update();
     Arc::new(Transport {
@@ -568,6 +569,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             epoch,
             Default::default(),
             ArcKeys::new(Arc::new(material)),
+            Default::default(),
         ));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
@@ -1951,6 +1953,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         Epoch::Initial,
         Default::default(),
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
+        Default::default(),
     ));
     let mut task = tokio::spawn(receive_packets(
         rcvd_pkt.initial,

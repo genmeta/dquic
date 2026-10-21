@@ -3,7 +3,7 @@ mod send {
     use std::{
         io,
         pin::Pin,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, atomic::AtomicBool},
         task::{Context, Poll, Waker},
     };
 
@@ -122,6 +122,16 @@ mod send {
     pub struct ArcSender(Arc<Mutex<Result<Sender, Error>>>);
 
     impl ArcSender {
+        /// Create a sender with a shared policy for unacknowledged CRYPTO data.
+        pub fn new(flighting_as_lost: Arc<AtomicBool>) -> Self {
+            Self(Arc::new(Mutex::new(Ok(Sender {
+                sndbuf: SendBuf::with_capacity(VARINT_MAX, flighting_as_lost),
+                writable_waker: None,
+                flush_waker: None,
+                tx_wakers: ArcSendWakers::default(),
+            }))))
+        }
+
         /// Abandon this encryption level's CRYPTO output and fail its writer with BrokenPipe.
         pub fn retire(&self) {
             self.on_error(
@@ -156,10 +166,6 @@ mod send {
     /// Struct for transport layer to send crypto data.
     #[derive(Debug, Clone)]
     pub struct CryptoStreamOutgoing(pub(super) ArcSender);
-
-    /// Initial CRYPTO output that remains available until a handshake path is selected.
-    #[derive(Debug, Clone)]
-    pub struct CryptoStreamMultiOut(pub(super) ArcSender);
 
     impl AsyncWrite for CryptoStreamWriter {
         fn poll_write(
@@ -221,7 +227,9 @@ mod send {
                 Ok(inner) => inner,
                 Err(_) => return Poll::Ready(Ok(0)),
             };
-            inner.poll_dump(cx, buffer)
+            let result = inner.poll_dump(cx, buffer);
+            inner.sndbuf.resend_flighting();
+            result
         }
     }
 
@@ -231,40 +239,6 @@ mod send {
                 inner.tx_wakers.unregister(waker);
             }
         }
-    }
-
-    impl<B: BufMut + ?Sized> Package<B> for CryptoStreamMultiOut {
-        fn poll_dump(
-            &mut self,
-            cx: &mut Context<'_>,
-            buffer: &mut PacketBuffer<'_, B>,
-        ) -> Poll<Result<usize, Error>> {
-            let mut guard = self.0.0.lock().unwrap();
-            let inner = match guard.as_mut() {
-                Ok(inner) => inner,
-                Err(_) => return Poll::Ready(Ok(0)),
-            };
-            let result = inner.poll_dump(cx, buffer);
-            inner.sndbuf.resend_flighting();
-            result
-        }
-    }
-
-    impl UnregisterWaker for CryptoStreamMultiOut {
-        fn unregister(&self, waker: &Waker) {
-            if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
-                inner.tx_wakers.unregister(waker);
-            }
-        }
-    }
-
-    pub(super) fn create() -> ArcSender {
-        ArcSender(Arc::new(Mutex::new(Ok(Sender {
-            sndbuf: SendBuf::with_capacity(VARINT_MAX),
-            writable_waker: None,
-            flush_waker: None,
-            tx_wakers: ArcSendWakers::default(),
-        }))))
     }
 }
 
@@ -397,9 +371,11 @@ mod recv {
     }
 }
 
+use std::sync::{Arc, atomic::AtomicBool};
+
 use qbase::{Close, error::Error};
 pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
-pub use send::{ArcSender, CryptoStreamMultiOut, CryptoStreamOutgoing, CryptoStreamWriter};
+pub use send::{ArcSender, CryptoStreamOutgoing, CryptoStreamWriter};
 
 /// Crypto data stream.
 #[derive(Debug, Clone)]
@@ -410,7 +386,7 @@ pub struct CryptoStream {
 
 impl Default for CryptoStream {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::default())
     }
 }
 
@@ -427,10 +403,11 @@ impl CryptoStream {
         self.recver.on_error(error);
     }
 
-    /// Create a new instance of [`CryptoStream`] with the given buffer size.
-    pub fn new() -> Self {
+    /// Create a CRYPTO stream with a shared policy for unacknowledged output.
+    /// Acknowledging data in any stream sharing this policy disables automatic replay.
+    pub fn new(pending_as_lost: Arc<AtomicBool>) -> Self {
         Self {
-            sender: send::create(),
+            sender: ArcSender::new(pending_as_lost),
             recver: recv::create(),
         }
     }
@@ -448,11 +425,6 @@ impl CryptoStream {
     /// Create a [`CryptoStreamOutgoing`] which belong to this crypto stream.
     pub fn outgoing(&self) -> CryptoStreamOutgoing {
         CryptoStreamOutgoing(self.sender.clone())
-    }
-
-    /// Create Initial output for use before a handshake path is selected.
-    pub fn multipath(&self) -> CryptoStreamMultiOut {
-        CryptoStreamMultiOut(self.sender.clone())
     }
 
     /// Create a [`CryptoStreamIncoming`] which belong to this crypto stream.

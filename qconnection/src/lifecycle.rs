@@ -46,9 +46,9 @@ async fn finish(paths: &Paths, error: Error) -> Error {
         }
     }
     {
-        let mut resender = paths.resender.write_guard();
-        let end = resender.largest();
-        resender.drain_to(end).for_each(drop);
+        let mut loss_resender = paths.loss_resender.write_guard();
+        let end = loss_resender.largest();
+        loss_resender.drain_to(end).for_each(drop);
     }
     for path in active_paths {
         paths.remove(&path);

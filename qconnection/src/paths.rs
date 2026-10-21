@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -31,9 +34,11 @@ pub struct Paths {
     pub cids: Arc<PathCids>,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
-    pub(crate) resender: ArcResend,
+    pub(crate) loss_resender: ArcResend,
     pub terminator: ArcTerminator,
     pub(crate) handshake: Arc<HandshakeStatus>,
+    /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
+    pub(crate) is_mp_handshaking: Arc<AtomicBool>,
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub(crate) responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
     role: Role,
@@ -43,6 +48,7 @@ pub struct Paths {
 }
 
 impl Paths {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_space: Arc<InitialSpace>,
         role: Role,
@@ -51,11 +57,12 @@ impl Paths {
         local_cids: ArcLocalCids,
         max_idle_timeout: Duration,
         defer_idle_timeout: Duration,
+        is_mp_handshaking: Arc<AtomicBool>,
     ) -> Arc<Self> {
         let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         let idle = ArcIdleTimer::new(max_idle_timeout);
-        let mut resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
-        resender
+        let mut loss_resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
+        loss_resender
             .push_back(initial_space.clone())
             .expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
@@ -71,9 +78,10 @@ impl Paths {
             cids: PathCids::new(dcid),
             spaces,
             reliable_frames,
-            resender: ArcResend::from(resender),
+            loss_resender: ArcResend::from(loss_resender),
             terminator: terminator.clone(),
             handshake,
+            is_mp_handshaking,
             entries: Mutex::new(BTreeMap::new()),
             responses: Mutex::new(HashMap::new()),
             role,
@@ -146,7 +154,7 @@ impl Paths {
                 self.defer_idle_timeout,
                 *self.max_idle_timeout.lock().unwrap(),
             ),
-            self.resender.clone(),
+            self.loss_resender.clone(),
             &self.cids,
         ));
         if self.cids.is_confirmed() {
@@ -173,6 +181,7 @@ impl Paths {
         {
             return;
         }
+        self.is_mp_handshaking.store(false, Ordering::Relaxed);
         for other in entries.values() {
             if !Arc::ptr_eq(other, path) {
                 other.guard_amplification();

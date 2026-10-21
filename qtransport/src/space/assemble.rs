@@ -87,7 +87,6 @@ impl Spaces {
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         packets: &mut [Option<Metadata>; 3],
-        multipath: bool,
     ) -> Result<(usize, usize), Error> {
         if limits.credit <= limits.overhead {
             return Ok((0, 0));
@@ -108,7 +107,6 @@ impl Spaces {
             limits,
             frames,
             packets,
-            multipath,
             0,
             None,
         );
@@ -152,7 +150,6 @@ impl Spaces {
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         packets: &mut [Option<Metadata>; 3],
-        multipath: bool,
         prefix: usize,
         min_bytes: Option<usize>,
     ) -> Result<(usize, usize, bool), Error> {
@@ -176,7 +173,6 @@ impl Spaces {
                 limits,
                 frames,
                 packets,
-                multipath,
                 prefix,
                 min_bytes,
             );
@@ -215,15 +211,7 @@ impl Spaces {
             } else {
                 0
             });
-            let result = space.encapsulate(
-                cx,
-                dcid,
-                pn,
-                external,
-                &mut constrained,
-                required,
-                multipath,
-            );
+            let result = space.encapsulate(cx, dcid, pn, external, &mut constrained, required);
             (
                 result,
                 constrained.pn_offset(),
@@ -249,7 +237,6 @@ impl Spaces {
                     limits,
                     frames,
                     packets,
-                    multipath,
                     prefix,
                     min_bytes,
                 );
@@ -271,7 +258,6 @@ impl Spaces {
             limits,
             frames,
             packets,
-            multipath,
             prefix + size,
             Some(required.saturating_sub(size)).filter(|&min| min != 0),
         );

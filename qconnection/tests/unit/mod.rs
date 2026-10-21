@@ -25,7 +25,7 @@ pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
         enter_handshake(paths, mature.spaces.handshake.clone());
     }
     paths
-        .resender
+        .loss_resender
         .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
@@ -44,7 +44,7 @@ pub fn enter_handshake(
     handshake: std::sync::Arc<qtransport::space::HandshakeSpace>,
 ) {
     paths
-        .resender
+        .loss_resender
         .write_guard()
         .push_back(handshake.clone())
         .unwrap();
@@ -56,7 +56,7 @@ pub fn enter_handshake(
 /// Emulate lifecycle retirement in tests that do not run growing.
 pub fn retire_spaces(paths: &Paths, end: qbase::Epoch) {
     let mut spaces = paths.spaces.write_guard();
-    let mut resender = paths.resender.write_guard();
+    let mut resender = paths.loss_resender.write_guard();
     while spaces.front().is_some_and(|(epoch, _)| epoch < end as u64) {
         let (_, space) = spaces.pop_front().unwrap();
         space.retire();

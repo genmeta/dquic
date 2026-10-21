@@ -48,11 +48,70 @@ fn record(space: &Space<ArcKeys<()>>) -> u64 {
 }
 
 #[tokio::test]
+async fn only_crypto_ack_disables_shared_replay_across_spaces() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use qbase::frame::PingFrame;
+
+    for acknowledged in Epoch::EPOCHS {
+        let pending_as_lost = Arc::new(AtomicBool::new(true));
+        let spaces = Epoch::EPOCHS.map(|epoch| {
+            Space::new(
+                epoch,
+                Default::default(),
+                ArcKeys::new(()),
+                pending_as_lost.clone(),
+            )
+        });
+        let space = &spaces[acknowledged];
+        let (ping_pn, _) = space.next_pn().unwrap();
+        space.sent_journal.on_sealed(
+            ping_pn,
+            None,
+            0,
+            metadata(acknowledged, &[Frame::Ping(PingFrame)]),
+            std::iter::empty(),
+        );
+        space.on_sent(
+            ping_pn,
+            true,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        );
+        let ack = |pn: u64| {
+            AckFrame::new(
+                pn.try_into().unwrap(),
+                0u32.into(),
+                0u32.into(),
+                vec![],
+                None,
+            )
+        };
+        assert!(!space.on_acked(&ack(ping_pn)).unwrap());
+        assert!(pending_as_lost.load(Ordering::Relaxed));
+
+        let mut pns = [0; 3];
+        for space in &spaces {
+            space.crypto.writer().write_all(b"hello").await.unwrap();
+            pns[space.epoch] = record(space);
+        }
+        assert!(space.on_acked(&ack(pns[acknowledged])).unwrap());
+        assert!(!pending_as_lost.load(Ordering::Relaxed));
+        for other in &spaces {
+            let frames = support::frames::take_frames(&mut other.crypto.outgoing());
+            assert_eq!(frames.len(), usize::from(other.epoch != acknowledged));
+            assert!(support::frames::take_frames(&mut other.crypto.outgoing()).is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn shared_space_recovers_once_and_stops_after_key_retirement() {
     let space = Arc::new(Space::new(
         Epoch::Initial,
         Default::default(),
         ArcKeys::new(()),
+        Default::default(),
     ));
     let paths: [Arc<dyn qcongestion::Resend>; 2] = [space.clone(), space.clone()];
     space.crypto.writer().write_all(b"first").await.unwrap();
@@ -85,7 +144,7 @@ async fn shared_space_recovers_once_and_stops_after_key_retirement() {
 async fn late_ack_cancels_crypto_recovery() {
     use qcongestion::Resend as _;
 
-    let space = HandshakeSpace::new(Default::default(), ArcKeys::new(()));
+    let space = HandshakeSpace::new(Default::default(), ArcKeys::new(()), Default::default());
     space.crypto.writer().write_all(b"crypto").await.unwrap();
     let pn = record(&space);
     space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
@@ -106,7 +165,12 @@ async fn late_ack_cancels_crypto_recovery() {
 #[tokio::test(start_paused = true)]
 async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
-        let space = Space::new(epoch, Default::default(), ArcKeys::new(()));
+        let space = Space::new(
+            epoch,
+            Default::default(),
+            ArcKeys::new(()),
+            Default::default(),
+        );
         let mut pns = Vec::new();
         for bytes in [b"first".as_slice(), b"second", b"third"] {
             space.crypto.writer().write_all(bytes).await.unwrap();
