@@ -1,25 +1,68 @@
-use std::time::Duration;
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
+use bytes::BytesMut;
 use qbase::{
     frame::{
         Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame, io::SendFrame,
     },
     net::{
         NatType,
-        route::{Link, Pathway},
+        route::{Line, Link, Pathway},
     },
 };
-use qprotocol::{Dock, EphemeralSocket, QuicProtocol};
+use qprotocol::{Dock, UdpSocket};
 use qtraversal::punch::ArcPuncher;
 use tokio::{sync::mpsc, task::Id};
 
-use super::support::{Encoder, PROBE, decode};
+use super::support::{Encoder, decode};
 
-struct Receiver;
+struct Binding(Arc<UdpSocket>);
 
-impl Drop for Receiver {
+impl Binding {
+    fn new() -> Self {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        // This test controls delivery itself. Keep the public registration for
+        // outgoing strategies, but receive through the fixture instead of Dock.
+        Dock::global().add(socket.clone()).unwrap().unwrap().abort();
+        Self(socket)
+    }
+
+    fn bound(&self) -> SocketAddr {
+        self.0.local_addr().unwrap()
+    }
+
+    async fn receive_hello(&self, expected: PunchHelloFrame) -> SocketAddr {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut packets = [BytesMut::zeroed(128)];
+            let mut lines = [Line::default()];
+            loop {
+                match self.0.receive(&mut packets, &mut lines).await {
+                    // Collision probes intentionally target unbound loopback
+                    // ports. Windows reports their ICMP replies on this socket;
+                    // they are not a peer response in the arbitration scenario.
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => continue,
+                    result => {
+                        result.unwrap();
+                    }
+                }
+                let bytes = packets[0].split_to(lines[0].seg_size as usize);
+                packets[0].resize(128, 0);
+                if decode(bytes)
+                    .into_iter()
+                    .any(|frame| matches!(frame, Frame::PunchHello(hello) if hello == expected))
+                {
+                    return lines[0].link.src;
+                }
+            }
+        })
+        .await
+        .expect("predicted probe must reach the peer")
+    }
+}
+
+impl Drop for Binding {
     fn drop(&mut self) {
-        QuicProtocol::global().on_receive(|_, _, _| {});
+        Dock::global().remove(&self.0);
     }
 }
 
@@ -62,25 +105,14 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
             println!(
                 "arbitration {low_nat:?}/{high_nat:?}, larger first: {deliver_to_larger_first}"
             );
-            let (received, mut datagrams) = mpsc::unbounded_channel();
-            QuicProtocol::global().on_receive(move |bytes, _, link| {
-                if bytes.starts_with(PROBE) {
-                    for frame in decode(bytes) {
-                        if let Frame::PunchHello(hello) = frame {
-                            let _ = received.send((hello, link));
-                        }
-                    }
-                }
-            });
-            let _receiver = Receiver;
-            let first = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let second = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let mut bounds = [
-                first.udp_socket().local_addr().unwrap(),
-                second.udp_socket().local_addr().unwrap(),
-            ];
-            bounds.sort();
-            let [lower, higher] = bounds;
+            let first = Binding::new();
+            let second = Binding::new();
+            let (low_socket, high_socket) = if first.bound() < second.bound() {
+                (&first, &second)
+            } else {
+                (&second, &first)
+            };
+            let [lower, higher] = [low_socket.bound(), high_socket.bound()];
             let (low_frames, mut low_received) = mpsc::unbounded_channel();
             let (high_frames, mut high_received) = mpsc::unbounded_channel();
             let low_encoder = Encoder::default();
@@ -115,11 +147,12 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
                 high.recv_punch_me_now(high_path, low_now);
             }
 
-            for (puncher, encoder, frames, path, link, active, replaced, nat) in [
+            for (puncher, encoder, frames, peer_socket, path, link, active, replaced, nat) in [
                 (
                     &low,
                     &low_encoder,
                     &mut low_received,
+                    high_socket,
                     low_path,
                     Link::new(lower, higher),
                     low_active,
@@ -130,6 +163,7 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
                     &high,
                     &high_encoder,
                     &mut high_received,
+                    low_socket,
                     high_path,
                     Link::new(higher, lower),
                     high_active,
@@ -141,16 +175,7 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
                     .wait_for_hello(|task| (task != active) == replaced)
                     .await;
                 let temporary = if nat == NatType::Symmetric {
-                    let source = tokio::time::timeout(Duration::from_secs(2), async {
-                        loop {
-                            let (probe, received) = datagrams.recv().await.unwrap();
-                            if probe == hello && received.src == link.dst {
-                                break received.dst;
-                            }
-                        }
-                    })
-                    .await
-                    .expect("predicted probe must reach the peer");
+                    let source = peer_socket.receive_hello(hello).await;
                     assert_ne!(source, link.src);
                     // The actual predicted probe ID, not an injected private Transaction.
                     puncher.recv_punch_done(link, PunchDoneFrame::respond_to(&hello));
