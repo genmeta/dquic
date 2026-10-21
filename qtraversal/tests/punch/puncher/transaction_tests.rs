@@ -47,7 +47,7 @@ async fn next_now(
     (frame, task.unwrap())
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
     for (low_nat, high_nat) in [
         (NatType::RestrictedPort, NatType::RestrictedPort),
