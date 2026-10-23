@@ -1266,6 +1266,161 @@ fn pns_for(pns: &BurstPackets, epoch: Epoch) -> impl Iterator<Item = (usize, u64
 }
 
 #[tokio::test(start_paused = true)]
+async fn amplification_unblocks_pto_when_its_probe_fits() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for (epoch, validated) in Epoch::EPOCHS
+        .into_iter()
+        .flat_map(|epoch| [(epoch, false), (epoch, true)])
+    {
+        let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
+        match epoch {
+            Epoch::Initial => {}
+            Epoch::Handshake => super::enter_handshake(&paths, mature.spaces.handshake.clone()),
+            Epoch::Data => super::enter_mature(&paths, &mature),
+        }
+        let path = Arc::new(Path::new(
+            Pathway::new(
+                EndpointAddr::direct("127.0.0.1:35101".parse().unwrap()),
+                EndpointAddr::direct("127.0.0.1:35102".parse().unwrap()),
+            ),
+            paths.handshake.clone(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+            paths.loss_resender.clone(),
+            &paths.cids,
+        ));
+        paths.cids.select(&path.cid);
+        if epoch == Epoch::Data {
+            super::confirm_handshake(&paths);
+        }
+        path.on_datagram_received(400);
+        path.validation.on_sent(1200);
+        path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
+        let base = path.cc.get_pto(epoch);
+        let mut datagrams = [BytesMut::with_capacity(1200)];
+        let mut frames = Vec::new();
+        let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(burst.poll_collect(&mut cx).is_pending());
+        tokio::time::advance(base * 2).await;
+        assert!(burst.poll_collect(&mut cx).is_pending());
+        assert_eq!(path.cc.get_pto(epoch), base);
+
+        // Positive credit can still be too small even for a PING packet.
+        let before = counter.0.load(Ordering::Relaxed);
+        path.on_datagram_received(1);
+        assert!(counter.0.load(Ordering::Relaxed) > before);
+        assert!(burst.poll_collect(&mut cx).is_pending());
+        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
+        assert_eq!(path.cc.get_pto(epoch), base);
+
+        // Handshake and 1-RTT probes fit well below 1200 bytes.
+        let before = counter.0.load(Ordering::Relaxed);
+        if validated {
+            path.validate();
+        } else {
+            path.on_datagram_received(20);
+        }
+        assert!(counter.0.load(Ordering::Relaxed) > before);
+        if epoch == Epoch::Initial && !validated {
+            assert!(burst.poll_collect(&mut cx).is_pending());
+            assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
+            path.on_datagram_received(379);
+        }
+        assert!(
+            matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))),
+            "{epoch:?} PTO did not resume when its probe fitted"
+        );
+        let meta = burst.packets[0][epoch].unwrap();
+        assert!(meta.content.is_ack_eliciting());
+        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
+        assert!(path.cc.get_pto(epoch) > base);
+        if epoch == Epoch::Initial {
+            assert_eq!(burst.datagrams[0].len(), 1200);
+        } else if !validated {
+            assert!(burst.datagrams[0].len() <= 63);
+        }
+        burst.cancel();
+        task::cancel_waiters(&paths, &path);
+        path.retire();
+        paths.terminator.terminate();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_probe() {
+    use qprotocol::{QuicProtocol, UdpSocket};
+
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    QuicProtocol::global()
+        .register(EndpointAddr::direct(socket.local_addr().unwrap()), &socket)
+        .unwrap();
+    let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
+    super::enter_handshake(&paths, mature.spaces.handshake.clone());
+    let path = Arc::new(Path::new(
+        Pathway::new(
+            EndpointAddr::direct(socket.local_addr().unwrap()),
+            EndpointAddr::direct(peer.local_addr().unwrap()),
+        ),
+        paths.handshake.clone(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        paths.loss_resender.clone(),
+        &paths.cids,
+    ));
+    paths.cids.select(&path.cid);
+    path.on_datagram_received(20);
+    path.cc
+        .on_pkt_sent(Epoch::Handshake, 0, true, 1200, true, None);
+    mature
+        .spaces
+        .handshake
+        .rcvd_journal
+        .on_rcvd_pn(42, true, path.cc.pto_base(Epoch::Handshake));
+    path.cc.on_pkt_rcvd(Epoch::Handshake, 42, true);
+    let base = path.cc.get_pto(Epoch::Handshake);
+    let mut datagrams = [BytesMut::with_capacity(1200)];
+    let mut frames = Vec::new();
+    let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
+    assert!(matches!(
+        burst.poll_collect(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(1))
+    ));
+    let meta = burst.packets[0][Epoch::Handshake].unwrap();
+    assert!(!meta.content.is_ack_eliciting());
+    assert!(!meta.in_flight);
+    assert!(meta.ack.is_some());
+    burst.submit(1).await.unwrap();
+    assert!(crate::common::path_credit(&path) > 0);
+    tokio::time::advance(base * 2).await;
+    // No subsequent budget poll: submission must already have told CC it is blocked.
+    path.cc.do_tick().unwrap();
+    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
+    assert_eq!(path.cc.get_pto(Epoch::Handshake), base);
+    path.validate();
+    assert!(matches!(
+        burst.poll_collect(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(1))
+    ));
+    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
+    burst.cancel();
+    task::cancel_waiters(&paths, &path);
+    path.retire();
+    paths.terminator.terminate();
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
 async fn path_validation_respects_small_amplification_credit() {
     use qbase::frame::{PathChallengeFrame, io::ReceiveFrame};
 

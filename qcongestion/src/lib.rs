@@ -11,7 +11,7 @@ mod pacing;
 mod packets;
 mod rtt;
 mod status;
-pub use status::{HandshakeStatus, PathStatus};
+pub use status::HandshakeStatus;
 
 /// default datagram size in bytes.
 pub const MSS: usize = 1200;
@@ -73,9 +73,6 @@ pub trait Transport {
 
     /// Discards the congestion control state for the specified epoch.
     fn discard_epoch(&self, epoch: Epoch);
-
-    /// Releases the anti-amplification limit for this path.
-    fn grant_anti_amplification(&self);
 }
 
 /// The [`Resend`] trait defines the interface for retransmitting lost packets.

@@ -1877,35 +1877,6 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
 }
 
 #[tokio::test(start_paused = true)]
-async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
-    use qcongestion::Transport as _;
-    let [(_client, transport, original), _] = pair(1);
-    let path = Arc::new(Path::new(
-        original.pathway,
-        confirmed_handshake(false),
-        path_heartbeat(),
-        data_trackers(&transport),
-        &qtransport::path::PathCids::new(Default::default()),
-    ));
-    path.on_datagram_received(400);
-    path.validation
-        .challenge(qbase::frame::PathChallengeFrame::random())
-        .unwrap();
-    let mut sender = Sender::new(keys(&transport), transport, path.clone()).unwrap();
-    assert_eq!(emit(&mut sender).len(), 1200);
-    assert_eq!(crate::send::constraints::credit(&path.validation), 0);
-
-    tokio::time::advance(path.cc.get_pto(Epoch::Data) + Duration::from_millis(1)).await;
-    path.cc.do_tick().unwrap();
-    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Data), 0);
-
-    path.on_datagram_received(400);
-    let _ = path.poll_credit(&mut Context::from_waker(std::task::Waker::noop()));
-    path.cc.do_tick().unwrap();
-    assert!(path.cc.need_send_ack_eliciting(Epoch::Data) > 0);
-}
-
-#[tokio::test(start_paused = true)]
 async fn shared_ack_only_updates_the_receiving_paths_congestion_control() {
     use qcongestion::Transport as _;
     let [(_client, transport, first), _] = pair(1);

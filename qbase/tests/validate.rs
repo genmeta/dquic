@@ -86,6 +86,36 @@ fn pathway(port: u16) -> Pathway {
 }
 
 #[test]
+fn credit_snapshots_preserve_the_sending_tasks_waiter() {
+    for cancel in [false, true] {
+        let validation = ArcValidation::new();
+        let (wakes, waker) = waiter();
+        assert!(
+            validation
+                .poll_credit(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        for _ in 0..3 {
+            assert_eq!(validation.credit().unwrap(), Some(0));
+        }
+        assert_eq!(count(&wakes), 0);
+        if cancel {
+            validation.cancel();
+            assert!(validation.is_cancelled());
+            assert!(matches!(validation.credit(), Err(Cancelled)));
+        } else {
+            validation.on_received(400);
+            assert_eq!(validation.credit().unwrap(), Some(1200));
+            validation.on_sent(1200);
+            assert_eq!(validation.credit().unwrap(), Some(0));
+            validation.enter_validated().unwrap();
+            assert_eq!(validation.credit().unwrap(), None);
+        }
+        assert_eq!(count(&wakes), 1);
+    }
+}
+
+#[test]
 fn shared_validation_send_frame_wakes_sender_and_packages_both_frame_types() {
     let mut frames = ArcValidation::new();
     let sender = frames.clone();
