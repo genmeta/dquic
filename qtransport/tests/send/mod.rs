@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use constraints::{AntiAmplifier, Constraints};
+use constraints::{Constraints, credit};
 use qbase::{
     Epoch,
     datagram::{GetDatagramType, WriteDatagramType},
@@ -23,6 +23,7 @@ use qbase::{
         route::{Pathway, WritePathway},
     },
     packet::{GetType, HeaderSize, OneRttHeader, Package, Type, header::io::WriteHeader},
+    validate::ArcValidation,
     varint::VarInt,
 };
 use qcongestion::{ArcCC, Transport as _};
@@ -236,7 +237,7 @@ where
 pub fn poll_send_with(
     pathway: Pathway,
     congestion: &ArcCC,
-    anti_amplifier: &AntiAmplifier,
+    validation: &ArcValidation,
     buffers: &mut Vec<BytesMut>,
     pns: &mut VecDeque<PendingPacket>,
     cx: &mut Context<'_>,
@@ -256,7 +257,17 @@ pub fn poll_send_with(
     if pns.is_empty() {
         return Poll::Ready(Ok(0));
     }
-    let mut credit = anti_amplifier.balance();
+    let mut credit = match validation.poll_credit(cx) {
+        Poll::Ready(Ok(credit)) => credit.unwrap_or(usize::MAX),
+        Poll::Pending => return Poll::Pending,
+        Poll::Ready(Err(cancelled)) => {
+            return Poll::Ready(Err(QuicError::with_default_fty(
+                ErrorKind::NoViablePath,
+                cancelled.to_string(),
+            )
+            .into()));
+        }
+    };
     let mut quota = congestion.send_quota();
     let mut probes = Epoch::EPOCHS.map(|epoch| congestion.need_send_ack_eliciting(epoch));
     let mut count = 0;
@@ -324,7 +335,7 @@ pub fn poll_send_with(
                     retention,
                 );
                 packet.journal = None;
-                anti_amplifier.on_sent(length);
+                validation.on_sent(length);
                 congestion.on_pkt_sent(
                     epoch,
                     packet.pn,

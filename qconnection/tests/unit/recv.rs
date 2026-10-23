@@ -392,13 +392,17 @@ async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
             assert_eq!(admitted[0].pathway, first.pathway);
             assert!(!Arc::ptr_eq(&admitted[0], &first));
             if epoch == Epoch::Initial {
-                assert!(matches!(
-                    admitted[0].state(),
-                    qtransport::path::PathState::AmplifyGuard {
-                        rcvd_bytes: 1200,
-                        sent_bytes: 0,
+                assert_eq!(
+                    crate::common::path_credit(&admitted[0]),
+                    if role == Role::Client {
+                        usize::MAX
+                    } else {
+                        3600
                     }
-                ));
+                );
+            } else {
+                assert!(admitted[0].is_validated());
+                assert_eq!(crate::common::path_credit(&admitted[0]), usize::MAX);
             }
             paths.retire_all();
         }

@@ -21,8 +21,8 @@ use qconnection::{
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
-    StreamReader, StreamWriter, keys::ArcKeys, packet::channel, path::PathState,
-    router::QuicRouter, space::InitialSpace,
+    StreamReader, StreamWriter, keys::ArcKeys, packet::channel, router::QuicRouter,
+    space::InitialSpace,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -247,10 +247,10 @@ fn describe(paths: &Paths) -> String {
         .iter()
         .map(|path| {
             format!(
-                "{:?}: {:?}, challenge={:?}",
+                "{:?}: validated={}, retired={}",
                 path.pathway,
-                path.state(),
-                path.challenge()
+                path.is_validated(),
+                path.is_retired()
             )
         })
         .collect::<Vec<_>>()
@@ -398,12 +398,12 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
             "stage 4: {error}\nclient: {}\nserver: {}\nold paths: {:?}/{:?}",
             describe(&client.paths),
             describe(&server.paths),
-            old_client_path.state(),
-            old_server_path.state()
+            old_client_path.is_retired(),
+            old_server_path.is_retired()
         );
     }
     assert!(
-        wait_for(|| old_client_path.state() == PathState::Retired).await,
+        wait_for(|| old_client_path.is_retired()).await,
         "stage 4: the old client sender did not retire its unusable path"
     );
     assert!(

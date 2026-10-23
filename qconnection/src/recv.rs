@@ -100,7 +100,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             {
                 paths.select_path(&path);
             }
-            if epoch == Epoch::Handshake && paths.cids.is_selected(&path.cid) {
+            if epoch == Epoch::Handshake {
                 path.validate();
                 paths.on_handshake_received();
             }
@@ -201,8 +201,6 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
             let _ = path.heartbeat.on_rcvd_at(content, now);
-            // Start validation only after authentication and path admission.
-            paths.start_validation(&path);
             for frame in parsed_frames.drain(..) {
                 let fty = frame.frame_type();
                 match frame {
@@ -234,8 +232,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                     Frame::NewToken(frame) => {
                         tokens.recv_frame(frame)?;
                     }
-                    Frame::PathChallenge(frame) => path.recv_frame(frame)?,
-                    Frame::PathResponse(frame) => paths.on_path_response(&path, frame),
+                    Frame::PathChallenge(frame) => {
+                        paths.validations.recv_frame((pathway, frame))?
+                    }
+                    Frame::PathResponse(frame) => paths.validations.recv_frame((pathway, frame))?,
                     Frame::HandshakeDone(frame) => {
                         handshake.recv_frame(frame)?;
                     }

@@ -5,7 +5,7 @@ use super::*;
 pub struct TestSender {
     pub pathway: Pathway,
     pub congestion: ArcCC,
-    pub(super) anti_amplifier: Arc<AntiAmplifier>,
+    pub(super) validation: ArcValidation,
     buffers: Vec<BytesMut>,
     pub(super) send_frames: Vec<GuaranteedFrame>,
     pns: VecDeque<PendingPacket>,
@@ -16,14 +16,14 @@ impl TestSender {
     pub fn new(
         pathway: Pathway,
         congestion: ArcCC,
-        anti_amplifier: Arc<AntiAmplifier>,
+        validation: ArcValidation,
         recovery: Option<Arc<DataSpace>>,
     ) -> Self {
         Self {
             pathway,
             recovery,
             congestion,
-            anti_amplifier,
+            validation,
             buffers: (0..MAX_BURST_PACKETS)
                 .map(|_| BytesMut::with_capacity(1200))
                 .collect(),
@@ -100,7 +100,7 @@ impl TestSender {
             flow_ctrl: std::cell::Cell::new(usize::MAX),
             capacity: 1200,
             congestion: self.congestion.send_quota(),
-            anti_amplification: self.anti_amplifier.balance(),
+            anti_amplification: credit(&self.validation),
         };
         while self.pns.len() < MAX_BURST_PACKETS {
             let Some(packet) = assemble(self, &constraints)? else {
@@ -128,7 +128,7 @@ impl TestSender {
         super::poll_send_with(
             self.pathway,
             &self.congestion,
-            &self.anti_amplifier,
+            &self.validation,
             &mut self.buffers,
             &mut self.pns,
             cx,

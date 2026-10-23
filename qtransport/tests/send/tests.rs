@@ -17,7 +17,7 @@ fn sender(transport: &Arc<Transport>, path: &Path) -> Sender {
     Sender::new(
         path.pathway,
         path.cc.clone(),
-        path.anti_amplifier.clone(),
+        path.validation.clone(),
         Some(transport.data.clone()),
     )
 }
@@ -57,12 +57,7 @@ fn cx() -> Context<'static> {
 async fn all_four_levels_seal_and_open_and_data_shares_packet_numbers() {
     let [(_client, transport, path), (_server, peer, _)] = crate::transport::pair(1);
     // Encoding-only sources are not owned by the transport's recovery components.
-    let mut sender = Sender::new(
-        path.pathway,
-        path.cc.clone(),
-        path.anti_amplifier.clone(),
-        None,
-    );
+    let mut sender = Sender::new(path.pathway, path.cc.clone(), path.validation.clone(), None);
     let fixed = crate::transport::fixed_keys();
     let keys = transport.data.keys.clone();
     let limit = Constraints {
@@ -267,14 +262,10 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
 async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     let [(_client, transport, path), _peer] = crate::transport::pair(1);
     let keys = transport.data.keys.clone();
-    let status = qcongestion::PathStatus::new(
-        Arc::new(qcongestion::HandshakeStatus::new(true)),
-        Arc::new(std::sync::atomic::AtomicU16::new(1200)),
-    );
-    let credit = Arc::new(AntiAmplifier::new(status));
-    credit.on_received(800);
+    let validation = ArcValidation::new();
+    validation.on_received(800);
     let mut sender = sender(&transport, &path);
-    sender.anti_amplifier = credit.clone();
+    sender.validation = validation.clone();
     let quota = sender.congestion.send_quota();
     let bytes = [Bytes::from(vec![7; 800])];
     let mut offset = 0;
@@ -300,11 +291,11 @@ async fn burst_debits_cumulative_credit_and_congestion_before_submission() {
     assert!(count > 1);
     let size: usize = sender.pending().map(|packet| packet.bytes().len()).sum();
     assert!(size <= 2400 && size <= quota);
-    assert_eq!(credit.balance(), 2400); // assembly does not debit the real credit
+    assert_eq!(credit(&validation), 2400); // assembly does not debit the real credit
     assert!(
         matches!(sender.poll_send_with(&mut cx(), &mut Vec::with_capacity(QuicProtocol::MAX_DATAGRAMS), |_, _, packets| Poll::Ready(Ok(packets.len())), |_| true, |_| {}), Poll::Ready(Ok(n)) if n == count)
     );
-    assert_eq!(credit.balance(), 2400 - size);
+    assert_eq!(credit(&validation), 2400 - size);
 }
 
 #[tokio::test]
@@ -461,7 +452,7 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
         ),
         Poll::Ready(Ok(1))
     ));
-    assert_eq!(path.state(), crate::path::PathState::Retired);
+    assert!(path.is_retired());
 }
 
 #[tokio::test]
@@ -481,7 +472,7 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
     let mut sender = Sender::new(
         pathway,
         path.cc.clone(),
-        path.anti_amplifier.clone(),
+        path.validation.clone(),
         Some(transport.data.clone()),
     );
     let keys = transport.data.keys.clone();

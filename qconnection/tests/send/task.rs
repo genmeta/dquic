@@ -62,7 +62,7 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
     paths.cids.select(&path.cid);
     common::wait_for_sender_exit(&path).await;
     assert!(paths.snapshot().is_empty());
-    assert_eq!(path.state(), qtransport::path::PathState::Retired);
+    assert!(path.is_retired());
 
     assert!(
         space
@@ -177,12 +177,12 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
     );
     tokio::task::yield_now().await;
     assert!(paths.get(&path.pathway).is_some());
-    assert_ne!(path.state(), qtransport::path::PathState::Retired);
+    assert!(!path.is_retired());
     tokio::time::advance(3 * pto).await;
     terminator.await;
     tokio::task::yield_now().await;
     assert!(paths.get(&path.pathway).is_none());
-    assert_eq!(path.state(), qtransport::path::PathState::Retired);
+    assert!(path.is_retired());
 }
 
 #[tokio::test(start_paused = true)]

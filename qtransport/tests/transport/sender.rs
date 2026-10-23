@@ -2,10 +2,7 @@
 use qprotocol::protocol::quic::QuicProtocol;
 
 use super::*;
-use crate::{
-    path::PathState,
-    send::{MAX_BURST_PACKETS, fixture::TestSender as PacketSender, write::PendingPacket},
-};
+use crate::send::{MAX_BURST_PACKETS, fixture::TestSender as PacketSender, write::PendingPacket};
 
 pub(crate) struct Sender {
     inner: PacketSender,
@@ -25,7 +22,7 @@ impl Sender {
         let inner = PacketSender::new(
             path.pathway,
             path.cc.clone(),
-            path.anti_amplifier.clone(),
+            path.validation.clone(),
             Some(transport.data.clone()),
         );
         Ok(Self {
@@ -44,11 +41,14 @@ impl Sender {
         if self.inner.pending().next().is_some() {
             return Ok(true);
         }
-        if self.path.state() == PathState::Retired {
+        if self.path.is_retired() {
             return Err(
                 QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
             );
         }
+        let _ = self
+            .path
+            .poll_credit(&mut Context::from_waker(std::task::Waker::noop()));
         let mut once = false;
         let count = self.inner.burst(|sender, constraints| {
             if once {
@@ -75,30 +75,36 @@ impl Sender {
         cx: &mut Context<'_>,
         mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<std::io::Result<usize>>,
     ) -> Poll<Result<bool, Error>> {
-        self.inner
+        let result = self
+            .inner
             .poll_send_with(
                 cx,
                 &mut self.packets,
                 |cx, path, packets| submit(cx, path, &packets[0]).map(|result| result.map(|_| 1)),
-                |_| self.path.state() != PathState::Retired,
-                |packet| packet.on_sent(&self.path),
+                |_| !self.path.is_retired(),
+                |_| {},
             )
-            .map(|result| result.map(|n| n != 0))
+            .map(|result| result.map(|n| n != 0));
+        let _ = self.path.poll_credit(cx);
+        result
     }
     pub(crate) fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
         protocol: &QuicProtocol,
     ) -> Poll<Result<bool, Error>> {
-        self.inner
+        let result = self
+            .inner
             .poll_send_with(
                 cx,
                 &mut self.packets,
                 |cx, pathway, packets| protocol.poll_send_datagrams(cx, pathway, packets),
-                |_| self.path.state() != PathState::Retired,
-                |packet| packet.on_sent(&self.path),
+                |_| !self.path.is_retired(),
+                |_| {},
             )
-            .map(|result| result.map(|n| n != 0))
+            .map(|result| result.map(|n| n != 0));
+        let _ = self.path.poll_credit(cx);
+        result
     }
 }
 impl Drop for Sender {
@@ -135,8 +141,7 @@ pub(crate) fn assemble_data(
                 None,
             )
         });
-    let mut response = path.response();
-    let mut challenge = path.challenge();
+    let mut validation = path.validation.clone();
     let mut crypto = transport.data.crypto.outgoing();
     let mut reliable = transport.data.reliable_frames.clone();
     let mut streams = transport.data.streams.clone();
@@ -149,12 +154,6 @@ pub(crate) fn assemble_data(
                 .is_some_and(|pn| ack.as_ref().is_some_and(|ack| pn >= ack.largest()))
         {
             ack = None;
-        }
-        if packet.response == response {
-            response = None;
-        }
-        if packet.challenge == challenge {
-            challenge = None;
         }
     }
     let mut ping =
@@ -174,7 +173,7 @@ pub(crate) fn assemble_data(
             header,
             &transport.data.sent_journal,
             constraints,
-            [&mut ack, &mut response, &mut challenge, &mut ping],
+            [&mut ack, &mut validation, &mut ping],
         )
     } else {
         sender.assemble_1rtt_packet(
@@ -185,8 +184,7 @@ pub(crate) fn assemble_data(
             [
                 &mut ack,
                 &mut crypto,
-                &mut response,
-                &mut challenge,
+                &mut validation,
                 &mut reliable,
                 &mut ping,
                 &mut streams,

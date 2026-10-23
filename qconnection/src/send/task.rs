@@ -55,7 +55,6 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
 pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
-        path.anti_amplifier.cancel(waker);
         let phase = paths.phase();
         let phase = phase.get();
         path.cc.cancel(waker);

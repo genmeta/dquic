@@ -786,7 +786,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
     );
     drop(collector);
     initial.crypto.writer().write_all(b"hello").await.unwrap();
-    path.anti_amplifier.on_received(1200);
+    path.validation.on_received(1200);
     path.retire();
     assert!(count.0.load(Ordering::Relaxed) > 0);
     paths.terminator.terminate();
@@ -861,7 +861,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
     assert!(a.0.load(Ordering::Relaxed) > 0);
     assert!(b.0.load(Ordering::Relaxed) > 0);
     // Keep the second task credit-blocked while the first task retires.
-    second.guard_amplification();
+    second.validation.revalidate().unwrap();
     first.retire();
     common::wait_for_sender_exit(&first).await;
     let first_before = a.0.load(Ordering::Relaxed);
