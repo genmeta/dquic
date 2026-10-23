@@ -20,7 +20,10 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::{Encapsulate, Recover, Space};
-use crate::{Error, GuaranteedFrame, keys::ArcKeys};
+use crate::{
+    Error, GuaranteedFrame,
+    keys::{ArcKeys, Seal},
+};
 
 /// Handshake headers carry no token or application-data sources.
 #[derive(Deref)]
@@ -78,6 +81,16 @@ impl<K> UnregisterWaker for HandshakeSpace<K> {
 }
 
 impl Encapsulate for HandshakeSpace<ArcKeys> {
+    fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
+        let keys = self.keys.get().ok()?;
+        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
+        Some(super::probe_size(
+            &header,
+            self.sent_journal.lock_guard().next_pn_len(),
+            keys.sealing.tag_len(),
+        ))
+    }
+
     fn encapsulate(
         &self,
         cx: &mut Context<'_>,

@@ -64,14 +64,8 @@ async fn shared_trackers_follow_append_and_retirement() {
     let handshake = Arc::new(HandshakeStatus::new(false));
     handshake.handshake_confirmed();
     let controllers = [
-        controller_with(
-            path_status(handshake.clone()),
-            ArcIndexDeque::from(trackers.clone()),
-        ),
-        controller_with(
-            path_status(handshake),
-            ArcIndexDeque::from(trackers.clone()),
-        ),
+        controller_with(handshake.clone(), ArcIndexDeque::from(trackers.clone())),
+        controller_with(handshake, ArcIndexDeque::from(trackers.clone())),
     ];
     let recovered = Arc::new(Mutex::new(Vec::new()));
     {
@@ -124,10 +118,7 @@ async fn negotiated_ack_delays_separate_local_scheduling_from_peer_pto() {
 async fn handshake_ack_completes_peer_address_validation_before_handshake_done() {
     let handshake = Arc::new(HandshakeStatus::new(false));
     handshake.got_handshake_key();
-    let cc = controller_with(
-        path_status(handshake.clone()),
-        trackers(Arc::new(NoopFeedback)),
-    );
+    let cc = controller_with(handshake.clone(), trackers(Arc::new(NoopFeedback)));
     let sent_at = Instant::now();
     cc.on_pkt_sent(Epoch::Handshake, 0, true, MSS, true, None);
     tokio::time::advance(cc.get_pto(Epoch::Handshake)).await;
@@ -178,7 +169,7 @@ async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
     let handshake = Arc::new(HandshakeStatus::new(false));
     let cc = controller_with(
-        path_status(handshake.clone()),
+        handshake.clone(),
         trackers(Arc::new(RecordingFeedback(recovered.clone()))),
     );
     cc.on_pkt_sent(Epoch::Initial, 0, true, MSS, true, None);
@@ -199,7 +190,7 @@ async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
 fn path_loss_does_not_recover_handshake_spaces_before_confirmation() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
     let cc = controller_with(
-        path_status(Arc::new(HandshakeStatus::new(false))),
+        Arc::new(HandshakeStatus::new(false)),
         trackers(Arc::new(RecordingFeedback(recovered.clone()))),
     );
     cc.on_pkt_sent(Epoch::Initial, 0, true, MSS, true, None);
@@ -277,39 +268,73 @@ async fn ack_with_largest_on_another_path_does_not_sample_rtt() {
 
 #[tokio::test(start_paused = true)]
 async fn regression_releasing_amplification_credit_rearms_recovery() {
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.handshake_confirmed();
-    let status = path_status(handshake);
-    let cc = controller_with(status.clone(), trackers(Arc::new(NoopFeedback)));
+    let cc = controller();
+    cc.lock().set_amplification_blocked(true);
     cc.do_tick().unwrap();
-    status.enter_anti_amplification_limit();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     let base = cc.get_pto(Epoch::Data);
     tokio::time::advance(base).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
     assert_eq!(cc.get_pto(Epoch::Data), base);
-    cc.grant_anti_amplification();
+    cc.lock().set_amplification_blocked(false);
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     assert!(cc.get_pto(Epoch::Data) > base);
 }
 
 #[tokio::test(start_paused = true)]
-async fn ack_only_send_that_exhausts_amplification_credit_disarms_pto() {
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.handshake_confirmed();
-    let status = path_status(handshake);
-    let cc = controller_with(status.clone(), trackers(Arc::new(NoopFeedback)));
+async fn amplification_blocking_disarms_an_already_running_pto() {
+    let cc = controller();
     cc.do_tick().unwrap();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     let base = cc.get_pto(Epoch::Data);
-    status.enter_anti_amplification_limit();
-    cc.on_pkt_sent(Epoch::Data, 1, false, 30, false, None);
+    cc.lock().set_amplification_blocked(true);
     tokio::time::advance(base).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
     assert_eq!(cc.get_pto(Epoch::Data), base);
+}
+
+#[tokio::test(start_paused = true)]
+async fn amplification_unblocking_preserves_the_deadline_and_backoff() {
+    let cc = controller();
+    cc.do_tick().unwrap();
+    cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
+    tokio::time::advance(cc.get_pto(Epoch::Data)).await;
+    cc.do_tick().unwrap();
+    assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
+    cc.on_pkt_sent(Epoch::Data, 1, true, 30, true, None);
+    let backoff = cc.get_pto(Epoch::Data);
+    cc.lock().set_amplification_blocked(true);
+    tokio::time::advance(backoff / 2).await;
+    for _ in 0..4 {
+        cc.lock().set_amplification_blocked(false);
+        cc.do_tick().unwrap();
+        assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
+        assert_eq!(cc.get_pto(Epoch::Data), backoff);
+        tokio::time::advance(backoff / 8).await;
+    }
+    cc.do_tick().unwrap();
+    assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
+    assert!(cc.get_pto(Epoch::Data) > backoff);
+}
+
+#[tokio::test(start_paused = true)]
+async fn amplification_blocking_preserves_time_threshold_loss_detection() {
+    let lost = Arc::new(Mutex::new(Vec::new()));
+    let cc = controller_with_feedback(Arc::new(RecordingFeedback(lost.clone())));
+    cc.do_tick().unwrap();
+    cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
+    cc.on_pkt_sent(Epoch::Data, 1, true, MSS, true, None);
+    tokio::time::advance(Duration::from_millis(5)).await;
+    cc.on_ack_rcvd(Epoch::Data, &ack(1));
+    assert!(lost.lock().unwrap().is_empty());
+    cc.lock().set_amplification_blocked(true);
+    tokio::time::advance(Duration::from_millis(10)).await;
+    cc.do_tick().unwrap();
+    assert_eq!(*lost.lock().unwrap(), [0]);
+    assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
 }
 
 #[tokio::test(start_paused = true)]

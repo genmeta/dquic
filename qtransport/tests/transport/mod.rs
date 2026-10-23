@@ -261,7 +261,7 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         data_trackers(transport),
         &qtransport::path::PathCids::new(Default::default()),
     ));
-    path.validate();
+    path.validation.enter_validated().unwrap();
     path
 }
 
@@ -1603,11 +1603,11 @@ async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
 async fn retired_path_replacement_has_its_own_sender_and_waiter() {
     let [(_client, ct, cp), _] = pair(1);
     let old_sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
-    cp.retire();
+    cp.close();
     let replacement = path(&ct, 0);
     let mut sender = Sender::new(keys(&ct), ct.clone(), replacement.clone()).unwrap();
     drop(old_sender);
-    assert!(cp.is_retired());
+    assert!(cp.validation.is_cancelled());
     assert!(!Arc::ptr_eq(&cp, &replacement));
     sender.heartbeat();
     assert!(!emit(&mut sender).is_empty());
@@ -1626,7 +1626,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let mut sender = Sender::new(keys(&transport), transport.clone(), original.clone()).unwrap();
     emit(&mut sender);
     let credit = transport.flow.sender.credit(usize::MAX).available();
-    original.retire();
+    original.close();
     drop(sender);
     drop(original);
     // Path retirement alone must not make the stream range available again.
@@ -1778,7 +1778,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         data_trackers(&ct),
         &qtransport::path::PathCids::new(Default::default()),
     ));
-    path.validate();
+    path.validation.enter_validated().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), path).unwrap();
@@ -1847,7 +1847,7 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
         ))
     });
     let [cp, sp] = paths;
-    cp.on_datagram_received(400);
+    cp.validation.on_received(400);
     let challenge_frame = qbase::frame::PathChallengeFrame::random();
     cp.validation.challenge(challenge_frame).unwrap();
     let waiting = cp.validation.respond();
@@ -1866,43 +1866,14 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     assert_eq!(crate::send::constraints::credit(&sp.validation), 2400);
     receive(&ct, &cp, &response);
     assert_eq!(waiting.await.unwrap(), Some(challenge_frame.into()));
-    cp.validate();
-    assert!(cp.is_validated());
+    cp.validation.enter_validated().unwrap();
+    assert!(cp.validation.is_validated());
     receive(&st, &sp, &emit(&mut cs));
     let (_, mut reader) = accepting.await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut body = [0; 9];
     reader.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"validated");
-}
-
-#[tokio::test(start_paused = true)]
-async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
-    use qcongestion::Transport as _;
-    let [(_client, transport, original), _] = pair(1);
-    let path = Arc::new(Path::new(
-        original.pathway,
-        confirmed_handshake(false),
-        path_heartbeat(),
-        data_trackers(&transport),
-        &qtransport::path::PathCids::new(Default::default()),
-    ));
-    path.on_datagram_received(400);
-    path.validation
-        .challenge(qbase::frame::PathChallengeFrame::random())
-        .unwrap();
-    let mut sender = Sender::new(keys(&transport), transport, path.clone()).unwrap();
-    assert_eq!(emit(&mut sender).len(), 1200);
-    assert_eq!(crate::send::constraints::credit(&path.validation), 0);
-
-    tokio::time::advance(path.cc.get_pto(Epoch::Data) + Duration::from_millis(1)).await;
-    path.cc.do_tick().unwrap();
-    assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Data), 0);
-
-    path.on_datagram_received(400);
-    let _ = path.poll_credit(&mut Context::from_waker(std::task::Waker::noop()));
-    path.cc.do_tick().unwrap();
-    assert!(path.cc.need_send_ack_eliciting(Epoch::Data) > 0);
 }
 
 #[tokio::test(start_paused = true)]

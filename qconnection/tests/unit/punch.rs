@@ -114,9 +114,7 @@ async fn receive(
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
-    for path in paths.snapshot() {
-        paths.remove(&path);
-    }
+    paths.clean();
 }
 
 async fn receive_on_paths(
@@ -457,7 +455,7 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
             paths.pto_for(&link.into(), Epoch::Data),
             Duration::from_secs(1)
         );
-        assert!(paths.snapshot().is_empty());
+        assert!(paths.entries.lock().unwrap().is_empty());
         receive_on_paths(
             receiver,
             &paths,
@@ -468,7 +466,7 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         )
         .await;
         assert!(
-            paths.snapshot().is_empty(),
+            paths.entries.lock().unwrap().is_empty(),
             "forged 1-RTT must not start a path sender"
         );
 
@@ -481,9 +479,14 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
             Scopes::ALL,
         )
         .await;
-        let admitted = paths.snapshot();
-        assert_eq!(admitted.len(), 1);
-        let path = &admitted[0];
+        assert_eq!(paths.entries.lock().unwrap().len(), 1);
+        let path = &paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&link.into())
+            .cloned()
+            .unwrap();
         assert_eq!(path.pathway, link.into());
         let expected = if receiver.parameters.role() == Role::Client {
             usize::MAX
@@ -502,7 +505,16 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
             Scopes::ALL,
         )
         .await;
-        assert!(Arc::ptr_eq(&paths.snapshot()[0], path));
+        assert!(Arc::ptr_eq(
+            &paths
+                .entries
+                .lock()
+                .unwrap()
+                .get(&link.into())
+                .cloned()
+                .unwrap(),
+            path
+        ));
         assert_eq!(crate::common::path_credit(path), expected);
 
         // A replay with a new source address must not create a second path.
@@ -516,7 +528,7 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
             Scopes::ALL,
         )
         .await;
-        assert_eq!(paths.snapshot().len(), 1);
+        assert_eq!(paths.entries.lock().unwrap().len(), 1);
         paths.retire_all();
     }
 }
@@ -548,16 +560,17 @@ async fn server_rejects_out_of_scope_sources_before_path_admission() {
         scopes,
     )
     .await;
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
     receive_on_paths(&receiver, &paths, vec![packet], link.into(), link, scopes).await;
-    assert_eq!(paths.snapshot().len(), 1);
+    assert_eq!(paths.entries.lock().unwrap().len(), 1);
     paths.retire_all();
 }
 
 #[tokio::test]
 async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
-    let pair = pair();
-    for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
+    for receiver in [0, 1] {
+        let pair = pair();
+        let (receiver, sender) = (&pair[receiver], &pair[1 - receiver]);
         let paths = empty_paths(receiver);
         let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
@@ -584,7 +597,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         )
         .await;
         assert!(
-            paths.get(&link.into()).is_none(),
+            !paths.entries.lock().unwrap().contains_key(&link.into()),
             "forged packet admitted a path"
         );
         receive_on_paths(
@@ -597,19 +610,25 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         )
         .await;
         tokio::task::yield_now().await;
-        let path = paths.get(&link.into()).unwrap();
+        let path = paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&link.into())
+            .cloned()
+            .unwrap();
         assert_eq!(super::selection(&paths, &path), 2);
         if receiver.parameters.role() == Role::Client {
-            assert!(path.is_validated());
+            assert!(path.validation.is_validated());
             assert!(super::take_validation_frames(&path).is_empty());
         } else {
             assert!(matches!(
                 super::take_validation_frames(&path).as_slice(),
                 [Frame::PathChallenge(_)]
             ));
-            assert!(!path.is_validated());
+            assert!(!path.validation.is_validated());
         }
-        assert!(original.is_validated());
+        assert!(original.validation.is_validated());
         paths.retire_all();
         qprotocol::QuicProtocol::global().unregister(socket.local_addr().unwrap());
     }

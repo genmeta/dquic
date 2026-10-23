@@ -1,25 +1,18 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
-    future::poll_fn,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU16, Ordering},
-    },
-    task::{Context, Poll},
+    sync::{Arc, atomic::AtomicU16},
     time::Duration,
 };
 
 use qbase::{
-    Cancelled, Epoch,
+    Epoch,
     net::{route::Pathway, tx::ArcSendWakers},
     packet::assemble::Metadata,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::ArcIndexDeque,
     validate::ArcValidation,
 };
-use qcongestion::{
-    Algorithm, ArcCC, CongestionController, HandshakeStatus, PathStatus, Resend, Transport as _,
-};
+use qcongestion::{Algorithm, ArcCC, CongestionController, HandshakeStatus, MSS, Resend};
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
@@ -33,8 +26,6 @@ pub struct Path {
     pub send_waker: ArcSendWakers,
     pub validation: ArcValidation,
     pub heartbeat: ArcHeartbeat,
-    status: PathStatus,
-    retired: AtomicBool,
 }
 
 impl Path {
@@ -47,12 +38,13 @@ impl Path {
         cids: &Arc<PathCids>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
-        let status = PathStatus::new(handshake, Arc::new(AtomicU16::new(1200)));
+        let validation = ArcValidation::new();
         let cc = ArcCC::new(
             Algorithm::NewReno,
             Duration::from_millis(25),
             trackers,
-            status.clone(),
+            handshake,
+            Arc::new(AtomicU16::new(MSS as u16)),
             send_waker.clone(),
         );
         Self {
@@ -60,63 +52,14 @@ impl Path {
             cid: cids.register(pathway, send_waker.clone()),
             cc,
             send_waker,
-            validation: ArcValidation::new(),
+            validation,
             heartbeat,
-            status,
-            retired: AtomicBool::new(false),
         }
-    }
-
-    pub async fn failed(&self) {
-        poll_fn(|cx| {
-            self.send_waker.register(cx.waker());
-            if self.is_retired() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
-    }
-
-    pub fn is_retired(&self) -> bool {
-        self.retired.load(Ordering::Acquire)
-    }
-
-    pub fn is_validated(&self) -> bool {
-        self.validation.is_validated()
-    }
-
-    /// Only the sending task polls credit and synchronizes recovery's amplification limit.
-    pub fn poll_credit(&self, cx: &mut Context<'_>) -> Poll<Result<usize, Cancelled>> {
-        match self.validation.poll_credit(cx) {
-            Poll::Ready(Ok(credit)) => {
-                let credit = credit.unwrap_or(usize::MAX);
-                if credit < 1200 {
-                    self.status.enter_anti_amplification_limit();
-                } else if self.status.is_at_anti_amplification_limit() {
-                    self.cc.grant_anti_amplification();
-                }
-                Poll::Ready(Ok(credit))
-            }
-            Poll::Pending => {
-                self.status.enter_anti_amplification_limit();
-                Poll::Pending
-            }
-            Poll::Ready(Err(cancelled)) => Poll::Ready(Err(cancelled)),
-        }
-    }
-
-    /// Account each received UDP datagram once, at the connection router.
-    pub fn on_datagram_received(&self, bytes: usize) {
-        self.validation.on_received(bytes);
-        self.send_waker.wake_all();
     }
 
     /// Account one successfully submitted datagram under the submission's CC lock.
     pub fn on_sent(
         &self,
-        cx: &mut Context<'_>,
         cc: &mut CongestionController,
         bytes: usize,
         packets: [Option<Metadata>; 3],
@@ -129,17 +72,10 @@ impl Path {
             .or_else(|| packets.iter().position(Option::is_some));
         let now = Instant::now();
         self.validation.on_sent(bytes + overhead);
-        match self.validation.poll_credit(cx) {
-            Poll::Ready(Ok(None)) => self.status.release_anti_amplification_limit(),
-            Poll::Ready(Ok(Some(credit))) if credit >= 1200 => {
-                self.status.release_anti_amplification_limit();
-            }
-            _ => self.status.enter_anti_amplification_limit(),
-        }
         let _ = idle.on_sent_at(now);
         for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
             let Some(meta) = packet else { continue };
-            let size = meta.pktlen
+            let sent_bytes = meta.pktlen
                 + if charged == Some(epoch as usize) {
                     overhead
                 } else {
@@ -149,7 +85,7 @@ impl Path {
                 epoch,
                 meta.pn,
                 meta.content.is_ack_eliciting(),
-                size,
+                sent_bytes,
                 meta.in_flight,
                 meta.ack,
             );
@@ -157,24 +93,9 @@ impl Path {
         }
     }
 
-    pub fn exempt(&self) {
-        if self.validation.exempt().is_ok() {
-            self.cc.grant_anti_amplification();
-            self.send_waker.wake_all();
-        }
-    }
-
-    pub fn validate(&self) {
-        if self.validation.enter_validated().is_ok() {
-            self.cc.grant_anti_amplification();
-            self.send_waker.wake_all();
-        }
-    }
-
-    pub fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
-        self.cid.retire();
+    pub fn close(&self) {
         self.validation.cancel();
+        self.cid.retire();
         self.heartbeat.stop();
         self.send_waker.wake_all();
     }

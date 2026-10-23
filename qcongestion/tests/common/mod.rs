@@ -4,7 +4,7 @@ use qbase::{
     net::tx::ArcSendWakers,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{Algorithm, ArcCC, HandshakeStatus, MSS, PathStatus, Resend};
+use qcongestion::{Algorithm, ArcCC, HandshakeStatus, MSS, Resend};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Duration;
 
@@ -30,18 +30,16 @@ pub fn trackers(feedback: Arc<dyn Resend>) -> ArcIndexDeque<Arc<dyn Resend>, 2> 
     ArcIndexDeque::from(entries)
 }
 
-pub fn path_status(handshake: Arc<HandshakeStatus>) -> PathStatus {
-    let status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
-    status.release_anti_amplification_limit();
-    status
-}
-
-pub fn controller_with(status: PathStatus, trackers: ArcIndexDeque<Arc<dyn Resend>, 2>) -> ArcCC {
+pub fn controller_with(
+    handshake: Arc<HandshakeStatus>,
+    trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
+) -> ArcCC {
     ArcCC::new(
         Algorithm::NewReno,
         Duration::from_millis(25),
         trackers,
-        status,
+        handshake,
+        Arc::new(AtomicU16::new(MSS as u16)),
         ArcSendWakers::default(),
     )
 }
@@ -49,7 +47,7 @@ pub fn controller_with(status: PathStatus, trackers: ArcIndexDeque<Arc<dyn Resen
 pub fn controller_with_feedback(feedback: Arc<dyn Resend>) -> ArcCC {
     let handshake = Arc::new(HandshakeStatus::new(false));
     handshake.handshake_confirmed();
-    controller_with(path_status(handshake), trackers(feedback))
+    controller_with(handshake, trackers(feedback))
 }
 
 pub fn controller() -> ArcCC {

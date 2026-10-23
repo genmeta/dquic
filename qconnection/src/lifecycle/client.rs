@@ -221,10 +221,12 @@ pub async fn client_growing(
                     )
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
-                        move || {
-                            paths
-                                .upgrade()
-                                .map_or_else(Vec::new, |paths| paths.snapshot())
+                        move |visit| {
+                            if let Some(paths) = paths.upgrade() {
+                                for path in paths.entries.lock().unwrap().values() {
+                                    visit(path);
+                                }
+                            }
                         }
                     }),
                 ),
@@ -324,7 +326,7 @@ pub(crate) async fn resolve_paths(
             paths.add_path(pathway);
         }
     }
-    if paths.snapshot().is_empty() {
+    if paths.entries.lock().unwrap().is_empty() {
         return Err(QuicError::with_default_fty(
             ErrorKind::NoViablePath,
             format!("DNS lookup for {server_name} ended without a usable path"),

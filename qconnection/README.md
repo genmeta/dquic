@@ -12,6 +12,7 @@
 - `server_growing`：从传入的 `Paths` 取得同一份阶段、路径及关闭状态，推进服务端连接。
 - 路径发送任务：每轮 Burst 读取阶段材料，结合本路径的 ACK、Challenge、Response、心跳及发送约束，依次尝试 Initial、Handshake、Data，再批量发送。Phase 不提供 assemble/send 方法。
 - `Paths::add_path`：创建并登记 `Path`，在 `Path` 上记录是否为握手选中路径，并启动该路径唯一的发送任务。重复添加同一 `Pathway` 返回已有路径。
+- `Paths::get(&pathway)`：取得已有路径，缺失时创建并启动发送、验证任务；`add_path` 也通过该入口复用路径。`remove(&pathway)` 按地址删除路径并停止其任务。
 
 ## 全局入口
 

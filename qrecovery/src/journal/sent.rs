@@ -59,6 +59,11 @@ pub struct SentJournal {
 }
 
 impl SentJournal {
+    /// Inspect the next encoded PN length without reserving a packet number.
+    pub fn next_pn_len(&self) -> usize {
+        PacketNumber::encode(self.next_pn.min(VARINT_MAX), self.largest_acked).size()
+    }
+
     /// Reserve a unique packet number before constructing a packet.
     pub fn next_pn(&mut self) -> Result<(u64, PacketNumber), Error> {
         let pn = self.next_pn;
@@ -374,6 +379,28 @@ impl ArcSentJournal {
 #[cfg(test)]
 mod tests {
     use super::{ArcSentJournal, ErrorKind, PacketNumber, VARINT_MAX};
+
+    #[test]
+    fn inspecting_pn_length_does_not_reserve_packet_numbers() {
+        for (pn, largest_acked, expected_len) in [
+            (0, 0, 2),
+            (1 << 15, 0, 3),
+            (1 << 23, 0, 4),
+            (1 << 23, (1 << 23) - 1, 2),
+        ] {
+            let records = ArcSentJournal::default();
+            // Reach encoding-length boundaries without allocating millions of packets.
+            let mut journal = records.lock_guard();
+            journal.next_pn = pn;
+            journal.largest_acked = largest_acked;
+            for _ in 0..3 {
+                assert_eq!(journal.next_pn_len(), expected_len);
+            }
+            let reserved = journal.next_pn().unwrap();
+            assert_eq!(reserved.0, pn);
+            assert_eq!(reserved.1.size(), expected_len);
+        }
+    }
 
     // The u62 boundary cannot be reached by a practical sequence of public allocations.
     #[test]

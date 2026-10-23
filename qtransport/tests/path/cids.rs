@@ -127,14 +127,14 @@ async fn replacement_at_selected_address_does_not_inherit_selection_or_old_handl
     let old = register(&cids, 4001);
     cids.select(&old.cid);
     let snapshot = ready(&old);
-    old.retire();
+    old.close();
     let replacement = register(&cids, 4001);
     assert!(!cids.is_selected(&replacement.cid));
     assert!(!cids.select(&replacement.cid));
     assert!(borrow(&replacement).is_pending());
     assert!(matches!(borrow(&old), Poll::Ready(None)));
     assert_eq!(*snapshot, cids.initial_dcid());
-    old.retire();
+    old.close();
     drop(old);
     assert!(borrow(&replacement).is_pending());
     assert!(!cids.is_initial());
@@ -149,7 +149,7 @@ async fn confirmation_survives_removal_of_every_path() {
     cids.select(&selected.cid);
     cids.attach_remote(remote.clone());
     cids.confirm_handshake();
-    selected.retire();
+    selected.close();
     let next = ConnectionId::from_slice(b"peer0001");
     remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
@@ -209,7 +209,7 @@ async fn primary_cid_rotates_before_confirmation_and_borrow_outlives_retirement(
     drop(pinned);
     let current = ready(&selected);
     assert_eq!(*current, next);
-    selected.retire();
+    selected.close();
     assert!(matches!(borrow(&selected), Poll::Ready(None)));
     assert_eq!(*current, next);
     drop(current);
@@ -250,7 +250,7 @@ async fn confirmation_new_cid_and_retirement_wake_waiting_sender() {
         .unwrap();
     assert_eq!(counter.0.load(Ordering::Relaxed), 2);
     drop(ready(&other));
-    other.retire();
+    other.close();
     assert!(counter.0.load(Ordering::Relaxed) >= 3);
     assert!(matches!(other.cid.borrow_cid(&mut cx), Poll::Ready(None)));
 }

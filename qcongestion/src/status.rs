@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU16, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Connection-wide handshake facts shared by every path's recovery controller.
 #[derive(Debug)]
@@ -49,44 +46,5 @@ impl HandshakeStatus {
 
     pub fn is_handshake_confirmed(&self) -> bool {
         self.is_handshake_confirmed.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Clone)]
-pub struct PathStatus {
-    pub(crate) handshake: Arc<HandshakeStatus>,
-    is_at_anti_amplification_limit: Arc<AtomicBool>,
-    pmtu: Arc<AtomicU16>,
-}
-
-impl PathStatus {
-    pub fn new(handshake: Arc<HandshakeStatus>, pmut: Arc<AtomicU16>) -> Self {
-        Self {
-            handshake,
-            is_at_anti_amplification_limit: Arc::new(AtomicBool::new(true)),
-            pmtu: pmut,
-        }
-    }
-
-    pub fn is_at_anti_amplification_limit(&self) -> bool {
-        self.is_at_anti_amplification_limit.load(Ordering::Relaxed)
-    }
-
-    pub fn release_anti_amplification_limit(&self) {
-        self.is_at_anti_amplification_limit
-            .store(false, Ordering::Release);
-    }
-
-    pub fn enter_anti_amplification_limit(&self) {
-        self.is_at_anti_amplification_limit
-            .store(true, Ordering::Release);
-    }
-
-    pub(super) fn pmtu(&self) -> Arc<AtomicU16> {
-        self.pmtu.clone()
-    }
-
-    pub(crate) fn mtu(&self) -> usize {
-        self.pmtu.load(Ordering::Relaxed) as usize
     }
 }

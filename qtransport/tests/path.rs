@@ -42,7 +42,7 @@ async fn handshake_confirmation_stops_early_epoch_pto() {
         ArcIndexDeque::from(IndexDeque::with_capacity(3)),
         &qtransport::path::PathCids::new(Default::default()),
     );
-    path.exempt();
+    path.validation.exempt().unwrap();
     handshake.got_handshake_key();
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
@@ -70,17 +70,47 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
         ArcIndexDeque::default(),
         &qtransport::path::PathCids::new(Default::default()),
     );
-    path.exempt();
+    path.validation.exempt().unwrap();
     let step = path.cc.get_pto(Epoch::Initial) / 10;
     for _ in 0..11 {
         tokio::time::advance(step).await;
         assert!(matches!(
-            path.poll_credit(&mut Context::from_waker(Waker::noop())),
-            Poll::Ready(Ok(usize::MAX))
+            path.validation
+                .poll_credit(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(None))
         ));
         path.cc.do_tick().unwrap();
     }
     assert!(path.cc.need_send_ack_eliciting(Epoch::Initial) > 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_shared_validation_retires_the_path() {
+    let path = Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+        ),
+        Arc::new(HandshakeStatus::new(true)),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        ArcIndexDeque::default(),
+        &qtransport::path::PathCids::new(Default::default()),
+    );
+    assert!(path.validation.credit().is_ok());
+    path.validation.cancel();
+    assert!(matches!(
+        path.validation
+            .poll_credit(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(qbase::Cancelled))
+    ));
+    path.close();
+    path.close();
+    assert!(path.validation.enter_validated().is_err());
+    assert!(matches!(
+        path.validation
+            .poll_credit(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(qbase::Cancelled))
+    ));
 }
 
 #[tokio::test(start_paused = true)]

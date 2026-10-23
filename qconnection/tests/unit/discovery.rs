@@ -72,17 +72,59 @@ async fn dns_records_are_consumed_in_order_without_delaying_relays() {
     ));
     send.unbounded_send((Source::Dht, relay)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
-    assert!(paths.get(&Pathway::new(public, relay)).is_none());
-    assert_eq!(paths.snapshot().len(), 1);
-    assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_none());
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local_relay, relay))
+    );
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(public, relay))
+    );
+    assert_eq!(paths.entries.lock().unwrap().len(), 1);
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local.endpoint(), direct))
+    );
     send.unbounded_send((Source::System, direct)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert!(paths.get(&Pathway::new(local.endpoint(), direct)).is_some());
-    assert!(paths.get(&Pathway::new(public, direct)).is_none());
-    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
-    assert!(paths.get(&Pathway::new(local_relay, direct)).is_none());
-    assert_eq!(paths.snapshot().len(), 2);
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local.endpoint(), direct))
+    );
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(public, direct))
+    );
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local_relay, relay))
+    );
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local_relay, direct))
+    );
+    assert_eq!(paths.entries.lock().unwrap().len(), 2);
     drop(send);
     discovery.await.unwrap();
     paths.retire_all();
@@ -114,9 +156,21 @@ async fn relay_only_dns_creates_a_path_without_waiting() {
     .now_or_never()
     .expect("relay-only discovery must not wait for a timer")
     .unwrap();
-    assert!(paths.get(&Pathway::new(local_relay, relay)).is_some());
-    assert!(paths.get(&Pathway::new(public, relay)).is_none());
-    assert_eq!(paths.snapshot().len(), 1);
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local_relay, relay))
+    );
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(public, relay))
+    );
+    assert_eq!(paths.entries.lock().unwrap().len(), 1);
     paths.retire_all();
 }
 
@@ -142,7 +196,7 @@ async fn relay_only_dns_without_a_local_relay_reports_no_viable_path() {
     .expect("relay-only discovery must not wait for a timer")
     .unwrap_err();
     assert!(matches!(error, Error::Quic(error) if error.kind() == ErrorKind::NoViablePath));
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
 }
 
 fn paths() -> Arc<Paths> {
@@ -221,22 +275,40 @@ async fn streaming_dns_pairs_each_record_with_the_current_book_and_deduplicates_
     ))
     .unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
 
     let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
     send.unbounded_send((Source::System, peer)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    let original = paths.get(&Pathway::new(first.endpoint(), peer)).unwrap();
+    let original = paths
+        .entries
+        .lock()
+        .unwrap()
+        .get(&Pathway::new(first.endpoint(), peer))
+        .cloned()
+        .unwrap();
 
     let second = LocalSocket::new(&book);
     send.unbounded_send((Source::Dht, peer)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert_eq!(paths.snapshot().len(), 2);
+    assert_eq!(paths.entries.lock().unwrap().len(), 2);
     assert!(Arc::ptr_eq(
-        &paths.get(&original.pathway).unwrap(),
+        &paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&original.pathway)
+            .cloned()
+            .unwrap(),
         &original
     ));
-    assert!(paths.get(&Pathway::new(second.endpoint(), peer)).is_some());
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(second.endpoint(), peer))
+    );
     drop(send);
     discovery.await.unwrap();
     paths.retire_all();
@@ -261,7 +333,7 @@ async fn empty_failed_and_unregistered_results_report_no_viable_path() {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::Quic(error) if error.kind() == ErrorKind::NoViablePath));
-        assert!(paths.snapshot().is_empty());
+        assert!(paths.entries.lock().unwrap().is_empty());
     }
 }
 
@@ -291,7 +363,7 @@ async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     ] {
         send.unbounded_send((source, peer)).unwrap();
         assert!(futures::poll!(&mut discovery).is_pending());
-        assert!(paths.snapshot().is_empty());
+        assert!(paths.entries.lock().unwrap().is_empty());
     }
     send.unbounded_send((
         Source::Mdns {
@@ -302,8 +374,14 @@ async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     ))
     .unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
-    assert!(paths.get(&Pathway::new(local.endpoint(), peer)).is_some());
-    assert_eq!(paths.snapshot().len(), 1);
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local.endpoint(), peer))
+    );
+    assert_eq!(paths.entries.lock().unwrap().len(), 1);
     drop(send);
     discovery.await.unwrap();
     paths.retire_all();
@@ -329,8 +407,20 @@ async fn loopback_dns_excludes_non_loopback_local_endpoints() {
     .now_or_never()
     .unwrap()
     .unwrap();
-    assert_eq!(paths.snapshot().len(), 1);
-    assert!(paths.get(&Pathway::new(local.endpoint(), peer)).is_some());
-    assert!(paths.get(&Pathway::new(bridge, peer)).is_none());
+    assert_eq!(paths.entries.lock().unwrap().len(), 1);
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(local.endpoint(), peer))
+    );
+    assert!(
+        !paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&Pathway::new(bridge, peer))
+    );
     paths.retire_all();
 }

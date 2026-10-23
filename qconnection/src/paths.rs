@@ -40,7 +40,7 @@ pub struct Paths {
     pub(crate) handshake: Arc<HandshakeStatus>,
     /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
     pub(crate) is_mp_handshaking: Arc<AtomicBool>,
-    pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
+    pub entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub validations: ArcValidations,
     role: Role,
     idle: ArcIdleTimer,
@@ -118,11 +118,28 @@ impl Paths {
     /// Enable a path and start its only sender. After handshake confirmation, also
     /// start validation; existing paths and validation tasks are reused.
     pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
-        self.create_path(pathway)
+        self.get_or_create_path(&pathway)
     }
 
-    pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
-        self.create_path(pathway)
+    /// Reuse the registered path, or create it and start its sender and validation.
+    pub fn get_or_create_path(self: &Arc<Self>, pathway: &Pathway) -> Arc<Path> {
+        self.entries
+            .lock()
+            .unwrap()
+            .entry(*pathway)
+            .or_insert_with(|| self.create_path(*pathway))
+            .clone()
+    }
+
+    /// Remove the registered path and stop its validation, heartbeat and sender.
+    pub fn del_path(&self, pathway: &Pathway) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let Some(path) = entries.remove(pathway) else {
+            return false;
+        };
+        path.close();
+        self.validations.remove(pathway);
+        true
     }
 
     /// Opening-key retention needs a PTO before an unknown path is admitted.
@@ -140,10 +157,6 @@ impl Paths {
     }
 
     fn create_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
-        let mut entries = self.entries.lock().unwrap();
-        if let Some(path) = entries.get(&pathway) {
-            return path.clone();
-        }
         let path = Arc::new(Path::new(
             pathway,
             self.handshake.clone(),
@@ -155,12 +168,10 @@ impl Paths {
             &self.cids,
         ));
         if self.role == Role::Client {
-            path.exempt();
+            let _ = path.validation.exempt();
         }
         self.validations.insert(pathway, path.validation.clone());
-        entries.insert(pathway, path.clone());
         self.start_validation(&path);
-        drop(entries);
 
         tokio::spawn(crate::send::sending(self.clone(), path.clone()));
         path.send_waker.wake_all();
@@ -207,8 +218,10 @@ impl Paths {
     }
 
     pub(crate) fn closing_pto(&self) -> Duration {
-        self.snapshot()
-            .iter()
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
             .map(|path| path.cc.pto_base(Epoch::Data))
             .max()
             .unwrap_or(Duration::from_secs(1))
@@ -246,7 +259,7 @@ impl Paths {
         // Prepare per-path state before releasing suspended senders.
         for path in entries.values() {
             if self.cids.is_selected(&path.cid) {
-                path.validate();
+                let _ = path.validation.enter_validated();
             }
         }
         self.cids.confirm_handshake();
@@ -258,7 +271,7 @@ impl Paths {
     /// Spawn one round at path creation or handshake confirmation.
     /// After revalidation, the caller explicitly starts the next round.
     pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if !self.cids.is_confirmed() || path.is_validated() || path.is_retired() {
+        if !self.cids.is_confirmed() || path.validation.is_validated() {
             return;
         }
         let response = path.validation.respond();
@@ -268,7 +281,7 @@ impl Paths {
             let terminator = paths.terminator.clone();
             let challenge = PathChallengeFrame::random();
             for _ in 0..=3 {
-                if path.is_validated() || path.validation.challenge(challenge).is_err() {
+                if path.validation.is_validated() || path.validation.challenge(challenge).is_err() {
                     break;
                 }
                 match tokio::select! {
@@ -277,15 +290,32 @@ impl Paths {
                     result = tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone()) => result,
                 } {
                     Ok(Ok(Some(frame))) if frame == PathResponseFrame::from(challenge) => {
-                        path.validate();
+                        if path.validation.enter_validated().is_ok() {
+                            path.send_waker.wake_all();
+                        }
                         break;
                     }
                     Ok(_) => break,
                     Err(_) => continue,
                 }
             }
-            // A replacement at the same Pathway has its own receiver and task.
-            if !path.is_validated() && paths.remove(&path) && paths.snapshot().is_empty() {
+            // Check and remove under one lock: an old task must not remove a replacement.
+            let no_paths = {
+                let mut entries = paths.entries.lock().unwrap();
+                if !path.validation.is_validated()
+                    && entries
+                        .get(&path.pathway)
+                        .is_some_and(|current| Arc::ptr_eq(current, &path))
+                {
+                    path.close();
+                    entries.remove(&path.pathway);
+                    paths.validations.remove(&path.pathway);
+                    entries.is_empty()
+                } else {
+                    false
+                }
+            };
+            if no_paths {
                 terminator.close(
                     CloseReason::Internal(QuicError::with_default_fty(
                         ErrorKind::NoViablePath,
@@ -297,27 +327,32 @@ impl Paths {
         });
     }
 
-    pub fn get(&self, pathway: &Pathway) -> Option<Arc<Path>> {
-        self.entries.lock().unwrap().get(pathway).cloned()
-    }
-
-    pub fn snapshot(&self) -> Vec<Arc<Path>> {
-        self.entries.lock().unwrap().values().cloned().collect()
-    }
-
-    /// Remove this exact retired instance, never a replacement at the same address.
-    pub fn remove(&self, path: &Arc<Path>) -> bool {
-        path.retire();
-        let mut entries = self.entries.lock().unwrap();
-        if entries
-            .get(&path.pathway)
-            .is_some_and(|current| Arc::ptr_eq(current, path))
+    /// Stop idle expiry and release paths, packet spaces and recovery trackers.
+    pub fn clean(&self) {
+        self.idle.cancel();
         {
-            entries.remove(&path.pathway);
-            self.validations.remove(&path.pathway);
-            true
-        } else {
-            false
+            let entries = self.entries.lock().unwrap();
+            for path in entries.values() {
+                for epoch in [Epoch::Initial, Epoch::Handshake] {
+                    path.cc.discard_epoch(epoch);
+                }
+            }
+        }
+        {
+            let mut spaces = self.spaces.write_guard();
+            while let Some((_, space)) = spaces.pop_front() {
+                space.retire();
+            }
+        }
+        {
+            let mut loss_resender = self.loss_resender.write_guard();
+            let end = loss_resender.largest();
+            loss_resender.drain_to(end).for_each(drop);
+        }
+        let mut entries = self.entries.lock().unwrap();
+        for (pathway, path) in std::mem::take(&mut *entries) {
+            path.close();
+            self.validations.remove(&pathway);
         }
     }
 }

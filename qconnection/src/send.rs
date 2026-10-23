@@ -17,7 +17,7 @@ use qbase::{
     packet::{Package, assemble::Metadata},
     param::ParameterId,
 };
-use qcongestion::Transport as _;
+use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
 use qtransport::{
     path::Path,
@@ -84,6 +84,7 @@ impl<'a, 'path> Burst<'a, 'path> {
     pub async fn submit(&mut self, count: usize) -> Result<(), Error> {
         let spaces = self.spaces.as_ref().expect("collected spaces");
         let path = self.path;
+        let dcid = **self.dcid.as_ref().expect("collected CID");
         let idle = self.paths.idle();
         let deadlines = Epoch::EPOCHS.map(|epoch| {
             (
@@ -100,6 +101,8 @@ impl<'a, 'path> Burst<'a, 'path> {
             let sent = poll_fn(|cx| -> Poll<std::io::Result<usize>> {
                 // ACK handling takes the same lock as submission and completion.
                 let mut cc = path.cc.lock();
+                // Retirement also cancels a batch already waiting for UDP writability.
+                path.validation.credit().map_err(std::io::Error::other)?;
                 let sent = ready!(QuicProtocol::global().poll_send(
                     cx,
                     path.pathway,
@@ -118,8 +121,17 @@ impl<'a, 'path> Burst<'a, 'path> {
                         Some(meta)
                     });
                     sent_handshake |= packets[Epoch::Handshake].is_some();
-                    path.on_sent(cx, &mut cc, self.datagrams[index].len(), packets, &idle);
+                    path.on_sent(&mut cc, self.datagrams[index].len(), packets, &idle);
                 }
+                update_amplification_blocked(
+                    &mut cc,
+                    spaces,
+                    dcid,
+                    path.validation
+                        .credit()
+                        .map_or(0, |credit| credit.unwrap_or(usize::MAX)),
+                    QuicProtocol::packet_overhead(path.pathway),
+                );
                 Poll::Ready(Ok(sent))
             })
             .await
@@ -147,9 +159,29 @@ impl Burst<'_, '_> {
         let cid = ready!(path.cid.borrow_cid(cx))
             .ok_or_else(|| no_viable_path("path CID binding retired"))?;
         let phase = self.paths.phase().poll_phase(cx).clone();
-        let credit = ready!(path.poll_credit(cx)).map_err(no_viable_path)?;
+        self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
+        let credit = match path.validation.poll_credit(cx) {
+            Poll::Ready(credit) => credit.map_err(no_viable_path)?.unwrap_or(usize::MAX),
+            Poll::Pending => 0,
+        };
+        let overhead = QuicProtocol::packet_overhead(path.pathway);
+        let send_quota = {
+            let mut cc = path.cc.lock();
+            // Update the budget before driving PTO, including when credit polling waits.
+            update_amplification_blocked(
+                &mut cc,
+                self.spaces.as_ref().unwrap(),
+                *cid,
+                credit,
+                overhead,
+            );
+            ready!(cc.poll_send_quota(cx)).map_err(no_viable_path)?
+        };
+        if credit == 0 {
+            return Poll::Pending;
+        }
         let mut limits = Constraints {
-            send_quota: ready!(path.cc.poll_send_quota(cx)).map_err(no_viable_path)?,
+            send_quota,
             credit,
             probe_quota: Epoch::EPOCHS.map(|epoch| {
                 if path.cc.need_send_ack_eliciting(epoch) > 0 {
@@ -159,9 +191,8 @@ impl Burst<'_, '_> {
                 }
             }),
             flow_ctrl: 0,
-            overhead: QuicProtocol::packet_overhead(path.pathway),
+            overhead,
         };
-        self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
         let mut flow = if let ConnPhase::Mature(phase) = &phase {
             let requested = self
                 .spaces
@@ -262,6 +293,25 @@ impl Burst<'_, '_> {
             Poll::Ready(Ok(count))
         }
     }
+}
+
+fn update_amplification_blocked(
+    cc: &mut CongestionController,
+    spaces: &Spaces,
+    dcid: ConnectionId,
+    credit: usize,
+    overhead: usize,
+) {
+    let epoch = cc.pto_epoch();
+    let blocked = match credit {
+        0 => true,
+        usize::MAX => false,
+        _ => epoch
+            .and_then(|epoch| spaces.0.get(epoch as u64))
+            .and_then(|space| space.probe_size(dcid))
+            .is_some_and(|size| credit < size + overhead),
+    };
+    cc.set_amplification_blocked(blocked);
 }
 
 fn no_viable_path(error: impl std::fmt::Display) -> Error {
