@@ -54,6 +54,8 @@ pub mod time;
 pub mod token;
 /// Utilities for common data structures.
 pub mod util;
+/// Per-path address validation and anti-amplification credit.
+pub mod validate;
 /// [Variable-length integers](https://www.rfc-editor.org/rfc/rfc9000.html#name-variable-length-integer-enc).
 pub mod varint;
 
