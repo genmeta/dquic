@@ -17,6 +17,18 @@ const CLIENT_KEY: &[u8] = include_bytes!("../keychain/localhost/client.key");
 const SERVER_OCSP: &[u8] = include_bytes!("../keychain/localhost/server.ocsp");
 const CLIENT_OCSP: &[u8] = include_bytes!("../keychain/localhost/client.ocsp");
 
+pub fn path_credit(path: &qtransport::path::Path) -> usize {
+    use std::task::{Context, Poll, Waker};
+
+    match path
+        .validation
+        .poll_credit(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(Ok(credit)) => credit.unwrap_or(usize::MAX),
+        _ => 0,
+    }
+}
+
 pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     set_roots();
     let provider = Arc::new(qtls::default_provider());

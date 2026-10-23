@@ -42,7 +42,7 @@ async fn handshake_confirmation_stops_early_epoch_pto() {
         ArcIndexDeque::from(IndexDeque::with_capacity(3)),
         &qtransport::path::PathCids::new(Default::default()),
     );
-    path.client_handshaking();
+    path.exempt();
     handshake.got_handshake_key();
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
@@ -54,6 +54,33 @@ async fn handshake_confirmation_stops_early_epoch_pto() {
         assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
         assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
+    use qbase::Epoch;
+
+    let path = Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+        ),
+        Arc::new(HandshakeStatus::new(false)),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        ArcIndexDeque::default(),
+        &qtransport::path::PathCids::new(Default::default()),
+    );
+    path.exempt();
+    let step = path.cc.get_pto(Epoch::Initial) / 10;
+    for _ in 0..11 {
+        tokio::time::advance(step).await;
+        assert!(matches!(
+            path.poll_credit(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(usize::MAX))
+        ));
+        path.cc.do_tick().unwrap();
+    }
+    assert!(path.cc.need_send_ack_eliciting(Epoch::Initial) > 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -71,9 +98,12 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 &qtransport::path::PathCids::new(Default::default()),
             );
             if queued {
-                path.recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
+                path.validation
+                    .recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
                     .unwrap();
-                path.set_challenge(PathChallengeFrame::from_slice(&[2; 8]));
+                path.validation
+                    .challenge(PathChallengeFrame::from_slice(&[2; 8]))
+                    .unwrap();
             }
             let counter = Arc::new(Counter(AtomicUsize::new(0)));
             let waker = Waker::from(counter.clone());
@@ -88,7 +118,7 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 ..Default::default()
             };
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
-            let result = (&path).poll_dump(
+            let result = path.validation.clone().poll_dump(
                 &mut Context::from_waker(&waker),
                 &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
             );
@@ -96,9 +126,43 @@ async fn validation_registers_only_when_both_sources_are_empty() {
             if queued {
                 assert_eq!(result, Poll::Ready(Ok(if quota == 0 { 0 } else { 2 })));
             }
-            path.recv_frame(PathChallengeFrame::from_slice(&[3; 8]))
+            path.validation
+                .recv_frame(PathChallengeFrame::from_slice(&[3; 8]))
                 .unwrap();
             assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
         }
     }
+}
+
+#[tokio::test]
+async fn every_duplicate_challenge_is_packaged_as_a_response() {
+    let path = Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+        ),
+        Arc::new(HandshakeStatus::new(true)),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        ArcIndexDeque::default(),
+        &qtransport::path::PathCids::new(Default::default()),
+    );
+    for _ in 0..10 {
+        path.validation
+            .recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
+            .unwrap();
+    }
+    let mut bytes = bytes::BytesMut::new();
+    let mut frames = Vec::new();
+    let mut limits = Constraints {
+        send_quota: 128,
+        credit: 128,
+        max_size: 128,
+        ..Default::default()
+    };
+    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let result = path.validation.clone().poll_dump(
+        &mut Context::from_waker(Waker::noop()),
+        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+    );
+    assert_eq!(result, Poll::Ready(Ok(10)));
 }

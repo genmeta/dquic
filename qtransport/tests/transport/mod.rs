@@ -306,12 +306,8 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
         Frame::Ack(frame) => acknowledge(transport, &frame, path)?,
         Frame::MaxData(frame) => transport.flow.sender.recv_frame(frame)?,
         Frame::DataBlocked(frame) => transport.flow.recver.recv_frame(frame)?,
-        Frame::PathChallenge(frame) => path.recv_frame(frame)?,
-        Frame::PathResponse(frame) => {
-            if path.matches_response(frame) {
-                path.validate();
-            }
-        }
+        Frame::PathChallenge(frame) => path.validation.recv_frame(frame)?,
+        Frame::PathResponse(frame) => path.validation.recv_frame(frame)?,
         Frame::Crypto(frame, bytes) => transport
             .data
             .crypto
@@ -983,7 +979,9 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
     receive(&ct, &cp, &ping(&keys(&st), 0)).unwrap();
     tokio::time::advance(Duration::from_millis(100)).await;
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
-    cp.recv_frame(PathChallengeFrame::random()).unwrap();
+    cp.validation
+        .recv_frame(PathChallengeFrame::random())
+        .unwrap();
     ct.data
         .reliable_frames
         .send_frame([ReliableFrame::MaxData(MaxDataFrame::new(4096u32.into()))]);
@@ -1609,7 +1607,7 @@ async fn retired_path_replacement_has_its_own_sender_and_waiter() {
     let replacement = path(&ct, 0);
     let mut sender = Sender::new(keys(&ct), ct.clone(), replacement.clone()).unwrap();
     drop(old_sender);
-    assert_eq!(cp.state(), crate::path::PathState::Retired);
+    assert!(cp.is_retired());
     assert!(!Arc::ptr_eq(&cp, &replacement));
     sender.heartbeat();
     assert!(!emit(&mut sender).is_empty());
@@ -1850,21 +1848,25 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     });
     let [cp, sp] = paths;
     cp.on_datagram_received(400);
-    cp.set_challenge(qbase::frame::PathChallengeFrame::random());
+    let challenge_frame = qbase::frame::PathChallengeFrame::random();
+    cp.validation.challenge(challenge_frame).unwrap();
+    let waiting = cp.validation.respond();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"validated")).unwrap();
     let mut cs = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     let mut ss = Sender::new(keys(&st), st.clone(), sp.clone()).unwrap();
     let challenge = emit(&mut cs);
     assert_eq!(challenge.len(), 1200);
-    assert_eq!(sp.amplification_credit(), 0);
+    assert_eq!(crate::send::constraints::credit(&sp.validation), 0);
     receive(&st, &sp, &challenge);
     let mut accepting = Box::pin(server.accept_uni_stream());
     assert!(futures::poll!(&mut accepting).is_pending());
     let response = emit(&mut ss);
     assert_eq!(response.len(), 1200);
-    assert_eq!(sp.amplification_credit(), 2400);
+    assert_eq!(crate::send::constraints::credit(&sp.validation), 2400);
     receive(&ct, &cp, &response);
+    assert_eq!(waiting.await.unwrap(), Some(challenge_frame.into()));
+    cp.validate();
     assert!(cp.is_validated());
     receive(&st, &sp, &emit(&mut cs));
     let (_, mut reader) = accepting.await.unwrap();
@@ -1886,16 +1888,19 @@ async fn exhausted_amplification_credit_suspends_pto_until_another_datagram() {
         &qtransport::path::PathCids::new(Default::default()),
     ));
     path.on_datagram_received(400);
-    path.set_challenge(qbase::frame::PathChallengeFrame::random());
+    path.validation
+        .challenge(qbase::frame::PathChallengeFrame::random())
+        .unwrap();
     let mut sender = Sender::new(keys(&transport), transport, path.clone()).unwrap();
     assert_eq!(emit(&mut sender).len(), 1200);
-    assert_eq!(path.amplification_credit(), 0);
+    assert_eq!(crate::send::constraints::credit(&path.validation), 0);
 
     tokio::time::advance(path.cc.get_pto(Epoch::Data) + Duration::from_millis(1)).await;
     path.cc.do_tick().unwrap();
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Data), 0);
 
     path.on_datagram_received(400);
+    let _ = path.poll_credit(&mut Context::from_waker(std::task::Waker::noop()));
     path.cc.do_tick().unwrap();
     assert!(path.cc.need_send_ack_eliciting(Epoch::Data) > 0);
 }

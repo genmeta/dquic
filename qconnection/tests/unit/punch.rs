@@ -441,8 +441,6 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
 
 #[tokio::test]
 async fn data_authentication_controls_path_admission_and_receive_credit() {
-    use qtransport::path::PathState;
-
     let pair = pair();
     for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
         let paths = empty_paths(receiver);
@@ -487,11 +485,12 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         assert_eq!(admitted.len(), 1);
         let path = &admitted[0];
         assert_eq!(path.pathway, link.into());
-        let expected = PathState::AmplifyGuard {
-            rcvd_bytes: packet.len(),
-            sent_bytes: 0,
+        let expected = if receiver.parameters.role() == Role::Client {
+            usize::MAX
+        } else {
+            packet.len() * 3
         };
-        assert_eq!(path.state(), expected);
+        assert_eq!(crate::common::path_credit(path), expected);
 
         // Neither failed authentication nor duplicate packets credit an existing path.
         receive_on_paths(
@@ -504,7 +503,7 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         )
         .await;
         assert!(Arc::ptr_eq(&paths.snapshot()[0], path));
-        assert_eq!(path.state(), expected);
+        assert_eq!(crate::common::path_credit(path), expected);
 
         // A replay with a new source address must not create a second path.
         let replay_link = Link::new(link.src, "127.0.0.1:43003".parse().unwrap());
@@ -600,11 +599,16 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         tokio::task::yield_now().await;
         let path = paths.get(&link.into()).unwrap();
         assert_eq!(super::selection(&paths, &path), 2);
-        assert!(
-            path.challenge().is_some(),
-            "authenticated ingress must start validation"
-        );
-        assert!(!path.is_validated());
+        if receiver.parameters.role() == Role::Client {
+            assert!(path.is_validated());
+            assert!(super::take_validation_frames(&path).is_empty());
+        } else {
+            assert!(matches!(
+                super::take_validation_frames(&path).as_slice(),
+                [Frame::PathChallenge(_)]
+            ));
+            assert!(!path.is_validated());
+        }
         assert!(original.is_validated());
         paths.retire_all();
         qprotocol::QuicProtocol::global().unregister(socket.local_addr().unwrap());

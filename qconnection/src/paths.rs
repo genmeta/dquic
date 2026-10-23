@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -8,7 +8,7 @@ use std::{
 };
 
 use qbase::{
-    ArcReceiving, Epoch,
+    Epoch,
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
@@ -16,10 +16,11 @@ use qbase::{
     role::Role,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::IndexDeque,
+    validate::ArcValidations,
 };
 use qcongestion::{HandshakeStatus, Transport as _};
 use qtransport::{
-    path::{Path, PathCids, PathState},
+    path::{Path, PathCids},
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
@@ -40,7 +41,7 @@ pub struct Paths {
     /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
     pub(crate) is_mp_handshaking: Arc<AtomicBool>,
     pub(crate) entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
-    pub(crate) responses: Mutex<HashMap<Pathway, ArcReceiving<[u8; 8]>>>,
+    pub validations: ArcValidations,
     role: Role,
     idle: ArcIdleTimer,
     max_idle_timeout: Mutex<Duration>,
@@ -83,7 +84,7 @@ impl Paths {
             handshake,
             is_mp_handshaking,
             entries: Mutex::new(BTreeMap::new()),
-            responses: Mutex::new(HashMap::new()),
+            validations: ArcValidations::default(),
             role,
             idle,
             max_idle_timeout: Mutex::new(max_idle_timeout),
@@ -117,15 +118,11 @@ impl Paths {
     /// Enable a path and start its only sender. After handshake confirmation, also
     /// start validation; existing paths and validation tasks are reused.
     pub fn add_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
-        let handshaking =
-            self.role == Role::Client && matches!(self.phase.get(), ConnPhase::Initial(_));
-        let path = self.create_path(pathway, handshaking);
-        self.start_validation(&path);
-        path
+        self.create_path(pathway)
     }
 
     pub(crate) fn on_incoming_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
-        self.create_path(pathway, false)
+        self.create_path(pathway)
     }
 
     /// Opening-key retention needs a PTO before an unknown path is admitted.
@@ -142,7 +139,7 @@ impl Paths {
             .unwrap_or(Duration::from_secs(1))
     }
 
-    fn create_path(self: &Arc<Self>, pathway: Pathway, handshaking: bool) -> Arc<Path> {
+    fn create_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(path) = entries.get(&pathway) {
             return path.clone();
@@ -157,14 +154,12 @@ impl Paths {
             self.loss_resender.clone(),
             &self.cids,
         ));
-        if self.cids.is_confirmed() {
-            if self.role == Role::Client {
-                path.client_validating();
-            }
-        } else if self.cids.is_initial() && handshaking {
-            path.client_handshaking();
+        if self.role == Role::Client {
+            path.exempt();
         }
+        self.validations.insert(pathway, path.validation.clone());
         entries.insert(pathway, path.clone());
+        self.start_validation(&path);
         drop(entries);
 
         tokio::spawn(crate::send::sending(self.clone(), path.clone()));
@@ -182,11 +177,6 @@ impl Paths {
             return;
         }
         self.is_mp_handshaking.store(false, Ordering::Relaxed);
-        for other in entries.values() {
-            if !Arc::ptr_eq(other, path) {
-                other.guard_amplification();
-            }
-        }
     }
 
     pub fn phase(&self) -> ArcConnPhase {
@@ -257,8 +247,6 @@ impl Paths {
         for path in entries.values() {
             if self.cids.is_selected(&path.cid) {
                 path.validate();
-            } else if self.role == Role::Client {
-                path.client_validating();
             }
         }
         self.cids.confirm_handshake();
@@ -267,42 +255,28 @@ impl Paths {
         }
     }
 
+    /// Spawn one round at path creation or handshake confirmation.
+    /// After revalidation, the caller explicitly starts the next round.
     pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if !self.cids.is_confirmed() {
+        if !self.cids.is_confirmed() || path.is_validated() || path.is_retired() {
             return;
         }
-        if !matches!(
-            path.state(),
-            PathState::AmplifyGuard { .. } | PathState::ClientValidating
-        ) {
-            return;
-        }
-        let mut responses = self.responses.lock().unwrap();
-        if responses.contains_key(&path.pathway) {
-            return;
-        }
-        let response = ArcReceiving::default();
-        responses.insert(path.pathway, response.clone());
-        drop(responses);
+        let response = path.validation.respond();
         let paths = self.clone();
         let path = path.clone();
         tokio::spawn(async move {
             let terminator = paths.terminator.clone();
             let challenge = PathChallengeFrame::random();
-            for _ in 0..3 {
-                if !matches!(
-                    path.state(),
-                    PathState::AmplifyGuard { .. } | PathState::ClientValidating
-                ) {
+            for _ in 0..=3 {
+                if path.is_validated() || path.validation.challenge(challenge).is_err() {
                     break;
                 }
-                path.set_challenge(challenge);
                 match tokio::select! {
                     biased;
                     _ = terminator.clone() => break,
                     result = tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone()) => result,
                 } {
-                    Ok(Ok(Some(data))) if data == *challenge => {
+                    Ok(Ok(Some(frame))) if frame == PathResponseFrame::from(challenge) => {
                         path.validate();
                         break;
                     }
@@ -311,37 +285,16 @@ impl Paths {
                 }
             }
             // A replacement at the same Pathway has its own receiver and task.
-            if paths
-                .get(&path.pathway)
-                .is_some_and(|current| Arc::ptr_eq(&current, &path))
-            {
-                paths.responses.lock().unwrap().remove(&path.pathway);
-                path.clear_challenge();
-                if matches!(
-                    path.state(),
-                    PathState::AmplifyGuard { .. } | PathState::ClientValidating
-                ) {
-                    paths.remove(&path);
-                    if paths.snapshot().is_empty() {
-                        terminator.close(
-                            CloseReason::Internal(QuicError::with_default_fty(
-                                ErrorKind::NoViablePath,
-                                "path validation timed out",
-                            )),
-                            paths.closing_pto(),
-                        );
-                    }
-                }
+            if !path.is_validated() && paths.remove(&path) && paths.snapshot().is_empty() {
+                terminator.close(
+                    CloseReason::Internal(QuicError::with_default_fty(
+                        ErrorKind::NoViablePath,
+                        "path validation failed",
+                    )),
+                    paths.closing_pto(),
+                );
             }
         });
-    }
-
-    pub(crate) fn on_path_response(&self, path: &Path, frame: PathResponseFrame) {
-        if path.matches_response(frame)
-            && let Some(response) = self.responses.lock().unwrap().get(&path.pathway)
-        {
-            response.with(*frame);
-        }
     }
 
     pub fn get(&self, pathway: &Pathway) -> Option<Arc<Path>> {
@@ -361,9 +314,7 @@ impl Paths {
             .is_some_and(|current| Arc::ptr_eq(current, path))
         {
             entries.remove(&path.pathway);
-            if let Some(response) = self.responses.lock().unwrap().remove(&path.pathway) {
-                response.cancel();
-            }
+            self.validations.remove(&path.pathway);
             true
         } else {
             false

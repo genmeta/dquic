@@ -118,7 +118,7 @@ impl<'a, 'path> Burst<'a, 'path> {
                         Some(meta)
                     });
                     sent_handshake |= packets[Epoch::Handshake].is_some();
-                    path.on_sent(&mut cc, self.datagrams[index].len(), packets, &idle);
+                    path.on_sent(cx, &mut cc, self.datagrams[index].len(), packets, &idle);
                 }
                 Poll::Ready(Ok(sent))
             })
@@ -147,9 +147,10 @@ impl Burst<'_, '_> {
         let cid = ready!(path.cid.borrow_cid(cx))
             .ok_or_else(|| no_viable_path("path CID binding retired"))?;
         let phase = self.paths.phase().poll_phase(cx).clone();
+        let credit = ready!(path.poll_credit(cx)).map_err(no_viable_path)?;
         let mut limits = Constraints {
             send_quota: ready!(path.cc.poll_send_quota(cx)).map_err(no_viable_path)?,
-            credit: ready!(path.anti_amplifier.poll_credit(cx))?,
+            credit,
             probe_quota: Epoch::EPOCHS.map(|epoch| {
                 if path.cc.need_send_ack_eliciting(epoch) > 0 {
                     1200
@@ -219,7 +220,7 @@ impl Burst<'_, '_> {
         });
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
-        let mut validation = path.as_ref();
+        let mut validation = path.validation.clone();
         let dcids = std::array::from_fn(|epoch| (epoch < depth).then_some(dcid));
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {

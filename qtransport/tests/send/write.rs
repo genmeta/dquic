@@ -57,15 +57,6 @@ pub struct PendingPacket {
 }
 
 impl PendingPacket {
-    pub fn on_sent(&self, path: &crate::path::Path) {
-        if let Some(frame) = self.response {
-            path.on_frame_assembled(&Frame::PathResponse(frame));
-        }
-        if let Some(frame) = self.challenge {
-            path.on_frame_assembled(&Frame::PathChallenge(frame));
-        }
-    }
-
     pub fn bytes(&self) -> &[u8] {
         &self.datagram.msg[self.datagram.raw_offset..]
     }

@@ -68,7 +68,7 @@ impl PathStatus {
         }
     }
 
-    pub(crate) fn is_at_anti_amplification_limit(&self) -> bool {
+    pub fn is_at_anti_amplification_limit(&self) -> bool {
         self.is_at_anti_amplification_limit.load(Ordering::Relaxed)
     }
 

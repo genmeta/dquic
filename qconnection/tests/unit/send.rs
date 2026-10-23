@@ -58,7 +58,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         trackers.clone(),
         &paths.cids,
     ));
-    path.client_handshaking();
+    path.exempt();
     paths.cids.select(&path.cid);
     path.cc
         .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
@@ -137,7 +137,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         trackers.clone(),
         &paths.cids,
     ));
-    path.client_handshaking();
+    path.exempt();
     paths.cids.select(&path.cid);
 
     path.cc.on_pkt_rcvd(Epoch::Initial, 3, true);
@@ -1289,11 +1289,11 @@ async fn path_validation_respects_small_amplification_credit() {
             path.on_datagram_received(received);
             let challenge = PathChallengeFrame::from_slice(&[7; 8]);
             if reply {
-                path.recv_frame(challenge).unwrap();
+                path.validation.recv_frame(challenge).unwrap();
             } else {
-                path.set_challenge(challenge);
+                path.validation.challenge(challenge).unwrap();
             }
-            let credit = path.amplification_credit();
+            let credit = crate::common::path_credit(&path);
             let mut datagrams = [BytesMut::with_capacity(1200)];
             let mut frames = Vec::new();
             let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
@@ -1323,11 +1323,7 @@ async fn path_validation_respects_small_amplification_credit() {
                         .in_flight
                 );
                 assert!(
-                    if reply {
-                        path.response().is_none()
-                    } else {
-                        path.challenge().is_none()
-                    },
+                    super::take_validation_frames(&path).is_empty(),
                     "validation frame was not encoded"
                 );
             }
@@ -1366,7 +1362,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    path.client_handshaking();
+    path.exempt();
     paths.cids.select(&path.cid);
 
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
@@ -1487,13 +1483,13 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     for journal in journals {
         journal.on_tick(Instant::now(), |_| panic!("unsubmitted packet timed out"));
     }
-    assert_eq!(path.amplification_credit(), 3600);
+    assert_eq!(crate::common::path_credit(&path), 3600);
     let delays =
         [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
     burst.submit(1).await.unwrap();
     let submitted_at = Instant::now();
     assert!(burst.packets[0].iter().all(Option::is_none));
-    assert_eq!(path.amplification_credit(), 2400);
+    assert_eq!(crate::common::path_credit(&path), 2400);
     burst.cancel();
     for (journal, delay) in journals.into_iter().zip(delays) {
         journal.on_tick(submitted_at + delay - Duration::from_nanos(1), |_| {
