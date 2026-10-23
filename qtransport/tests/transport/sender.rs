@@ -46,9 +46,6 @@ impl Sender {
                 QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
             );
         }
-        let _ = self
-            .path
-            .poll_credit(&mut Context::from_waker(std::task::Waker::noop()));
         let mut once = false;
         let count = self.inner.burst(|sender, constraints| {
             if once {
@@ -75,8 +72,7 @@ impl Sender {
         cx: &mut Context<'_>,
         mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<std::io::Result<usize>>,
     ) -> Poll<Result<bool, Error>> {
-        let result = self
-            .inner
+        self.inner
             .poll_send_with(
                 cx,
                 &mut self.packets,
@@ -84,17 +80,14 @@ impl Sender {
                 |_| !self.path.is_retired(),
                 |_| {},
             )
-            .map(|result| result.map(|n| n != 0));
-        let _ = self.path.poll_credit(cx);
-        result
+            .map(|result| result.map(|n| n != 0))
     }
     pub(crate) fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
         protocol: &QuicProtocol,
     ) -> Poll<Result<bool, Error>> {
-        let result = self
-            .inner
+        self.inner
             .poll_send_with(
                 cx,
                 &mut self.packets,
@@ -102,9 +95,7 @@ impl Sender {
                 |_| !self.path.is_retired(),
                 |_| {},
             )
-            .map(|result| result.map(|n| n != 0));
-        let _ = self.path.poll_credit(cx);
-        result
+            .map(|result| result.map(|n| n != 0))
     }
 }
 impl Drop for Sender {

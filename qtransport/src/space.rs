@@ -14,7 +14,7 @@ use qbase::{
     frame::AckFrame,
     net::tx::UnregisterWaker,
     packet::{
-        LongSpecificBits, PacketNumber, ShortSpecificBits,
+        GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
         assemble::{Metadata, Package, PacketBuffer},
     },
 };
@@ -300,6 +300,10 @@ where
 
 /// Space-specific packet header and frame assembly.
 pub trait Encapsulate: Transmit {
+    /// Minimum datagram size for a PING in this space, without reserving a PN.
+    /// Returns `None` after the space's sending keys have retired.
+    fn probe_size(&self, dcid: ConnectionId) -> Option<usize>;
+
     #[allow(clippy::too_many_arguments)]
     fn encapsulate(
         &self,
@@ -310,6 +314,12 @@ pub trait Encapsulate: Transmit {
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
     ) -> Poll<Result<usize, Error>>;
+}
+
+fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usize) -> usize {
+    let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
+    // A PING occupies one byte. Header protection also needs a full sample.
+    (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
 }
 
 pub enum Keys {

@@ -107,26 +107,35 @@ impl Validation {
         matches!(self, Self::Validated { .. })
     }
 
-    /// `None` grants unlimited credit. Zero finite credit waits for new input.
-    pub fn poll_credit(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<usize>, Cancelled>> {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+
+    /// Snapshot the allowance without registering a credit waiter.
+    pub fn credit(&self) -> Result<Option<usize>, Cancelled> {
         match self {
             Self::Validating {
                 rcvd_bytes,
                 sent_bytes,
-                credit_waker,
                 ..
-            } => {
-                let credit = rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes);
-                if credit == 0 {
-                    *credit_waker = Some(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    Poll::Ready(Ok(Some(credit)))
-                }
-            }
-            Self::Validated { .. } => Poll::Ready(Ok(None)),
-            Self::Cancelled { .. } => Poll::Ready(Err(Cancelled)),
+            } => Ok(Some(
+                rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes),
+            )),
+            Self::Validated { .. } => Ok(None),
+            Self::Cancelled { .. } => Err(Cancelled),
         }
+    }
+
+    /// `None` grants unlimited credit. Zero finite credit waits for new input.
+    pub fn poll_credit(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<usize>, Cancelled>> {
+        let credit = self.credit()?;
+        if let Self::Validating { credit_waker, .. } = self
+            && credit == Some(0)
+        {
+            *credit_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        Poll::Ready(Ok(credit))
     }
 
     /// Account for each received UDP datagram once.
@@ -318,6 +327,15 @@ impl ArcValidation {
 
     pub fn is_validated(&self) -> bool {
         self.0.lock().unwrap().is_validated()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.lock().unwrap().is_cancelled()
+    }
+
+    /// Snapshot credit without replacing the sending task's waker.
+    pub fn credit(&self) -> Result<Option<usize>, Cancelled> {
+        self.0.lock().unwrap().credit()
     }
 
     /// Wait for positive credit, return `None` for unlimited credit, or report cancellation.

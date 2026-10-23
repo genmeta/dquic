@@ -20,7 +20,10 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::{Encapsulate, Recover, Space};
-use crate::{Error, GuaranteedFrame, keys::ArcKeys};
+use crate::{
+    Error, GuaranteedFrame,
+    keys::{ArcKeys, Seal},
+};
 
 /// Initial headers retain their token across every packet in this space.
 #[derive(Deref)]
@@ -85,6 +88,20 @@ impl UnregisterWaker for InitialSpace {
 }
 
 impl Encapsulate for InitialSpace {
+    fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
+        let keys = self.keys.get().ok()?;
+        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid)
+            .initial(self.token.clone().unwrap_or_default());
+        Some(
+            super::probe_size(
+                &header,
+                self.sent_journal.lock_guard().next_pn_len(),
+                keys.sealing.tag_len(),
+            )
+            .max(1200),
+        )
+    }
+
     fn encapsulate(
         &self,
         cx: &mut Context<'_>,

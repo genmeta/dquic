@@ -1,10 +1,7 @@
 use crate::*;
 
 fn shared_controller(handshake: &Arc<HandshakeStatus>) -> ArcCC {
-    controller_with(
-        path_status(handshake.clone()),
-        trackers(Arc::new(NoopFeedback)),
-    )
+    controller_with(handshake.clone(), trackers(Arc::new(NoopFeedback)))
 }
 
 #[tokio::test(start_paused = true)]

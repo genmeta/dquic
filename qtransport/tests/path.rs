@@ -84,6 +84,31 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn cancelling_shared_validation_retires_the_path() {
+    let path = Path::new(
+        Pathway::new(
+            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
+            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
+        ),
+        Arc::new(HandshakeStatus::new(true)),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        ArcIndexDeque::default(),
+        &qtransport::path::PathCids::new(Default::default()),
+    );
+    assert!(!path.is_retired());
+    path.validation.cancel();
+    assert!(path.is_retired());
+    let failed = path.failed();
+    tokio::pin!(failed);
+    assert!(futures::poll!(&mut failed).is_ready());
+    path.retire();
+    path.retire();
+    path.validate();
+    assert!(path.is_retired());
+    assert!(!path.is_validated());
+}
+
+#[tokio::test(start_paused = true)]
 async fn validation_registers_only_when_both_sources_are_empty() {
     for queued in [false, true] {
         for quota in [0, 128] {

@@ -154,6 +154,18 @@ impl UnregisterWaker for DataSpace {
 }
 
 impl Encapsulate for DataSpace {
+    fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
+        if self.keys.is_retired() {
+            return None;
+        }
+        let header = OneRttHeader::new(Default::default(), dcid);
+        Some(super::probe_size(
+            &header,
+            self.sent_journal.lock_guard().next_pn_len(),
+            self.keys.tag_len(),
+        ))
+    }
+
     fn encapsulate(
         &self,
         cx: &mut Context<'_>,

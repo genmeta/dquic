@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU16, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -13,7 +16,7 @@ use crate::{
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
     rtt::{ArcRtt, INITIAL_RTT},
-    status::PathStatus,
+    status::HandshakeStatus,
 };
 
 const INIT_CWND: usize = MSS * 10;
@@ -42,22 +45,47 @@ pub struct CongestionController {
     // Shared connection spaces, indexed by epoch even after early spaces retire.
     trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
-    path_status: PathStatus,
+    handshake: Arc<HandshakeStatus>,
+    pmtu: Arc<AtomicU16>,
+    // The sender reports whether amplification credit prevents the current PTO probe.
+    amplification_blocked: bool,
     tx_waker: ArcSendWakers,
 }
 
 impl CongestionController {
+    /// Update the sender's anti-amplification decision without resetting PTO backoff.
+    pub fn set_amplification_blocked(&mut self, blocked: bool) {
+        if self.amplification_blocked != blocked {
+            self.amplification_blocked = blocked;
+            self.set_loss_detection_timer();
+        }
+    }
+
+    /// Select the next PTO's space after observing handshake retirement.
+    pub fn pto_epoch(&mut self) -> Option<Epoch> {
+        self.retire_handshake_spaces();
+        if self.no_ack_eliciting_in_flight() && self.peer_completed_address_validation() {
+            return None;
+        }
+        self.get_pto_time_and_epoch().map(|(_, epoch)| epoch)
+    }
+
+    fn mtu(&self) -> usize {
+        self.pmtu.load(Ordering::Relaxed) as usize
+    }
+
     /// A.4. Initialization
     fn init(
         algorithm: Algorithm,
         max_ack_delay: Duration,
         trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        path_status: PathStatus,
+        handshake: Arc<HandshakeStatus>,
+        pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
         let algorithm: Box<dyn Control> = match algorithm {
             Algorithm::Bbr => todo!("implement BBR"),
-            Algorithm::NewReno => Box::new(NewReno::new(path_status.pmtu())),
+            Algorithm::NewReno => Box::new(NewReno::new(pmtu.clone())),
         };
 
         let now = Instant::now();
@@ -73,11 +101,19 @@ impl CongestionController {
                 PacketSpace::with_epoch(Epoch::Data, max_ack_delay),
             ],
             discarded_epochs: [false; Epoch::count()],
-            pacer: Pacer::new(INITIAL_RTT, INIT_CWND, path_status.mtu(), now, None),
+            pacer: Pacer::new(
+                INITIAL_RTT,
+                INIT_CWND,
+                pmtu.load(Ordering::Relaxed) as usize,
+                now,
+                None,
+            ),
             pending_burst: false,
             trackers,
             need_send_ack_eliciting_packets: [0; Epoch::count()],
-            path_status,
+            handshake,
+            pmtu,
+            amplification_blocked: false,
             tx_waker,
         }
     }
@@ -128,7 +164,7 @@ impl CongestionController {
         if ack_eliciting || in_flight {
             self.packet_spaces[epoch].sent_packets.push_back(sent);
         }
-        if in_flight || self.path_status.is_at_anti_amplification_limit() {
+        if in_flight {
             self.set_loss_detection_timer();
         }
         self.pacer.on_sent(sent_bytes);
@@ -149,29 +185,6 @@ impl CongestionController {
             self.packet_spaces[epoch]
                 .rcvd_packets
                 .on_ack_sent(pn, largest_acked);
-        }
-    }
-
-    /// A.6. On Receiving a Datagram
-    /// OnDatagramReceived(datagram):
-    ///   // If this datagram unblocks the server, arm the
-    ///   // PTO timer to avoid deadlock.
-    ///   if (server was at anti-amplification limit):
-    ///     SetLossDetectionTimer()
-    ///     if loss_detection_timer.timeout < now():
-    ///       // Execute PTO if it would have expired
-    ///       // while the amplification limit applied.
-    ///       OnLossDetectionTimeout()
-    pub fn on_datagram_rcvd(&mut self) {
-        // If this datagram unblocks the server, arm the PTO timer to avoid deadlock.
-        if self.path_status.is_at_anti_amplification_limit() {
-            let now = Instant::now();
-            let peer_validated = self.peer_completed_address_validation();
-            self.set_loss_detection_timer();
-            if self.loss_detection_timer.is_some_and(|t| t < now) {
-                // Execute PTO if it would have expired while the amplification limit applied.
-                self.on_loss_detection_timeout(peer_validated);
-            }
         }
     }
 
@@ -227,14 +240,14 @@ impl CongestionController {
             None => return,
             Some(newly_acked_packets) => {
                 if epoch == Epoch::Handshake {
-                    self.path_status.handshake.received_handshake_ack();
+                    self.handshake.received_handshake_ack();
                 }
                 let (largest_pn, largest_time_sent) = newly_acked_packets.largest;
                 if largest_pn == ack_frame.largest() && newly_acked_packets.include_ack_eliciting {
                     self.rtt.update(
                         now - largest_time_sent,
                         Duration::from_micros(ack_frame.delay()),
-                        self.path_status.handshake.is_handshake_confirmed(),
+                        self.handshake.is_handshake_confirmed(),
                     );
                 }
                 // Process ECN information if present.
@@ -291,7 +304,7 @@ impl CongestionController {
             return;
         }
 
-        if self.path_status.is_at_anti_amplification_limit() {
+        if self.amplification_blocked {
             self.loss_detection_timer = None;
             return;
         }
@@ -353,12 +366,7 @@ impl CongestionController {
             // Use the driver's decision: another path can advance the shared
             // handshake after that decision without changing this timeout event.
             debug_assert!(!peer_validated);
-            if self
-                .path_status
-                .handshake
-                .has_handshake_key
-                .load(Ordering::Acquire)
-            {
+            if self.handshake.has_handshake_key.load(Ordering::Acquire) {
                 // Send an anti-deadlock packet: Initial is padded
                 // to earn more anti-amplification credit,
                 // a Handshake packet proves address ownership.
@@ -428,12 +436,7 @@ impl CongestionController {
         let now = Instant::now();
         if self.no_ack_eliciting_in_flight() {
             // assert!(!self.peer_completed_address_validation());
-            if self
-                .path_status
-                .handshake
-                .has_handshake_key
-                .load(Ordering::Acquire)
-            {
+            if self.handshake.has_handshake_key.load(Ordering::Acquire) {
                 return Some((now + duration, Epoch::Handshake));
             } else {
                 return Some((now + duration, Epoch::Initial));
@@ -448,7 +451,7 @@ impl CongestionController {
             if epoch == Epoch::Data {
                 // An endpoint MUST NOT set its PTO timer for the Application Data
                 // packet number epoch until the handshake is confirmed
-                if !self.path_status.handshake.is_handshake_confirmed() {
+                if !self.handshake.is_handshake_confirmed() {
                     return pto_time;
                 }
                 duration += self.max_ack_delay * (1 << self.pto_count);
@@ -477,13 +480,12 @@ impl CongestionController {
     ///   return has received Handshake ACK ||
     ///        handshake confirmed
     fn peer_completed_address_validation(&self) -> bool {
-        self.path_status.handshake.is_server
+        self.handshake.is_server
             || self
-                .path_status
                 .handshake
                 .has_received_handshake_ack
                 .load(Ordering::Acquire)
-            || self.path_status.handshake.is_handshake_confirmed()
+            || self.handshake.is_handshake_confirmed()
     }
 
     fn process_ecn(&mut self, ack: &AckFrame, sent_time: &Instant, epoch: Epoch) {
@@ -506,7 +508,7 @@ impl CongestionController {
         let pacing_quota = self.pacer.schedule(
             self.rtt.smoothed_rtt(),
             self.algorithm.congestion_window(),
-            self.path_status.mtu(),
+            self.mtu(),
             now,
             self.algorithm.pacing_rate(),
         );
@@ -539,10 +541,9 @@ impl CongestionController {
         self.set_loss_detection_timer();
     }
 
-    /// Drive recovery: retire completed handshake spaces before processing a timeout.
-    fn tick(&mut self) -> Result<(), TooManyPtos> {
+    fn retire_handshake_spaces(&mut self) {
         if !self.discarded_epochs[Epoch::Initial] {
-            let handshake = &self.path_status.handshake;
+            let handshake = &self.handshake;
             let initial_finished = if handshake.is_server {
                 handshake.has_received_handshake.load(Ordering::Acquire)
             } else {
@@ -552,20 +553,26 @@ impl CongestionController {
                 self.discard_epoch(Epoch::Initial);
             }
         }
-        if !self.discarded_epochs[Epoch::Handshake]
-            && self.path_status.handshake.is_handshake_confirmed()
-        {
+        if !self.discarded_epochs[Epoch::Handshake] && self.handshake.is_handshake_confirmed() {
             self.discard_epoch(Epoch::Handshake);
         }
+    }
+
+    /// Drive recovery: retire completed handshake spaces before processing a timeout.
+    fn tick(&mut self) -> Result<(), TooManyPtos> {
+        self.retire_handshake_spaces();
         // Another path's Handshake ACK can invalidate an already armed
         // anti-deadlock PTO. Cancel it before dispatching a timeout. Preserve
         // loss detection and existing PTO deadlines that are still needed.
         let peer_validated = self.peer_completed_address_validation();
-        if peer_validated
-            && self.no_ack_eliciting_in_flight()
-            && self.get_loss_time_and_epoch().is_none()
+        if self.loss_detection_timer.is_none()
+            || self.amplification_blocked
+            || (peer_validated
+                && self.no_ack_eliciting_in_flight()
+                && self.get_loss_time_and_epoch().is_none())
         {
-            self.loss_detection_timer = None;
+            // Rearm after credit returns, keeping an already running PTO's deadline.
+            self.set_loss_detection_timer();
         }
         if self
             .loss_detection_timer
@@ -577,6 +584,14 @@ impl CongestionController {
             }
         }
         Ok(())
+    }
+
+    pub fn poll_send_quota(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
+        self.tx_waker.register(cx.waker());
+        self.tick()?;
+        let quota = self.send_quota();
+        self.pending_burst = quota < self.mtu();
+        Poll::Ready(Ok(if self.pending_burst { 0 } else { quota }))
     }
 
     fn on_path_lost(&mut self) {
@@ -622,14 +637,16 @@ impl ArcCC {
         algorithm: Algorithm,
         max_ack_delay: Duration,
         trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        path_status: PathStatus,
+        handshake: Arc<HandshakeStatus>,
+        pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
         let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
             algorithm,
             max_ack_delay,
             trackers,
-            path_status,
+            handshake,
+            pmtu,
             tx_waker.clone(),
         ))));
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -654,12 +671,7 @@ impl ArcCC {
     }
 
     pub fn poll_send_quota(&self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
-        let mut guard = self.0.lock().unwrap();
-        guard.tx_waker.register(cx.waker());
-        guard.tick()?;
-        let quota = guard.send_quota();
-        guard.pending_burst = quota < guard.path_status.mtu();
-        Poll::Ready(Ok(if guard.pending_burst { 0 } else { quota }))
+        self.lock().poll_send_quota(cx)
     }
 
     /// Install negotiated local ACK scheduling and peer ACK/PTO bounds.
@@ -694,7 +706,7 @@ impl super::Transport for ArcCC {
         let mut guard = self.0.lock().unwrap();
         guard.tick()?;
 
-        if guard.pending_burst && guard.send_quota() >= guard.path_status.mtu() {
+        if guard.pending_burst && guard.send_quota() >= guard.mtu() {
             guard.pending_burst = false;
             guard.tx_waker.wake_all();
         }
@@ -708,7 +720,7 @@ impl super::Transport for ArcCC {
     fn send_quota(&self) -> usize {
         let mut guard = self.0.lock().unwrap();
         let send_quota = guard.send_quota();
-        if send_quota >= guard.path_status.mtu() {
+        if send_quota >= guard.mtu() {
             send_quota
         } else {
             guard.pending_burst = true;
@@ -758,7 +770,6 @@ impl super::Transport for ArcCC {
             return;
         }
         guard.packet_spaces[epoch].rcvd_packets.on_pkt_rcvd(pn);
-        guard.on_datagram_rcvd();
     }
 
     fn get_pto(&self, epoch: Epoch) -> Duration {
@@ -774,12 +785,6 @@ impl super::Transport for ArcCC {
     fn need_send_ack_eliciting(&self, epoch: Epoch) -> usize {
         let guard = self.0.lock().unwrap();
         guard.need_send_ack_eliciting_packets[epoch]
-    }
-
-    fn grant_anti_amplification(&self) {
-        let mut guard = self.0.lock().unwrap();
-        guard.path_status.release_anti_amplification_limit();
-        guard.set_loss_detection_timer();
     }
 }
 
@@ -801,8 +806,7 @@ mod tests {
     fn controller_with_feedback(feedback: Arc<dyn Resend>) -> CongestionController {
         let handshake = Arc::new(HandshakeStatus::new(false));
         handshake.handshake_confirmed();
-        let path_status = PathStatus::new(handshake, Arc::new(AtomicU16::new(MSS as u16)));
-        path_status.release_anti_amplification_limit();
+        let pmtu = Arc::new(AtomicU16::new(MSS as u16));
 
         CongestionController::init(
             Algorithm::NewReno,
@@ -814,7 +818,8 @@ mod tests {
                 }
                 ArcIndexDeque::from(trackers)
             },
-            path_status,
+            handshake,
+            pmtu,
             ArcSendWakers::default(),
         )
     }
