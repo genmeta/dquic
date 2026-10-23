@@ -14,38 +14,44 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut packets = [[None; 3]; MAX_BURST_PACKETS];
     let terminator = paths.terminator.clone();
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
-    loop {
+    let error = loop {
         let result = tokio::select! {
             biased;
-            _ = terminator.clone() => break,
-            _ = path.failed() => break,
+            _ = terminator.clone() => break None,
             result = burst.batch() => result,
         };
         burst.cancel();
         if let Err(error) = result {
             if error.kind() == ErrorKind::NoViablePath {
-                paths.remove(&path);
-                if paths.snapshot().is_empty() {
-                    terminator.close(error.into(), paths.closing_pto());
-                }
-                break;
+                break Some(error);
             } else if !terminator.close(error.into(), paths.closing_pto()) {
                 // Closed components are empty sources. A repeated error here means
                 // packet assembly itself still fails; wait without spinning.
-                tokio::select! {
-                    _ = terminator.clone() => {},
-                    _ = path.failed() => {},
-                }
-                break;
+                terminator.clone().await;
+                break None;
             }
         }
-    }
+    };
     burst.cancel();
     cancel_waiters(&paths, &path);
-    paths.remove(&path);
-    if paths.snapshot().is_empty() {
+    // A removed path may already have been replaced while its sender was exiting.
+    let no_paths = {
+        let mut entries = paths.entries.lock().unwrap();
+        if entries
+            .get(&path.pathway)
+            .is_some_and(|current| Arc::ptr_eq(current, &path))
+        {
+            path.close();
+            entries.remove(&path.pathway);
+            paths.validations.remove(&path.pathway);
+        }
+        entries.is_empty()
+    };
+    if no_paths {
         terminator.close(
-            no_viable_path("all paths retired").into(),
+            error
+                .unwrap_or_else(|| no_viable_path("all paths retired"))
+                .into(),
             paths.closing_pto(),
         );
         terminator.await;

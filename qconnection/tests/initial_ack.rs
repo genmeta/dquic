@@ -61,7 +61,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         Default::default(),
         &qtransport::path::PathCids::new(Default::default()),
     );
-    path.exempt();
+    path.validation.exempt().unwrap();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.
     let data = [hello.slice(..4)];
     let mut crypto = (CryptoFrame::new(0u32.into(), 4u32.into()), data.as_slice());

@@ -92,9 +92,7 @@ impl Drop for Peer {
             phase.puncher.release_temporary_sockets();
             phase.cid_registry.local.clear();
         }
-        for path in self.paths.snapshot() {
-            self.paths.remove(&path);
-        }
+        common::retire_all(&self.paths);
         self.growing.abort();
     }
 }
@@ -243,14 +241,16 @@ async fn wait_for(mut ready: impl FnMut() -> bool) -> bool {
 
 fn describe(paths: &Paths) -> String {
     paths
-        .snapshot()
-        .iter()
+        .entries
+        .lock()
+        .unwrap()
+        .values()
         .map(|path| {
             format!(
                 "{:?}: validated={}, retired={}",
                 path.pathway,
-                path.is_validated(),
-                path.is_retired()
+                path.validation.is_validated(),
+                path.validation.is_cancelled()
             )
         })
         .collect::<Vec<_>>()
@@ -327,13 +327,30 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
         wait_for(|| client.paths.cids.is_confirmed()
             && client
                 .paths
+                .entries
+                .lock()
+                .unwrap()
                 .get(&old_route)
-                .is_some_and(|p| p.is_validated()))
+                .is_some_and(|p| p.validation.is_validated()))
         .await,
         "stage 1: handshake confirmation missing"
     );
-    let old_client_path = client.paths.get(&old_route).unwrap();
-    let old_server_path = server.paths.get(&old_route.flip()).unwrap();
+    let old_client_path = client
+        .paths
+        .entries
+        .lock()
+        .unwrap()
+        .get(&old_route)
+        .cloned()
+        .unwrap();
+    let old_server_path = server
+        .paths
+        .entries
+        .lock()
+        .unwrap()
+        .get(&old_route.flip())
+        .cloned()
+        .unwrap();
     let (_, mut client_stream) = client.connection.open_bi_stream().await.unwrap().unwrap();
     client_stream.1.write_all(b"open").await.unwrap();
     let (_, mut server_stream) = timeout(STEP_TIMEOUT, server.connection.accept_bi_stream())
@@ -353,7 +370,18 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let new_route = Pathway::new(new_socket.endpoint(), server_socket.endpoint());
     new_socket.publish();
     let punched = wait_for(|| {
-        client.paths.get(&new_route).is_some() && server.paths.get(&new_route.flip()).is_some()
+        client
+            .paths
+            .entries
+            .lock()
+            .unwrap()
+            .contains_key(&new_route)
+            && server
+                .paths
+                .entries
+                .lock()
+                .unwrap()
+                .contains_key(&new_route.flip())
     })
     .await;
     if !punched {
@@ -368,12 +396,18 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     assert!(
         wait_for(|| client
             .paths
+            .entries
+            .lock()
+            .unwrap()
             .get(&new_route)
-            .is_some_and(|p| p.is_validated())
+            .is_some_and(|p| p.validation.is_validated())
             && server
                 .paths
+                .entries
+                .lock()
+                .unwrap()
                 .get(&new_route.flip())
-                .is_some_and(|p| p.is_validated()))
+                .is_some_and(|p| p.validation.is_validated()))
         .await,
         "stage 3: new path validation did not complete\nclient: {}\nserver: {}",
         describe(&client.paths),
@@ -398,25 +432,31 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
             "stage 4: {error}\nclient: {}\nserver: {}\nold paths: {:?}/{:?}",
             describe(&client.paths),
             describe(&server.paths),
-            old_client_path.is_retired(),
-            old_server_path.is_retired()
+            old_client_path.validation.is_cancelled(),
+            old_server_path.validation.is_cancelled()
         );
     }
     assert!(
-        wait_for(|| old_client_path.is_retired()).await,
+        wait_for(|| old_client_path.validation.is_cancelled()).await,
         "stage 4: the old client sender did not retire its unusable path"
     );
     assert!(
         client
             .paths
+            .entries
+            .lock()
+            .unwrap()
             .get(&new_route)
-            .is_some_and(|p| p.is_validated())
+            .is_some_and(|p| p.validation.is_validated())
     );
     assert!(
         server
             .paths
+            .entries
+            .lock()
+            .unwrap()
             .get(&new_route.flip())
-            .is_some_and(|p| p.is_validated())
+            .is_some_and(|p| p.validation.is_validated())
     );
     ServerRegistry::global().remove("localhost");
 }

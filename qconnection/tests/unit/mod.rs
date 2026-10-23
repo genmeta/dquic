@@ -39,9 +39,7 @@ fn take_validation_frames(path: &qtransport::path::Path) -> Vec<qbase::frame::Fr
 impl Paths {
     fn retire_all(&self) {
         self.terminator.terminate();
-        for path in self.snapshot() {
-            self.remove(&path);
-        }
+        self.clean();
     }
 }
 

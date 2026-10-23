@@ -19,6 +19,87 @@ use crate::{
 };
 
 #[tokio::test(start_paused = true)]
+async fn existing_and_new_paths_observe_shared_handshake_progress_on_tick() {
+    use qcongestion::Transport as _;
+
+    let paths = paths(Role::Client);
+    let first = paths.add_path(pathway(30002));
+    first.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
+    first.cc.on_pkt_rcvd(Epoch::Handshake, 0, true);
+    assert!(first.cc.need_ack(Epoch::Initial).is_some());
+    assert!(first.cc.need_ack(Epoch::Handshake).is_some());
+
+    paths.on_handshake_sent();
+    first.cc.do_tick().unwrap();
+    assert!(first.cc.need_ack(Epoch::Initial).is_none());
+    assert!(first.cc.need_ack(Epoch::Handshake).is_some());
+    let second = paths.add_path(pathway(30003));
+    second.cc.do_tick().unwrap();
+    second.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
+    second.cc.on_pkt_rcvd(Epoch::Handshake, 0, true);
+    assert!(second.cc.need_ack(Epoch::Initial).is_none());
+    assert!(second.cc.need_ack(Epoch::Handshake).is_some());
+
+    paths.handshake.handshake_confirmed();
+    for path in [&first, &second] {
+        path.cc.do_tick().unwrap();
+        assert!(path.cc.need_ack(Epoch::Initial).is_none());
+        assert!(path.cc.need_ack(Epoch::Handshake).is_none());
+    }
+    let third = paths.add_path(pathway(30004));
+    third.cc.do_tick().unwrap();
+    for epoch in [Epoch::Initial, Epoch::Handshake] {
+        third.cc.on_pkt_rcvd(epoch, 0, true);
+        assert!(third.cc.need_ack(epoch).is_none());
+    }
+    paths.retire_all();
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_stops_idle_expiry_and_releases_paths_spaces_and_recovery() {
+    use qbase::packet::PacketContent;
+    use qcongestion::Transport as _;
+    use tokio::time::Instant;
+
+    let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
+    let initial = crate::common::initial_space(&paths.spaces);
+    let first = paths.add_path(pathway(30002));
+    let second = paths.add_path(pathway(30003));
+    let response = first.validation.respond();
+    for path in [&first, &second] {
+        for epoch in [Epoch::Initial, Epoch::Handshake] {
+            path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
+        }
+    }
+    paths.clean();
+    paths.clean();
+
+    assert!(paths.entries.lock().unwrap().is_empty());
+    assert!(paths.spaces.read_guard().is_empty());
+    assert!(paths.loss_resender.read_guard().is_empty());
+    assert!(initial.keys.get().is_err());
+    assert!(paths.idle().timeout().await.is_err());
+    assert!(response.await.is_err());
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for path in [&first, &second] {
+        assert!(paths.validations.get(&path.pathway).is_none());
+        assert!(path.validation.credit().is_err());
+        assert!(matches!(super::borrow(path), std::task::Poll::Ready(None)));
+        assert!(
+            path.heartbeat
+                .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
+                .is_err()
+        );
+        path.cc.do_tick().unwrap();
+        assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
+        assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
+    }
+    paths.terminator.terminate();
+    crate::common::wait_for_sender_exit(&first).await;
+    crate::common::wait_for_sender_exit(&second).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
     let start = tokio::time::Instant::now();
@@ -49,9 +130,9 @@ async fn client_paths_are_exempt_without_local_challenges() {
     let (paths, mature) = super::send::mature_phase(Role::Client, Duration::ZERO);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
-    let incoming = paths.on_incoming_path(pathway(30004));
+    let incoming = paths.get_or_create_path(&pathway(30004));
     for path in [&first, &second, &incoming] {
-        assert!(path.is_validated());
+        assert!(path.validation.is_validated());
         assert_eq!(crate::common::path_credit(path), usize::MAX);
         assert_eq!(super::selection(&paths, path), u8::MAX);
     }
@@ -59,9 +140,9 @@ async fn client_paths_are_exempt_without_local_challenges() {
     assert_eq!(super::selection(&paths, &first), 1);
     assert_eq!(super::selection(&paths, &second), 0);
     assert_eq!(super::selection(&paths, &incoming), 0);
-    assert!(second.is_validated());
+    assert!(second.validation.is_validated());
     super::enter_mature(&paths, &mature);
-    assert!(paths.add_path(pathway(30005)).is_validated());
+    assert!(paths.add_path(pathway(30005)).validation.is_validated());
     assert!(
         matches!(super::borrow(&first), std::task::Poll::Ready(Some(cid)) if *cid == mature.peer_cid())
     );
@@ -71,11 +152,11 @@ async fn client_paths_are_exempt_without_local_challenges() {
     assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway)));
     paths.start_validation(&added);
     tokio::task::yield_now().await;
-    for path in paths.snapshot() {
-        assert_eq!(super::selection(&paths, &path), 2);
-        assert!(path.is_validated());
-        assert_eq!(crate::common::path_credit(&path), usize::MAX);
-        assert!(super::take_validation_frames(&path).is_empty());
+    for path in paths.entries.lock().unwrap().values() {
+        assert_eq!(super::selection(&paths, path), 2);
+        assert!(path.validation.is_validated());
+        assert_eq!(crate::common::path_credit(path), usize::MAX);
+        assert!(super::take_validation_frames(path).is_empty());
         assert!(paths.validations.get(&path.pathway).unwrap().is_validated());
     }
     paths
@@ -86,8 +167,8 @@ async fn client_paths_are_exempt_without_local_challenges() {
         super::take_validation_frames(&added).as_slice(),
         [Frame::PathResponse(_)]
     ));
-    paths.remove(&first);
-    assert!(paths.add_path(pathway(30008)).is_validated());
+    paths.del_path(&first.pathway);
+    assert!(paths.add_path(pathway(30008)).validation.is_validated());
     paths.retire_all();
 }
 
@@ -105,7 +186,7 @@ async fn selecting_a_live_handshake_path_stops_crypto_replay() {
             is_mp_handshaking.clone(),
         );
         let stale = paths.add_path(pathway(30002));
-        paths.remove(&stale);
+        paths.del_path(&stale.pathway);
         let selected = paths.add_path(pathway(30002));
         paths.select_path(&stale);
         assert!(is_mp_handshaking.load(Ordering::Relaxed));
@@ -120,7 +201,7 @@ async fn removed_undecided_path_cannot_override_selection() {
     let paths = paths(Role::Client);
     let stale = paths.add_path(pathway(30002));
     let selected = paths.add_path(pathway(30003));
-    paths.remove(&stale);
+    paths.del_path(&stale.pathway);
     paths.select_path(&selected);
     paths.select_path(&stale);
     assert_eq!(super::selection(&paths, &selected), 1);
@@ -153,15 +234,17 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
     paths.select_path(&first);
-    paths.remove(&first);
+    paths.del_path(&first.pathway);
     let added = paths.add_path(pathway(30004));
     assert_eq!(super::selection(&paths, &added), 0);
     paths.select_path(&second);
     paths.select_path(&added);
     assert!(
         paths
-            .snapshot()
-            .iter()
+            .entries
+            .lock()
+            .unwrap()
+            .values()
             .all(|path| super::selection(&paths, path) == 0)
     );
     paths.retire_all();
@@ -187,7 +270,7 @@ async fn server_paths_start_guarded_and_responses_are_dispatched_by_pathway() {
             qbase::frame::PathResponseFrame::from(challenge),
         ))
         .unwrap();
-    assert!(!second.is_validated());
+    assert!(!second.validation.is_validated());
     paths
         .validations
         .recv_frame((
@@ -196,7 +279,7 @@ async fn server_paths_start_guarded_and_responses_are_dispatched_by_pathway() {
         ))
         .unwrap();
     tokio::task::yield_now().await;
-    assert!(first.is_validated());
+    assert!(first.validation.is_validated());
     assert_eq!(crate::common::path_credit(&first), usize::MAX);
     assert_eq!(crate::common::path_credit(&second), 0);
     assert!(
@@ -235,13 +318,53 @@ async fn first_mismatched_response_fails_even_if_a_matching_response_follows() {
         ))
         .unwrap();
     tokio::task::yield_now().await;
-    assert!(path.is_retired());
-    assert!(!path.is_validated());
-    assert!(paths.get(&path.pathway).is_none());
+    assert!(path.validation.is_cancelled());
+    assert!(!path.validation.is_validated());
+    assert!(!paths.entries.lock().unwrap().contains_key(&path.pathway));
     assert!(paths.validations.get(&path.pathway).is_none());
     assert!(
         matches!(paths.terminator.clone().await, crate::Error::Quic(error) if error.kind() == ErrorKind::NoViablePath)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_validation_removes_its_path_and_stops_its_sender_without_closing_other_paths() {
+    let paths = paths(Role::Server);
+    let live = paths.add_path(pathway(30002));
+    live.validation.enter_validated().unwrap();
+    let failed = paths.add_path(pathway(30003));
+    confirm_validation(&paths);
+    let close = crate::common::observe_close(&paths.terminator);
+    paths.start_validation(&failed);
+    tokio::task::yield_now().await;
+    let [Frame::PathChallenge(challenge)] = super::take_validation_frames(&failed)[..] else {
+        panic!("expected one challenge");
+    };
+    let mut mismatched = *challenge;
+    mismatched[0] ^= 1;
+    paths
+        .validations
+        .recv_frame((
+            failed.pathway,
+            qbase::frame::PathResponseFrame::from(PathChallengeFrame::from_slice(&mismatched)),
+        ))
+        .unwrap();
+
+    crate::common::wait_for_sender_exit(&failed).await;
+    assert!(!paths.entries.lock().unwrap().contains_key(&failed.pathway));
+    assert!(paths.validations.get(&failed.pathway).is_none());
+    assert!(Arc::ptr_eq(
+        &paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&live.pathway)
+            .cloned()
+            .unwrap(),
+        &live
+    ));
+    assert!(close.notified().is_none());
+    paths.retire_all();
 }
 
 #[tokio::test(start_paused = true)]
@@ -257,15 +380,14 @@ async fn validation_retransmits_the_same_challenge_three_times_and_retirement_ca
             panic!("expected a retransmitted challenge");
         };
         assert_eq!(*expected.get_or_insert(challenge), challenge);
-        assert!(Arc::ptr_eq(&path, &paths.add_path(path.pathway)));
-        assert!(Arc::ptr_eq(&path, &paths.on_incoming_path(path.pathway)));
+        assert!(Arc::ptr_eq(&path, &paths.get_or_create_path(&path.pathway)));
         tokio::task::yield_now().await;
         assert!(super::take_validation_frames(&path).is_empty());
         tokio::time::advance(path.cc.pto_base(Epoch::Data) * 3).await;
         tokio::task::yield_now().await;
     }
-    assert!(path.is_retired());
-    assert!(paths.get(&path.pathway).is_none());
+    assert!(path.validation.is_cancelled());
+    assert!(!paths.entries.lock().unwrap().contains_key(&path.pathway));
     assert!(paths.validations.get(&path.pathway).is_none());
     assert!(
         matches!(paths.terminator.clone().await, crate::Error::Quic(error) if error.kind() == ErrorKind::NoViablePath)
@@ -277,7 +399,7 @@ async fn validation_retransmits_the_same_challenge_three_times_and_retirement_ca
     paths.start_validation(&replacement);
     tokio::task::yield_now().await;
     let response = replacement.validation.respond();
-    paths.remove(&replacement);
+    paths.del_path(&replacement.pathway);
     assert!(response.await.is_err());
     tokio::task::yield_now().await;
     assert!(paths.validations.get(&replacement.pathway).is_none());
@@ -309,25 +431,30 @@ async fn revalidation_starts_a_new_task_on_the_registered_validation() {
             ))
             .unwrap();
         tokio::task::yield_now().await;
-        assert!(path.is_validated());
+        assert!(path.validation.is_validated());
         assert!(paths.validations.get(&path.pathway).unwrap().is_validated());
     }
     paths.retire_all();
 }
 
-#[tokio::test]
-async fn an_old_validation_task_cannot_remove_a_replacement_at_the_same_pathway() {
+#[tokio::test(start_paused = true)]
+async fn old_validation_and_sending_tasks_cannot_remove_a_replacement_at_the_same_pathway() {
     let paths = paths(Role::Server);
     let previous = paths.add_path(pathway(30002));
     confirm_validation(&paths);
     paths.start_validation(&previous);
     tokio::task::yield_now().await;
-    paths.remove(&previous);
+    paths.del_path(&previous.pathway);
     let replacement = paths.add_path(previous.pathway);
-    assert!(!paths.remove(&previous));
-    tokio::task::yield_now().await;
+    crate::common::wait_for_sender_exit(&previous).await;
     assert!(Arc::ptr_eq(
-        &paths.get(&replacement.pathway).unwrap(),
+        &paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&replacement.pathway)
+            .cloned()
+            .unwrap(),
         &replacement
     ));
     assert!(paths.validations.get(&replacement.pathway).is_some());
@@ -342,7 +469,7 @@ async fn an_old_validation_task_cannot_remove_a_replacement_at_the_same_pathway(
         ))
         .unwrap();
     tokio::task::yield_now().await;
-    assert!(replacement.is_validated());
+    assert!(replacement.validation.is_validated());
     paths.retire_all();
 }
 
@@ -385,5 +512,5 @@ fn confirm_validation(paths: &Arc<Paths>) {
     ));
     paths.handshake.handshake_confirmed();
     paths.cids.confirm_handshake();
-    selected.retire();
+    selected.close();
 }

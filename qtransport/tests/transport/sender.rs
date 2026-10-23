@@ -41,7 +41,7 @@ impl Sender {
         if self.inner.pending().next().is_some() {
             return Ok(true);
         }
-        if self.path.is_retired() {
+        if self.path.validation.is_cancelled() {
             return Err(
                 QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
             );
@@ -77,7 +77,7 @@ impl Sender {
                 cx,
                 &mut self.packets,
                 |cx, path, packets| submit(cx, path, &packets[0]).map(|result| result.map(|_| 1)),
-                |_| !self.path.is_retired(),
+                |_| !self.path.validation.is_cancelled(),
                 |_| {},
             )
             .map(|result| result.map(|n| n != 0))
@@ -92,7 +92,7 @@ impl Sender {
                 cx,
                 &mut self.packets,
                 |cx, pathway, packets| protocol.poll_send_datagrams(cx, pathway, packets),
-                |_| !self.path.is_retired(),
+                |_| !self.path.validation.is_cancelled(),
                 |_| {},
             )
             .map(|result| result.map(|n| n != 0))
@@ -158,7 +158,7 @@ pub(crate) fn assemble_data(
             constraints,
             [&mut ping],
         )
-    } else if !path.is_validated() {
+    } else if !path.validation.is_validated() {
         sender.assemble_1rtt_packet(
             keys,
             header,

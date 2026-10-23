@@ -77,8 +77,9 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 }
             }
             // Admit paths only after authentication and complete frame parsing.
-            let path = paths.on_incoming_path(pathway);
-            path.on_datagram_received(received_bytes);
+            let path = paths.get_or_create_path(&pathway);
+            path.validation.on_received(received_bytes);
+            path.send_waker.wake_all();
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
@@ -101,7 +102,9 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 paths.select_path(&path);
             }
             if epoch == Epoch::Handshake {
-                path.validate();
+                if path.validation.enter_validated().is_ok() {
+                    path.send_waker.wake_all();
+                }
                 paths.on_handshake_received();
             }
             for frame in parsed_frames.drain(..) {
@@ -195,8 +198,9 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                 }
             }
             // Admit paths only after authentication and complete frame parsing.
-            let path = paths.on_incoming_path(pathway);
-            path.on_datagram_received(received_bytes);
+            let path = paths.get_or_create_path(&pathway);
+            path.validation.on_received(received_bytes);
+            path.send_waker.wake_all();
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);

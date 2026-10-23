@@ -9,6 +9,71 @@ use qbase::error::AppError;
 use qtransport::{ArcConnection, Error, terminate::ArcTerminator};
 
 #[tokio::test(start_paused = true)]
+async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pto() {
+    use std::time::Duration;
+
+    use qbase::{Epoch, net::route::Pathway, time::heartbeat::ArcHeartbeat};
+    use qcongestion::HandshakeStatus;
+    use qtransport::path::{Path, PathCids};
+    use tokio::time::Instant;
+
+    let cids = PathCids::new(Default::default());
+    let paths = Arc::new([4401, 4402, 4403].map(|port| {
+        Arc::new(Path::new(
+            Pathway::new(
+                "127.0.0.1:4400".parse().unwrap(),
+                format!("127.0.0.1:{port}").parse().unwrap(),
+            ),
+            Arc::new(HandshakeStatus::new(false)),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+            Default::default(),
+            &cids,
+        ))
+    }));
+    paths[0].validation.enter_validated().unwrap();
+    paths[1]
+        .cc
+        .set_ack_delays(Duration::ZERO, Duration::from_millis(100));
+    paths[2].validation.enter_validated().unwrap();
+    paths[2].close();
+    let largest = paths[1].cc.pto_base(Epoch::Data);
+    assert!(largest > paths[0].cc.pto_base(Epoch::Data));
+
+    let data = support::data::data();
+    let terminator = ArcTerminator::no_error();
+    let connection = ArcConnection::new(Bytes::new(), data.streams.clone(), terminator.clone())
+        .with_path_observer({
+            let paths = Arc::downgrade(&paths);
+            move |visit| {
+                if let Some(paths) = paths.upgrade() {
+                    for path in paths.iter() {
+                        visit(path);
+                    }
+                }
+            }
+        });
+    assert_eq!(connection.validated_paths(), [paths[0].pathway]);
+    let start = Instant::now();
+    connection
+        .clone()
+        .close(42u32.into(), "close with live paths");
+    assert!(matches!(terminator.await, Error::App(error) if error.error_code() == 42));
+    assert_eq!(Instant::now() - start, largest * 3);
+
+    paths[1].validation.enter_validated().unwrap();
+    assert_eq!(
+        connection.validated_paths(),
+        [paths[0].pathway, paths[1].pathway]
+    );
+    paths[0].close();
+    assert_eq!(connection.validated_paths(), [paths[1].pathway]);
+    let path = Arc::downgrade(&paths[1]);
+    drop(paths);
+    assert!(path.upgrade().is_none());
+    assert!(connection.validated_paths().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn connection_keeps_streams_alive_without_retaining_the_data_space() {
     use tokio::io::AsyncWriteExt;
 

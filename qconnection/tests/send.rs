@@ -787,7 +787,7 @@ async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription(
     drop(collector);
     initial.crypto.writer().write_all(b"hello").await.unwrap();
     path.validation.on_received(1200);
-    path.retire();
+    path.close();
     assert!(count.0.load(Ordering::Relaxed) > 0);
     paths.terminator.terminate();
     common::wait_for_sender_exit(&path).await;
@@ -862,10 +862,11 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
     assert!(b.0.load(Ordering::Relaxed) > 0);
     // Keep the second task credit-blocked while the first task retires.
     second.validation.revalidate().unwrap();
-    first.retire();
+    first.close();
     common::wait_for_sender_exit(&first).await;
     let first_before = a.0.load(Ordering::Relaxed);
-    second.on_datagram_received(1200);
+    second.validation.on_received(1200);
+    second.send_waker.wake_all();
     assert!(matches!(
         std::pin::pin!(two.collect()).poll(&mut Context::from_waker(&wb)),
         Poll::Ready(Ok(1))
@@ -875,14 +876,14 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
     initial.crypto.writer().write_all(b"again").await.unwrap();
     assert_eq!(a.0.load(Ordering::Relaxed), first_before);
     assert!(b.0.load(Ordering::Relaxed) > before);
-    second.retire();
+    second.close();
     paths.terminator.terminate();
     common::wait_for_sender_exit(&second).await;
     // Terminating the last path also notifies connection-close waiters.
     let first_before = a.0.load(Ordering::Relaxed);
     let before = b.0.load(Ordering::Relaxed);
-    first.retire();
-    second.retire();
+    first.close();
+    second.close();
     assert_eq!(a.0.load(Ordering::Relaxed), first_before);
     assert_eq!(b.0.load(Ordering::Relaxed), before);
 }

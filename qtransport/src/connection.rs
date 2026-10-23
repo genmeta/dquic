@@ -17,11 +17,13 @@ use crate::{
 #[derive(Clone)]
 pub struct ArcConnection(Arc<Connection>);
 
+type PathObserver = dyn Fn(&mut dyn FnMut(&Path)) + Send + Sync;
+
 struct Connection {
     alpn: Bytes,
     streams: DataStreams<ArcReliableFrames>,
     terminator: ArcTerminator,
-    paths: OnceLock<Box<dyn Fn() -> Vec<Arc<Path>> + Send + Sync>>,
+    paths: OnceLock<Box<PathObserver>>,
 }
 
 impl ArcConnection {
@@ -41,11 +43,11 @@ impl ArcConnection {
         }))
     }
 
-    /// Integration only: attach a read-only view without retaining the lifecycle owner.
+    /// Integration only: visit borrowed paths synchronously without retaining their owner.
     #[doc(hidden)]
     pub fn with_path_observer(
         self,
-        paths: impl Fn() -> Vec<Arc<Path>> + Send + Sync + 'static,
+        paths: impl Fn(&mut dyn FnMut(&Path)) + Send + Sync + 'static,
     ) -> Self {
         let _ = self.0.paths.set(Box::new(paths));
         self
@@ -53,13 +55,15 @@ impl ArcConnection {
 
     /// Snapshot of currently validated paths. Retired and unvalidated paths are excluded.
     pub fn validated_paths(&self) -> Vec<Pathway> {
-        self.0.paths.get().map_or_else(Vec::new, |snapshot| {
-            snapshot()
-                .into_iter()
-                .filter(|path| path.is_validated())
-                .map(|path| path.pathway)
-                .collect()
-        })
+        let mut validated = Vec::new();
+        if let Some(paths) = self.0.paths.get() {
+            paths(&mut |path| {
+                if path.validation.is_validated() {
+                    validated.push(path.pathway);
+                }
+            });
+        }
+        validated
     }
 
     pub fn alpn(&self) -> &[u8] {
@@ -96,17 +100,17 @@ impl ArcConnection {
 
 impl Connection {
     fn close(&self, error: AppError) {
-        let pto = self
-            .paths
-            .get()
-            .and_then(|snapshot| {
-                snapshot()
-                    .iter()
-                    .map(|path| path.cc.pto_base(Epoch::Data))
-                    .max()
-            })
-            .unwrap_or(Duration::from_secs(1));
-        self.terminator.close(CloseReason::App(error), pto);
+        let mut pto = None;
+        if let Some(paths) = self.paths.get() {
+            paths(&mut |path| {
+                let base = path.cc.pto_base(Epoch::Data);
+                pto = Some(pto.map_or(base, |pto: Duration| pto.max(base)));
+            });
+        }
+        self.terminator.close(
+            CloseReason::App(error),
+            pto.unwrap_or(Duration::from_secs(1)),
+        );
     }
 }
 

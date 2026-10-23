@@ -54,7 +54,8 @@ pub(super) async fn receive_packets<H, M>(
                 let Some(path) = admit_path(pathway, link) else {
                     return Ok(());
                 };
-                path.on_datagram_received(received_bytes);
+                path.validation.on_received(received_bytes);
+                path.send_waker.wake_all();
                 inspect(epoch, &path)?;
                 // CLOSE reaches the control owner even when ordinary component pipes are full.
                 if let Some(frame) = parsed_frames

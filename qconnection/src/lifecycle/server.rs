@@ -268,10 +268,12 @@ pub async fn server_growing(
                     )
                     .with_path_observer({
                         let paths = Arc::downgrade(&paths);
-                        move || {
-                            paths
-                                .upgrade()
-                                .map_or_else(Vec::new, |paths| paths.snapshot())
+                        move |visit| {
+                            if let Some(paths) = paths.upgrade() {
+                                for path in paths.entries.lock().unwrap().values() {
+                                    visit(path);
+                                }
+                            }
                         }
                     }),
                 ),

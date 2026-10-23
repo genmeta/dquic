@@ -446,13 +446,13 @@ async fn sent_callback_can_acknowledge_and_retire_path() {
                     .sent_journal
                     .on_acked(&ack(packet.pn), |_| {})
                     .unwrap();
-                path.validate();
-                path.retire();
+                path.validation.enter_validated().unwrap();
+                path.close();
             },
         ),
         Poll::Ready(Ok(1))
     ));
-    assert!(path.is_retired());
+    assert!(path.validation.is_cancelled());
 }
 
 #[tokio::test]
