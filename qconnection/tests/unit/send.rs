@@ -58,14 +58,14 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         trackers.clone(),
         &paths.cids,
     ));
-    path.exempt();
+    path.validation.exempt().unwrap();
     paths.cids.select(&path.cid);
     path.cc
         .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
+    tokio::time::advance(Duration::from_secs(10)).await;
     paths.on_handshake_sent();
     // Initial remains queued until growing cleans up; retired keys must already stop assembly.
     assert_eq!(paths.spaces.read_guard().offset(), 0);
-    tokio::time::advance(Duration::from_secs(10)).await;
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
@@ -137,7 +137,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         trackers.clone(),
         &paths.cids,
     ));
-    path.exempt();
+    path.validation.exempt().unwrap();
     paths.cids.select(&path.cid);
 
     path.cc.on_pkt_rcvd(Epoch::Initial, 3, true);
@@ -237,7 +237,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     paths.loss_resender.clone(),
                     &paths.cids,
                 ));
-                path.validate();
+                path.validation.enter_validated().unwrap();
                 let competitor = Arc::new(Path::new(
                     Pathway::new(
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
@@ -351,7 +351,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
             trackers.clone(),
             &paths.cids,
         ));
-        path.validate();
+        path.validation.enter_validated().unwrap();
         paths.cids.select(&path.cid);
         let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
         terminator.close(
@@ -696,7 +696,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    path.validate();
+    path.validation.enter_validated().unwrap();
     paths.cids.select(&path.cid);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
@@ -841,7 +841,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
         &paths.cids,
     ));
     paths.cids.select(&path.cid);
-    path.validate();
+    path.validation.enter_validated().unwrap();
     // The selected sender waits if the available CID was already consumed.
     assert!(paths.cids.is_selected(&path.cid));
     for crypto in [
@@ -959,7 +959,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    path.validate();
+    path.validation.enter_validated().unwrap();
     paths.cids.select(&path.cid);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
@@ -1025,7 +1025,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    waiting_path.validate();
+    waiting_path.validation.enter_validated().unwrap();
     mature
         .spaces
         .data
@@ -1042,7 +1042,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let sending_task = tokio::spawn(sending(paths.clone(), waiting_path.clone()));
     tokio::task::yield_now().await;
     assert!(!sending_task.is_finished());
-    waiting_path.retire();
+    waiting_path.close();
     tokio::time::timeout(Duration::from_secs(1), sending_task)
         .await
         .unwrap()
@@ -1128,7 +1128,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
             paths.loss_resender.clone(),
             &paths.cids,
         ));
-        path.validate();
+        path.validation.enter_validated().unwrap();
         paths.cids.select(&path.cid);
         path.heartbeat
             .on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now())
@@ -1191,7 +1191,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
                 .content,
             PacketContent::JustPing
         );
-        path.retire();
+        path.close();
     }
 }
 
@@ -1299,7 +1299,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         if epoch == Epoch::Data {
             super::confirm_handshake(&paths);
         }
-        path.on_datagram_received(400);
+        path.validation.on_received(400);
         path.validation.on_sent(1200);
         path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
         let base = path.cc.get_pto(epoch);
@@ -1317,7 +1317,8 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
 
         // Positive credit can still be too small even for a PING packet.
         let before = counter.0.load(Ordering::Relaxed);
-        path.on_datagram_received(1);
+        path.validation.on_received(1);
+        path.send_waker.wake_all();
         assert!(counter.0.load(Ordering::Relaxed) > before);
         assert!(burst.poll_collect(&mut cx).is_pending());
         assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
@@ -1326,15 +1327,16 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         // Handshake and 1-RTT probes fit well below 1200 bytes.
         let before = counter.0.load(Ordering::Relaxed);
         if validated {
-            path.validate();
+            path.validation.enter_validated().unwrap();
         } else {
-            path.on_datagram_received(20);
+            path.validation.on_received(20);
         }
+        path.send_waker.wake_all();
         assert!(counter.0.load(Ordering::Relaxed) > before);
         if epoch == Epoch::Initial && !validated {
             assert!(burst.poll_collect(&mut cx).is_pending());
             assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
-            path.on_datagram_received(379);
+            path.validation.on_received(379);
         }
         assert!(
             matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))),
@@ -1351,7 +1353,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         }
         burst.cancel();
         task::cancel_waiters(&paths, &path);
-        path.retire();
+        path.close();
         paths.terminator.terminate();
     }
 }
@@ -1378,7 +1380,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
         &paths.cids,
     ));
     paths.cids.select(&path.cid);
-    path.on_datagram_received(20);
+    path.validation.on_received(20);
     path.cc
         .on_pkt_sent(Epoch::Handshake, 0, true, 1200, true, None);
     mature
@@ -1407,7 +1409,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     path.cc.do_tick().unwrap();
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
     assert_eq!(path.cc.get_pto(Epoch::Handshake), base);
-    path.validate();
+    path.validation.enter_validated().unwrap();
     assert!(matches!(
         burst.poll_collect(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(Ok(1))
@@ -1415,7 +1417,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
     burst.cancel();
     task::cancel_waiters(&paths, &path);
-    path.retire();
+    path.close();
     paths.terminator.terminate();
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
@@ -1441,7 +1443,7 @@ async fn path_validation_respects_small_amplification_credit() {
             paths.cids.select(&path.cid);
             paths.handshake.handshake_confirmed();
             paths.cids.confirm_handshake();
-            path.on_datagram_received(received);
+            path.validation.on_received(received);
             let challenge = PathChallengeFrame::from_slice(&[7; 8]);
             if reply {
                 path.validation.recv_frame(challenge).unwrap();
@@ -1482,8 +1484,8 @@ async fn path_validation_respects_small_amplification_credit() {
                     "validation frame was not encoded"
                 );
             }
-            assert!(!path.is_validated());
-            path.retire();
+            assert!(!path.validation.is_validated());
+            path.close();
             paths.terminator.terminate();
         }
     }
@@ -1517,7 +1519,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    path.exempt();
+    path.validation.exempt().unwrap();
     paths.cids.select(&path.cid);
 
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
@@ -1589,6 +1591,49 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn retired_path_rejects_a_collected_burst_before_udp_submission() {
+    use qprotocol::{QuicProtocol, UdpSocket};
+
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local = EndpointAddr::direct(socket.local_addr().unwrap());
+    QuicProtocol::global().register(local, &socket).unwrap();
+    let paths = crate::common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let space = crate::common::initial_space(&paths.spaces);
+    space.crypto.writer().write_all(b"pending").await.unwrap();
+    let path = Arc::new(Path::new(
+        Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
+        paths.handshake.clone(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        paths.loss_resender.clone(),
+        &paths.cids,
+    ));
+    path.validation.exempt().unwrap();
+    paths.cids.select(&path.cid);
+    let mut datagrams = [BytesMut::with_capacity(1200)];
+    let mut frames = Vec::new();
+    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
+    let count = burst.collect().await.unwrap();
+    let pn = burst.packets[0][Epoch::Initial].unwrap().pn;
+    path.close();
+
+    let error = burst.submit(count).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NoViablePath);
+    assert!(matches!(error, crate::Error::Quic(error) if error.reason() == "Cancelled"));
+    assert!(burst.packets[0][Epoch::Initial].is_some());
+    burst.cancel();
+    assert!(space.sent_journal.lock_guard().packet(pn).is_none());
+    task::cancel_waiters(&paths, &path);
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
 async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     use qprotocol::{QuicProtocol, UdpSocket};
     use tokio::time::Instant;
@@ -1624,7 +1669,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         paths.loss_resender.clone(),
         &paths.cids,
     ));
-    path.on_datagram_received(1200);
+    path.validation.on_received(1200);
     paths.cids.select(&path.cid);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
@@ -1677,7 +1722,7 @@ async fn retired_cid_keeps_sender_pending_until_a_replacement_arrives() {
             paths.loss_resender.clone(),
             &paths.cids,
         ));
-        path.validate();
+        path.validation.enter_validated().unwrap();
         path
     };
     let selected = make_path(35502);
@@ -1715,7 +1760,7 @@ async fn retired_cid_keeps_sender_pending_until_a_replacement_arrives() {
     assert!(burst.poll_collect(&mut cx).is_pending());
     assert!(burst.packets.iter().flatten().all(Option::is_none));
     assert!(burst.dcid.is_none());
-    assert!(other.is_validated());
+    assert!(other.validation.is_validated());
     let replacement = ConnectionId::from_slice(b"client03");
     remote
         .recv_frame(NewConnectionIdFrame::new(
@@ -1727,7 +1772,7 @@ async fn retired_cid_keeps_sender_pending_until_a_replacement_arrives() {
     assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
     assert_eq!(**burst.dcid.as_ref().unwrap(), replacement);
     burst.cancel();
-    other.retire();
+    other.close();
     assert!(
         matches!(burst.poll_collect(&mut cx), Poll::Ready(Err(error))
         if error.kind() == ErrorKind::NoViablePath && error.to_string().contains("path CID binding retired"))

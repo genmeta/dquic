@@ -101,6 +101,8 @@ impl<'a, 'path> Burst<'a, 'path> {
             let sent = poll_fn(|cx| -> Poll<std::io::Result<usize>> {
                 // ACK handling takes the same lock as submission and completion.
                 let mut cc = path.cc.lock();
+                // Retirement also cancels a batch already waiting for UDP writability.
+                path.validation.credit().map_err(std::io::Error::other)?;
                 let sent = ready!(QuicProtocol::global().poll_send(
                     cx,
                     path.pathway,
@@ -158,8 +160,8 @@ impl Burst<'_, '_> {
             .ok_or_else(|| no_viable_path("path CID binding retired"))?;
         let phase = self.paths.phase().poll_phase(cx).clone();
         self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
-        let credit = match path.poll_credit(cx) {
-            Poll::Ready(credit) => credit.map_err(no_viable_path)?,
+        let credit = match path.validation.poll_credit(cx) {
+            Poll::Ready(credit) => credit.map_err(no_viable_path)?.unwrap_or(usize::MAX),
             Poll::Pending => 0,
         };
         let overhead = QuicProtocol::packet_overhead(path.pathway);

@@ -307,7 +307,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             assert!(matches!(growing.await.unwrap(), Error::Quic(error)
                 if error.kind() == qbase::error::ErrorKind::TransportParameter));
             assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
-            assert!(paths.snapshot().is_empty());
+            assert!(paths.entries.lock().unwrap().is_empty());
             assert!(!route_exists(&router, cid).await);
             QuicProtocol::global().unregister(socket.local_addr().unwrap());
             return;
@@ -371,7 +371,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert!(tls.read_keys().await.is_err());
     assert!(handshake.keys.get().is_err());
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
     assert!(!route_exists(&router, cid).await);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
     drop(connection);

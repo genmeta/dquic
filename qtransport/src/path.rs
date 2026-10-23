@@ -1,13 +1,11 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
-    future::poll_fn,
     sync::{Arc, atomic::AtomicU16},
-    task::{Context, Poll},
     time::Duration,
 };
 
 use qbase::{
-    Cancelled, Epoch,
+    Epoch,
     net::{route::Pathway, tx::ArcSendWakers},
     packet::assemble::Metadata,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
@@ -59,39 +57,6 @@ impl Path {
         }
     }
 
-    pub async fn failed(&self) {
-        poll_fn(|cx| {
-            self.send_waker.register(cx.waker());
-            if self.is_retired() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
-    }
-
-    pub fn is_retired(&self) -> bool {
-        self.validation.is_cancelled()
-    }
-
-    pub fn is_validated(&self) -> bool {
-        self.validation.is_validated()
-    }
-
-    /// Only the sending task polls credit and updates recovery's amplification state.
-    pub fn poll_credit(&self, cx: &mut Context<'_>) -> Poll<Result<usize, Cancelled>> {
-        self.validation
-            .poll_credit(cx)
-            .map(|credit| credit.map(|credit| credit.unwrap_or(usize::MAX)))
-    }
-
-    /// Account each received UDP datagram once, at the connection router.
-    pub fn on_datagram_received(&self, bytes: usize) {
-        self.validation.on_received(bytes);
-        self.send_waker.wake_all();
-    }
-
     /// Account one successfully submitted datagram under the submission's CC lock.
     pub fn on_sent(
         &self,
@@ -110,7 +75,7 @@ impl Path {
         let _ = idle.on_sent_at(now);
         for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
             let Some(meta) = packet else { continue };
-            let size = meta.pktlen
+            let sent_bytes = meta.pktlen
                 + if charged == Some(epoch as usize) {
                     overhead
                 } else {
@@ -120,7 +85,7 @@ impl Path {
                 epoch,
                 meta.pn,
                 meta.content.is_ack_eliciting(),
-                size,
+                sent_bytes,
                 meta.in_flight,
                 meta.ack,
             );
@@ -128,19 +93,7 @@ impl Path {
         }
     }
 
-    pub fn exempt(&self) {
-        if self.validation.exempt().is_ok() {
-            self.send_waker.wake_all();
-        }
-    }
-
-    pub fn validate(&self) {
-        if self.validation.enter_validated().is_ok() {
-            self.send_waker.wake_all();
-        }
-    }
-
-    pub fn retire(&self) {
+    pub fn close(&self) {
         self.validation.cancel();
         self.cid.retire();
         self.heartbeat.stop();

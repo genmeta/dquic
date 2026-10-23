@@ -379,9 +379,7 @@ pub async fn wait_for_sender_exit(path: &Arc<qtransport::path::Path>) {
 
 pub fn retire_all(paths: &qconnection::Paths) {
     paths.terminator.terminate();
-    for path in paths.snapshot() {
-        paths.remove(&path);
-    }
+    paths.clean();
 }
 
 pub mod path_fixtures;

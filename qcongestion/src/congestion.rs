@@ -53,6 +53,19 @@ pub struct CongestionController {
 }
 
 impl CongestionController {
+    /// A.6. On Receiving a Datagram
+    /// OnDatagramReceived(datagram):
+    ///   // If this datagram unblocks the server, arm the
+    ///   // PTO timer to avoid deadlock.
+    ///   if (server was at anti-amplification limit):
+    ///     SetLossDetectionTimer()
+    ///     if loss_detection_timer.timeout < now():
+    ///       // Execute PTO if it would have expired
+    ///       // while the amplification limit applied.
+    ///       OnLossDetectionTimeout()
+    ///
+    /// The sender reports blocking after credit changes; poll_send_quota then
+    /// processes an expired PTO using the updated budget.
     /// Update the sender's anti-amplification decision without resetting PTO backoff.
     pub fn set_amplification_blocked(&mut self, blocked: bool) {
         if self.amplification_blocked != blocked {

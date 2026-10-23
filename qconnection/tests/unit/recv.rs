@@ -263,7 +263,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             Duration::from_secs(1),
         );
         assert!(space.crypto.reader().read(&mut [0; 1]).await.is_err());
-        paths.remove(&path);
+        paths.del_path(&path.pathway);
         let header = || {
             LongHeaderBuilder::with_cid(
                 ConnectionId::from_slice(b"localcid"),
@@ -377,23 +377,30 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
 async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
     for role in [Role::Client, Role::Server] {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
-            let (paths, first, _) = paths(role);
-            for path in paths.snapshot() {
-                paths.remove(&path);
-            }
-            assert!(paths.snapshot().is_empty());
+            let (paths, first, second) = paths(role);
+            paths.del_path(&first.pathway);
+            paths.del_path(&second.pathway);
+            assert!(paths.entries.lock().unwrap().is_empty());
 
             receive_ping(role, epoch, true, &paths, &first).await;
-            assert!(paths.snapshot().is_empty(), "forged packet admitted a path");
+            assert!(
+                paths.entries.lock().unwrap().is_empty(),
+                "forged packet admitted a path"
+            );
 
             receive_ping(role, epoch, false, &paths, &first).await;
-            let admitted = paths.snapshot();
-            assert_eq!(admitted.len(), 1);
-            assert_eq!(admitted[0].pathway, first.pathway);
-            assert!(!Arc::ptr_eq(&admitted[0], &first));
+            assert_eq!(paths.entries.lock().unwrap().len(), 1);
+            let admitted = paths
+                .entries
+                .lock()
+                .unwrap()
+                .get(&first.pathway)
+                .cloned()
+                .unwrap();
+            assert!(!Arc::ptr_eq(&admitted, &first));
             if epoch == Epoch::Initial {
                 assert_eq!(
-                    crate::common::path_credit(&admitted[0]),
+                    crate::common::path_credit(&admitted),
                     if role == Role::Client {
                         usize::MAX
                     } else {
@@ -401,8 +408,8 @@ async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
                     }
                 );
             } else {
-                assert!(admitted[0].is_validated());
-                assert_eq!(crate::common::path_credit(&admitted[0]), usize::MAX);
+                assert!(admitted.validation.is_validated());
+                assert_eq!(crate::common::path_credit(&admitted), usize::MAX);
             }
             paths.retire_all();
         }
@@ -626,7 +633,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     let (paths, first, second) = paths(Role::Server);
     let space = crate::common::initial_space(&paths.spaces);
     let server_keys = keys(true);
-    first.validate();
+    first.validation.enter_validated().unwrap();
     let header = || {
         LongHeaderBuilder::with_cid(
             ConnectionId::from_slice(b"peercid0"),
@@ -760,7 +767,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
             paths.loss_resender.clone(),
             &paths.cids,
         ));
-        path.validate();
+        path.validation.enter_validated().unwrap();
         paths
             .entries
             .lock()

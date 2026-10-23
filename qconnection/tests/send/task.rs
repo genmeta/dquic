@@ -34,14 +34,14 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
         let path = path.clone();
         move || {
             std::thread::sleep(Duration::from_millis(50));
-            path.retire();
+            path.close();
         }
     });
     tokio::task::yield_now().await;
-    assert!(paths.get(&path.pathway).is_some());
+    assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
     watchdog.join().unwrap();
     common::wait_for_sender_exit(&path).await;
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -61,8 +61,8 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
     ));
     paths.cids.select(&path.cid);
     common::wait_for_sender_exit(&path).await;
-    assert!(paths.snapshot().is_empty());
-    assert!(path.is_retired());
+    assert!(paths.entries.lock().unwrap().is_empty());
+    assert!(path.validation.is_cancelled());
 
     assert!(
         space
@@ -99,7 +99,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         local,
         EndpointAddr::direct(peer.local_addr().unwrap()),
     ));
-    path.validate();
+    path.validation.enter_validated().unwrap();
     paths.cids.select(&path.cid);
     space
         .rcvd_journal
@@ -148,7 +148,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     assert!(Instant::now() >= start + Duration::from_secs(5));
     assert!(Instant::now() <= received + Duration::from_secs(8));
     assert!(!common::take_heartbeat(&path));
-    path.retire();
+    path.close();
     common::wait_for_sender_exit(&path).await;
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
@@ -176,13 +176,13 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
         pto,
     );
     tokio::task::yield_now().await;
-    assert!(paths.get(&path.pathway).is_some());
-    assert!(!path.is_retired());
+    assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
+    assert!(!path.validation.is_cancelled());
     tokio::time::advance(3 * pto).await;
     terminator.await;
     tokio::task::yield_now().await;
-    assert!(paths.get(&path.pathway).is_none());
-    assert!(path.is_retired());
+    assert!(!paths.entries.lock().unwrap().contains_key(&path.pathway));
+    assert!(path.validation.is_cancelled());
 }
 
 #[tokio::test(start_paused = true)]
@@ -216,7 +216,7 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
         .crypto
         .on_error(&error);
     tokio::task::yield_now().await;
-    assert!(paths.get(&path.pathway).is_some());
+    assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
     assert!(
         crate::common::observe_close(&terminator)
             .notified()
@@ -269,12 +269,12 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
                 .iter()
                 .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
         );
-        assert!(paths.get(&path.pathway).is_some());
+        assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
     }
     tokio::time::advance(3 * pto).await;
     common::wait_for_sender_exit(&path).await;
     assert_eq!(terminator.await, error);
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
@@ -307,7 +307,7 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
     paths.cids.select(&path.cid);
     for message in [b"first".as_slice(), b"second".as_slice()] {
         tokio::task::yield_now().await;
-        assert!(paths.get(&path.pathway).is_some());
+        assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
         space.crypto.writer().write_all(message).await.unwrap();
         let mut bytes = [BytesMut::zeroed(1500)];
         let mut lines = [Line::new(
@@ -339,8 +339,8 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
             |frame| matches!(frame.unwrap().0, Frame::Crypto(_, bytes) if bytes.as_ref() == message)
         ));
     }
-    path.retire();
+    path.close();
     common::wait_for_sender_exit(&path).await;
-    assert!(paths.snapshot().is_empty());
+    assert!(paths.entries.lock().unwrap().is_empty());
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
