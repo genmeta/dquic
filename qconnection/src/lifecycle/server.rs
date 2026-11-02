@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use qbase::{
-    Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     handshake::ArcHandshake,
@@ -36,14 +35,13 @@ pub async fn server_growing(
     token: ArcTokenRegistry,
 ) -> Error {
     let phase = paths.phase();
+    let progress = &paths.progress;
     let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
     let terminator = paths.terminator.clone();
-    let spaces = paths.spaces.clone();
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
-    let loss_resender = paths.loss_resender.clone();
     let scid = initial_space.initial_scid;
     let origin_dcid = local_cids.origin_dcid();
 
@@ -107,18 +105,7 @@ pub async fn server_growing(
                 ArcKeys::from(hs_keys),
                 paths.is_mp_handshaking.clone(),
             ));
-            loss_resender
-                .write_guard()
-                .push_back(hs_space.clone())
-                .expect("Handshake epoch");
-            spaces
-                .write_guard()
-                .push_back(hs_space.clone())
-                .expect("Handshake epoch");
-            terminator.register(Arc::new(hs_space.crypto.clone()));
-            paths.handshake.got_handshake_key();
-            phase.enter_handshake();
-            initial_space.crypto.recver.retire();
+            let _ = progress.install_handshake(hs_space.clone());
 
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
@@ -162,15 +149,7 @@ pub async fn server_growing(
                 reliable_frames.clone(),
                 paths.is_mp_handshaking.clone(),
             ));
-            loss_resender
-                .write_guard()
-                .push_back(data_space.clone())
-                .expect("Data epoch");
-            spaces
-                .write_guard()
-                .push_back(data_space.clone())
-                .expect("Data epoch");
-            terminator.register(Arc::new(data_space.crypto.clone()));
+            progress.install_data(data_space.clone());
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data_space.clone(), client_scid),
@@ -212,6 +191,7 @@ pub async fn server_growing(
             // Receiving Finished selects the handshake path before waking TLS.
             // Until then, Handshake keeps the first flight independent of path CIDs.
             let summary = tls_ctx.finished().await?;
+            progress.on_tls_finished();
             let handshake = ArcHandshake::new_server(reliable_frames.clone());
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
@@ -232,30 +212,17 @@ pub async fn server_growing(
             handshake.done();
 
             paths.cids.attach_remote(cid_registry.remote.clone());
-            phase.enter_mature(Arc::new(MaturePhase {
+            progress.enter_mature(Arc::new(MaturePhase {
                 parameters,
                 flow_ctrl,
                 cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
             }));
 
-            data_space.keys.allow_update();
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
-            {
-                let mut spaces = spaces.write_guard();
-                let mut resender = loss_resender.write_guard();
-                while spaces
-                    .front()
-                    .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
-                {
-                    let (_, space) = spaces.pop_front().unwrap();
-                    space.retire();
-                    resender.pop_front();
-                }
-            }
-            paths.handshake_confirmed();
+            progress.on_handshake_done(&paths);
 
             Ok::<_, Error>((
                 (

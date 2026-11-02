@@ -7,11 +7,11 @@ mod algorithm;
 pub use algorithm::Algorithm;
 mod congestion;
 pub use congestion::{ArcCC, CongestionController};
+mod facts;
 mod pacing;
 mod packets;
 mod rtt;
-mod status;
-pub use status::HandshakeStatus;
+pub use facts::HandshakeFacts;
 
 /// default datagram size in bytes.
 pub const MSS: usize = 1200;

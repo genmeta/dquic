@@ -53,7 +53,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
             "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
             "127.0.0.1:5500".parse().unwrap(),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         trackers.clone(),
         &paths.cids,
@@ -63,9 +63,9 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     path.cc
         .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
     tokio::time::advance(Duration::from_secs(10)).await;
-    paths.on_handshake_sent();
-    // Initial remains queued until growing cleans up; retired keys must already stop assembly.
-    assert_eq!(paths.spaces.read_guard().offset(), 0);
+    paths.progress.on_handshake_sent();
+    assert_eq!(paths.spaces.read_guard().offset(), Epoch::Handshake as u64);
+    assert_eq!(trackers.read_guard().offset(), Epoch::Handshake as u64);
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
@@ -132,7 +132,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     );
     let path = Arc::new(Path::new(
         pathway,
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         trackers.clone(),
         &paths.cids,
@@ -232,7 +232,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
                     ),
-                    paths.handshake.clone(),
+                    paths.progress.facts(),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     paths.loss_resender.clone(),
                     &paths.cids,
@@ -243,7 +243,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                         EndpointAddr::direct("127.0.0.1:35001".parse().unwrap()),
                         EndpointAddr::direct("127.0.0.1:35003".parse().unwrap()),
                     ),
-                    paths.handshake.clone(),
+                    paths.progress.facts(),
                     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                     paths.loss_resender.clone(),
                     &paths.cids,
@@ -267,7 +267,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                             2,
                             paths.reliable_frames.clone(),
                         ));
-                        paths.handshake.handshake_confirmed();
+                        paths.progress.facts().on_handshake_done();
                         paths.cids.confirm_handshake();
                     }
                     _ => {}
@@ -346,7 +346,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
                 EndpointAddr::direct("127.0.0.1:33001".parse().unwrap()),
                 EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             trackers.clone(),
             &paths.cids,
@@ -691,7 +691,7 @@ async fn existing_path_recovers_new_spaces_after_phase_upgrade() {
             EndpointAddr::direct("127.0.0.1:34101".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34102".parse().unwrap()),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -782,7 +782,7 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
                 EndpointAddr::direct(([127, 0, 0, 1], port).into()),
                 EndpointAddr::direct("127.0.0.1:34300".parse().unwrap()),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,
@@ -835,7 +835,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
             EndpointAddr::direct("127.0.0.1:34201".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34202".parse().unwrap()),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -954,7 +954,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             EndpointAddr::direct("127.0.0.1:34001".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -996,7 +996,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         .write_all(b"remaining")
         .await
         .unwrap();
-    paths.handshake.handshake_confirmed();
+    paths.progress.facts().on_handshake_done();
     paths.cids.confirm_handshake();
     assert!(matches!(
         collect(Burst::new(
@@ -1020,7 +1020,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             EndpointAddr::direct("127.0.0.1:34003".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:34002".parse().unwrap()),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -1123,7 +1123,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
                 "127.0.0.1:30001".parse::<EndpointAddr>().unwrap(),
                 "127.0.0.1:30002".parse().unwrap(),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,
@@ -1205,7 +1205,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
                     EndpointAddr::direct("127.0.0.1:35201".parse().unwrap()),
                     EndpointAddr::direct("127.0.0.1:35202".parse().unwrap()),
                 ),
-                paths.handshake.clone(),
+                paths.progress.facts(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 paths.loss_resender.clone(),
                 &paths.cids,
@@ -1221,11 +1221,10 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
             };
             let retire_initial = || {
                 if role == Role::Client {
-                    paths.on_handshake_sent();
+                    paths.progress.on_handshake_sent();
                 } else {
-                    paths.on_handshake_received();
+                    paths.progress.on_handshake_received();
                 }
-                super::retire_spaces(&paths, Epoch::Handshake);
             };
             assert_eq!(epochs(), [0]);
             if retire_before_handshake {
@@ -1290,7 +1289,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
                 EndpointAddr::direct("127.0.0.1:35101".parse().unwrap()),
                 EndpointAddr::direct("127.0.0.1:35102".parse().unwrap()),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,
@@ -1374,7 +1373,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
             EndpointAddr::direct(socket.local_addr().unwrap()),
             EndpointAddr::direct(peer.local_addr().unwrap()),
         ),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -1435,13 +1434,13 @@ async fn path_validation_respects_small_amplification_credit() {
                     EndpointAddr::direct("127.0.0.1:35101".parse().unwrap()),
                     EndpointAddr::direct("127.0.0.1:35102".parse().unwrap()),
                 ),
-                paths.handshake.clone(),
+                paths.progress.facts(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 paths.loss_resender.clone(),
                 &paths.cids,
             ));
             paths.cids.select(&path.cid);
-            paths.handshake.handshake_confirmed();
+            paths.progress.facts().on_handshake_done();
             paths.cids.confirm_handshake();
             path.validation.on_received(received);
             let challenge = PathChallengeFrame::from_slice(&[7; 8]);
@@ -1514,7 +1513,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         .unwrap();
     let path = Arc::new(Path::new(
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -1608,7 +1607,7 @@ async fn retired_path_rejects_a_collected_burst_before_udp_submission() {
     space.crypto.writer().write_all(b"pending").await.unwrap();
     let path = Arc::new(Path::new(
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -1664,7 +1663,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     super::enter_handshake(&paths, handshake.clone());
     let path = Arc::new(Path::new(
         Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -1717,7 +1716,7 @@ async fn retired_cid_keeps_sender_pending_until_a_replacement_arrives() {
                 EndpointAddr::direct("127.0.0.1:35501".parse().unwrap()),
                 EndpointAddr::direct(([127, 0, 0, 1], port).into()),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,

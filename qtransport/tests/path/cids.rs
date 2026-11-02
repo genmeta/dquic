@@ -11,9 +11,10 @@ use qbase::{
     cid::{ArcRemoteCids, BorrowedCid, ConnectionId},
     frame::{NewConnectionIdFrame, io::ReceiveFrame},
     net::{addr::EndpointAddr, route::Pathway},
+    role::Role,
     time::heartbeat::ArcHeartbeat,
 };
-use qcongestion::HandshakeStatus;
+use qcongestion::HandshakeFacts;
 use qtransport::{
     ArcReliableFrames,
     path::{Path, PathCids},
@@ -29,7 +30,7 @@ fn pathway(port: u16) -> Pathway {
 fn register(cids: &Arc<PathCids>, port: u16) -> Path {
     Path::new(
         pathway(port),
-        Arc::new(HandshakeStatus::new(true)),
+        Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
         cids,

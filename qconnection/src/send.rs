@@ -137,7 +137,7 @@ impl<'a, 'path> Burst<'a, 'path> {
             .await
             .map_err(no_viable_path)?;
             if sent_handshake {
-                self.paths.on_handshake_sent();
+                self.paths.progress.on_handshake_sent();
             }
             if sent == 0 {
                 return Err(no_viable_path("UDP submitted zero datagrams"));

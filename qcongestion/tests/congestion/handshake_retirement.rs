@@ -1,17 +1,17 @@
 use crate::*;
 
-fn shared_controller(handshake: &Arc<HandshakeStatus>) -> ArcCC {
+fn shared_controller(handshake: &Arc<HandshakeFacts>) -> ArcCC {
     controller_with(handshake.clone(), trackers(Arc::new(NoopFeedback)))
 }
 
 #[tokio::test(start_paused = true)]
 async fn shared_progress_retires_each_paths_spaces_once() {
-    for is_server in [false, true] {
-        let handshake = Arc::new(HandshakeStatus::new(is_server));
+    for role in [Role::Client, Role::Server] {
+        let handshake = Arc::new(HandshakeFacts::with_role(role));
         let mut controllers = vec![shared_controller(&handshake), shared_controller(&handshake)];
-        handshake.got_handshake_key();
+        handshake.install_handshake_key();
         // Only the client's first send / server's first receive retires Initial.
-        if is_server {
+        if role == Role::Server {
             handshake.on_handshake_sent();
         } else {
             handshake.on_handshake_received();
@@ -35,7 +35,7 @@ async fn shared_progress_retires_each_paths_spaces_once() {
             assert_eq!(cc.need_send_ack_eliciting(Epoch::Initial), 3);
             assert!(cc.get_pto(Epoch::Initial) > cc.pto_base(Epoch::Initial));
         }
-        if is_server {
+        if role == Role::Server {
             handshake.on_handshake_received();
         } else {
             handshake.on_handshake_sent();
@@ -53,7 +53,7 @@ async fn shared_progress_retires_each_paths_spaces_once() {
             assert_eq!(cc.need_send_ack_eliciting(Epoch::Initial), 0);
         }
 
-        handshake.handshake_confirmed();
+        handshake.on_handshake_done();
         controllers.push(shared_controller(&handshake));
         let sent_at = Instant::now();
         for cc in &controllers {
@@ -85,8 +85,8 @@ async fn shared_progress_retires_each_paths_spaces_once() {
 
 #[tokio::test(start_paused = true)]
 async fn handshake_ack_on_another_path_cancels_an_armed_anti_deadlock_probe() {
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.got_handshake_key();
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+    handshake.install_handshake_key();
     let waiting = shared_controller(&handshake);
     let receiving = shared_controller(&handshake);
     handshake.on_handshake_sent();

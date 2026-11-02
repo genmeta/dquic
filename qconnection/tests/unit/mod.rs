@@ -75,24 +75,12 @@ pub fn enter_handshake(
         .push_back(handshake.clone())
         .unwrap();
     paths.spaces.write_guard().push_back(handshake).unwrap();
-    paths.handshake.got_handshake_key();
+    paths.progress.facts().install_handshake_key();
     paths.phase().enter_handshake();
 }
 
-/// Emulate lifecycle retirement in tests that do not run growing.
-pub fn retire_spaces(paths: &Paths, end: qbase::Epoch) {
-    let mut spaces = paths.spaces.write_guard();
-    let mut resender = paths.loss_resender.write_guard();
-    while spaces.front().is_some_and(|(epoch, _)| epoch < end as u64) {
-        let (_, space) = spaces.pop_front().unwrap();
-        space.retire();
-        resender.pop_front();
-    }
-}
-
 pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {
-    retire_spaces(paths, qbase::Epoch::Data);
-    paths.handshake_confirmed();
+    paths.progress.on_handshake_done(paths);
 }
 
 /// Observe the same four scenarios across existing sending and receiving tests.

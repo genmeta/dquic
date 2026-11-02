@@ -6,17 +6,17 @@ use std::{
     task::{Context, Poll},
 };
 
-use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, util::ArcIndexDeque};
+use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, role::Role, util::ArcIndexDeque};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
 use crate::{
     Algorithm, MSS, Resend, TooManyPtos,
     algorithm::{Control, new_reno::NewReno},
+    facts::HandshakeFacts,
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
     rtt::{ArcRtt, INITIAL_RTT},
-    status::HandshakeStatus,
 };
 
 const INIT_CWND: usize = MSS * 10;
@@ -43,9 +43,9 @@ pub struct CongestionController {
     // The waker to notify when the controller is ready to send.
     pending_burst: bool,
     // Shared connection spaces, indexed by epoch even after early spaces retire.
-    trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
+    loss_resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
-    handshake: Arc<HandshakeStatus>,
+    hs_facts: Arc<HandshakeFacts>,
     pmtu: Arc<AtomicU16>,
     // The sender reports whether amplification credit prevents the current PTO probe.
     amplification_blocked: bool,
@@ -91,8 +91,8 @@ impl CongestionController {
     fn init(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        handshake: Arc<HandshakeStatus>,
+        loss_resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
+        hs_facts: Arc<HandshakeFacts>,
         pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -122,9 +122,9 @@ impl CongestionController {
                 None,
             ),
             pending_burst: false,
-            trackers,
+            loss_resenders,
             need_send_ack_eliciting_packets: [0; Epoch::count()],
-            handshake,
+            hs_facts,
             pmtu,
             amplification_blocked: false,
             tx_waker,
@@ -253,14 +253,14 @@ impl CongestionController {
             None => return,
             Some(newly_acked_packets) => {
                 if epoch == Epoch::Handshake {
-                    self.handshake.received_handshake_ack();
+                    self.hs_facts.on_handshake_acked();
                 }
                 let (largest_pn, largest_time_sent) = newly_acked_packets.largest;
                 if largest_pn == ack_frame.largest() && newly_acked_packets.include_ack_eliciting {
                     self.rtt.update(
                         now - largest_time_sent,
                         Duration::from_micros(ack_frame.delay()),
-                        self.handshake.is_handshake_confirmed(),
+                        self.hs_facts.is_handshake_done(),
                     );
                 }
                 // Process ECN information if present.
@@ -276,7 +276,7 @@ impl CongestionController {
 
         if loss_pns.peek().is_some() {
             self.rtt.try_backoff_rtt();
-            let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
+            let tracker = self.loss_resenders.read_guard().get(epoch as u64).cloned();
             if let Some(tracker) = tracker {
                 tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
             }
@@ -366,7 +366,7 @@ impl CongestionController {
 
             if loss_pns.peek().is_some() {
                 self.rtt.try_backoff_rtt();
-                let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
+                let tracker = self.loss_resenders.read_guard().get(epoch as u64).cloned();
                 if let Some(tracker) = tracker {
                     tracker.resend(PacketLostTrigger::TimeThreshold, &mut loss_pns);
                 }
@@ -379,7 +379,7 @@ impl CongestionController {
             // Use the driver's decision: another path can advance the shared
             // handshake after that decision without changing this timeout event.
             debug_assert!(!peer_validated);
-            if self.handshake.has_handshake_key.load(Ordering::Acquire) {
+            if self.hs_facts.has_handshake_key() {
                 // Send an anti-deadlock packet: Initial is padded
                 // to earn more anti-amplification credit,
                 // a Handshake packet proves address ownership.
@@ -449,7 +449,7 @@ impl CongestionController {
         let now = Instant::now();
         if self.no_ack_eliciting_in_flight() {
             // assert!(!self.peer_completed_address_validation());
-            if self.handshake.has_handshake_key.load(Ordering::Acquire) {
+            if self.hs_facts.has_handshake_key() {
                 return Some((now + duration, Epoch::Handshake));
             } else {
                 return Some((now + duration, Epoch::Initial));
@@ -464,7 +464,7 @@ impl CongestionController {
             if epoch == Epoch::Data {
                 // An endpoint MUST NOT set its PTO timer for the Application Data
                 // packet number epoch until the handshake is confirmed
-                if !self.handshake.is_handshake_confirmed() {
+                if !self.hs_facts.is_handshake_done() {
                     return pto_time;
                 }
                 duration += self.max_ack_delay * (1 << self.pto_count);
@@ -493,12 +493,9 @@ impl CongestionController {
     ///   return has received Handshake ACK ||
     ///        handshake confirmed
     fn peer_completed_address_validation(&self) -> bool {
-        self.handshake.is_server
-            || self
-                .handshake
-                .has_received_handshake_ack
-                .load(Ordering::Acquire)
-            || self.handshake.is_handshake_confirmed()
+        self.hs_facts.role() == Role::Server
+            || self.hs_facts.has_handshake_acked()
+            || self.hs_facts.is_handshake_done()
     }
 
     fn process_ecn(&mut self, ack: &AckFrame, sent_time: &Instant, epoch: Epoch) {
@@ -555,18 +552,10 @@ impl CongestionController {
     }
 
     fn retire_handshake_spaces(&mut self) {
-        if !self.discarded_epochs[Epoch::Initial] {
-            let handshake = &self.handshake;
-            let initial_finished = if handshake.is_server {
-                handshake.has_received_handshake.load(Ordering::Acquire)
-            } else {
-                handshake.has_sent_handshake.load(Ordering::Acquire)
-            };
-            if initial_finished || handshake.is_handshake_confirmed() {
-                self.discard_epoch(Epoch::Initial);
-            }
+        if !self.discarded_epochs[Epoch::Initial] && self.hs_facts.is_initial_done() {
+            self.discard_epoch(Epoch::Initial);
         }
-        if !self.discarded_epochs[Epoch::Handshake] && self.handshake.is_handshake_confirmed() {
+        if !self.discarded_epochs[Epoch::Handshake] && self.hs_facts.is_handshake_done() {
             self.discard_epoch(Epoch::Handshake);
         }
     }
@@ -613,7 +602,7 @@ impl CongestionController {
         for &epoch in Epoch::iter() {
             let packet_numbers = self.packet_spaces[epoch].discard(&mut self.algorithm);
             if epoch == Epoch::Data && !packet_numbers.is_empty() {
-                let tracker = self.trackers.read_guard().get(epoch as u64).cloned();
+                let tracker = self.loss_resenders.read_guard().get(epoch as u64).cloned();
                 if let Some(tracker) = tracker {
                     tracker.resend(
                         PacketLostTrigger::PtoExpired,
@@ -649,16 +638,16 @@ impl ArcCC {
     pub fn new(
         algorithm: Algorithm,
         max_ack_delay: Duration,
-        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        handshake: Arc<HandshakeStatus>,
+        loss_resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
+        hs_facts: Arc<HandshakeFacts>,
         pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
         let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
             algorithm,
             max_ack_delay,
-            trackers,
-            handshake,
+            loss_resenders,
+            hs_facts,
             pmtu,
             tx_waker.clone(),
         ))));
@@ -808,7 +797,7 @@ mod tests {
     use qbase::{net::tx::ArcSendWakers, util::IndexDeque};
 
     use super::*;
-    use crate::HandshakeStatus;
+    use crate::HandshakeFacts;
 
     struct NoopFeedback;
 
@@ -817,8 +806,8 @@ mod tests {
     }
 
     fn controller_with_feedback(feedback: Arc<dyn Resend>) -> CongestionController {
-        let handshake = Arc::new(HandshakeStatus::new(false));
-        handshake.handshake_confirmed();
+        let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+        handshake.on_handshake_done();
         let pmtu = Arc::new(AtomicU16::new(MSS as u16));
 
         CongestionController::init(

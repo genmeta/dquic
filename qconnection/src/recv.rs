@@ -105,7 +105,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 if path.validation.enter_validated().is_ok() {
                     path.send_waker.wake_all();
                 }
-                paths.on_handshake_received();
+                paths.progress.on_handshake_received();
             }
             for frame in parsed_frames.drain(..) {
                 match frame {

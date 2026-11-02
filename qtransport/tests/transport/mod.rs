@@ -256,7 +256,7 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     );
     let path = Arc::new(Path::new(
         pathway,
-        confirmed_handshake(transport.parameters.role() == Role::Server),
+        confirmed_handshake(transport.parameters.role()),
         path_heartbeat(),
         data_trackers(transport),
         &qtransport::path::PathCids::new(Default::default()),
@@ -1773,7 +1773,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     protocol.register(local, &socket).unwrap();
     let path = Arc::new(Path::new(
         pathway,
-        confirmed_handshake(false),
+        confirmed_handshake(Role::Client),
         path_heartbeat(),
         data_trackers(&ct),
         &qtransport::path::PathCids::new(Default::default()),
@@ -1840,7 +1840,7 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
         Arc::new(Path::new(
             pathway,
-            confirmed_handshake(transport.parameters.role() == Role::Server),
+            confirmed_handshake(transport.parameters.role()),
             path_heartbeat(),
             data_trackers(transport),
             &qtransport::path::PathCids::new(Default::default()),
@@ -1987,8 +1987,8 @@ async fn sealing_does_not_wait_for_socket_submission() {
     worker.join().unwrap();
 }
 
-fn confirmed_handshake(server: bool) -> Arc<qcongestion::HandshakeStatus> {
-    let handshake = Arc::new(qcongestion::HandshakeStatus::new(server));
-    handshake.handshake_confirmed();
+fn confirmed_handshake(role: Role) -> Arc<qcongestion::HandshakeFacts> {
+    let handshake = Arc::new(qcongestion::HandshakeFacts::with_role(role));
+    handshake.on_handshake_done();
     handshake
 }

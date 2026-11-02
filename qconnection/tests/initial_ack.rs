@@ -19,6 +19,7 @@ use qbase::{
         route::{Line, Link, Pathway},
     },
     packet::{DataHeader, GetDcid, LongHeaderBuilder, Packet, PacketReader, long},
+    role::Role,
     time::heartbeat::ArcHeartbeat,
 };
 use qconnection::{Scope, ServerRegistry, TlsContext};
@@ -56,7 +57,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let pathway = Pathway::new(EndpointAddr::direct(client_addr), local);
     let path = Path::new(
         pathway,
-        Arc::new(qcongestion::HandshakeStatus::new(false)),
+        Arc::new(qcongestion::HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
         &qtransport::path::PathCids::new(Default::default()),
