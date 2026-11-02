@@ -12,8 +12,8 @@ use qtransport::{ArcConnection, Error, terminate::ArcTerminator};
 async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pto() {
     use std::time::Duration;
 
-    use qbase::{Epoch, net::route::Pathway, time::heartbeat::ArcHeartbeat};
-    use qcongestion::HandshakeStatus;
+    use qbase::{Epoch, net::route::Pathway, role::Role, time::heartbeat::ArcHeartbeat};
+    use qcongestion::HandshakeFacts;
     use qtransport::path::{Path, PathCids};
     use tokio::time::Instant;
 
@@ -24,7 +24,7 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
                 "127.0.0.1:4400".parse().unwrap(),
                 format!("127.0.0.1:{port}").parse().unwrap(),
             ),
-            Arc::new(HandshakeStatus::new(false)),
+            Arc::new(HandshakeFacts::with_role(Role::Client)),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Default::default(),
             &cids,

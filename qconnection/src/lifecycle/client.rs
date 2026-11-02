@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use qbase::{
-    Epoch,
     cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     handshake::ArcHandshake,
@@ -42,16 +41,15 @@ pub async fn client_growing(
     established: impl FnOnce(Result<Connected, Error>),
 ) -> Error {
     let phase = paths.phase();
+    let progress = &paths.progress;
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(tls_context.clone()));
     let ConnPhase::Initial(initial_phase) = phase.get() else {
         unreachable!("client_growing starts with InitialPhase")
     };
 
-    let spaces = paths.spaces.clone();
     let reliable_frames = paths.reliable_frames.clone();
     let local_cids = initial_phase.local_cids.clone();
-    let loss_resender = paths.loss_resender.clone();
     let scid = initial_space.initial_scid;
     let odcid = local_cids.origin_dcid();
     drop(initial_phase);
@@ -91,19 +89,9 @@ pub async fn client_growing(
                 ArcKeys::from(handshake_keys),
                 paths.is_mp_handshaking.clone(),
             ));
-            loss_resender
-                .write_guard()
-                .push_back(hs_space.clone())
-                .expect("Handshake epoch");
-            spaces
-                .write_guard()
-                .push_back(hs_space.clone())
-                .expect("Handshake epoch");
-            terminator.register(Arc::new(hs_space.crypto.clone()));
-            paths.handshake.got_handshake_key();
-            let server_scid = phase.enter_handshake();
-            initial_space.crypto.recver.retire();
-            initial_space.crypto.sender.retire();
+            let server_scid = progress
+                .install_handshake(hs_space.clone())
+                .expect("first Handshake key installation");
 
             tokio::spawn(read_tls_to_space(
                 tls_context.clone(),
@@ -158,20 +146,12 @@ pub async fn client_growing(
                 reliable_frames.clone(),
                 paths.is_mp_handshaking.clone(),
             ));
-            loss_resender
-                .write_guard()
-                .push_back(data_space.clone())
-                .expect("Data epoch");
-            spaces
-                .write_guard()
-                .push_back(data_space.clone())
-                .expect("Data epoch");
-            terminator.register(Arc::new(data_space.crypto.clone()));
+            progress.install_data(data_space.clone());
             let puncher = ArcPuncher::new(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data_space.clone(), server_scid),
             );
-            phase.enter_mature(Arc::new(MaturePhase {
+            progress.enter_mature(Arc::new(MaturePhase {
                 parameters: parameters.clone(),
                 flow_ctrl: flow_ctrl.clone(),
                 cid_registry: cid_registry.clone(),
@@ -205,7 +185,7 @@ pub async fn client_growing(
             ));
 
             let summary = tls_context.finished().await?;
-            hs_space.crypto.recver.retire();
+            progress.on_tls_finished();
             let remote_authority = summary.remote.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
             })?;
@@ -231,7 +211,6 @@ pub async fn client_growing(
                     }),
                 ),
                 handshake_done,
-                data_space,
                 puncher,
             ))
         };
@@ -240,7 +219,7 @@ pub async fn client_growing(
             .and_then(std::convert::identity)
     };
 
-    let (connected, handshake_done, data, puncher) = match result {
+    let (connected, handshake_done, puncher) = match result {
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(reason.clone()));
@@ -253,17 +232,7 @@ pub async fn client_growing(
         biased;
         reason = terminator.clone() => reason,
         () = handshake_done => {
-            data.keys.allow_update();
-            {
-                let mut spaces = spaces.write_guard();
-                let mut loss_resender = loss_resender.write_guard();
-                while spaces.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
-                    let (_, space) = spaces.pop_front().unwrap();
-                    space.retire();
-                    loss_resender.pop_front();
-                }
-            }
-            paths.handshake_confirmed();
+            progress.on_handshake_done(&paths);
             // Dropping this coroutine also stops observation by dropping the sender.
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
             let observer = puncher.observe_endpoints(

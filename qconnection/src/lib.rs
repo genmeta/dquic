@@ -8,6 +8,7 @@ mod endpoint;
 pub(crate) mod lifecycle;
 mod paths;
 pub mod phase;
+mod progress;
 pub mod recv;
 pub mod send;
 pub mod tls;

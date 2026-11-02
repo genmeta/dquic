@@ -762,7 +762,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
                 EndpointAddr::direct(([127, 0, 0, 1], port).into()),
                 "127.0.0.1:34300".parse().unwrap(),
             ),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,
@@ -918,7 +918,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             );
             let path = Arc::new(Path::new(
                 link.into(),
-                paths.handshake.clone(),
+                paths.progress.facts(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
                 paths.loss_resender.clone(),
                 &paths.cids,

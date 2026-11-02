@@ -29,7 +29,7 @@ async fn existing_and_new_paths_observe_shared_handshake_progress_on_tick() {
     assert!(first.cc.need_ack(Epoch::Initial).is_some());
     assert!(first.cc.need_ack(Epoch::Handshake).is_some());
 
-    paths.on_handshake_sent();
+    paths.progress.on_handshake_sent();
     first.cc.do_tick().unwrap();
     assert!(first.cc.need_ack(Epoch::Initial).is_none());
     assert!(first.cc.need_ack(Epoch::Handshake).is_some());
@@ -40,7 +40,7 @@ async fn existing_and_new_paths_observe_shared_handshake_progress_on_tick() {
     assert!(second.cc.need_ack(Epoch::Initial).is_none());
     assert!(second.cc.need_ack(Epoch::Handshake).is_some());
 
-    paths.handshake.handshake_confirmed();
+    paths.progress.facts().on_handshake_done();
     for path in [&first, &second] {
         path.cc.do_tick().unwrap();
         assert!(path.cc.need_ack(Epoch::Initial).is_none());
@@ -499,7 +499,7 @@ async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
 fn confirm_validation(paths: &Arc<Paths>) {
     let selected = qtransport::path::Path::new(
         pathway(39999),
-        paths.handshake.clone(),
+        paths.progress.facts(),
         qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -510,7 +510,7 @@ fn confirm_validation(paths: &Arc<Paths>) {
         2,
         paths.reliable_frames.clone(),
     ));
-    paths.handshake.handshake_confirmed();
+    paths.progress.facts().on_handshake_done();
     paths.cids.confirm_handshake();
     selected.close();
 }

@@ -15,10 +15,11 @@ use qbase::{
     frame::{PathChallengeFrame, io::ReceiveFrame},
     net::{addr::EndpointAddr, route::Pathway},
     packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    role::Role,
     time::heartbeat::ArcHeartbeat,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{HandshakeStatus, Transport as _};
+use qcongestion::{HandshakeFacts, Transport as _};
 use qtransport::path::Path;
 
 struct Counter(AtomicUsize);
@@ -29,9 +30,9 @@ impl std::task::Wake for Counter {
 }
 
 #[tokio::test(start_paused = true)]
-async fn handshake_confirmation_stops_early_epoch_pto() {
+async fn handshake_events_stop_early_epoch_pto() {
     use qbase::Epoch;
-    let handshake = Arc::new(HandshakeStatus::new(false));
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
     let path = Path::new(
         Pathway::new(
             EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
@@ -43,11 +44,12 @@ async fn handshake_confirmation_stops_early_epoch_pto() {
         &qtransport::path::PathCids::new(Default::default()),
     );
     path.validation.exempt().unwrap();
-    handshake.got_handshake_key();
+    handshake.install_handshake_key();
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
     }
-    handshake.handshake_confirmed();
+    handshake.on_handshake_sent();
+    handshake.on_handshake_done();
     for _ in 0..8 {
         tokio::time::advance(Duration::from_secs(1)).await;
         path.cc.do_tick().unwrap();
@@ -65,7 +67,7 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
             EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
         ),
-        Arc::new(HandshakeStatus::new(false)),
+        Arc::new(HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
         &qtransport::path::PathCids::new(Default::default()),
@@ -91,7 +93,7 @@ async fn cancelling_shared_validation_retires_the_path() {
             EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
         ),
-        Arc::new(HandshakeStatus::new(true)),
+        Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
         &qtransport::path::PathCids::new(Default::default()),
@@ -122,7 +124,7 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                     EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
                     EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
                 ),
-                Arc::new(HandshakeStatus::new(true)),
+                Arc::new(HandshakeFacts::with_role(Role::Server)),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 ArcIndexDeque::default(),
                 &qtransport::path::PathCids::new(Default::default()),
@@ -171,7 +173,7 @@ async fn every_duplicate_challenge_is_packaged_as_a_response() {
             EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
             EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
         ),
-        Arc::new(HandshakeStatus::new(true)),
+        Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
         &qtransport::path::PathCids::new(Default::default()),

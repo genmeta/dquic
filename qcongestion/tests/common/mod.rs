@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex, atomic::AtomicU16};
 
 use qbase::{
     net::tx::ArcSendWakers,
+    role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{Algorithm, ArcCC, HandshakeStatus, MSS, Resend};
+use qcongestion::{Algorithm, ArcCC, HandshakeFacts, MSS, Resend};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Duration;
 
@@ -31,7 +32,7 @@ pub fn trackers(feedback: Arc<dyn Resend>) -> ArcIndexDeque<Arc<dyn Resend>, 2> 
 }
 
 pub fn controller_with(
-    handshake: Arc<HandshakeStatus>,
+    handshake: Arc<HandshakeFacts>,
     trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
 ) -> ArcCC {
     ArcCC::new(
@@ -45,8 +46,8 @@ pub fn controller_with(
 }
 
 pub fn controller_with_feedback(feedback: Arc<dyn Resend>) -> ArcCC {
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.handshake_confirmed();
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+    handshake.on_handshake_done();
     controller_with(handshake, trackers(feedback))
 }
 

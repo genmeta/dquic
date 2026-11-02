@@ -4,9 +4,10 @@ use common::*;
 use qbase::{
     Epoch,
     frame::AckFrame,
+    role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{ArcCC, HandshakeStatus, MSS, Resend, Transport};
+use qcongestion::{ArcCC, HandshakeFacts, MSS, Resend, Transport};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
@@ -61,8 +62,8 @@ async fn shared_trackers_follow_append_and_retirement() {
     let mut entries = IndexDeque::<Arc<dyn Resend>, 2>::with_capacity(3);
     entries.push_back(Arc::new(NoopFeedback)).unwrap();
     let trackers = Arc::new(RwLock::new(entries));
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.handshake_confirmed();
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+    handshake.on_handshake_done();
     let controllers = [
         controller_with(handshake.clone(), ArcIndexDeque::from(trackers.clone())),
         controller_with(handshake, ArcIndexDeque::from(trackers.clone())),
@@ -116,8 +117,8 @@ async fn negotiated_ack_delays_separate_local_scheduling_from_peer_pto() {
 
 #[tokio::test(start_paused = true)]
 async fn handshake_ack_completes_peer_address_validation_before_handshake_done() {
-    let handshake = Arc::new(HandshakeStatus::new(false));
-    handshake.got_handshake_key();
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+    handshake.install_handshake_key();
     let cc = controller_with(handshake.clone(), trackers(Arc::new(NoopFeedback)));
     let sent_at = Instant::now();
     cc.on_pkt_sent(Epoch::Handshake, 0, true, MSS, true, None);
@@ -130,7 +131,7 @@ async fn handshake_ack_completes_peer_address_validation_before_handshake_done()
         Epoch::Handshake,
         &AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None),
     );
-    assert!(!handshake.is_handshake_confirmed());
+    assert!(!handshake.is_handshake_done());
     assert_eq!(cc.get_pto(Epoch::Handshake), cc.pto_base(Epoch::Handshake));
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Handshake), 0);
     // No anti-deadlock probes remain necessary, even though HANDSHAKE_DONE has not arrived.
@@ -167,7 +168,7 @@ async fn discarded_epochs_ignore_late_sends_and_do_not_reset_data_pto_twice() {
 #[tokio::test(start_paused = true)]
 async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
-    let handshake = Arc::new(HandshakeStatus::new(false));
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
     let cc = controller_with(
         handshake.clone(),
         trackers(Arc::new(RecordingFeedback(recovered.clone()))),
@@ -178,7 +179,7 @@ async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
     tokio::time::advance(cc.get_pto(Epoch::Initial)).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Initial), 1);
-    handshake.handshake_confirmed();
+    handshake.on_handshake_done();
     cc.discard_epoch(Epoch::Initial);
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Initial), 0);
     assert!(cc.need_ack(Epoch::Initial).is_none());
@@ -190,7 +191,7 @@ async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
 fn path_loss_does_not_recover_handshake_spaces_before_confirmation() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
     let cc = controller_with(
-        Arc::new(HandshakeStatus::new(false)),
+        Arc::new(HandshakeFacts::with_role(Role::Client)),
         trackers(Arc::new(RecordingFeedback(recovered.clone()))),
     );
     cc.on_pkt_sent(Epoch::Initial, 0, true, MSS, true, None);

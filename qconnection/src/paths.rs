@@ -18,16 +18,15 @@ use qbase::{
     util::IndexDeque,
     validate::ArcValidations,
 };
-use qcongestion::{HandshakeStatus, Transport as _};
+use qcongestion::{HandshakeFacts, Transport as _};
 use qtransport::{
     path::{Path, PathCids},
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
 
-use crate::{
-    ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, ConnPhase, InitialPhase,
-};
+use super::progress::ArcProgress;
+use crate::{ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, InitialPhase};
 
 /// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
@@ -37,7 +36,7 @@ pub struct Paths {
     pub reliable_frames: ArcReliableFrames,
     pub(crate) loss_resender: ArcResend,
     pub terminator: ArcTerminator,
-    pub(crate) handshake: Arc<HandshakeStatus>,
+    pub(crate) progress: ArcProgress,
     /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
     pub(crate) is_mp_handshaking: Arc<AtomicBool>,
     pub entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
@@ -60,7 +59,6 @@ impl Paths {
         defer_idle_timeout: Duration,
         is_mp_handshaking: Arc<AtomicBool>,
     ) -> Arc<Self> {
-        let handshake = Arc::new(HandshakeStatus::new(role == Role::Server));
         let idle = ArcIdleTimer::new(max_idle_timeout);
         let mut loss_resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
         loss_resender
@@ -74,14 +72,22 @@ impl Paths {
             .push_back(initial_space)
             .expect("Initial epoch");
         let phase = ArcConnPhase::initial(InitialPhase::new(dcid, local_cids));
+        let loss_resender = ArcResend::from(loss_resender);
+        let progress = ArcProgress::new(
+            role,
+            phase.clone(),
+            spaces.clone(),
+            loss_resender.clone(),
+            terminator.clone(),
+        );
         let paths = Arc::new(Self {
             phase,
             cids: PathCids::new(dcid),
             spaces,
             reliable_frames,
-            loss_resender: ArcResend::from(loss_resender),
+            loss_resender,
             terminator: terminator.clone(),
-            handshake,
+            progress,
             is_mp_handshaking,
             entries: Mutex::new(BTreeMap::new()),
             validations: ArcValidations::default(),
@@ -123,11 +129,13 @@ impl Paths {
 
     /// Reuse the registered path, or create it and start its sender and validation.
     pub fn get_or_create_path(self: &Arc<Self>, pathway: &Pathway) -> Arc<Path> {
+        // Take shared facts before entries to preserve the Progress -> entries lock order.
+        let facts = self.progress.facts();
         self.entries
             .lock()
             .unwrap()
             .entry(*pathway)
-            .or_insert_with(|| self.create_path(*pathway))
+            .or_insert_with(|| self.create_path(*pathway, facts))
             .clone()
     }
 
@@ -156,10 +164,10 @@ impl Paths {
             .unwrap_or(Duration::from_secs(1))
     }
 
-    fn create_path(self: &Arc<Self>, pathway: Pathway) -> Arc<Path> {
+    fn create_path(self: &Arc<Self>, pathway: Pathway, facts: Arc<HandshakeFacts>) -> Arc<Path> {
         let path = Arc::new(Path::new(
             pathway,
-            self.handshake.clone(),
+            facts,
             ArcHeartbeat::new(
                 self.defer_idle_timeout,
                 *self.max_idle_timeout.lock().unwrap(),
@@ -225,47 +233,6 @@ impl Paths {
             .map(|path| path.cc.pto_base(Epoch::Data))
             .max()
             .unwrap_or(Duration::from_secs(1))
-    }
-
-    pub(crate) fn on_handshake_sent(&self) {
-        self.handshake.on_handshake_sent();
-        if self.role == Role::Client {
-            let spaces = self.spaces.read_guard();
-            if let Some(initial) = spaces.get(Epoch::Initial as u64) {
-                initial.retire();
-            }
-        }
-    }
-
-    pub(crate) fn on_handshake_received(&self) {
-        self.handshake.on_handshake_received();
-        if self.role == Role::Server {
-            let spaces = self.spaces.read_guard();
-            if let Some(initial) = spaces.get(Epoch::Initial as u64) {
-                initial.retire();
-            }
-        }
-    }
-
-    pub(crate) fn handshake_confirmed(self: &Arc<Self>) {
-        self.handshake.handshake_confirmed();
-        let ConnPhase::Mature(_) = self.phase.get() else {
-            return;
-        };
-        let entries = self.entries.lock().unwrap();
-        if self.cids.is_confirmed() {
-            return;
-        }
-        // Prepare per-path state before releasing suspended senders.
-        for path in entries.values() {
-            if self.cids.is_selected(&path.cid) {
-                let _ = path.validation.enter_validated();
-            }
-        }
-        self.cids.confirm_handshake();
-        for path in entries.values() {
-            self.start_validation(path);
-        }
     }
 
     /// Spawn one round at path creation or handshake confirmation.
@@ -338,17 +305,7 @@ impl Paths {
                 }
             }
         }
-        {
-            let mut spaces = self.spaces.write_guard();
-            while let Some((_, space)) = spaces.pop_front() {
-                space.retire();
-            }
-        }
-        {
-            let mut loss_resender = self.loss_resender.write_guard();
-            let end = loss_resender.largest();
-            loss_resender.drain_to(end).for_each(drop);
-        }
+        self.progress.clean();
         let mut entries = self.entries.lock().unwrap();
         for (pathway, path) in std::mem::take(&mut *entries) {
             path.close();

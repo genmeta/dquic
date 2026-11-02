@@ -107,7 +107,7 @@ async fn receive(
     // Preinstall a path without a sender so responses stay inspectable in the queue.
     let path = Arc::new(Path::new(
         pathway,
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -244,7 +244,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     let pathway = link.into();
     let path = Arc::new(Path::new(
         pathway,
-        paths.handshake.clone(),
+        paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
         &paths.cids,
@@ -786,7 +786,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         );
         let path = Arc::new(Path::new(
             link.into(),
-            paths.handshake.clone(),
+            paths.progress.facts(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
             paths.loss_resender.clone(),
             &paths.cids,

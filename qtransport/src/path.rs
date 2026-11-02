@@ -12,7 +12,7 @@ use qbase::{
     util::ArcIndexDeque,
     validate::ArcValidation,
 };
-use qcongestion::{Algorithm, ArcCC, CongestionController, HandshakeStatus, MSS, Resend};
+use qcongestion::{Algorithm, ArcCC, CongestionController, HandshakeFacts, MSS, Resend};
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
@@ -32,7 +32,7 @@ impl Path {
     /// Construct a path using the connection's shared handshake lifecycle.
     pub fn new(
         pathway: Pathway,
-        handshake: Arc<HandshakeStatus>,
+        hs_facts: Arc<HandshakeFacts>,
         heartbeat: ArcHeartbeat,
         trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
         cids: &Arc<PathCids>,
@@ -43,7 +43,7 @@ impl Path {
             Algorithm::NewReno,
             Duration::from_millis(25),
             trackers,
-            handshake,
+            hs_facts,
             Arc::new(AtomicU16::new(MSS as u16)),
             send_waker.clone(),
         );
