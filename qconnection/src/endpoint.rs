@@ -137,7 +137,7 @@ impl QuicEndpoint {
     /// Dropping this future before delivery closes the pending connection and discovery.
     pub async fn connect(&self, server_name: String) -> Result<Connected, Error> {
         let local = self.identity.as_deref().map(Self::authority).transpose()?;
-        let tls_name = qresolve::split_host_port(&server_name).0.to_owned();
+        let tls_name = qresolve::split_name_port(&server_name).0.to_owned();
         // Deployed peers bind the TLS client certificate to this transport name.
         // Derive it from the same authority; anonymous clients do not advertise one.
         let mut client_parameters = self.client_parameters.clone();

@@ -1,11 +1,12 @@
+// Compile the library source here to keep white-box tests out of src.
+include!("../src/lib.rs");
+
 use std::{fmt, sync::Mutex};
 
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
 };
-
-use super::*;
 
 #[derive(Debug)]
 struct ControlledResolver(Mutex<Option<oneshot::Receiver<ResolveResult>>>);
