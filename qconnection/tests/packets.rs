@@ -109,7 +109,10 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        ConnectionId::from_slice(b"original"),
+        qbase::cid::ArcRemoteCids::client(
+            ConnectionId::from_slice(b"original"),
+            reliable_frames.clone(),
+        ),
         reliable_frames,
         local_cids,
         Duration::from_secs(5),
@@ -134,6 +137,10 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let growing = async move { tokio::join!(growing, tick).0 };
     tokio::pin!(growing);
     assert!(growing.as_mut().now_or_never().is_none());
+    assert_eq!(
+        common::cid_value(&phase.remote_cids().apply_dcid()),
+        ConnectionId::from_slice(b"original")
+    );
     let initial_only = matches!(phase.get(), ConnPhase::Initial(_));
     tls.on_error(
         qbase::error::QuicError::with_default_fty(
@@ -201,7 +208,10 @@ async fn close_at_client_stage(wait: ClientWait) {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        ConnectionId::from_slice(b"original"),
+        qbase::cid::ArcRemoteCids::client(
+            ConnectionId::from_slice(b"original"),
+            reliable_frames.clone(),
+        ),
         reliable_frames,
         local_cids,
         Duration::from_secs(5),
@@ -270,6 +280,17 @@ async fn close_at_client_stage(wait: ClientWait) {
     })
     .await
     .unwrap();
+    assert!(
+        paths
+            .entries
+            .lock()
+            .unwrap()
+            .get(&pathway)
+            .unwrap()
+            .dcid
+            .is_allocated(),
+        "the reply path must bind sequence zero before server parameters arrive"
+    );
     assert!(matches!(
         delivery.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -318,6 +339,39 @@ async fn close_at_client_stage(wait: ClientWait) {
             delivery.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
+        if matches!(wait, ClientWait::OneRttKeys) {
+            use qbase::{
+                frame::{Frame, FrameReader},
+                packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+                param::ParameterId,
+            };
+            // EncryptedExtensions supplies the CID limit before 1-RTT keys exist.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let mut bytes = BytesMut::with_capacity(4096);
+            let mut frames = Vec::new();
+            let mut limits = Constraints {
+                send_quota: 4096,
+                credit: 4096,
+                max_size: 4096,
+                ..Default::default()
+            };
+            let ty = OneRttHeader::new(Default::default(), common::cid_value(&paths.new_dcid()))
+                .get_type();
+            let _ = paths.reliable_frames.clone().poll_dump(
+                &mut std::task::Context::from_waker(std::task::Waker::noop()),
+                &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+            );
+            let issued = FrameReader::new(bytes.freeze(), ty)
+                .filter_map(|frame| match frame.unwrap().0 {
+                    Frame::NewConnectionId(frame) => Some(frame.sequence()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let limit = common::parameters()
+                .1
+                .get::<u64>(ParameterId::ActiveConnectionIdLimit);
+            assert_eq!(issued, (1..limit).collect::<Vec<_>>());
+        }
     }
     let mut connection = None;
     if matches!(wait, ClientWait::HandshakeDone) {

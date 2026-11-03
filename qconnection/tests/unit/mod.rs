@@ -1,3 +1,4 @@
+mod cids;
 mod discovery;
 mod lifecycle;
 mod paths;
@@ -60,8 +61,7 @@ pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
         .write_guard()
         .push_back(mature.spaces.data.clone())
         .unwrap();
-    paths.cids.attach_remote(mature.cid_registry.remote.clone());
-    paths.phase().enter_mature(mature.phase.clone());
+    paths.enter_mature(mature.phase.clone());
 }
 
 /// Install resources before switching phase, as growing does.
@@ -76,6 +76,8 @@ pub fn enter_handshake(
         .unwrap();
     paths.spaces.write_guard().push_back(handshake).unwrap();
     paths.progress.facts().install_handshake_key();
+    // The isolated TLS fixture uses its current CID as the simulated peer SCID.
+    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
     paths.phase().enter_handshake();
 }
 
@@ -85,18 +87,31 @@ pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {
 
 /// Observe the same four scenarios across existing sending and receiving tests.
 fn selection(paths: &Paths, path: &qtransport::path::Path) -> u8 {
-    if paths.cids.is_confirmed() {
+    if paths.is_confirmed() {
         2
-    } else if paths.cids.is_initial() {
+    } else if paths.is_initial() {
         u8::MAX
     } else {
-        u8::from(paths.cids.is_selected(&path.cid))
+        u8::from(paths.is_selected(path))
     }
 }
 
 fn borrow(
+    paths: &Paths,
     path: &qtransport::path::Path,
-) -> std::task::Poll<Option<qbase::cid::BorrowedCid<crate::ArcReliableFrames>>> {
-    path.cid
-        .borrow_cid(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+) -> std::task::Poll<Option<qbase::cid::ConnectionId>> {
+    use std::task::{Context, Poll, Waker};
+    if path.validation.is_cancelled() {
+        return Poll::Ready(None);
+    }
+    if !paths.can_send(path) {
+        return Poll::Pending;
+    }
+    let result = path
+        .dcid
+        .poll_borrow(&mut Context::from_waker(Waker::noop()));
+    if matches!(result, Poll::Ready(Some(_))) {
+        path.dcid.refresh();
+    }
+    result
 }

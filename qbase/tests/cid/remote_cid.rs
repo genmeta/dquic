@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, Mutex},
-    task::Poll,
+    task::{Context, Poll, Waker},
 };
 
 use derive_more::Deref;
@@ -11,7 +11,6 @@ use qbase::{
         NewConnectionIdFrame, RetireConnectionIdFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
     varint::VarInt,
 };
 
@@ -24,30 +23,37 @@ impl SendFrame<RetireConnectionIdFrame> for RetiredCids {
     }
 }
 
+fn remote(cid: ConnectionId, limit: u64, retired: RetiredCids) -> ArcRemoteCids<RetiredCids> {
+    let remote = ArcRemoteCids::server(cid, retired);
+    remote.set_limit(limit);
+    remote.upgrade();
+    remote
+}
+
 #[test]
-fn borrowed_cid_outlives_the_cell_handle_and_defers_path_retirement() {
+fn borrowed_cid_value_is_pinned_until_refresh_after_path_retirement() {
     let retired = RetiredCids::default();
     let cid = ConnectionId::from_slice(b"client00");
-    let remote = ArcRemoteCids::new(cid, 2, retired.clone());
+    let remote = remote(cid, 2, retired.clone());
     let cell = remote.apply_dcid();
-    let Poll::Ready(Some(borrowed)) = cell.borrow_cid(ArcSendWakers::default()) else {
+    let Poll::Ready(Some(borrowed)) = cell.poll_borrow(&mut Context::from_waker(Waker::noop()))
+    else {
         panic!("initial CID is ready");
     };
     cell.retire();
     assert!(retired.lock().unwrap().is_empty());
     assert!(matches!(
-        cell.borrow_cid(ArcSendWakers::default()),
+        cell.poll_borrow(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(None)
     ));
-    drop(cell);
-    assert_eq!(*borrowed, cid);
-    drop(borrowed);
+    assert_eq!(borrowed, cid);
+    cell.refresh();
     assert_eq!(retired.lock().unwrap().len(), 1);
 }
 
 #[test]
 fn initial_cid_can_be_retired_before_any_sender_requests_a_cell() {
-    let remote = ArcRemoteCids::new(
+    let remote = remote(
         ConnectionId::from_slice(b"client00"),
         2,
         RetiredCids::default(),
@@ -57,14 +63,16 @@ fn initial_cid_can_be_retired_before_any_sender_requests_a_cell() {
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
         .unwrap();
     let selected = remote.apply_dcid();
-    assert!(matches!(selected.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(cid)) if *cid == next));
+    assert!(
+        matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == next)
+    );
 }
 
 #[test]
 fn selected_server_limit_counts_initial_and_new_cids() {
     let initial = ConnectionId::from_slice(b"client00");
-    let remote = ArcRemoteCids::new(initial, 8, RetiredCids::default());
+    let remote = remote(initial, 8, RetiredCids::default());
     let cell = remote.apply_dcid();
 
     for seq in 1..8u32 {
@@ -76,8 +84,8 @@ fn selected_server_limit_counts_initial_and_new_cids() {
         assert!(remote.recv_frame(frame).is_ok());
     }
     assert!(matches!(
-        cell.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(cid)) if *cid == initial
+        cell.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == initial
     ));
 
     let frame = NewConnectionIdFrame::new(
@@ -93,54 +101,59 @@ fn selected_server_limit_counts_initial_and_new_cids() {
 fn construction_leaves_allocation_to_the_first_sender() {
     let initial = ConnectionId::from_slice(b"client00");
     let next = ConnectionId::from_slice(b"client01");
-    let remote = ArcRemoteCids::new(initial, 4, RetiredCids::default());
+    let remote = remote(initial, 4, RetiredCids::default());
 
     remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
         .unwrap();
     let selected = remote.apply_dcid();
-    assert!(matches!(selected.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(cid)) if *cid == initial));
+    assert!(
+        matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == initial)
+    );
     let other = remote.apply_dcid();
-    assert!(matches!(other.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(cid)) if *cid == next));
+    assert!(
+        matches!(other.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == next)
+    );
 }
 
 #[test]
 fn test_remote_cids() {
     let retired_cids = RetiredCids::default();
     let initial_dcid = ConnectionId::random_gen(8);
-    let remote_cids = ArcRemoteCids::new(initial_dcid, 8, retired_cids.clone());
+    let remote_cids = remote(initial_dcid, 8, retired_cids.clone());
     let cid_apply0 = remote_cids.apply_dcid();
 
-    let waker = ArcSendWakers::default();
+    let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        cid_apply0.borrow_cid(waker.clone()),
-        Poll::Ready(Some(cid)) if *cid == initial_dcid
+        cid_apply0.poll_borrow(&mut cx),
+        Poll::Ready(Some(cid)) if cid == initial_dcid
     ));
+
+    cid_apply0.refresh();
 
     // Will return Pending, because the peer hasn't issue any connection id
     let cid_apply1 = remote_cids.apply_dcid();
-    assert!(matches!(
-        cid_apply1.borrow_cid(waker.clone()),
-        Poll::Pending
-    ));
+    assert!(matches!(cid_apply1.poll_borrow(&mut cx), Poll::Pending));
 
     let new_dcid = ConnectionId::random_gen(8);
     let frame = NewConnectionIdFrame::new(new_dcid, VarInt::from_u32(1), VarInt::from_u32(0));
     assert!(remote_cids.recv_frame(frame).is_ok());
 
     assert!(matches!(
-        cid_apply0.borrow_cid(waker.clone()),
-        Poll::Ready(Some(cid)) if *cid == initial_dcid
+        cid_apply0.poll_borrow(&mut cx),
+        Poll::Ready(Some(cid)) if cid == initial_dcid
     ));
     assert!(matches!(
-        cid_apply1.borrow_cid(waker.clone()),
-        Poll::Ready(Some(cid)) if *cid == new_dcid
+        cid_apply1.poll_borrow(&mut cx),
+        Poll::Ready(Some(cid)) if cid == new_dcid
     ));
 
-    // Additionally, a new request will be made because if the peer-issued CID is
-    // insufficient, it will still return Pending.
+    cid_apply0.refresh();
+    cid_apply1.refresh();
+
+    // A new path waits for its first CID; the existing path keeps its old CID.
     remote_cids
         .recv_frame(NewConnectionIdFrame::new(
             new_dcid,
@@ -148,20 +161,39 @@ fn test_remote_cids() {
             1u32.into(),
         ))
         .unwrap();
+    assert!(retired_cids.lock().unwrap().is_empty());
+    let cid_apply2 = remote_cids.apply_dcid();
+    assert!(cid_apply2.poll_borrow(&mut cx).is_pending());
+    assert_eq!(
+        cid_apply0.poll_borrow(&mut cx),
+        Poll::Ready(Some(initial_dcid))
+    );
+    cid_apply0.refresh();
+    let replacement = ConnectionId::random_gen(8);
+    remote_cids
+        .recv_frame(NewConnectionIdFrame::new(
+            replacement,
+            2u32.into(),
+            1u32.into(),
+        ))
+        .unwrap();
+    assert_eq!(
+        cid_apply0.poll_borrow(&mut cx),
+        Poll::Ready(Some(replacement))
+    );
+    cid_apply0.refresh();
     assert_eq!(
         &*retired_cids.lock().unwrap(),
         &[RetireConnectionIdFrame::new(0u32.into())]
     );
-    let cid_apply2 = remote_cids.apply_dcid();
-    assert!(cid_apply2.borrow_cid(waker.clone()).is_pending());
-    assert!(cid_apply0.borrow_cid(waker.clone()).is_pending());
+    assert!(cid_apply2.poll_borrow(&mut cx).is_pending());
 }
 
 #[test]
 fn test_retire_in_remote_cids() {
     let retired_cids = RetiredCids::default();
     let initial_dcid = ConnectionId::random_gen(8);
-    let remote_cids = ArcRemoteCids::new(initial_dcid, 8, retired_cids.clone());
+    let remote_cids = remote(initial_dcid, 8, retired_cids.clone());
     let cid_apply0 = remote_cids.apply_dcid();
 
     let cids: Vec<_> = std::iter::once(initial_dcid)
@@ -176,11 +208,11 @@ fn test_retire_in_remote_cids() {
 
     let cid_apply1 = remote_cids.apply_dcid();
 
-    let waker = ArcSendWakers::default();
-    let Poll::Ready(Some(borrowed0)) = cid_apply0.borrow_cid(waker.clone()) else {
+    let mut cx = Context::from_waker(Waker::noop());
+    let Poll::Ready(Some(borrowed0)) = cid_apply0.poll_borrow(&mut cx) else {
         panic!("initial CID is ready");
     };
-    let Poll::Ready(Some(borrowed1)) = cid_apply1.borrow_cid(waker.clone()) else {
+    let Poll::Ready(Some(borrowed1)) = cid_apply1.poll_borrow(&mut cx) else {
         panic!("second CID is ready");
     };
 
@@ -190,10 +222,12 @@ fn test_retire_in_remote_cids() {
     // delay retire cid
     assert_eq!(retired_cids.0.lock().unwrap().len(), 2);
 
-    assert!(cid_apply0.borrow_cid(waker.clone()).is_pending());
-    assert!(cid_apply1.borrow_cid(waker.clone()).is_pending());
-    assert_eq!(*borrowed0, cids[0]);
-    assert_eq!(*borrowed1, cids[1]);
+    cid_apply0.refresh();
+    cid_apply1.refresh();
+    assert_eq!(cid_apply0.poll_borrow(&mut cx), Poll::Ready(Some(cids[0])));
+    assert_eq!(cid_apply1.poll_borrow(&mut cx), Poll::Ready(Some(cids[1])));
+    assert_eq!(borrowed0, cids[0]);
+    assert_eq!(borrowed1, cids[1]);
 
     for seq in 4..7 {
         remote_cids
@@ -205,8 +239,8 @@ fn test_retire_in_remote_cids() {
             .unwrap();
     }
     assert_eq!(retired_cids.0.lock().unwrap().len(), 2);
-    drop(borrowed0);
-    drop(borrowed1);
+    cid_apply0.refresh();
+    cid_apply1.refresh();
     assert_eq!(retired_cids.0.lock().unwrap().len(), 4);
 
     for seq in [1, 0, 3, 2] {
@@ -218,14 +252,16 @@ fn test_retire_in_remote_cids() {
     }
 
     assert!(matches!(
-        cid_apply0.borrow_cid(waker.clone()),
-        Poll::Ready(Some(entry)) if *entry == cids[4]
+        cid_apply0.poll_borrow(&mut cx),
+        Poll::Ready(Some(entry)) if entry == cids[4]
     ));
     assert!(matches!(
-        cid_apply1.borrow_cid(waker.clone()),
-       Poll::Ready(Some(entry)) if *entry == cids[5]
+        cid_apply1.poll_borrow(&mut cx),
+       Poll::Ready(Some(entry)) if entry == cids[5]
     ));
 
+    cid_apply0.refresh();
+    cid_apply1.refresh();
     cid_apply1.retire();
     assert_eq!(retired_cids.lock().unwrap().len(), 1);
     assert_eq!(
@@ -238,7 +274,7 @@ fn test_retire_in_remote_cids() {
 fn test_retire_without_apply() {
     let retired_cids = RetiredCids::default();
     let initial_dcid = ConnectionId::random_gen(8);
-    let remote_cids = ArcRemoteCids::new(initial_dcid, 8, retired_cids.clone());
+    let remote_cids = remote(initial_dcid, 8, retired_cids.clone());
     let cid_apply0 = remote_cids.apply_dcid();
 
     let mut cids = vec![initial_dcid];
@@ -255,13 +291,13 @@ fn test_retire_without_apply() {
     assert_eq!(retired_cids.0.lock().unwrap().len(), 4);
 
     let cid_apply1 = remote_cids.apply_dcid();
-    let waker = ArcSendWakers::default();
+    let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        cid_apply0.borrow_cid(waker.clone()),
-       Poll::Ready(Some(entry)) if *entry == cids[4]
+        cid_apply0.poll_borrow(&mut cx),
+       Poll::Ready(Some(entry)) if entry == cids[4]
     ));
     assert!(matches!(
-        cid_apply1.borrow_cid(waker.clone()),
-        Poll::Ready(Some(entry)) if *entry == cids[5]
+        cid_apply1.poll_borrow(&mut cx),
+        Poll::Ready(Some(entry)) if entry == cids[5]
     ));
 }

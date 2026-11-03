@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, Mutex},
-    task::Poll,
+    task::{Context, Poll, Waker},
 };
 
 use qbase::{
@@ -10,7 +10,6 @@ use qbase::{
         NewConnectionIdFrame, RetireConnectionIdFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
     varint::VarInt,
 };
 
@@ -37,7 +36,9 @@ fn frame(seq: u64, retire_prior_to: u64) -> NewConnectionIdFrame {
 
 fn remote(limit: u64) -> (ArcRemoteCids<Retired>, Retired) {
     let retired = Retired::default();
-    let remote = ArcRemoteCids::new(cid(0), limit, retired.clone());
+    let remote = ArcRemoteCids::server(cid(0), retired.clone());
+    remote.set_limit(limit);
+    remote.upgrade();
     (remote, retired)
 }
 
@@ -83,8 +84,8 @@ fn initial_and_out_of_order_cids_are_counted_once() {
     for seq in 0..3 {
         let cell = remote.apply_dcid();
         assert!(matches!(
-            cell.borrow_cid(ArcSendWakers::default()),
-            Poll::Ready(Some(borrowed)) if *borrowed == cid(seq)
+            cell.poll_borrow(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Some(borrowed)) if borrowed == cid(seq)
         ));
     }
 }
@@ -100,13 +101,13 @@ fn retransmitting_a_locally_retired_cid_does_not_reactivate_it() {
     remote.recv_frame(frame(2, 0)).unwrap();
     remote.recv_frame(first).unwrap();
     assert!(matches!(
-        retired.borrow_cid(ArcSendWakers::default()),
+        retired.poll_borrow(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(None)
     ));
     let replacement = remote.apply_dcid();
     assert!(matches!(
-        replacement.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(borrowed)) if *borrowed == cid(2)
+        replacement.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(borrowed)) if borrowed == cid(2)
     ));
     assert!(matches!(
         remote.recv_frame(frame(3, 0)),
@@ -126,8 +127,8 @@ fn peer_retirement_frees_capacity_before_the_limit_check() {
     for seq in 2..4 {
         let cell = remote.apply_dcid();
         assert!(matches!(
-            cell.borrow_cid(ArcSendWakers::default()),
-            Poll::Ready(Some(borrowed)) if *borrowed == cid(seq)
+            cell.poll_borrow(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Some(borrowed)) if borrowed == cid(seq)
         ));
     }
 }
@@ -152,78 +153,132 @@ fn retired_sequences(retired: &Retired) -> Vec<u64> {
 }
 
 #[test]
-fn retired_cid_waits_for_replacement_without_closing_its_binding() {
+fn installing_the_initial_scid_wakes_the_first_cell_and_keeps_sequence_zero() {
+    let retired = Retired::default();
+    let remote = ArcRemoteCids::client(cid(9), retired.clone());
+    remote.set_limit(4);
+    let first = remote.apply_dcid();
+    first.upgrade();
+    let counter = Arc::new(WakeCounter::default());
+    let waker = Waker::from(counter.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(first.poll_borrow(&mut cx).is_pending());
+    remote.on_receive_from(cid(0));
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(first.poll_borrow(&mut cx), Poll::Ready(Some(cid(0))));
+    first.refresh();
+    remote.on_receive_from(cid(0));
+    remote.upgrade();
+    let second = remote.apply_dcid();
+    assert!(second.poll_borrow(&mut cx).is_pending());
+    remote.recv_frame(frame(1, 0)).unwrap();
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
+    second.refresh();
+    remote.recv_frame(frame(2, 1)).unwrap();
+    remote.on_receive_from(cid(0));
+    assert_eq!(first.poll_borrow(&mut cx), Poll::Ready(Some(cid(2))));
+    first.refresh();
+    assert_eq!(retired_sequences(&retired), [0]);
+}
+
+#[test]
+fn repolling_a_pending_cell_replaces_the_waiter_for_allocation_and_retirement() {
+    for close in [false, true] {
+        let (remote, _) = remote(4);
+        let _first = remote.apply_dcid();
+        let pending = remote.apply_dcid();
+        let old = Arc::new(WakeCounter::default());
+        let current = Arc::new(WakeCounter::default());
+        let old_waker = Waker::from(old.clone());
+        let current_waker = Waker::from(current.clone());
+        assert!(
+            pending
+                .poll_borrow(&mut Context::from_waker(&old_waker))
+                .is_pending()
+        );
+        assert!(
+            pending
+                .poll_borrow(&mut Context::from_waker(&current_waker))
+                .is_pending()
+        );
+        if close {
+            pending.retire();
+        } else {
+            remote.recv_frame(frame(1, 0)).unwrap();
+        }
+        assert_eq!(old.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(current.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+fn replacement_requests_keep_the_old_cid_until_assignment_between_batches() {
     let (remote, retired) = remote(4);
     remote.recv_frame(frame(1, 0)).unwrap();
     let first = remote.apply_dcid();
     let second = remote.apply_dcid();
-    // Both paths lose their CID, but only one replacement is available.
+    // Only the first path can switch; the other path continues using CID 1.
     remote.recv_frame(frame(2, 2)).unwrap();
-    assert_eq!(retired_sequences(&retired), [0, 1]);
-    assert!(matches!(first.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(borrowed)) if *borrowed == cid(2)));
-    let counter = Arc::new(WakeCounter::default());
-    let wakers = ArcSendWakers::default();
-    wakers.register(&std::task::Waker::from(counter.clone()));
-    assert!(second.borrow_cid(wakers.clone()).is_pending());
-    // Repeating the retirement does not reactivate CID 1 or retire it twice.
-    remote.recv_frame(frame(2, 2)).unwrap();
-    assert!(second.borrow_cid(wakers.clone()).is_pending());
-    assert_eq!(retired_sequences(&retired), [0, 1]);
-    remote.recv_frame(frame(3, 2)).unwrap();
-    assert_eq!(counter.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert!(matches!(second.borrow_cid(wakers),
-        Poll::Ready(Some(borrowed)) if *borrowed == cid(3)));
-}
-
-#[test]
-fn pinned_retired_cid_is_not_reborrowed_and_is_released_without_a_replacement() {
-    let (remote, retired) = remote(4);
-    remote.recv_frame(frame(1, 0)).unwrap();
-    let _first = remote.apply_dcid();
-    let second = remote.apply_dcid();
-    let Poll::Ready(Some(borrowed)) = second.borrow_cid(ArcSendWakers::default()) else {
-        panic!("CID 1 is ready");
-    };
-    remote.recv_frame(frame(2, 2)).unwrap();
-    assert_eq!(*borrowed, cid(1));
     assert_eq!(retired_sequences(&retired), [0]);
-    assert!(second.borrow_cid(ArcSendWakers::default()).is_pending());
-    drop(borrowed);
-    assert_eq!(retired_sequences(&retired), [0, 1]);
-    assert!(second.borrow_cid(ArcSendWakers::default()).is_pending());
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(first.poll_borrow(&mut cx), Poll::Ready(Some(cid(2))));
+    first.refresh();
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
+    second.refresh();
+    remote.recv_frame(frame(2, 2)).unwrap();
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
+    second.refresh();
+    assert_eq!(retired_sequences(&retired), [0]);
     remote.recv_frame(frame(3, 2)).unwrap();
-    assert!(matches!(second.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(borrowed)) if *borrowed == cid(3)));
     assert_eq!(retired_sequences(&retired), [0, 1]);
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(3))));
+    second.refresh();
 }
 
 #[test]
-fn closing_a_binding_waiting_for_replacement_wakes_it_and_does_not_reactivate_it() {
+fn old_cid_stays_usable_across_refresh_until_its_replacement_arrives() {
     let (remote, retired) = remote(4);
     remote.recv_frame(frame(1, 0)).unwrap();
     let _first = remote.apply_dcid();
     let second = remote.apply_dcid();
-    let Poll::Ready(Some(borrowed)) = second.borrow_cid(ArcSendWakers::default()) else {
-        panic!("CID 1 is ready");
-    };
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
     remote.recv_frame(frame(2, 2)).unwrap();
-    let counter = Arc::new(WakeCounter::default());
-    let wakers = ArcSendWakers::default();
-    wakers.register(&std::task::Waker::from(counter.clone()));
-    assert!(second.borrow_cid(wakers.clone()).is_pending());
+    assert_eq!(retired_sequences(&retired), [0]);
+    second.refresh();
+    assert_eq!(retired_sequences(&retired), [0]);
+    for _ in 0..3 {
+        assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
+        second.refresh();
+        assert_eq!(retired_sequences(&retired), [0]);
+    }
+    let snapshot = second.poll_borrow(&mut cx);
+    remote.recv_frame(frame(3, 2)).unwrap();
+    assert_eq!(snapshot, Poll::Ready(Some(cid(1))));
+    assert_eq!(retired_sequences(&retired), [0]);
+    second.refresh();
+    assert_eq!(retired_sequences(&retired), [0, 1]);
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(3))));
+    second.refresh();
+}
+
+#[test]
+fn closing_a_binding_awaiting_replacement_retires_its_last_cid_without_reactivation() {
+    let (remote, retired) = remote(4);
+    remote.recv_frame(frame(1, 0)).unwrap();
+    let _first = remote.apply_dcid();
+    let second = remote.apply_dcid();
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(Some(cid(1))));
+    remote.recv_frame(frame(2, 2)).unwrap();
     second.retire();
-    assert_eq!(counter.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert!(matches!(
-        second.borrow_cid(wakers.clone()),
-        Poll::Ready(None)
-    ));
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(None));
     assert_eq!(retired_sequences(&retired), [0]);
-    drop(borrowed);
+    second.refresh();
     assert_eq!(retired_sequences(&retired), [0, 1]);
     remote.recv_frame(frame(3, 2)).unwrap();
-    assert!(matches!(second.borrow_cid(wakers), Poll::Ready(None)));
+    assert_eq!(second.poll_borrow(&mut cx), Poll::Ready(None));
     let third = remote.apply_dcid();
-    assert!(matches!(third.borrow_cid(ArcSendWakers::default()),
-        Poll::Ready(Some(borrowed)) if *borrowed == cid(3)));
+    assert_eq!(third.poll_borrow(&mut cx), Poll::Ready(Some(cid(3))));
+    third.refresh();
 }

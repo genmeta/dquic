@@ -81,7 +81,11 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
             let paths = super::initial_paths_with_timeouts(
                 role,
                 scid,
-                ConnectionId::from_slice(b"original"),
+                if role == Role::Server {
+                    peer
+                } else {
+                    ConnectionId::from_slice(b"original")
+                },
                 super::initial_keys(role == Role::Server),
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
@@ -89,8 +93,10 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
             );
             let registry = qconnection::CidRegistry::new(
                 super::initial_phase(&paths).local_cids.clone(),
-                qbase::cid::ArcRemoteCids::new(peer, 2, paths.reliable_frames.clone()),
+                paths.phase().remote_cids(),
             );
+            registry.remote.set_limit(2);
+            paths.update_initial_dcid(peer);
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(super::initial_keys(role == Role::Server))),

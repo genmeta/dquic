@@ -1,22 +1,26 @@
 use std::{
     collections::VecDeque,
-    ops::Deref,
     sync::{Arc, Mutex},
-    task::Poll,
+    task::{Context, Poll, Waker},
 };
 
-use super::ConnectionId;
+use super::{ArcDcid, ArcHandshakeDcid, ConnectionId, Dcid, HandshakeDcid};
 use crate::{
     error::{Error, ErrorKind, QuicError},
     frame::{
         GetFrameType, NewConnectionIdFrame, RetireConnectionIdFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
     token::ResetToken,
     util::IndexDeque,
     varint::{VARINT_MAX, VarInt},
 };
+
+#[derive(Debug)]
+enum DcidStage {
+    Handshake(ArcHandshakeDcid),
+    Allocate,
+}
 
 /// RemoteCids is used to manage the connection IDs issued by the peer,
 /// and to send [`RetireConnectionIdFrame`] to the peer.
@@ -26,18 +30,20 @@ struct RemoteCids<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
+    dcid_stage: DcidStage,
     // The cid issued by the peer, the sequence number maybe not continuous
     // since the disordered [`NewConnectionIdFrame`]
     cid_deque: IndexDeque<Option<(u64, ConnectionId, ResetToken)>, VARINT_MAX>,
-    // The cell of the connection ID, which is ready in use
+    // Cells indexed by their latest assigned connection ID sequence.
     ready_cells: IndexDeque<ArcCidCell<RETIRED>, VARINT_MAX>,
     // The cell of the connection ID, which needs to be assigned or reassigned
-    // They can be retired before being assigned or reassigned.
+    // A replacement request keeps its previous CID usable until assignment.
+    // These cells can be retired before being assigned or reassigned.
     pending_cells: VecDeque<ArcCidCell<RETIRED>>,
     // The maximum number of connection IDs which is used to check if the
     // maximum number of connection IDs has been exceeded
     // when receiving a [`NewConnectionIdFrame`]
-    active_cid_limit: u64,
+    active_cid_limit: Option<u64>,
     // The position of the cid to be used, and the position of the cell to be assigned.
     cursor: u64,
     // The retired cids, each needs send a [`RetireConnectionIdFrame`] to peer
@@ -48,25 +54,40 @@ impl<RETIRED> RemoteCids<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
-    /// Create a remote CID manager with the peer's Initial SCID and active CID limit.
-    ///
-    /// As mentioned above, the retired cids can be a deque, a channel, or any buffer,
-    /// as long as it can send those [`RetireConnectionIdFrame`] to the peer finally.
-    /// See [`RemoteCids`]
-    fn new(initial_dcid: ConnectionId, active_cid_limit: u64, retired_cids: RETIRED) -> Self {
+    fn new(source: HandshakeDcid, retired_cids: RETIRED) -> Self {
         let mut cid_deque = IndexDeque::default();
-        cid_deque
-            .push_back(Some((0, initial_dcid, ResetToken::default())))
-            .expect("Initial connection ID should be inserted at the offset 0");
-
+        let source = match source {
+            HandshakeDcid::Odcid(cid) => ArcHandshakeDcid::from_odcid(cid),
+            HandshakeDcid::PeerScid(cid) => {
+                cid_deque
+                    .push_back(Some((0, cid, ResetToken::default())))
+                    .expect("Initial connection ID has sequence zero");
+                ArcHandshakeDcid::from_peer_scid(cid)
+            }
+        };
         Self {
-            active_cid_limit,
+            dcid_stage: DcidStage::Handshake(source),
+            active_cid_limit: None,
             cid_deque,
             ready_cells: Default::default(),
             pending_cells: Default::default(),
             cursor: 0,
             retired_cids,
         }
+    }
+
+    fn on_receive_from(&mut self, peer_scid: ConnectionId) -> bool {
+        let DcidStage::Handshake(source) = &self.dcid_stage else {
+            return false;
+        };
+        if !source.on_receive_from(peer_scid) {
+            return false;
+        }
+        self.cid_deque
+            .insert(0, Some((0, peer_scid, ResetToken::default())))
+            .expect("Initial connection ID has sequence zero");
+        self.arrange_idle_cid();
+        true
     }
 
     /// Receive a [`NewConnectionIdFrame`] from peer.
@@ -102,14 +123,14 @@ where
             })
             .count() as u64
             + u64::from(self.cid_deque.get(seq).is_none_or(Option::is_none));
-        if active_len > self.active_cid_limit {
+        let active_cid_limit = self
+            .active_cid_limit
+            .expect("local CID limit set before 1-RTT");
+        if active_len > active_cid_limit {
             return Err(QuicError::new(
                 ErrorKind::ConnectionIdLimit,
                 frame.frame_type().into(),
-                format!(
-                    "{active_len} exceed active_cid_limit {}",
-                    self.active_cid_limit
-                ),
+                format!("{active_len} exceed active_cid_limit {}", active_cid_limit),
             )
             .into());
         }
@@ -157,8 +178,8 @@ where
         }
     }
 
-    /// Eliminate the old cids and inform the peer with a
-    /// [`RetireConnectionIdFrame`] for each retired connection ID.
+    /// Queue old path CIDs for replacement; keep them usable until reassigned.
+    /// Unallocated CIDs can be retired immediately.
     #[doc(hidden)]
     fn retire_prior_to(&mut self, tomb_seq: u64) {
         if tomb_seq <= self.ready_cells.offset() {
@@ -185,16 +206,12 @@ where
         } else {
             let actual_applied = self.ready_cells.largest();
             let need_reassigned = actual_applied.min(tomb_seq);
-            // retire the cids before seq, including the applied and unapplied
+            // Queue assigned cells before the boundary for replacement.
             for _ in self.ready_cells.offset()..need_reassigned {
                 let (_, cell) = self.ready_cells.pop_front().unwrap();
-                let mut guard = cell.0.lock().unwrap();
-                if guard.is_retired {
-                    continue;
+                if !cell.is_retired() {
+                    self.pending_cells.push_back(cell);
                 }
-                guard.invalidate();
-                drop(guard);
-                self.pending_cells.push_back(cell);
             }
             if actual_applied < tomb_seq {
                 self.ready_cells.reset_offset(tomb_seq);
@@ -212,8 +229,8 @@ where
     }
 
     /// Apply for a new connection ID, and return an [`ArcCidCell`], which may be not ready state.
-    fn apply_dcid(&mut self) -> ArcCidCell<RETIRED> {
-        let cell = ArcCidCell::new(self.retired_cids.clone());
+    fn allocate_cell(&mut self, is_using: bool) -> ArcCidCell<RETIRED> {
+        let cell = ArcCidCell::new(self.retired_cids.clone(), is_using);
         self.pending_cells.push_back(cell.clone());
         self.arrange_idle_cid();
         cell
@@ -238,28 +255,57 @@ impl<RETIRED> ArcRemoteCids<RETIRED>
 where
     RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
 {
-    /// Create a remote CID manager with the peer's Initial SCID as sequence zero.
-    ///
-    /// `active_cid_limit` is the limit advertised by this endpoint. `retired_cids`
-    /// sends RETIRE_CONNECTION_ID frames to the peer.
-    ///
-    /// Construction does not request a CID cell. The first [`Self::apply_dcid`]
-    /// gets sequence zero unless the peer has already retired it through a
-    /// NEW_CONNECTION_ID frame's retire_prior_to field. The connection's path
-    /// CID policy reserves this first cell for its selected handshake path.
-    pub fn new(initial_dcid: ConnectionId, active_cid_limit: u64, retired_cids: RETIRED) -> Self {
+    /// Start client handshaking. ODCID is not an issued connection ID.
+    pub fn client(odcid: ConnectionId, retired_cids: RETIRED) -> Self {
         Self(Arc::new(Mutex::new(RemoteCids::new(
-            initial_dcid,
-            active_cid_limit,
+            HandshakeDcid::Odcid(odcid),
             retired_cids,
         ))))
     }
 
-    /// Apply for a CID cell when a path starts sending 1-RTT packets.
-    ///
-    /// Return an [`ArcCidCell`], which may be not ready state.
-    pub fn apply_dcid(&self) -> ArcCidCell<RETIRED> {
-        self.0.lock().unwrap().apply_dcid()
+    /// Start server handshaking with the peer's SCID as sequence zero.
+    pub fn server(client_scid: ConnectionId, retired_cids: RETIRED) -> Self {
+        Self(Arc::new(Mutex::new(RemoteCids::new(
+            HandshakeDcid::PeerScid(client_scid),
+            retired_cids,
+        ))))
+    }
+
+    /// Set this endpoint's advertised limit before receiving NEW_CONNECTION_ID.
+    pub fn set_limit(&self, active_cid_limit: u64) {
+        self.0.lock().unwrap().active_cid_limit = Some(active_cid_limit);
+    }
+
+    /// Fix the shared peer SCID and install sequence zero only on the first response.
+    pub fn on_receive_from(&self, peer_scid: ConnectionId) -> bool {
+        self.0.lock().unwrap().on_receive_from(peer_scid)
+    }
+
+    /// Future paths allocate immediately; existing handshake paths upgrade separately.
+    pub fn upgrade(&self) {
+        let mut remote = self.0.lock().unwrap();
+        if let DcidStage::Handshake(source) = &remote.dcid_stage {
+            assert!(
+                matches!(source.get(), HandshakeDcid::PeerScid(_)),
+                "peer SCID known before handshake confirmation"
+            );
+            remote.dcid_stage = DcidStage::Allocate;
+        }
+    }
+
+    /// Request a distinct path state using the manager's current stage.
+    pub fn apply_dcid(&self) -> ArcDcid<RETIRED> {
+        let mut remote = self.0.lock().unwrap();
+        let dcid = match &remote.dcid_stage {
+            DcidStage::Handshake(source) => Dcid::Handshake(source.clone(), self.clone()),
+            DcidStage::Allocate => Dcid::Allocate(remote.allocate_cell(false)),
+        };
+        ArcDcid::from(dcid)
+    }
+
+    pub(super) fn allocate_cell(&self) -> ArcCidCell<RETIRED> {
+        // A handshake batch may already hold the peer SCID. Keep it until refresh.
+        self.0.lock().unwrap().allocate_cell(true)
     }
 }
 
@@ -281,11 +327,9 @@ where
 {
     retired_cids: RETIRED,
     allocated_cids: VecDeque<(u64, ConnectionId)>,
-    waker: Option<ArcSendWakers>,
+    waker: Option<Waker>,
     is_retired: bool,
     is_using: bool,
-    // Old allocations may remain pinned by a borrower while replacement is pending.
-    is_pending: bool,
 }
 
 impl<RETIRED> CidCell<RETIRED>
@@ -295,21 +339,20 @@ where
     fn assign(&mut self, seq: u64, cid: ConnectionId) {
         assert!(!self.is_retired);
         self.allocated_cids.push_front((seq, cid));
-        self.is_pending = false;
         self.release_retired_cids();
 
         if let Some(waker) = self.waker.take() {
-            waker.wake_all();
+            waker.wake();
         }
     }
 
-    fn borrow_cid(&mut self, tx_waker: ArcSendWakers) -> Poll<Option<ConnectionId>> {
+    fn poll_borrow(&mut self, cx: &mut Context<'_>) -> Poll<Option<ConnectionId>> {
         if self.is_retired {
             return Poll::Ready(None);
         }
 
-        if self.is_pending {
-            self.waker = Some(tx_waker);
+        if self.allocated_cids.is_empty() {
+            self.waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
             let cid = self.allocated_cids[0].1;
@@ -318,15 +361,8 @@ where
         }
     }
 
-    fn renew(&mut self) {
-        assert!(self.is_using);
+    fn refresh(&mut self) {
         self.is_using = false;
-        self.release_retired_cids();
-    }
-
-    /// Stop new borrows without closing this path's binding.
-    fn invalidate(&mut self) {
-        self.is_pending = true;
         self.release_retired_cids();
     }
 
@@ -334,7 +370,7 @@ where
         if self.is_using {
             return;
         }
-        let keep = usize::from(!self.is_pending && !self.is_retired);
+        let keep = usize::from(!self.is_retired);
         while self.allocated_cids.len() > keep {
             let (seq, _) = self.allocated_cids.pop_back().unwrap();
             let sequence = VarInt::try_from(seq)
@@ -348,7 +384,7 @@ where
         self.is_retired = true;
         self.release_retired_cids();
         if let Some(waker) = self.waker.take() {
-            waker.wake_all();
+            waker.wake();
         }
     }
 }
@@ -368,14 +404,13 @@ where
     ///
     /// It can be created only by the [`ArcRemoteCids::apply_dcid`] method.
     #[doc(hidden)]
-    fn new(retired_cids: RETIRED) -> Self {
+    fn new(retired_cids: RETIRED, is_using: bool) -> Self {
         Self(Arc::new(Mutex::new(CidCell {
             retired_cids,
             allocated_cids: VecDeque::with_capacity(2),
             waker: None,
             is_retired: false,
-            is_using: false,
-            is_pending: true,
+            is_using,
         })))
     }
 
@@ -383,71 +418,27 @@ where
         self.0.lock().unwrap().is_retired
     }
 
-    /// Borrow the current CID. Returns Pending both before its first allocation
-    /// and while an invalidated CID is waiting for a replacement.
+    /// Borrow the current CID, or wait if this cell has never received one.
+    /// An assigned CID stays usable until a replacement is available (project policy).
     ///
     /// If the corresponding path which applied this cid is inactive,
     /// then this cid apply is retired.
     /// In this case, None will be returned.
-    pub fn borrow_cid(&self, tx_waker: ArcSendWakers) -> Poll<Option<BorrowedCid<RETIRED>>> {
-        self.0.lock().unwrap().borrow_cid(tx_waker).map(|cid| {
-            cid.map(|cid| BorrowedCid {
-                cid_cell: Some(self.0.clone()),
-                cid,
-            })
-        })
+    /// One batch per path may hold a CID until it calls [`Self::refresh`].
+    pub fn poll_borrow(&self, cx: &mut Context<'_>) -> Poll<Option<ConnectionId>> {
+        self.0.lock().unwrap().poll_borrow(cx)
+    }
+
+    /// Return the current batch and release CIDs awaiting retirement.
+    /// Keep the current CID until a replacement is assigned or this cell is closed.
+    /// Calling this without an outstanding borrow is harmless.
+    pub fn refresh(&self) {
+        self.0.lock().unwrap().refresh();
     }
 
     /// When the Path is invalid, the connection id needs to be retired, and this Cell
     /// is marked as no longer in use, with a [`RetireConnectionIdFrame`] being sent to peer.
     pub fn retire(&self) {
         self.0.lock().unwrap().retire();
-    }
-}
-
-/// A borrowed connection ID, which will be returned back when it is dropped.
-///
-/// Registry-backed borrows defer CID retirement until they are dropped. Shared
-/// handshake snapshots keep the CID chosen when the batch was assembled.
-pub struct BorrowedCid<RETIRED>
-where
-    RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
-{
-    cid: ConnectionId,
-    cid_cell: Option<Arc<Mutex<CidCell<RETIRED>>>>,
-}
-
-impl<RETIRED> BorrowedCid<RETIRED>
-where
-    RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
-{
-    /// Snapshot of the shared handshake CID before a registry cell takes over.
-    pub fn shared(cid: ConnectionId) -> Self {
-        Self {
-            cid,
-            cid_cell: None,
-        }
-    }
-}
-
-impl<RETIRED> Deref for BorrowedCid<RETIRED>
-where
-    RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
-{
-    type Target = ConnectionId;
-
-    fn deref(&self) -> &Self::Target {
-        &self.cid
-    }
-}
-
-impl<RETIRED> Drop for BorrowedCid<RETIRED>
-where
-    RETIRED: SendFrame<RetireConnectionIdFrame> + Clone,
-{
-    fn drop(&mut self) {
-        if let Some(cell) = &self.cid_cell {
-            cell.lock().unwrap().renew();
-        }
     }
 }

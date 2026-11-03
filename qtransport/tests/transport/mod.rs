@@ -259,7 +259,11 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         confirmed_handshake(transport.parameters.role()),
         path_heartbeat(),
         data_trackers(transport),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     ));
     path.validation.enter_validated().unwrap();
     path
@@ -1776,7 +1780,11 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         confirmed_handshake(Role::Client),
         path_heartbeat(),
         data_trackers(&ct),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     ));
     path.validation.enter_validated().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
@@ -1843,7 +1851,11 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
             confirmed_handshake(transport.parameters.role()),
             path_heartbeat(),
             data_trackers(transport),
-            &qtransport::path::PathCids::new(Default::default()),
+            qbase::cid::ArcRemoteCids::client(
+                Default::default(),
+                qtransport::ArcReliableFrames::with_capacity(0),
+            )
+            .apply_dcid(),
         ))
     });
     let [cp, sp] = paths;

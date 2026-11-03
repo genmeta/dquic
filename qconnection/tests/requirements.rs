@@ -83,7 +83,10 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Server,
-        ConnectionId::from_slice(b"wrongcid"),
+        qbase::cid::ArcRemoteCids::server(
+            ConnectionId::from_slice(b"wrongcid"),
+            reliable_frames.clone(),
+        ),
         reliable_frames,
         local_cids,
         Duration::ZERO,

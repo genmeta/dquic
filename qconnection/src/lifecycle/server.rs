@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use futures::future::poll_fn;
 use qbase::{
-    cid::ArcRemoteCids,
     error::{ErrorKind, QuicError},
     handshake::ArcHandshake,
     param::{ParameterId, Requirements},
@@ -44,6 +44,8 @@ pub async fn server_growing(
     let local_cids = initial_phase.local_cids.clone();
     let scid = initial_space.initial_scid;
     let origin_dcid = local_cids.origin_dcid();
+    let handshake_dcid = phase.remote_cids().apply_dcid();
+    drop(initial_phase);
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
@@ -96,8 +98,15 @@ pub async fn server_growing(
     let result = {
         let establish = async {
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
-            parameters.authenticate_cids(Requirements::require_client(initial_phase.dcid()))?;
-            drop(initial_phase);
+            let client_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx))
+                .await
+                .expect("handshake CID is available");
+            handshake_dcid.refresh();
+            parameters.authenticate_cids(Requirements::require_client(client_scid))?;
+            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            let remote_cids = phase.remote_cids();
+            remote_cids.set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
+            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
 
             let hs_keys = tls_ctx.read_keys().await?;
             let hs_space = Arc::new(HandshakeSpace::new(
@@ -118,13 +127,6 @@ pub async fn server_growing(
                 paths.clone(),
             ));
 
-            let client_scid = parameters.remote(ParameterId::InitialSourceConnectionId);
-            let remote_cids = ArcRemoteCids::new(
-                client_scid,
-                parameters.local(ParameterId::ActiveConnectionIdLimit),
-                reliable_frames.clone(),
-            );
-            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
             let keys = ArcOneRttKeys::from(tls_ctx.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
                 parameters.local(ParameterId::InitialMaxStreamsBidi),
@@ -154,7 +156,6 @@ pub async fn server_growing(
                 reliable_frames.clone(),
                 ProbeEncoder::new(data_space.clone(), client_scid),
             );
-            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             for space in [&initial_space.space, &hs_space.0] {
@@ -193,6 +194,12 @@ pub async fn server_growing(
             let summary = tls_ctx.finished().await?;
             progress.on_tls_finished();
             let handshake = ArcHandshake::new_server(reliable_frames.clone());
+            paths.enter_mature(Arc::new(MaturePhase {
+                parameters: parameters.clone(),
+                flow_ctrl: flow_ctrl.clone(),
+                cid_registry: cid_registry.clone(),
+                puncher: puncher.clone(),
+            }));
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 data_space.as_ref(),
@@ -210,14 +217,6 @@ pub async fn server_growing(
                 handshake.clone(),
             ));
             handshake.done();
-
-            paths.cids.attach_remote(cid_registry.remote.clone());
-            progress.enter_mature(Arc::new(MaturePhase {
-                parameters,
-                flow_ctrl,
-                cid_registry: cid_registry.clone(),
-                puncher: puncher.clone(),
-            }));
 
             let local = summary.local.ok_or_else(|| {
                 QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")

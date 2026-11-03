@@ -47,6 +47,8 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
         }
         entries.is_empty()
     };
+    // An idle upgrade can retain a handshake batch without another collect poll.
+    path.dcid.refresh();
     if no_paths {
         terminator.close(
             error

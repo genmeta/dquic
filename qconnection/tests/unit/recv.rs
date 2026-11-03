@@ -422,18 +422,18 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             for corrupt in [true, false] {
                 let (paths, first, _) = paths(role);
+                let dcid = paths.new_dcid();
                 receive_ping(role, epoch, corrupt, &paths, &first).await;
-                let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
-                    panic!("expected Initial");
-                };
-                assert_eq!(initial.dcid(), paths.cids.initial_dcid());
+                assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
                 assert_eq!(
-                    paths.cids.initial_dcid(),
-                    ConnectionId::from_slice(if !corrupt && epoch == Epoch::Initial {
-                        b"peercid0"
-                    } else {
-                        b"original"
-                    })
+                    crate::common::cid_value(&dcid),
+                    ConnectionId::from_slice(
+                        if role == Role::Client && !corrupt && epoch == Epoch::Initial {
+                            b"peercid0"
+                        } else {
+                            b"original"
+                        }
+                    )
                 );
                 paths.retire_all();
             }
@@ -445,11 +445,9 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
 async fn client_selects_handshake_but_not_initial_ping() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let (paths, first, second) = paths(Role::Client);
-        let crate::ConnPhase::Initial(initial) = paths.phase().get() else {
-            panic!("expected Initial");
-        };
-        assert_eq!(initial.dcid(), paths.cids.initial_dcid());
-        let original_dcid = paths.cids.initial_dcid();
+        let dcid = paths.new_dcid();
+        assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
+        let original_dcid = crate::common::cid_value(&dcid);
         assert_eq!(
             (
                 super::selection(&paths, &first),
@@ -466,7 +464,7 @@ async fn client_selects_handshake_but_not_initial_ping() {
             ),
             (u8::MAX, u8::MAX)
         );
-        assert_eq!(paths.cids.initial_dcid(), original_dcid);
+        assert_eq!(crate::common::cid_value(&dcid), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
         assert_eq!(
             paths.is_mp_handshaking.load(Ordering::Relaxed),
@@ -486,7 +484,7 @@ async fn client_selects_handshake_but_not_initial_ping() {
         );
         if epoch == Epoch::Initial {
             assert_eq!(
-                paths.cids.initial_dcid(),
+                crate::common::cid_value(&dcid),
                 ConnectionId::from_slice(b"peercid0")
             );
         }
@@ -563,7 +561,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     );
     assert!(ipv6.cc.need_ack(Epoch::Initial).is_none());
     assert_eq!(
-        paths.cids.initial_dcid(),
+        crate::common::cid_value(&paths.new_dcid()),
         ConnectionId::from_slice(b"peercid0")
     );
 
@@ -754,19 +752,22 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     use crate::send::{Burst, MAX_BURST_PACKETS};
 
     let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
-    crate::common::initial_phase(&paths).set_dcid(mature.peer_cid());
+    paths.update_initial_dcid(mature.peer_cid());
     super::enter_handshake(&paths, mature.spaces.handshake.clone());
     let make_path = |port| {
-        let path = Arc::new(Path::new(
-            Pathway::new(
-                EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-                "127.0.0.1:34300".parse().unwrap(),
+        let path = crate::common::registered_path(
+            &paths,
+            Path::new(
+                Pathway::new(
+                    EndpointAddr::direct(([127, 0, 0, 1], port).into()),
+                    "127.0.0.1:34300".parse().unwrap(),
+                ),
+                paths.progress.facts(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                paths.loss_resender.clone(),
+                paths.new_dcid(),
             ),
-            paths.progress.facts(),
-            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.loss_resender.clone(),
-            &paths.cids,
-        ));
+        );
         path.validation.enter_validated().unwrap();
         paths
             .entries
@@ -801,10 +802,10 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         crate::ConnPhase::Handshake(_)
     ));
     assert!(
-        matches!(super::borrow(&first), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+        matches!(super::borrow(&paths, &first), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
     assert!(
-        matches!(super::borrow(&second), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+        matches!(super::borrow(&paths, &second), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
     assert_eq!(
         (
@@ -864,16 +865,15 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         (0, 1)
     );
     assert!(
-        matches!(super::borrow(&second), Poll::Ready(Some(cid)) if *cid == paths.cids.initial_dcid())
+        matches!(super::borrow(&paths, &second), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
 
-    // Growing assigns only after selection and before publishing Mature.
-    paths.cids.attach_remote(mature.cid_registry.remote.clone());
-    paths.phase().enter_mature(mature.phase.clone());
+    // Publishing Mature also assigns every path's CID under the path-table lock.
+    paths.enter_mature(mature.phase.clone());
     assert!(matches!(paths.phase().get(), crate::ConnPhase::Mature(_)));
-    assert!(super::borrow(&first).is_pending());
-    assert!(matches!(super::borrow(&second),
-        Poll::Ready(Some(cid)) if *cid == mature.peer_cid()));
+    assert!(super::borrow(&paths, &first).is_pending());
+    assert!(matches!(super::borrow(&paths, &second),
+        Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
     mature
         .spaces
         .handshake
@@ -916,13 +916,16 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 "127.0.0.1:30001".parse().unwrap(),
                 "127.0.0.1:30002".parse().unwrap(),
             );
-            let path = Arc::new(Path::new(
-                link.into(),
-                paths.progress.facts(),
-                ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-                paths.loss_resender.clone(),
-                &paths.cids,
-            ));
+            let path = crate::common::registered_path(
+                &paths,
+                Path::new(
+                    link.into(),
+                    paths.progress.facts(),
+                    ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
+                    paths.loss_resender.clone(),
+                    paths.new_dcid(),
+                ),
+            );
             paths
                 .entries
                 .lock()

@@ -6,6 +6,7 @@ use std::{
 
 use qbase::{
     Epoch,
+    cid::ArcDcid,
     net::{route::Pathway, tx::ArcSendWakers},
     packet::assemble::Metadata,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
@@ -16,12 +17,11 @@ use qcongestion::{Algorithm, ArcCC, CongestionController, HandshakeFacts, MSS, R
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
-mod cids;
-pub use cids::{PathCid, PathCids};
+use crate::ArcReliableFrames;
 
 pub struct Path {
     pub pathway: Pathway,
-    pub cid: Arc<PathCid>,
+    pub dcid: ArcDcid<ArcReliableFrames>,
     pub cc: ArcCC,
     pub send_waker: ArcSendWakers,
     pub validation: ArcValidation,
@@ -35,7 +35,7 @@ impl Path {
         hs_facts: Arc<HandshakeFacts>,
         heartbeat: ArcHeartbeat,
         trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        cids: &Arc<PathCids>,
+        dcid: ArcDcid<ArcReliableFrames>,
     ) -> Self {
         let send_waker = ArcSendWakers::default();
         let validation = ArcValidation::new();
@@ -49,7 +49,7 @@ impl Path {
         );
         Self {
             pathway,
-            cid: cids.register(pathway, send_waker.clone()),
+            dcid,
             cc,
             send_waker,
             validation,
@@ -95,7 +95,7 @@ impl Path {
 
     pub fn close(&self) {
         self.validation.cancel();
-        self.cid.retire();
+        self.dcid.retire();
         self.heartbeat.stop();
         self.send_waker.wake_all();
     }

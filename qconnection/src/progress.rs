@@ -1,14 +1,15 @@
 //! Connection-level handshake transitions and packet-space lifetime.
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 
-use qbase::{Epoch, cid::ConnectionId, role::Role};
+use qbase::{Epoch, role::Role};
 use qcongestion::HandshakeFacts;
 use qtransport::{
+    path::Path,
     space::{ArcSpaces, DataSpace, Encapsulate, HandshakeSpace, Spaces},
     terminate::ArcTerminator,
 };
 
-use crate::{ArcConnPhase, ArcResend, ConnPhase, MaturePhase, Paths};
+use crate::{ArcConnPhase, ArcResend, ConnPhase, Paths};
 
 /// Serializes edge-triggered lifecycle effects for the shared handshake facts.
 #[derive(Clone)]
@@ -35,16 +36,12 @@ impl ArcProgress {
         self.0.lock().unwrap().facts.clone()
     }
 
-    pub(crate) fn install_handshake(&self, space: Arc<HandshakeSpace>) -> Option<ConnectionId> {
+    pub(crate) fn install_handshake(&self, space: Arc<HandshakeSpace>) -> bool {
         self.0.lock().unwrap().install_handshake(space)
     }
 
     pub(crate) fn install_data(&self, space: Arc<DataSpace>) {
         self.0.lock().unwrap().install_data(space);
-    }
-
-    pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {
-        self.0.lock().unwrap().enter_mature(phase);
     }
 
     pub(crate) fn on_tls_finished(&self) {
@@ -57,6 +54,10 @@ impl ArcProgress {
 
     pub(crate) fn on_handshake_received(&self) {
         self.0.lock().unwrap().on_handshake_received();
+    }
+
+    pub(crate) fn on_path_selected(&self, paths: &Paths, path: &Arc<Path>) -> bool {
+        self.0.lock().unwrap().on_path_selected(paths, path)
     }
 
     pub(crate) fn on_handshake_done(&self, paths: &Arc<Paths>) {
@@ -96,9 +97,9 @@ impl Progress {
         }
     }
 
-    fn install_handshake(&mut self, space: Arc<HandshakeSpace>) -> Option<ConnectionId> {
+    fn install_handshake(&mut self, space: Arc<HandshakeSpace>) -> bool {
         if !self.facts.install_handshake_key() {
-            return None;
+            return false;
         }
         self.install(space);
         if let Some(initial) = self.spaces.read_guard().get(Epoch::Initial as u64) {
@@ -107,15 +108,12 @@ impl Progress {
                 initial.crypto().sender.retire();
             }
         }
-        Some(self.phase.enter_handshake())
+        self.phase.enter_handshake();
+        true
     }
 
     fn install_data(&mut self, space: Arc<DataSpace>) {
         self.install(space);
-    }
-
-    fn enter_mature(&mut self, phase: Arc<MaturePhase>) {
-        self.phase.enter_mature(phase);
     }
 
     fn on_tls_finished(&mut self) {
@@ -139,6 +137,25 @@ impl Progress {
         }
     }
 
+    fn on_path_selected(&mut self, paths: &Paths, path: &Arc<Path>) -> bool {
+        let entries = paths.entries.lock().unwrap();
+        if !entries
+            .get(&path.pathway)
+            .is_some_and(|current| Arc::ptr_eq(current, path))
+            || path.validation.is_cancelled()
+            || self.facts.is_handshake_done()
+            || !self.facts.on_path_selected()
+        {
+            return false;
+        }
+        path.dcid.upgrade();
+        paths.is_mp_handshaking.store(false, Ordering::Relaxed);
+        for path in entries.values() {
+            path.send_waker.wake_all();
+        }
+        true
+    }
+
     fn on_handshake_done(&mut self, paths: &Arc<Paths>) {
         let ConnPhase::Mature(_) = self.phase.get() else {
             return;
@@ -147,6 +164,7 @@ impl Progress {
             // Cleanup may have removed Data before this confirmation was handled.
             return;
         };
+        let entries = paths.entries.lock().unwrap();
         if !self.facts.on_handshake_done() {
             return;
         }
@@ -163,19 +181,15 @@ impl Progress {
                 resender.pop_front();
             }
         }
-        let entries = paths.entries.lock().unwrap();
-        if paths.cids.is_confirmed() {
-            return;
-        }
-        // Prepare per-path state before releasing suspended senders.
+        self.phase.remote_cids().upgrade();
         for path in entries.values() {
-            if paths.cids.is_selected(&path.cid) {
+            if path.dcid.is_allocated() {
                 let _ = path.validation.enter_validated();
+            } else {
+                path.dcid.upgrade();
+                paths.spawn_validation(path);
+                path.send_waker.wake_all();
             }
-        }
-        paths.cids.confirm_handshake();
-        for path in entries.values() {
-            paths.start_validation(path);
         }
     }
 

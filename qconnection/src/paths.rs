@@ -1,15 +1,12 @@
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
 
 use qbase::{
     Epoch,
-    cid::ConnectionId,
+    cid::{ArcDcid, ArcRemoteCids, ConnectionId},
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
@@ -18,20 +15,22 @@ use qbase::{
     util::IndexDeque,
     validate::ArcValidations,
 };
-use qcongestion::{HandshakeFacts, Transport as _};
+use qcongestion::{HandshakeFacts, Transport};
 use qtransport::{
-    path::{Path, PathCids},
+    path::Path,
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
 
 use super::progress::ArcProgress;
-use crate::{ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, InitialPhase};
+use crate::{
+    ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, ConnPhase, InitialPhase,
+    MaturePhase,
+};
 
 /// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
-    pub cids: Arc<PathCids>,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
     pub(crate) loss_resender: ArcResend,
@@ -52,7 +51,7 @@ impl Paths {
     pub fn new(
         initial_space: Arc<InitialSpace>,
         role: Role,
-        dcid: ConnectionId,
+        remote_cids: ArcRemoteCids<ArcReliableFrames>,
         reliable_frames: ArcReliableFrames,
         local_cids: ArcLocalCids,
         max_idle_timeout: Duration,
@@ -71,7 +70,7 @@ impl Paths {
             .write_guard()
             .push_back(initial_space)
             .expect("Initial epoch");
-        let phase = ArcConnPhase::initial(InitialPhase::new(dcid, local_cids));
+        let phase = ArcConnPhase::initial(InitialPhase::new(remote_cids, local_cids));
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(
             role,
@@ -82,7 +81,6 @@ impl Paths {
         );
         let paths = Arc::new(Self {
             phase,
-            cids: PathCids::new(dcid),
             spaces,
             reliable_frames,
             loss_resender,
@@ -165,6 +163,7 @@ impl Paths {
     }
 
     fn create_path(self: &Arc<Self>, pathway: Pathway, facts: Arc<HandshakeFacts>) -> Arc<Path> {
+        let confirmed = facts.is_handshake_done();
         let path = Arc::new(Path::new(
             pathway,
             facts,
@@ -173,29 +172,65 @@ impl Paths {
                 *self.max_idle_timeout.lock().unwrap(),
             ),
             self.loss_resender.clone(),
-            &self.cids,
+            self.phase.remote_cids().apply_dcid(),
         ));
         if self.role == Role::Client {
             let _ = path.validation.exempt();
         }
         self.validations.insert(pathway, path.validation.clone());
-        self.start_validation(&path);
+        if confirmed {
+            self.spawn_validation(&path);
+        }
 
         tokio::spawn(crate::send::sending(self.clone(), path.clone()));
         path.send_waker.wake_all();
         path
     }
 
-    pub(crate) fn select_path(&self, path: &Arc<Path>) {
+    /// Construct a distinct CID source for a path added by a connection driver.
+    pub fn new_dcid(&self) -> ArcDcid<ArcReliableFrames> {
+        let _entries = self.entries.lock().unwrap();
+        self.phase.remote_cids().apply_dcid()
+    }
+
+    pub fn update_initial_dcid(&self, cid: ConnectionId) {
+        self.phase.on_receive_from(cid);
+    }
+
+    pub fn select_path(&self, path: &Arc<Path>) -> bool {
+        self.progress.on_path_selected(self, path)
+    }
+
+    /// Publish negotiated resources under the path-table lock.
+    pub fn enter_mature(&self, mature: Arc<MaturePhase>) {
         let entries = self.entries.lock().unwrap();
-        if !entries
-            .get(&path.pathway)
-            .is_some_and(|current| Arc::ptr_eq(current, path))
-            || !self.cids.select(&path.cid)
-        {
+        if matches!(self.phase.get(), ConnPhase::Mature(_)) {
             return;
         }
-        self.is_mp_handshaking.store(false, Ordering::Relaxed);
+        self.phase.enter_mature(mature);
+        for path in entries.values() {
+            path.send_waker.wake_all();
+        }
+    }
+
+    pub fn is_initial(&self) -> bool {
+        !self.progress.facts().has_selected_path()
+    }
+
+    pub fn is_confirmed(&self) -> bool {
+        self.progress.facts().is_handshake_done()
+    }
+
+    pub fn is_selected(&self, path: &Path) -> bool {
+        !self.is_confirmed() && path.dcid.is_allocated()
+    }
+
+    /// A ready CID does not open additional paths before handshake confirmation.
+    pub(crate) fn can_send(&self, path: &Path) -> bool {
+        let facts = self.progress.facts();
+        // Wait for the path bindings and validation associated with a transition.
+        let _entries = self.entries.lock().unwrap();
+        !facts.has_selected_path() || facts.is_handshake_done() || path.dcid.is_allocated()
     }
 
     pub fn phase(&self) -> ArcConnPhase {
@@ -237,8 +272,15 @@ impl Paths {
 
     /// Spawn one round at path creation or handshake confirmation.
     /// After revalidation, the caller explicitly starts the next round.
-    pub(crate) fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if !self.cids.is_confirmed() || path.validation.is_validated() {
+    pub fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
+        if !self.is_confirmed() {
+            return;
+        }
+        self.spawn_validation(path);
+    }
+
+    pub(crate) fn spawn_validation(self: &Arc<Self>, path: &Arc<Path>) {
+        if path.validation.is_validated() || path.validation.is_cancelled() {
             return;
         }
         let response = path.validation.respond();

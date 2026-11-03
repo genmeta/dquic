@@ -14,10 +14,10 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
 
     use qbase::{Epoch, net::route::Pathway, role::Role, time::heartbeat::ArcHeartbeat};
     use qcongestion::HandshakeFacts;
-    use qtransport::path::{Path, PathCids};
+    use qtransport::path::Path;
     use tokio::time::Instant;
 
-    let cids = PathCids::new(Default::default());
+    let cid = Default::default();
     let paths = Arc::new([4401, 4402, 4403].map(|port| {
         Arc::new(Path::new(
             Pathway::new(
@@ -27,7 +27,8 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
             Arc::new(HandshakeFacts::with_role(Role::Client)),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Default::default(),
-            &cids,
+            qbase::cid::ArcRemoteCids::client(cid, qtransport::ArcReliableFrames::with_capacity(0))
+                .apply_dcid(),
         ))
     }));
     paths[0].validation.enter_validated().unwrap();

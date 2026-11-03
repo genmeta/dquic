@@ -4,7 +4,6 @@ use bytes::BytesMut;
 use futures::FutureExt;
 use qbase::{
     Epoch,
-    cid::ConnectionId,
     error::ErrorKind,
     frame::{
         AddAddressFrame, ConnectionCloseFrame, Frame, FrameReader, HandshakeDoneFrame, PingFrame,
@@ -85,11 +84,22 @@ fn encode_frames<const N: usize>(
 
 fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
     let role = phase.parameters.role();
-    let paths = crate::common::initial_paths(
-        role,
+    let is_mp_handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let initial = Arc::new(qtransport::space::InitialSpace::new(
         phase.spaces.initial.initial_scid,
-        ConnectionId::from_slice(b"original"),
-        common::initial_keys(role == Role::Server),
+        qtransport::keys::ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
+        None,
+        is_mp_handshaking.clone(),
+    ));
+    let paths = Paths::new(
+        initial,
+        role,
+        phase.cid_registry.remote.clone(),
+        phase.spaces.data.reliable_frames.clone(),
+        phase.cid_registry.local.clone(),
+        Duration::ZERO,
+        Duration::ZERO,
+        is_mp_handshaking,
     );
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
@@ -110,7 +120,7 @@ async fn receive(
         paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
-        &paths.cids,
+        paths.new_dcid(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -247,7 +257,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
-        &paths.cids,
+        paths.new_dcid(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     let terminator = paths.terminator.clone();
@@ -572,6 +582,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let pair = pair();
         let (receiver, sender) = (&pair[receiver], &pair[1 - receiver]);
         let paths = empty_paths(receiver);
+        paths.update_initial_dcid(receiver.peer_cid());
         let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
         qprotocol::QuicProtocol::global()
@@ -789,7 +800,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             paths.progress.facts(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
             paths.loss_resender.clone(),
-            &paths.cids,
+            paths.new_dcid(),
         ));
         paths
             .entries

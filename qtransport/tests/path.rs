@@ -1,7 +1,3 @@
-mod path {
-    mod cids;
-}
-
 use std::{
     sync::{
         Arc,
@@ -41,7 +37,11 @@ async fn handshake_events_stop_early_epoch_pto() {
         handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::from(IndexDeque::with_capacity(3)),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     );
     path.validation.exempt().unwrap();
     handshake.install_handshake_key();
@@ -70,7 +70,11 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
         Arc::new(HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     );
     path.validation.exempt().unwrap();
     let step = path.cc.get_pto(Epoch::Initial) / 10;
@@ -96,7 +100,11 @@ async fn cancelling_shared_validation_retires_the_path() {
         Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     );
     assert!(path.validation.credit().is_ok());
     path.validation.cancel();
@@ -127,7 +135,11 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 Arc::new(HandshakeFacts::with_role(Role::Server)),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 ArcIndexDeque::default(),
-                &qtransport::path::PathCids::new(Default::default()),
+                qbase::cid::ArcRemoteCids::client(
+                    Default::default(),
+                    qtransport::ArcReliableFrames::with_capacity(0),
+                )
+                .apply_dcid(),
             );
             if queued {
                 path.validation
@@ -176,7 +188,11 @@ async fn every_duplicate_challenge_is_packaged_as_a_response() {
         Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     );
     for _ in 0..10 {
         path.validation

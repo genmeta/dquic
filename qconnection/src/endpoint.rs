@@ -6,7 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    cid::{ConnectionId, GenUniqueCid},
+    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
     endpoint::{Anonymous, Endpoint},
     error::{AppError, ErrorKind, QuicError},
     net::route::Scopes,
@@ -187,7 +187,7 @@ impl QuicEndpoint {
         let paths = Paths::new(
             initial_space.clone(),
             Role::Client,
-            origin_dcid,
+            ArcRemoteCids::client(origin_dcid, reliable_frames.clone()),
             reliable_frames,
             local_cids,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
@@ -328,7 +328,7 @@ impl ServerRegistry {
                 let paths = Paths::new(
                     initial_space.clone(),
                     Role::Server,
-                    client_scid,
+                    ArcRemoteCids::server(client_scid, reliable_frames.clone()),
                     reliable_frames,
                     local_cids,
                     Duration::ZERO,

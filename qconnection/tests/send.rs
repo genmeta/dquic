@@ -891,6 +891,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
 #[tokio::test]
 async fn collected_burst_completes_when_selection_or_cid_source_changes() {
     use qbase::{
+        frame::{NewConnectionIdFrame, io::ReceiveFrame},
         net::route::{Line, Link},
         packet::GetDcid,
     };
@@ -915,8 +916,9 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
             local,
             EndpointAddr::direct("127.0.0.1:9".parse().unwrap()),
         ));
-        if change != 0 {
-            paths.cids.select(&first.cid);
+        if change == 2 {
+            paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
+            paths.select_path(&first);
         }
         let initial = common::initial_space(&paths.spaces);
         initial
@@ -932,16 +934,21 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
         let count = burst.collect().now_or_never().unwrap().unwrap();
         match change {
             0 => {
-                paths.cids.select(&second.cid);
+                paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
+                paths.select_path(&second);
             }
-            1 => paths
-                .cids
-                .update_initial_dcid(ConnectionId::from_slice(b"server00")),
-            _ => paths.cids.attach_remote(qbase::cid::ArcRemoteCids::new(
-                paths.cids.initial_dcid(),
-                2,
-                paths.reliable_frames.clone(),
-            )),
+            1 => paths.update_initial_dcid(ConnectionId::from_slice(b"server00")),
+            _ => {
+                paths
+                    .phase()
+                    .remote_cids()
+                    .recv_frame(NewConnectionIdFrame::new(
+                        ConnectionId::from_slice(b"server00"),
+                        1u32.into(),
+                        1u32.into(),
+                    ))
+                    .unwrap();
+            }
         }
         // Verify the CID on the wire after the policy changes and submission completes.
         burst.submit(count).await.unwrap();
@@ -989,14 +996,16 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
                 assert!(journal.packet(opened.pn()).unwrap().size > 0);
             }
         }
-        let mut cx = Context::from_waker(Waker::noop());
         if change == 0 {
-            assert!(first.cid.borrow_cid(&mut cx).is_pending());
+            assert!(!paths.is_selected(&first));
         } else {
-            assert!(
-                matches!(first.cid.borrow_cid(&mut cx), Poll::Ready(Some(cid))
-                if *cid == paths.cids.initial_dcid())
+            assert_eq!(
+                first
+                    .dcid
+                    .poll_borrow(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Some(ConnectionId::from_slice(b"server00")))
             );
+            first.dcid.refresh();
         }
         common::retire_all(&paths);
         common::wait_for_sender_exit(&first).await;
