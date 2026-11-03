@@ -8,6 +8,7 @@ use qbase::role::Role;
 #[derive(Debug)]
 pub struct HandshakeFacts {
     role: Role,
+    path_selected: AtomicBool,
     got_handshake_key: AtomicBool,
     has_sent_handshake: AtomicBool,
     has_received_handshake: AtomicBool,
@@ -20,6 +21,7 @@ impl HandshakeFacts {
     pub fn with_role(role: Role) -> Self {
         Self {
             role,
+            path_selected: AtomicBool::new(false),
             got_handshake_key: AtomicBool::new(false),
             has_sent_handshake: AtomicBool::new(false),
             has_received_handshake: AtomicBool::new(false),
@@ -27,6 +29,15 @@ impl HandshakeFacts {
             is_tls_finished: AtomicBool::new(false),
             is_handshake_done: AtomicBool::new(false),
         }
+    }
+
+    /// Record selection once, without retaining the selected path's identity.
+    pub fn on_path_selected(&self) -> bool {
+        !self.path_selected.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn has_selected_path(&self) -> bool {
+        self.path_selected.load(Ordering::Acquire)
     }
 
     pub fn install_handshake_key(&self) -> bool {

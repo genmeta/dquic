@@ -60,7 +60,11 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         Arc::new(qcongestion::HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
-        &qtransport::path::PathCids::new(Default::default()),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qconnection::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
     );
     path.validation.exempt().unwrap();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.

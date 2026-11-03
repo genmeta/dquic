@@ -1,5 +1,7 @@
 #[path = "cid/connection_id.rs"]
 mod connection_id;
+#[path = "cid/dcid.rs"]
+mod dcid;
 #[path = "cid/local_cid.rs"]
 mod local_cid;
 #[path = "cid/remote_cid.rs"]

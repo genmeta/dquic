@@ -130,7 +130,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let paths = Paths::new(
             initial_space.clone(),
             Role::Server,
-            *packet.scid(),
+            qbase::cid::ArcRemoteCids::server(*packet.scid(), reliable.clone()),
             reliable,
             local_cids,
             Duration::ZERO,
@@ -177,7 +177,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        odcid,
+        qbase::cid::ArcRemoteCids::client(odcid, reliable.clone()),
         reliable,
         local_cids,
         Duration::ZERO,
@@ -324,7 +324,7 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let (mut client, mut server) = connect(&server_socket).await;
     let old_route = Pathway::new(old_socket.endpoint(), server_socket.endpoint());
     assert!(
-        wait_for(|| client.paths.cids.is_confirmed()
+        wait_for(|| client.paths.is_confirmed()
             && client
                 .paths
                 .entries

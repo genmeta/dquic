@@ -85,11 +85,10 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             let _ = idle.on_rcvd_at(now);
             let _ = path.heartbeat.on_rcvd_at(content, now);
             if let Some(dcid) = initial_scid
-                && let ConnPhase::Initial(initial) = paths.phase().get()
+                && let ConnPhase::Initial(_) = paths.phase().get()
             {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
-                paths.cids.update_initial_dcid(dcid);
-                initial.set_dcid(dcid);
+                paths.update_initial_dcid(dcid);
             }
             // An Initial ACK proves receipt, but does not identify the path
             // carrying the server's TLS flight. Keep racing until CRYPTO arrives.
@@ -99,7 +98,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             if epoch == Epoch::Handshake
                 || (role == Role::Client && epoch == Epoch::Initial && has_crypto_data)
             {
-                paths.select_path(&path);
+                paths.progress.on_path_selected(&paths, &path);
             }
             if epoch == Epoch::Handshake {
                 if path.validation.enter_validated().is_ok() {
@@ -119,7 +118,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                         cc.on_ack_rcvd(epoch, &frame, Instant::now());
                         drop(cc);
                         if role == Role::Server && epoch == Epoch::Initial && crypto_acked {
-                            paths.select_path(&path);
+                            paths.progress.on_path_selected(&paths, &path);
                         }
                     }
                     Frame::Close(frame) => {

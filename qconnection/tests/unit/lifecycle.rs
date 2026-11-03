@@ -59,12 +59,8 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
         let paths = &mature.paths;
         let initial = &mature.spaces.initial;
         let handshake = &mature.spaces.handshake;
-        let dcid = crate::common::initial_phase(paths).dcid();
-        assert_eq!(
-            paths.progress.install_handshake(handshake.clone()),
-            Some(dcid)
-        );
-        assert_eq!(paths.progress.install_handshake(handshake.clone()), None);
+        assert!(paths.progress.install_handshake(handshake.clone()));
+        assert!(!paths.progress.install_handshake(handshake.clone()));
         assert!(matches!(
             paths.phase().get(),
             crate::ConnPhase::Handshake(_)
@@ -109,11 +105,11 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
             Epoch::Handshake as u64
         );
         paths.progress.install_data(mature.spaces.data.clone());
-        paths.progress.enter_mature(mature.phase.clone());
+        paths.enter_mature(mature.phase.clone());
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         assert!(!paths.progress.facts().is_handshake_done());
-        assert_eq!(paths.progress.install_handshake(handshake.clone()), None);
+        assert!(!paths.progress.install_handshake(handshake.clone()));
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         paths.retire_all();
@@ -181,12 +177,7 @@ async fn packet_events_retire_initial_from_both_queues() {
             ))),
             paths.is_mp_handshaking.clone(),
         ));
-        assert!(
-            paths
-                .progress
-                .install_handshake(handshake.clone())
-                .is_some()
-        );
+        assert!(paths.progress.install_handshake(handshake.clone()));
         paths.progress.on_handshake_sent();
         paths.progress.on_handshake_received();
         assert_eq!(spaces.read_guard().len(), 1);

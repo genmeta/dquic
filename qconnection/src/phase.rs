@@ -1,41 +1,35 @@
 //! Stage-specific connection state. Each path reads the current phase for every burst.
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use qbase::{cid::ConnectionId, net::tx::ArcSendWakers};
+use qbase::{
+    cid::{ArcRemoteCids, ConnectionId},
+    net::tx::ArcSendWakers,
+};
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use crate::{ArcLocalCids, ArcParameters, ArcReliableFrames, CidRegistry, FlowController};
 
 /// Initial connection identity, before the peer's source CID is fixed.
 pub struct InitialPhase {
-    dcid: Mutex<ConnectionId>,
     pub local_cids: ArcLocalCids,
+    remote_cids: ArcRemoteCids<ArcReliableFrames>,
     pub(crate) upgrade_wakers: ArcSendWakers,
 }
 
 impl InitialPhase {
-    pub fn new(dcid: ConnectionId, local_cids: ArcLocalCids) -> Self {
+    pub fn new(remote_cids: ArcRemoteCids<ArcReliableFrames>, local_cids: ArcLocalCids) -> Self {
         Self {
-            dcid: Mutex::new(dcid),
             local_cids,
+            remote_cids,
             upgrade_wakers: ArcSendWakers::default(),
         }
-    }
-
-    pub fn dcid(&self) -> ConnectionId {
-        *self.dcid.lock().unwrap()
-    }
-
-    pub(crate) fn set_dcid(&self, dcid: ConnectionId) {
-        *self.dcid.lock().unwrap() = dcid;
-        self.upgrade_wakers.wake_all();
     }
 }
 
 /// Peer CID established, waiting for parameters and Data keys.
 pub struct HandshakePhase {
-    pub dcid: ConnectionId,
     pub local_cids: ArcLocalCids,
+    remote_cids: ArcRemoteCids<ArcReliableFrames>,
     pub(crate) upgrade_wakers: ArcSendWakers,
 }
 
@@ -66,6 +60,28 @@ impl ArcConnPhase {
         self.0.read().unwrap().clone()
     }
 
+    pub fn remote_cids(&self) -> ArcRemoteCids<ArcReliableFrames> {
+        match &*self.0.read().unwrap() {
+            ConnPhase::Initial(initial) => initial.remote_cids.clone(),
+            ConnPhase::Handshake(handshake) => handshake.remote_cids.clone(),
+            ConnPhase::Mature(mature) => mature.cid_registry.remote.clone(),
+        }
+    }
+
+    pub(crate) fn on_receive_from(&self, peer_scid: ConnectionId) {
+        let phase = self.get();
+        let (remote, wakers) = match &phase {
+            ConnPhase::Initial(p) => (&p.remote_cids, Some(&p.upgrade_wakers)),
+            ConnPhase::Handshake(p) => (&p.remote_cids, Some(&p.upgrade_wakers)),
+            ConnPhase::Mature(p) => (&p.cid_registry.remote, None),
+        };
+        if remote.on_receive_from(peer_scid)
+            && let Some(wakers) = wakers
+        {
+            wakers.wake_all();
+        }
+    }
+
     pub(crate) fn poll_phase(
         &self,
         cx: &mut std::task::Context<'_>,
@@ -79,22 +95,20 @@ impl ArcConnPhase {
         phase
     }
 
-    /// Enter Handshake and return the peer CID fixed for this phase.
-    pub(crate) fn enter_handshake(&self) -> ConnectionId {
+    /// Enter Handshake and wake phase subscribers.
+    pub(crate) fn enter_handshake(&self) {
         let mut phase = self.0.write().unwrap();
         let ConnPhase::Initial(initial) = &*phase else {
             unreachable!("enter_handshake starts with InitialPhase")
         };
-        let server_scid = initial.dcid();
         let upgrade_wakers = initial.upgrade_wakers.clone();
         *phase = ConnPhase::Handshake(Arc::new(HandshakePhase {
-            dcid: initial.dcid(),
             local_cids: initial.local_cids.clone(),
+            remote_cids: initial.remote_cids.clone(),
             upgrade_wakers: upgrade_wakers.clone(),
         }));
         drop(phase);
         upgrade_wakers.wake_all();
-        server_scid
     }
 
     pub(crate) fn enter_mature(&self, phase: Arc<MaturePhase>) {

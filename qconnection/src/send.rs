@@ -11,7 +11,7 @@ use bytes::BytesMut;
 pub use packet::{Envelope, Packet};
 use qbase::{
     Epoch,
-    cid::{BorrowedCid, ConnectionId},
+    cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{GuaranteedFrame, PingFrame},
     packet::{Package, assemble::Metadata},
@@ -25,7 +25,7 @@ use qtransport::{
 };
 pub(crate) use task::sending;
 
-use crate::{ArcReliableFrames, ConnPhase, Error, Paths};
+use crate::{ConnPhase, Error, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
 /// Sealed packet metadata, indexed by datagram and epoch.
@@ -38,7 +38,7 @@ pub struct Burst<'a, 'path> {
     pub(crate) datagrams: &'a mut [BytesMut],
     frames: &'a mut Vec<GuaranteedFrame>,
     pub(crate) packets: &'a mut BurstPackets,
-    pub(crate) dcid: Option<BorrowedCid<ArcReliableFrames>>,
+    pub(crate) dcid: Option<ConnectionId>,
     spaces: Option<Spaces>,
 }
 
@@ -72,7 +72,7 @@ impl<'a, 'path> Burst<'a, 'path> {
             }
         }
         self.frames.clear();
-        self.dcid.take();
+        self.refresh_cid();
     }
 
     pub async fn batch(&mut self) -> Result<(), Error> {
@@ -84,7 +84,7 @@ impl<'a, 'path> Burst<'a, 'path> {
     pub async fn submit(&mut self, count: usize) -> Result<(), Error> {
         let spaces = self.spaces.as_ref().expect("collected spaces");
         let path = self.path;
-        let dcid = **self.dcid.as_ref().expect("collected CID");
+        let dcid = self.dcid.expect("collected CID");
         let idle = self.paths.idle();
         let deadlines = Epoch::EPOCHS.map(|epoch| {
             (
@@ -144,7 +144,7 @@ impl<'a, 'path> Burst<'a, 'path> {
             }
             first += sent;
         }
-        self.dcid.take();
+        self.refresh_cid();
         Ok(())
     }
 }
@@ -156,8 +156,29 @@ impl Burst<'_, '_> {
 
     pub(crate) fn poll_collect(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, Error>> {
         let path = self.path;
-        let cid = ready!(path.cid.borrow_cid(cx))
+        path.send_waker.register(cx.waker());
+        if path.validation.is_cancelled() {
+            return Poll::Ready(Err(no_viable_path("path CID binding retired")));
+        }
+        if !self.paths.can_send(path) {
+            return Poll::Pending;
+        }
+        let cid = ready!(path.dcid.poll_borrow(cx))
             .ok_or_else(|| no_viable_path("path CID binding retired"))?;
+        self.dcid = Some(cid);
+        let result = self.poll_collect_with_cid(cx, cid);
+        if result.is_pending() {
+            self.refresh_cid();
+        }
+        result
+    }
+
+    fn poll_collect_with_cid(
+        &mut self,
+        cx: &mut Context<'_>,
+        cid: ConnectionId,
+    ) -> Poll<Result<usize, Error>> {
+        let path = self.path;
         let phase = self.paths.phase().poll_phase(cx).clone();
         self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
         let credit = match path.validation.poll_credit(cx) {
@@ -171,7 +192,7 @@ impl Burst<'_, '_> {
             update_amplification_blocked(
                 &mut cc,
                 self.spaces.as_ref().unwrap(),
-                *cid,
+                cid,
                 credit,
                 overhead,
             );
@@ -215,15 +236,11 @@ impl Burst<'_, '_> {
                 phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
             ),
         };
-        let result = self.collect_depth(cx, depth, *cid, &mut limits, exponent);
+        let result = self.collect_depth(cx, depth, cid, &mut limits, exponent);
         if let Some(flow) = &mut flow {
             flow.post_sent(flow.available() - limits.flow_ctrl);
         }
-        // On assembly errors a prefix can already be sealed. Keep its borrow
-        // until cancel() recovers it; Pending has no sealed packets.
-        if !result.is_pending() {
-            self.dcid = Some(cid);
-        }
+        // On assembly errors a prefix can already be sealed; cancel() returns it.
         result
     }
 
@@ -292,6 +309,20 @@ impl Burst<'_, '_> {
         } else {
             Poll::Ready(Ok(count))
         }
+    }
+}
+
+impl Burst<'_, '_> {
+    fn refresh_cid(&mut self) {
+        if self.dcid.take().is_some() {
+            self.path.dcid.refresh();
+        }
+    }
+}
+
+impl Drop for Burst<'_, '_> {
+    fn drop(&mut self) {
+        self.refresh_cid();
     }
 }
 
