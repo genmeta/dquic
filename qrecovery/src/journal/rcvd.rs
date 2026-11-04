@@ -203,9 +203,16 @@ impl RcvdJournal {
 pub struct ArcRcvdJournal {
     inner: Arc<RwLock<RcvdJournal>>,
     waiters: ArcSendWakers,
+    ack_delay_exponent: u32,
 }
 
 impl ArcRcvdJournal {
+    /// Configure outgoing ACK delays before sharing this journal.
+    pub fn with_ack_delay_exponent(mut self, exponent: u32) -> Self {
+        self.ack_delay_exponent = exponent;
+        self
+    }
+
     pub fn with_capacity(capacity: usize, max_ack_delay: Option<Duration>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(
@@ -213,6 +220,7 @@ impl ArcRcvdJournal {
                 max_ack_delay,
             ))),
             waiters: Default::default(),
+            ack_delay_exponent: 0,
         }
     }
 
@@ -259,7 +267,7 @@ impl ArcRcvdJournal {
         AckPackege {
             journal: self,
             need_ack,
-            exponent: 0,
+            exponent: self.ack_delay_exponent,
         }
     }
 }

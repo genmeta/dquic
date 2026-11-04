@@ -1,5 +1,7 @@
 use qbase::{
-    frame::{DataBlockedFrame, EncodeSize, FrameType, GetFrameType, io::WriteFrame},
+    frame::{
+        DataBlockedFrame, EncodeSize, FrameType, GetFrameType, StreamCtlFrame, io::WriteFrame,
+    },
     varint::VarInt,
 };
 
@@ -23,6 +25,8 @@ fn test_write_data_blocked_frame() {
 fn test_read_data_blocked_frame() {
     assert_eq!(
         super::parse_frame(&[0x14, 0x52, 0x34], FrameType::DataBlocked),
-        qbase::frame::Frame::DataBlocked(DataBlockedFrame::new(VarInt::from_u32(0x1234)))
+        qbase::frame::Frame::StreamCtl(StreamCtlFrame::DataBlocked(DataBlockedFrame::new(
+            VarInt::from_u32(0x1234)
+        )))
     );
 }

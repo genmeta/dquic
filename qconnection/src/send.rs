@@ -15,7 +15,6 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{GuaranteedFrame, PingFrame},
     packet::{Package, assemble::Metadata},
-    param::ParameterId,
 };
 use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
@@ -25,7 +24,7 @@ use qtransport::{
 };
 pub(crate) use task::sending;
 
-use crate::{ConnPhase, Error, Paths};
+use crate::{Error, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
 /// Sealed packet metadata, indexed by datagram and epoch.
@@ -179,7 +178,6 @@ impl Burst<'_, '_> {
         cid: ConnectionId,
     ) -> Poll<Result<usize, Error>> {
         let path = self.path;
-        let phase = self.paths.phase().poll_phase(cx).clone();
         self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
         let credit = match path.validation.poll_credit(cx) {
             Poll::Ready(credit) => credit.map_err(no_viable_path)?.unwrap_or(usize::MAX),
@@ -211,65 +209,34 @@ impl Burst<'_, '_> {
                     0
                 }
             }),
-            flow_ctrl: 0,
             overhead,
         };
-        let mut flow = if let ConnPhase::Mature(phase) = &phase {
-            let requested = self
-                .spaces
-                .as_ref()
-                .unwrap()
-                .0
-                .get(Epoch::Data as u64)
-                .filter(|_| limits.send_quota >= 1200)
-                .map_or(0, |data| data.fresh_bytes_up_to(limits.send_quota));
-            Some(ready!(phase.flow_ctrl.sender.poll_credit(cx, requested)))
-        } else {
-            None
-        };
-        limits.flow_ctrl = flow.as_ref().map_or(0, |credit| credit.available());
-        let (depth, exponent) = match &phase {
-            ConnPhase::Initial(_) => (1, 0),
-            ConnPhase::Handshake(_) => (2, 0),
-            ConnPhase::Mature(phase) => (
-                3,
-                phase.parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-            ),
-        };
-        let result = self.collect_depth(cx, depth, cid, &mut limits, exponent);
-        if let Some(flow) = &mut flow {
-            flow.post_sent(flow.available() - limits.flow_ctrl);
-        }
+        let result = self.collect_spaces(cx, cid, &mut limits);
         // On assembly errors a prefix can already be sealed; cancel() returns it.
         result
     }
 
-    fn collect_depth(
+    fn collect_spaces(
         &mut self,
         cx: &mut Context<'_>,
-        depth: usize,
         dcid: ConnectionId,
         limits: &mut Constraints,
-        exponent: u32,
     ) -> Poll<Result<usize, Error>> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
         let mut acks = Epoch::EPOCHS.map(|epoch| {
             (
                 epoch,
-                spaces.0.get(epoch as u64).map(|space| {
-                    let mut ack = space.rcvd_journal().ack_package(path.cc.need_ack(epoch));
-                    if epoch == Epoch::Data {
-                        ack.exponent = exponent;
-                    }
-                    ack
-                }),
+                spaces
+                    .0
+                    .get(epoch as u64)
+                    .map(|space| space.rcvd_journal().ack_package(path.cc.need_ack(epoch))),
             )
         });
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
         let mut validation = path.validation.clone();
-        let dcids = std::array::from_fn(|epoch| (epoch < depth).then_some(dcid));
+        let dcids = [Some(dcid); 3];
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
             // A sealed packet consumes its epoch's PTO allowance, even without a PING.

@@ -404,6 +404,10 @@ pub fn be_frame_type(input: &[u8]) -> nom::IResult<&[u8], FrameType, Error> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[enum_dispatch(EncodeSize, GetFrameType)]
 pub enum StreamCtlFrame {
+    /// MAX_DATA frame, see [`MaxDataFrame`].
+    MaxData(MaxDataFrame),
+    /// DATA_BLOCKED frame, see [`DataBlockedFrame`].
+    DataBlocked(DataBlockedFrame),
     /// RESET_STREAM frame, see [`ResetStreamFrame`].
     ResetStream(ResetStreamFrame),
     /// STOP_SENDING frame, see [`StopSendingFrame`].
@@ -424,10 +428,6 @@ pub enum StreamCtlFrame {
 pub enum ReliableFrame {
     /// NEW_TOKEN frame, see [`NewTokenFrame`].
     NewToken(NewTokenFrame),
-    /// MAX_DATA frame, see [`MaxDataFrame`].
-    MaxData(MaxDataFrame),
-    /// DATA_BLOCKED frame, see [`DataBlockedFrame`].
-    DataBlocked(DataBlockedFrame),
     /// NEW_CONNECTION_ID frame, see [`NewConnectionIdFrame`].
     NewConnectionId(NewConnectionIdFrame),
     /// RETIRE_CONNECTION_ID frame, see [`RetireConnectionIdFrame`].
@@ -462,8 +462,6 @@ impl TryFrom<Frame> for GuaranteedFrame {
             Frame::Stream(frame, ()) => return Ok(Self::Stream(frame)),
             Frame::Crypto(frame, ()) => return Ok(Self::Crypto(frame)),
             Frame::NewToken(frame) => ReliableFrame::NewToken(frame),
-            Frame::MaxData(frame) => ReliableFrame::MaxData(frame),
-            Frame::DataBlocked(frame) => ReliableFrame::DataBlocked(frame),
             Frame::NewConnectionId(frame) => ReliableFrame::NewConnectionId(frame),
             Frame::RetireConnectionId(frame) => ReliableFrame::RetireConnectionId(frame),
             Frame::HandshakeDone(frame) => ReliableFrame::HandshakeDone(frame),
@@ -503,10 +501,6 @@ pub enum Frame<D = ()> {
     Close(ConnectionCloseFrame),
     /// NEW_TOKEN frame, see [`NewTokenFrame`].
     NewToken(NewTokenFrame),
-    /// MAX_DATA frame, see [`MaxDataFrame`].
-    MaxData(MaxDataFrame),
-    /// DATA_BLOCKED frame, see [`DataBlockedFrame`].
-    DataBlocked(DataBlockedFrame),
     /// NEW_CONNECTION_ID frame, see [`NewConnectionIdFrame`].
     NewConnectionId(NewConnectionIdFrame),
     /// RETIRE_CONNECTION_ID frame, see [`RetireConnectionIdFrame`].
@@ -542,10 +536,6 @@ impl<D> From<ReliableFrame> for Frame<D> {
     fn from(frame: ReliableFrame) -> Self {
         match frame {
             ReliableFrame::NewToken(new_token_frame) => Frame::NewToken(new_token_frame),
-            ReliableFrame::MaxData(max_data_frame) => Frame::MaxData(max_data_frame),
-            ReliableFrame::DataBlocked(data_blocked_frame) => {
-                Frame::DataBlocked(data_blocked_frame)
-            }
             ReliableFrame::NewConnectionId(new_connection_id_frame) => {
                 Frame::NewConnectionId(new_connection_id_frame)
             }
@@ -587,10 +577,6 @@ impl<'f, D> TryFrom<&'f Frame<D>> for ReliableFrame {
             Frame::NewToken(new_token_frame) => {
                 Ok(ReliableFrame::NewToken(new_token_frame.clone()))
             }
-            Frame::MaxData(max_data_frame) => Ok(ReliableFrame::MaxData(*max_data_frame)),
-            Frame::DataBlocked(data_blocked_frame) => {
-                Ok(ReliableFrame::DataBlocked(*data_blocked_frame))
-            }
             Frame::NewConnectionId(new_connection_id_frame) => {
                 Ok(ReliableFrame::NewConnectionId(*new_connection_id_frame))
             }
@@ -626,8 +612,6 @@ impl<D> GetFrameType for Frame<D> {
             Frame::Ack(f) => f.frame_type(),
             Frame::Close(f) => f.frame_type(),
             Frame::NewToken(f) => f.frame_type(),
-            Frame::MaxData(f) => f.frame_type(),
-            Frame::DataBlocked(f) => f.frame_type(),
             Frame::NewConnectionId(f) => f.frame_type(),
             Frame::RetireConnectionId(f) => f.frame_type(),
             Frame::HandshakeDone(f) => f.frame_type(),
@@ -663,8 +647,6 @@ impl<D> EncodeSize for Frame<D> {
             Frame::Ack(f) => f.max_encoding_size(),
             Frame::Close(f) => f.max_encoding_size(),
             Frame::NewToken(f) => f.max_encoding_size(),
-            Frame::MaxData(f) => f.max_encoding_size(),
-            Frame::DataBlocked(f) => f.max_encoding_size(),
             Frame::NewConnectionId(f) => f.max_encoding_size(),
             Frame::RetireConnectionId(f) => f.max_encoding_size(),
             Frame::HandshakeDone(f) => f.max_encoding_size(),
@@ -691,8 +673,6 @@ impl<D> EncodeSize for Frame<D> {
             Frame::Ack(f) => f.encoding_size(),
             Frame::Close(f) => f.encoding_size(),
             Frame::NewToken(f) => f.encoding_size(),
-            Frame::MaxData(f) => f.encoding_size(),
-            Frame::DataBlocked(f) => f.encoding_size(),
             Frame::NewConnectionId(f) => f.encoding_size(),
             Frame::RetireConnectionId(f) => f.encoding_size(),
             Frame::HandshakeDone(f) => f.encoding_size(),
@@ -751,6 +731,8 @@ impl Iterator for FrameReader {
 impl<T: BufMut> WriteFrame<StreamCtlFrame> for T {
     fn put_frame(&mut self, frame: &StreamCtlFrame) {
         match frame {
+            StreamCtlFrame::MaxData(frame) => self.put_frame(frame),
+            StreamCtlFrame::DataBlocked(frame) => self.put_frame(frame),
             StreamCtlFrame::ResetStream(frame) => self.put_frame(frame),
             StreamCtlFrame::StopSending(frame) => self.put_frame(frame),
             StreamCtlFrame::MaxStreamData(frame) => self.put_frame(frame),
@@ -765,8 +747,6 @@ impl<T: BufMut> WriteFrame<ReliableFrame> for T {
     fn put_frame(&mut self, frame: &ReliableFrame) {
         match frame {
             ReliableFrame::NewToken(frame) => self.put_frame(frame),
-            ReliableFrame::MaxData(frame) => self.put_frame(frame),
-            ReliableFrame::DataBlocked(frame) => self.put_frame(frame),
             ReliableFrame::NewConnectionId(frame) => self.put_frame(frame),
             ReliableFrame::RetireConnectionId(frame) => self.put_frame(frame),
             ReliableFrame::HandshakeDone(frame) => self.put_frame(frame),

@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use qbase::{
     Epoch,
-    frame::{AckFrame, Frame, io::SendFrame},
+    frame::{AckFrame, Frame, StreamCtlFrame, io::SendFrame},
 };
 use qevent::quic::recovery::PacketLostTrigger;
 use qtransport::{
@@ -224,10 +224,12 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
         0,
         metadata(
             Epoch::Data,
-            &[Frame::MaxData(MaxDataFrame::new(123u32.into()))],
+            &[Frame::StreamCtl(StreamCtlFrame::MaxData(
+                MaxDataFrame::new(123u32.into()),
+            ))],
         ),
         &mut [qbase::frame::GuaranteedFrame::Reliable(
-            MaxDataFrame::new(123u32.into()).into(),
+            StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())).into(),
         )]
         .into_iter(),
     );
@@ -253,7 +255,7 @@ async fn retired_data_keys_stop_loss_and_timer_recovery() {
 
     let data = support::data::data();
     data.reliable_frames
-        .send_frame([MaxDataFrame::new(123u32.into())]);
+        .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
     let mut frames = support::frames::take_frames(&mut data.reliable_frames.clone());
     assert_eq!(frames.len(), 1);
     let (pn, _) = data.next_pn().unwrap();
@@ -283,10 +285,10 @@ async fn data_trait_cancel_recovers_staged_and_sealed_frames() {
         writer.write_all(b"stream").await.unwrap();
         data.crypto.writer().write_all(b"crypto").await.unwrap();
         data.reliable_frames
-            .send_frame([MaxDataFrame::new(123u32.into())]);
-        assert_eq!(space.fresh_bytes(), 6);
+            .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
+        assert_eq!(data.streams.fresh_bytes(), 6);
 
-        let prefix = Frame::MaxData(MaxDataFrame::new(1u32.into()));
+        let prefix = Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(1u32.into())));
         let mut frames = vec![prefix.clone()];
         frames.extend(support::frames::take_frames(&mut data.crypto.outgoing()));
         frames.extend(support::frames::take_frames(
@@ -294,7 +296,7 @@ async fn data_trait_cancel_recovers_staged_and_sealed_frames() {
         ));
         frames.extend(support::frames::take_frames(&mut data.streams.clone()));
         assert_eq!(frames.len(), 4);
-        assert_eq!(space.fresh_bytes(), 0);
+        assert_eq!(data.streams.fresh_bytes(), 0);
         let (pn, _) = space.pn_and_keys().unwrap().unwrap();
         let meta = metadata(Epoch::Data, &frames[1..]);
         let mut frames: Vec<GuaranteedFrame> = frames
@@ -306,14 +308,14 @@ async fn data_trait_cancel_recovers_staged_and_sealed_frames() {
         }
         space.cancel(pn.0, &mut frames.drain(1..));
         assert_eq!(frames, vec![prefix.try_into().unwrap()]);
-        assert_eq!(space.fresh_bytes(), 0);
+        assert_eq!(data.streams.fresh_bytes(), 0);
         assert!(matches!(
             support::frames::take_frames(&mut data.crypto.outgoing()).as_slice(),
             [Frame::Crypto(frame, _)] if frame.offset() == 0 && frame.len() == 6
         ));
         assert!(matches!(
             support::frames::take_frames(&mut data.reliable_frames.clone()).as_slice(),
-            [Frame::MaxData(_)]
+            [Frame::StreamCtl(StreamCtlFrame::MaxData(_))]
         ));
         assert!(matches!(
             support::frames::take_frames(&mut data.streams.clone()).as_slice(),
@@ -380,7 +382,7 @@ async fn data_trait_unregister_removes_all_source_waiters() {
         data.crypto.writer().write_all(b"crypto").await.unwrap();
         data.rcvd_journal.on_rcvd_pn(0, true, Duration::ZERO);
         data.reliable_frames
-            .send_frame([MaxDataFrame::new(123u32.into())]);
+            .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
         writer.write_all(b"stream").await.unwrap();
         assert_eq!(
             counter.0.load(Ordering::Relaxed),

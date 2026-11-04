@@ -21,17 +21,15 @@ use qtransport::{
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
+use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use super::progress::ArcProgress;
-use crate::{
-    ArcConnPhase, ArcDcid, ArcReliableFrames, ArcResend, CidRegistry, CloseReason, ConnPhase,
-    InitialPhase, MaturePhase,
-};
+use crate::{ArcDcid, ArcReliableFrames, ArcResend, CidRegistry, CloseReason};
 
 /// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
-    phase: ArcConnPhase,
     pub cid_registry: CidRegistry,
+    pub puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
     pub(crate) loss_resender: ArcResend,
@@ -69,18 +67,20 @@ impl Paths {
             .write_guard()
             .push_back(initial_space)
             .expect("Initial epoch");
-        let phase = ArcConnPhase::initial(InitialPhase::default());
+        let puncher = ArcPuncher::new(
+            reliable_frames.clone(),
+            ProbeEncoder::new(spaces.clone(), cid_registry.remote.apply_dcid()),
+        );
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(
             role,
-            phase.clone(),
             spaces.clone(),
             loss_resender.clone(),
             terminator.clone(),
         );
         let paths = Arc::new(Self {
-            phase,
             cid_registry,
+            puncher,
             spaces,
             reliable_frames,
             loss_resender,
@@ -195,28 +195,14 @@ impl Paths {
 
     pub fn update_initial_dcid(&self, cid: ConnectionId) {
         if self.cid_registry.remote.on_receive_from(cid) {
-            match self.phase.get() {
-                ConnPhase::Initial(p) => p.upgrade_wakers.wake_all(),
-                ConnPhase::Handshake(p) => p.upgrade_wakers.wake_all(),
-                ConnPhase::Mature(_) => {}
+            for path in self.entries.lock().unwrap().values() {
+                path.send_waker.wake_all();
             }
         }
     }
 
     pub fn select_path(&self, path: &Arc<Path>) -> bool {
         self.progress.on_path_selected(self, path)
-    }
-
-    /// Publish negotiated resources under the path-table lock.
-    pub fn enter_mature(&self, mature: Arc<MaturePhase>) {
-        let entries = self.entries.lock().unwrap();
-        if matches!(self.phase.get(), ConnPhase::Mature(_)) {
-            return;
-        }
-        self.phase.enter_mature(mature);
-        for path in entries.values() {
-            path.send_waker.wake_all();
-        }
     }
 
     pub fn is_initial(&self) -> bool {
@@ -237,10 +223,6 @@ impl Paths {
         // Wait for the path bindings and validation associated with a transition.
         let _entries = self.entries.lock().unwrap();
         !facts.has_selected_path() || facts.is_handshake_done() || path.dcid.is_allocated()
-    }
-
-    pub fn phase(&self) -> ArcConnPhase {
-        self.phase.clone()
     }
 
     pub(crate) fn role(&self) -> Role {
@@ -345,6 +327,8 @@ impl Paths {
     /// Stop idle expiry and release paths, packet spaces and recovery trackers.
     pub fn clean(&self) {
         self.idle.cancel();
+        self.puncher.abort_transactions();
+        self.puncher.release_temporary_sockets();
         {
             let entries = self.entries.lock().unwrap();
             for path in entries.values() {

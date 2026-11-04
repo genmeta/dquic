@@ -315,7 +315,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         ([0, 0, 100], [0, 0, 100]),
         ([0, 0, 0], [0, 0, 0]),
     ] {
-        let [sender, receiver] = common::phase::pair();
+        let [sender, receiver] = common::spaces::pair();
         let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
         spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
         spaces.0.push_back(sender.spaces.data.clone()).unwrap();
@@ -487,7 +487,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
     };
     use qtransport::space::{Spaces, assemble::Constraints};
     for capacity in [1199, 1200] {
-        let [sender, _] = common::phase::pair();
+        let [sender, _] = common::spaces::pair();
         let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
         spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
         spaces.0.push_back(sender.spaces.data.clone()).unwrap();
@@ -693,7 +693,6 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
             send_quota: 2400,
             probe_quota: [1200; 3],
             overhead: 32,
-            ..Default::default()
         };
         let mut ack = Some(AckFrame::new(
             0u32.into(),

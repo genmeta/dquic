@@ -4,12 +4,11 @@ use std::sync::Arc;
 use qbase::{
     Epoch,
     frame::AckFrame,
-    param::ParameterId,
     varint::{VARINT_MAX, VarInt},
 };
 
 use crate::{
-    ArcParameters, Error,
+    Error,
     path::Path,
     space::{DataSpace, Recover},
 };
@@ -19,17 +18,15 @@ use crate::{
 /// Report the highest acknowledged generation to the receive task's ArcOneRttKeys.
 pub fn acknowledge(
     data: &DataSpace,
-    parameters: &ArcParameters,
     ack: &AckFrame,
     received_on: &Arc<Path>,
     on_ack: impl Fn(u64),
 ) -> Result<(), Error> {
     let acknowledged = {
         let mut congestion = received_on.cc.lock();
-        let exponent: u64 = parameters.remote(ParameterId::AckDelayExponent);
         let delay = ack
             .delay()
-            .checked_shl(exponent as u32)
+            .checked_shl(data.peer_ack_delay_exponent)
             .unwrap_or(VARINT_MAX)
             .min(VARINT_MAX);
         let acknowledged = data.on_acked(ack)?;

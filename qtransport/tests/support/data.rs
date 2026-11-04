@@ -20,7 +20,7 @@ pub(crate) fn data() -> Arc<DataSpace> {
     let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
     let streams = DataStreams::new(
-        parameters,
+        parameters.clone(),
         Box::new(DemandConcurrency),
         reliable.clone(),
         Default::default(),
@@ -30,6 +30,8 @@ pub(crate) fn data() -> Arc<DataSpace> {
         ArcOneRttKeys::from(keys),
         streams,
         reliable,
+        parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
+        parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         Default::default(),
     ))
 }

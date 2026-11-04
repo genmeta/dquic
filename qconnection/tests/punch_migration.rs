@@ -16,8 +16,8 @@ use qbase::{
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnPhase, ArcConnection, ArcLocalCids, ArcReliableFrames, ConnPhase, Error, Paths, Scope,
-    ServerRegistry, TlsContext, client_growing, server_growing,
+    ArcConnection, ArcLocalCids, ArcReliableFrames, Error, Paths, Scope, ServerRegistry,
+    TlsContext, client_growing, server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{
@@ -66,7 +66,6 @@ impl Drop for Socket {
 
 struct Peer {
     connection: ArcConnection,
-    phase: ArcConnPhase,
     paths: Arc<Paths>,
     growing: JoinHandle<Error>,
 }
@@ -87,10 +86,6 @@ impl Drop for Peer {
         self.connection
             .clone()
             .close(0u32.into(), "migration test finished");
-        if let ConnPhase::Mature(phase) = self.phase.get() {
-            phase.puncher.abort_transactions();
-            phase.puncher.release_temporary_sockets();
-        }
         self.paths.cid_registry.local.clear();
         common::retire_all(&self.paths);
         self.growing.abort();
@@ -139,7 +134,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             Duration::ZERO,
             pending_as_lost,
         );
-        let phase = paths.phase();
 
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
@@ -150,7 +144,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
         );
         let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
-        created.send((phase, paths, growing)).unwrap();
+        created.send((paths, growing)).unwrap();
     });
 
     let client = common::anonymous_client();
@@ -188,7 +182,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         Duration::ZERO,
         pending_as_lost,
     );
-    let phase = paths.phase();
 
     let (deliver, connected) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
@@ -216,17 +209,15 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .expect("stage 1: server handshake timed out")
         .unwrap()
         .2;
-    let (server_phase, server_paths, server_growing) = server_state.recv().await.unwrap();
+    let (server_paths, server_growing) = server_state.recv().await.unwrap();
     (
         Peer {
             connection: client_connection,
-            phase,
             paths,
             growing,
         },
         Peer {
             connection: server_connection,
-            phase: server_phase,
             paths: server_paths,
             growing: server_growing,
         },

@@ -22,7 +22,6 @@ use crate::Error;
 /// Balances reserved once for a burst. Packet bounds belong to its slice and recursion.
 #[derive(Clone, Default)]
 pub struct Constraints {
-    pub flow_ctrl: usize,
     pub send_quota: usize,
     pub credit: usize,
     pub probe_quota: [usize; 3],
@@ -42,11 +41,15 @@ struct PacketLimit<'a> {
     shared: &'a mut Constraints,
     epoch: Epoch,
     max_size: usize,
+    flow_ctrl: usize,
 }
 
 impl Limit for PacketLimit<'_> {
     fn flow_ctrl(&self) -> usize {
-        self.shared.flow_ctrl
+        self.flow_ctrl
+    }
+    fn set_flow_ctrl(&mut self, amount: usize) {
+        self.flow_ctrl = amount;
     }
     fn send_quota(&self) -> usize {
         self.shared
@@ -66,7 +69,7 @@ impl Limit for PacketLimit<'_> {
         self.max_size = size;
     }
     fn fresh(&mut self, amount: usize) {
-        self.shared.flow_ctrl -= amount;
+        self.flow_ctrl -= amount;
     }
     fn take(&mut self, sent: usize, credit: usize) {
         self.shared.take(self.epoch, sent, credit);
@@ -130,10 +133,7 @@ impl Spaces {
                 Ok((size, nframes))
             }
             result => {
-                // Consumed STREAM bytes are recovered as retransmissions, not fresh data.
-                let fresh = limits.flow_ctrl;
                 *limits = before;
-                limits.flow_ctrl = fresh;
                 result.map(|_| (0, 0))
             }
         }
@@ -189,6 +189,7 @@ impl Spaces {
                 shared: limits,
                 epoch,
                 max_size: buffer.len().min(16383),
+                flow_ctrl: usize::MAX,
             };
             let mut writer = &mut buffer[..];
             let mut constrained = PacketBuffer::new(
@@ -316,7 +317,7 @@ impl Spaces {
         ))
     }
 
-    /// Obtain a concrete handle when starting a receiver; phases retain only this queue.
+    /// Obtain a concrete handle when starting a receiver or encoding a probe.
     pub fn get<T: Encapsulate>(
         spaces: &IndexDeque<Arc<dyn Encapsulate>, 2>,
         epoch: Epoch,

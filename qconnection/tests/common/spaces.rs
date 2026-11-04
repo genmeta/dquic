@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use qbase::{cid::ConnectionId, frame::Frame, packet::OneRttHeader, role::Role};
-use qconnection::{ArcParameters, MaturePhase, Paths};
+use qconnection::{ArcParameters, Paths};
 use qtransport::{keys::ArcKeys, space::HandshakeSpace};
 
 /// Concrete handles owned by the receive side, including already retired spaces.
@@ -12,27 +12,20 @@ pub struct SpaceFixture {
     pub data: std::sync::Arc<qtransport::space::DataSpace>,
 }
 
-pub struct MatureFixture {
+pub struct DataFixture {
     pub paths: std::sync::Arc<Paths>,
-    pub phase: std::sync::Arc<qconnection::MaturePhase>,
+    pub parameters: ArcParameters,
     pub spaces: SpaceFixture,
 }
 
-impl MatureFixture {
+impl DataFixture {
     pub fn peer_cid(&self) -> qbase::cid::ConnectionId {
         self.parameters
             .remote(qbase::param::ParameterId::InitialSourceConnectionId)
     }
 }
 
-impl std::ops::Deref for MatureFixture {
-    type Target = qconnection::MaturePhase;
-    fn deref(&self) -> &Self::Target {
-        &self.phase
-    }
-}
-
-pub fn pair() -> [Arc<MatureFixture>; 2] {
+pub fn pair() -> [Arc<DataFixture>; 2] {
     let [mut client, mut server] = super::backends(false);
     let mut material = [None, None];
     while material.iter().any(Option::is_none) {
@@ -108,47 +101,35 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
                 reliable_frames.clone(),
                 Default::default(),
             );
-            let flow = qconnection::FlowController::new(
-                parameters.remote(qbase::param::ParameterId::InitialMaxData),
-                parameters.local(qbase::param::ParameterId::InitialMaxData),
-                reliable_frames.clone(),
-            );
             let data = Arc::new(qtransport::space::DataSpace::new(
                 Default::default(),
                 keys.unwrap().into(),
                 streams,
                 reliable_frames.clone(),
+                parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
+                parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
                 pending_as_lost,
             ));
-            let puncher = qtraversal::punch::ArcPuncher::new(
-                reliable_frames,
-                qtraversal::punch::ProbeEncoder::new(data.clone(), peer),
-            );
             let concrete = SpaceFixture {
                 initial: super::initial_space(&paths.spaces),
                 handshake,
                 data,
             };
-            let phase = Arc::new(MaturePhase {
-                flow_ctrl: flow,
-                parameters,
-                puncher,
-            });
-            let phase = Arc::new(MatureFixture {
+            let fixture = Arc::new(DataFixture {
                 paths,
-                phase,
+                parameters,
                 spaces: concrete,
             });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
-            take_reliable(&phase);
-            phase
+            take_reliable(&fixture);
+            fixture
         })
         .collect::<Vec<_>>()
         .try_into()
         .unwrap_or_else(|_| unreachable!())
 }
 
-pub fn take_reliable(phase: &MatureFixture) -> Vec<Frame> {
+pub fn take_reliable(phase: &DataFixture) -> Vec<Frame> {
     use qbase::packet::{Constraints, GetType, Package, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut limits = Constraints {

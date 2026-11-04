@@ -193,14 +193,6 @@ pub trait Recover {
     fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>);
     fn on_tick(&self, now: Instant);
     fn retire(&self);
-    fn fresh_bytes(&self) -> usize {
-        0
-    }
-
-    /// Count at most the fresh bytes that fit the caller's send allowance.
-    fn fresh_bytes_up_to(&self, limit: usize) -> usize {
-        self.fresh_bytes().min(limit)
-    }
 }
 
 /// Reserve a packet number together with its fixed key generation.

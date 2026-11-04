@@ -362,7 +362,7 @@ pub fn initial_space(
     Arc::new(initial.space.clone())
 }
 
-pub mod phase;
+pub mod spaces;
 
 pub fn take_heartbeat(path: &qtransport::path::Path) -> bool {
     use std::task::{Context, Poll, Waker};

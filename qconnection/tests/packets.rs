@@ -14,7 +14,7 @@ use qbase::{
     role::Role,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qconnection::{ConnPhase, Error, Paths, TlsContext, client_growing};
+use qconnection::{Error, Paths, TlsContext, client_growing};
 use qprotocol::QuicProtocol;
 use qtransport::{keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::{
@@ -121,7 +121,6 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         Duration::ZERO,
         pending_as_lost,
     );
-    let phase = paths.phase();
     let (endpoint, _) = common::endpoints(false);
     let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
 
@@ -143,7 +142,11 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         common::cid_value(&paths.cid_registry.remote.apply_dcid()),
         ConnectionId::from_slice(b"original")
     );
-    let initial_only = matches!(phase.get(), ConnPhase::Initial(_));
+    let initial_only = paths
+        .spaces
+        .read_guard()
+        .get(qbase::Epoch::Handshake as u64)
+        .is_none();
     tls.on_error(
         qbase::error::QuicError::with_default_fty(
             qbase::error::ErrorKind::Internal,
@@ -222,7 +225,6 @@ async fn close_at_client_stage(wait: ClientWait) {
         Duration::ZERO,
         pending_as_lost,
     );
-    let phase = paths.phase();
 
     let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
@@ -272,7 +274,12 @@ async fn close_at_client_stage(wait: ClientWait) {
     router.receive(BytesMut::from(packet.as_ref()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if matches!(phase.get(), ConnPhase::Handshake(_)) {
+            if paths
+                .spaces
+                .read_guard()
+                .get(qbase::Epoch::Handshake as u64)
+                .is_some()
+            {
                 break qtransport::space::Spaces::get::<qtransport::space::HandshakeSpace>(
                     &paths.spaces.read_guard(),
                     qbase::Epoch::Handshake,
@@ -331,14 +338,19 @@ async fn close_at_client_stage(wait: ClientWait) {
             assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
             assert!(matches!(growing.await.unwrap(), Error::Quic(error)
                 if error.kind() == qbase::error::ErrorKind::TransportParameter));
-            assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
             assert!(paths.entries.lock().unwrap().is_empty());
             assert!(!route_exists(&router, cid).await);
             QuicProtocol::global().unregister(socket.local_addr().unwrap());
             return;
         }
         tokio::task::yield_now().await;
-        assert!(matches!(phase.get(), ConnPhase::Handshake(_)));
+        assert!(
+            paths
+                .spaces
+                .read_guard()
+                .get(qbase::Epoch::Handshake as u64)
+                .is_some()
+        );
         assert!(matches!(
             delivery.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -393,9 +405,6 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        let ConnPhase::Mature(_) = phase.get() else {
-            panic!()
-        };
         assert!(
             qtransport::space::Spaces::get::<qtransport::space::DataSpace>(
                 &paths.spaces.read_guard(),

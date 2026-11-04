@@ -22,25 +22,62 @@ use qbase::{
 use qtransport::path::Path;
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
-pub(super) use crate::common::phase::pair;
+pub(super) use crate::common::spaces::pair;
 use crate::{
-    ArcHandshake, Paths, Scopes, common, common::phase::take_reliable,
+    ArcHandshake, Paths, Scopes, common, common::spaces::take_reliable,
     recv::receive_1rtt_pkt_and_deliver_frames,
 };
 
-fn encoder(phase: &super::MatureFixture) -> ProbeEncoder {
-    ProbeEncoder::new(phase.spaces.data.clone(), phase.peer_cid())
+fn encoder(phase: &super::DataFixture) -> ProbeEncoder {
+    let mut spaces = phase.paths.spaces.read_guard().clone();
+    if spaces.get(Epoch::Handshake as u64).is_none() {
+        spaces.push_back(phase.spaces.handshake.clone()).unwrap();
+    }
+    if spaces.get(Epoch::Data as u64).is_none() {
+        spaces.push_back(phase.spaces.data.clone()).unwrap();
+    }
+    ProbeEncoder::new(spaces.into(), phase.paths.cid_registry.remote.apply_dcid())
+}
+
+#[tokio::test]
+async fn early_probe_encoder_uses_published_data_and_the_updated_peer_cid() {
+    use qbase::{cid::ConnectionId, packet::GetDcid};
+
+    let [client, _] = pair();
+    let paths = common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"client00"),
+        ConnectionId::from_slice(b"original"),
+        common::initial_keys(false),
+    );
+    let encoder = ProbeEncoder::new(paths.spaces.clone(), paths.cid_registry.remote.apply_dcid());
+    let frame = PunchHelloFrame::new(1, 2, 3);
+    assert_eq!(
+        encoder.encode_probe(frame).unwrap_err().kind(),
+        std::io::ErrorKind::NotConnected
+    );
+    paths.update_initial_dcid(client.peer_cid());
+    super::install_data(&paths, &client);
+    let Packet::Data(packet) = PacketReader::new(encoder.encode_probe(frame).unwrap(), 8)
+        .next()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected Data packet");
+    };
+    assert_eq!(*packet.header.dcid(), client.peer_cid());
+    paths.retire_all();
 }
 
 fn encode_frame(
-    phase: &super::MatureFixture,
+    phase: &super::DataFixture,
     mut frame: impl for<'b> qbase::packet::Package<&'b mut BytesMut>,
 ) -> BytesMut {
     encode_frames(phase, [&mut frame])
 }
 
 fn encode_frames<const N: usize>(
-    phase: &super::MatureFixture,
+    phase: &super::DataFixture,
     frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut BytesMut>; N],
 ) -> BytesMut {
     use qbase::packet::{Constraints, assemble::Assemble};
@@ -82,7 +119,7 @@ fn encode_frames<const N: usize>(
     bytes
 }
 
-fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
+fn empty_paths(phase: &super::DataFixture) -> Arc<Paths> {
     let role = phase.parameters.role();
     let is_mp_handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let initial = Arc::new(qtransport::space::InitialSpace::new(
@@ -100,6 +137,7 @@ fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
         Duration::ZERO,
         is_mp_handshaking,
     );
+    super::install_data(&paths, phase);
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
     terminator.register(Arc::new(phase.spaces.data.streams.clone()));
@@ -107,7 +145,7 @@ fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
 }
 
 async fn receive(
-    phase: &Arc<super::MatureFixture>,
+    phase: &Arc<super::DataFixture>,
     packets: Vec<BytesMut>,
     pathway: Pathway,
     link: Link,
@@ -123,11 +161,10 @@ async fn receive(
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
-    paths.clean();
 }
 
 async fn receive_on_paths(
-    phase: &Arc<super::MatureFixture>,
+    phase: &Arc<super::DataFixture>,
     paths: &Arc<Paths>,
     packets: Vec<BytesMut>,
     pathway: Pathway,
@@ -158,10 +195,7 @@ async fn receive_on_paths(
     receive_1rtt_pkt_and_deliver_frames(
         (rx, (role == Role::Server).then_some(scopes)),
         phase.spaces.data.clone(),
-        phase.flow_ctrl.clone(),
-        phase.puncher.clone(),
         paths.clone(),
-        phase.parameters.clone(),
         tokens,
         handshake.clone(),
     )
@@ -267,10 +301,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     let task = tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
         (rx, None),
         receiver.spaces.data.clone(),
-        receiver.flow_ctrl.clone(),
-        receiver.puncher.clone(),
         paths.clone(),
-        receiver.parameters.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         ArcHandshake::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
     ));
@@ -282,8 +313,11 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         b"x".as_slice(),
     );
     stream.0.set_len_bit(Len::Explicit);
-    let limit = receiver.flow_ctrl.sender.credit(usize::MAX).available() + 100;
-    let mut max_data = MaxDataFrame::new(VarInt::from_u64(limit as u64).unwrap());
+    let limit = receiver
+        .parameters
+        .remote::<u64>(qbase::param::ParameterId::InitialMaxData)
+        + 100;
+    let mut max_data = MaxDataFrame::new(VarInt::from_u64(limit).unwrap());
     let mut close = ConnectionCloseFrame::from(peer_error.clone());
     let bytes = encode_frames(
         &sender,
@@ -305,10 +339,6 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
     assert!(terminator.clone().now_or_never().is_none());
-    assert_eq!(
-        receiver.flow_ctrl.sender.credit(usize::MAX).available(),
-        limit
-    );
     // Late registration observes Draining's peer reason only if CLOSE was delivered.
     assert_eq!(
         crate::common::observe_close(&terminator).notified(),
@@ -400,10 +430,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         receive_1rtt_pkt_and_deliver_frames(
             (rx, Some(Scopes::ALL)),
             receiver.spaces.data.clone(),
-            receiver.flow_ctrl.clone(),
-            receiver.puncher.clone(),
             paths.clone(),
-            receiver.parameters.clone(),
             ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
             handshake.clone(),
         )
@@ -445,8 +472,9 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
 
 #[tokio::test]
 async fn data_authentication_controls_path_admission_and_receive_credit() {
-    let pair = pair();
-    for (receiver, sender) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
+    for receiving in [0, 1] {
+        let pair = pair();
+        let (receiver, sender) = (&pair[receiving], &pair[1 - receiving]);
         let paths = empty_paths(receiver);
         let link = Link::new(
             "127.0.0.1:43001".parse().unwrap(),
@@ -586,7 +614,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
             .unwrap();
         let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.select_path(&original);
-        super::enter_mature(&paths, receiver);
+        super::install_data(&paths, receiver);
         super::confirm_handshake(&paths);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
         let packet = encoder(sender)

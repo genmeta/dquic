@@ -762,12 +762,6 @@ impl From<&ReliableFrame> for QuicFrame {
     fn from(frame: &ReliableFrame) -> Self {
         match frame {
             ReliableFrame::NewToken(new_token_frame) => new_token_frame.into(),
-            ReliableFrame::MaxData(max_data_frame) => QuicFrame::MaxData {
-                maximum: max_data_frame.max_data(),
-            },
-            ReliableFrame::DataBlocked(data_blocked_frame) => QuicFrame::DataBlocked {
-                limit: data_blocked_frame.limit(),
-            },
             ReliableFrame::NewConnectionId(new_connection_id_frame) => QuicFrame::NewConnectionId {
                 sequence_number: new_connection_id_frame.sequence() as u32,
                 retire_prior_to: new_connection_id_frame.retire_prior_to() as u32,
@@ -820,6 +814,12 @@ impl From<&NewTokenFrame> for QuicFrame {
 impl From<&StreamCtlFrame> for QuicFrame {
     fn from(frame: &StreamCtlFrame) -> Self {
         match frame {
+            StreamCtlFrame::MaxData(frame) => QuicFrame::MaxData {
+                maximum: frame.max_data(),
+            },
+            StreamCtlFrame::DataBlocked(frame) => QuicFrame::DataBlocked {
+                limit: frame.limit(),
+            },
             StreamCtlFrame::ResetStream(reset_stream_frame) => QuicFrame::ResetStream {
                 stream_id: reset_stream_frame.stream_id().id(),
                 error_code: (reset_stream_frame.app_error_code() as u32).into(),
@@ -912,8 +912,6 @@ impl<D: Buffer> From<&Frame<D>> for QuicFrame {
             Frame::Ack(frame) => frame.into(),
             Frame::Close(frame) => frame.into(),
             Frame::NewToken(frame) => frame.into(),
-            Frame::MaxData(frame) => (&ReliableFrame::from(*frame)).into(),
-            Frame::DataBlocked(frame) => (&ReliableFrame::from(*frame)).into(),
             Frame::NewConnectionId(frame) => (&ReliableFrame::from(*frame)).into(),
             Frame::RetireConnectionId(frame) => (&ReliableFrame::from(*frame)).into(),
             Frame::HandshakeDone(frame) => (&ReliableFrame::from(*frame)).into(),

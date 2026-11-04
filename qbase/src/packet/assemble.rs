@@ -14,6 +14,8 @@ use crate::{
 
 pub trait Limit {
     fn flow_ctrl(&self) -> usize;
+    /// Set the fresh STREAM allowance for the current frame source.
+    fn set_flow_ctrl(&mut self, amount: usize);
     fn send_quota(&self) -> usize;
     fn credit(&self) -> usize;
     fn min_size(&self) -> usize;
@@ -161,6 +163,10 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
 impl Limit for Constraints {
     fn flow_ctrl(&self) -> usize {
         self.flow_ctrl
+    }
+
+    fn set_flow_ctrl(&mut self, amount: usize) {
+        self.flow_ctrl = amount;
     }
 
     fn send_quota(&self) -> usize {
@@ -461,8 +467,6 @@ frame_packages!(
     AckFrame,
     ConnectionCloseFrame,
     NewTokenFrame,
-    MaxDataFrame,
-    DataBlockedFrame,
     HandshakeDoneFrame,
     PathChallengeFrame,
     PathResponseFrame,
@@ -511,6 +515,8 @@ macro_rules! stream_control_packages {
     )*};
 }
 stream_control_packages!(
+    MaxDataFrame,
+    DataBlockedFrame,
     ResetStreamFrame,
     StopSendingFrame,
     MaxStreamDataFrame,

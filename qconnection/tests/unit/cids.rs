@@ -33,8 +33,8 @@ fn path(paths: &Paths, port: u16) -> Arc<Path> {
     )
 }
 
-fn negotiated(role: Role) -> (Arc<Paths>, super::MatureFixture) {
-    super::send::mature_phase(role, Duration::ZERO)
+fn negotiated(role: Role) -> (Arc<Paths>, super::DataFixture) {
+    super::send::data_spaces(role, Duration::ZERO)
 }
 
 fn ready(paths: &Paths, path: &Path) -> ConnectionId {
@@ -55,11 +55,10 @@ async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
         let peer = ConnectionId::from_slice(b"peer0000");
         let counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        let phase = paths.phase();
         if handshaking {
-            phase.enter_handshake();
+            paths.progress.facts().install_handshake_key();
         }
-        drop(phase.poll_phase(&mut Context::from_waker(&waker)));
+        a.send_waker.register(&waker);
         paths.update_initial_dcid(peer);
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
         paths.update_initial_dcid(ConnectionId::from_slice(b"ignored0"));
@@ -75,7 +74,7 @@ async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
 #[tokio::test(start_paused = true)]
 async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do_not_open_handshaking_paths()
  {
-    for phase_first in [false, true] {
+    for data_first in [false, true] {
         let (paths, mature) = negotiated(Role::Server);
         let initial = mature.peer_cid();
         let next = ConnectionId::from_slice(b"peer0001");
@@ -86,12 +85,12 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
         remote
             .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
             .unwrap();
-        if phase_first {
-            super::enter_mature(&paths, &mature);
+        if data_first {
+            super::install_data(&paths, &mature);
         }
         assert!(paths.select_path(&selected));
-        if !phase_first {
-            super::enter_mature(&paths, &mature);
+        if !data_first {
+            super::install_data(&paths, &mature);
         }
         assert_eq!(ready(&paths, &selected), initial);
         // Only the selected path is bound before confirmation, even when CID 1 is available.
@@ -121,7 +120,7 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_selection_registry_installation_and_path_creation_preserve_cell_zero() {
+async fn concurrent_selection_data_installation_and_path_creation_preserve_cell_zero() {
     let (paths, mature) = negotiated(Role::Server);
     let selected = paths.add_path(pathway(4001));
     let initial = mature.peer_cid();
@@ -145,7 +144,7 @@ async fn concurrent_selection_registry_installation_and_path_creation_preserve_c
         let barrier = barrier.clone();
         async move {
             barrier.wait().await;
-            super::enter_mature(&paths, &mature);
+            super::install_data(&paths, &mature);
         }
     });
     let creation = tokio::spawn({
@@ -185,14 +184,14 @@ async fn replacement_at_the_selected_address_does_not_inherit_selection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn removal_before_registry_installation_still_reserves_zero_for_the_old_handshake_path() {
+async fn removal_before_data_installation_still_reserves_zero_for_the_old_handshake_path() {
     let (paths, mature) = negotiated(Role::Server);
     let old = path(&paths, 4001);
     let other = path(&paths, 4002);
     paths.select_path(&old);
     paths.del_path(&old.pathway);
     let remote = &paths.cid_registry.remote;
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     let next = ConnectionId::from_slice(b"peer0001");
     remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
@@ -215,7 +214,7 @@ async fn the_handshake_cell_rotates_before_confirmation_after_refresh() {
     let selected = path(&paths, 4001);
     paths.select_path(&selected);
     let remote = &paths.cid_registry.remote;
-    assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
+    assert!(!paths.progress.facts().has_handshake_key());
     let pinned = selected
         .dcid
         .poll_borrow(&mut Context::from_waker(Waker::noop()));
@@ -226,7 +225,7 @@ async fn the_handshake_cell_rotates_before_confirmation_after_refresh() {
     assert_eq!(pinned, Poll::Ready(Some(initial)));
     selected.dcid.refresh();
     assert_eq!(ready(&paths, &selected), next);
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     assert_eq!(ready(&paths, &selected), next);
     selected.close();
     assert_eq!(super::borrow(&paths, &selected), Poll::Ready(None));
@@ -248,7 +247,7 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     let other = path(&paths, 4002);
     paths.select_path(&selected);
     let remote = &paths.cid_registry.remote;
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     let counter = Arc::new(Counter::default());
     let waker = Waker::from(counter.clone());
     let mut cx = Context::from_waker(&waker);
@@ -281,8 +280,8 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     paths.retire_all();
 }
 
-fn take_retired(mature: &super::MatureFixture) -> Vec<u64> {
-    crate::common::phase::take_reliable(mature)
+fn take_retired(mature: &super::DataFixture) -> Vec<u64> {
+    crate::common::spaces::take_reliable(mature)
         .into_iter()
         .filter_map(|frame| {
             if let qbase::frame::Frame::RetireConnectionId(frame) = frame {
@@ -302,10 +301,10 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
     use crate::send::{Burst, MAX_BURST_PACKETS};
 
     for finish in ["pending", "cancel", "drop"] {
-        let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+        let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
         let selected = path(&paths, 4001);
         paths.select_path(&selected);
-        super::enter_mature(&paths, &mature);
+        super::install_data(&paths, &mature);
         selected.validation.enter_validated().unwrap();
         take_retired(&mature);
         if finish != "pending" {
@@ -362,11 +361,11 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
 
 #[tokio::test(start_paused = true)]
 async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_sender_alive() {
-    let (paths, mature) = super::send::mature_phase(Role::Client, Duration::ZERO);
+    let (paths, mature) = super::send::data_spaces(Role::Client, Duration::ZERO);
     let selected = path(&paths, 4001);
     selected.validation.enter_validated().unwrap();
     paths.select_path(&selected);
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     super::confirm_handshake(&paths);
     take_retired(&mature);
     let removed = paths.add_path(pathway(4002));
@@ -392,7 +391,7 @@ async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_send
 
 #[tokio::test(start_paused = true)]
 async fn closing_a_just_upgraded_sender_releases_its_handshake_cid_without_dropping_the_path() {
-    let (paths, mature) = super::send::mature_phase(Role::Client, Duration::ZERO);
+    let (paths, mature) = super::send::data_spaces(Role::Client, Duration::ZERO);
     let _other = path(&paths, 4001);
     let selected = paths.add_path(pathway(4002));
     paths.select_path(&selected);

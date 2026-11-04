@@ -1,13 +1,13 @@
 use std::{
     io,
-    sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use bytes::BytesMut;
 use qbase::{
-    cid::ConnectionId,
+    Epoch,
+    cid::ArcDcid,
     frame::GuaranteedFrame,
     packet::{
         OneRttHeader,
@@ -15,8 +15,9 @@ use qbase::{
     },
 };
 use qtransport::{
+    ArcReliableFrames,
     packet::assemble::{Envelope, Packet},
-    space::{Allocate, DataSpace, Keys, Recover},
+    space::{Allocate, ArcSpaces, DataSpace, Keys, Recover, Spaces},
 };
 
 use super::PunchPacketEncoder;
@@ -26,13 +27,14 @@ const MAX_PUNCH_PACKET_SIZE: usize = 128;
 /// Builds pathless probes using the connection's shared 1-RTT keys and packet numbers.
 #[derive(Clone)]
 pub struct ProbeEncoder {
-    space: Arc<DataSpace>,
-    peer_cid: ConnectionId,
+    spaces: ArcSpaces,
+    peer_cid: ArcDcid<ArcReliableFrames>,
 }
 
 impl ProbeEncoder {
-    pub fn new(space: Arc<DataSpace>, peer_cid: ConnectionId) -> Self {
-        Self { space, peer_cid }
+    /// Retain a handshake CID handle so probes follow the initial peer SCID.
+    pub fn new(spaces: ArcSpaces, peer_cid: ArcDcid<ArcReliableFrames>) -> Self {
+        Self { spaces, peer_cid }
     }
 }
 
@@ -41,7 +43,20 @@ impl PunchPacketEncoder for ProbeEncoder {
     where
         P: for<'b> Package<&'b mut BytesMut>,
     {
-        let space = &self.space;
+        let space =
+            Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "Data space is not installed")
+            })?;
+        let Poll::Ready(Some(peer_cid)) = self
+            .peer_cid
+            .poll_borrow(&mut Context::from_waker(Waker::noop()))
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "peer CID is unavailable",
+            ));
+        };
+        self.peer_cid.refresh();
         let (pn, Keys::Short(key)) = space
             .pn_and_keys()
             .map_err(io::Error::other)?
@@ -51,7 +66,7 @@ impl PunchPacketEncoder for ProbeEncoder {
         };
         let result = (|| {
             let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
-            let header = OneRttHeader::new(Default::default(), self.peer_cid);
+            let header = OneRttHeader::new(Default::default(), peer_cid);
             let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
             let packet =
                 Packet::new(header, pn, &mut bytes, &mut frames).map_err(io::Error::other)?;

@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use qbase::{
     error::Error,
-    frame::{AckFrame, GuaranteedFrame, GuaranteedFrame as Frame, ReliableFrame},
+    frame::{AckFrame, GuaranteedFrame, GuaranteedFrame as Frame, ReliableFrame, StreamCtlFrame},
     packet::{PacketNumber, assemble::Metadata},
 };
 use qrecovery::journal::ArcSentJournal;
@@ -19,8 +19,8 @@ fn ack(pn: u64) -> AckFrame {
 }
 
 fn frame(value: u32) -> GuaranteedFrame {
-    Frame::Reliable(ReliableFrame::MaxData(qbase::frame::MaxDataFrame::new(
-        value.into(),
+    Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(
+        qbase::frame::MaxDataFrame::new(value.into()),
     )))
 }
 
@@ -46,7 +46,9 @@ fn acknowledged_values(records: &ArcSentJournal, pn: u64) -> Vec<u64> {
     let mut values = Vec::new();
     records
         .on_acked(&ack(pn), |frame| match frame {
-            Frame::Reliable(ReliableFrame::MaxData(frame)) => values.push(frame.max_data()),
+            Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(frame))) => {
+                values.push(frame.max_data())
+            }
             _ => panic!("unexpected recovery frame"),
         })
         .unwrap();
@@ -92,7 +94,7 @@ fn pending_reliable_records_reuse_scratch_allocation() {
     records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
     records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     assert_eq!(acknowledged_values(&records, 0), [10]);
 }
@@ -115,7 +117,7 @@ async fn shared_handles_distinguish_cancelled_pending_and_sent_packets() {
     assert_eq!((cancelled, sent, pending), (0, 1, 2));
     second.cancel(cancelled, |frame| frames.push(frame));
     assert!(
-        matches!(frames.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(frames.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     frames.clear();
     first.on_sent(sent, false, Duration::ZERO, Duration::ZERO);
@@ -231,7 +233,7 @@ async fn reverse_submission_and_ack_order_preserve_each_packets_frames() {
     records.cancel(2, |frame| scratch.push(frame));
     assert_eq!(scratch.as_ptr(), allocation);
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 120)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 120)
     );
     assert!(records.lock_guard().packet(2).is_none());
     assert!(records.on_acked(&ack(2), |_| {}).is_err());
@@ -254,7 +256,9 @@ fn batch_ack_preserves_pending_frames_after_prefix_reclamation() {
     let mut values = Vec::new();
     records
         .on_acked(&ack, |frame| match frame {
-            GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) => {
+            GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
+                StreamCtlFrame::MaxData(frame),
+            )) => {
                 values.push(frame.max_data());
             }
             _ => panic!("unexpected recovery frame"),
@@ -273,7 +277,7 @@ fn batch_ack_preserves_pending_frames_after_prefix_reclamation() {
         .unwrap();
     records.cancel(3, |frame| scratch.push(frame));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(frame))] if frame.max_data() == 30)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(frame)))] if frame.max_data() == 30)
     );
     assert!(records.lock_guard().packet(3).is_none());
     records.cancel(0, |_| panic!("empty packet returned a frame"));
@@ -300,8 +304,8 @@ fn concurrent_batches_keep_each_packets_frames_together() {
     for pn in (0..400).rev() {
         records.cancel(pn, |frame| scratch.push(frame));
         let [
-            Frame::Reliable(ReliableFrame::MaxData(a)),
-            Frame::Reliable(ReliableFrame::MaxData(b)),
+            Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(a))),
+            Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(b))),
         ] = scratch.as_slice()
         else {
             panic!()
@@ -327,13 +331,13 @@ async fn terminal_packets_release_frames_without_disturbing_pending_packets() {
     assert_eq!(acknowledged_values(&records, 1), [1]);
     records.cancel(2, |frame| scratch.push(frame));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 2)
     );
     scratch.clear();
     records.resend(&mut [3].into_iter(), |frame| scratch.push(frame.clone()));
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 3)
     );
     scratch.clear();
     assert_eq!(
@@ -352,7 +356,7 @@ async fn terminal_packets_release_frames_without_disturbing_pending_packets() {
     }
     records.cancel(0, |frame| scratch.push(frame));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 0)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 0)
     );
     scratch.clear();
     assert_eq!(
@@ -373,7 +377,7 @@ async fn loss_retains_frames_for_late_ack_and_expiration_removes_records() {
     records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     assert_eq!(record_pending(&records, 0, &mut scratch).unwrap().0, 1);
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
@@ -383,7 +387,7 @@ async fn loss_retains_frames_for_late_ack_and_expiration_removes_records() {
     records.resend(&mut [0, 1].into_iter(), |frame| scratch.push(frame.clone()));
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     scratch.clear();
     assert_eq!(acknowledged_values(&records, 0), [10]);
@@ -419,7 +423,7 @@ async fn repeated_loss_never_requeues_retained_packets_or_extends_retention() {
     });
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(a)), Frame::Reliable(ReliableFrame::MaxData(b))]
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(a))), Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(b)))]
         if a.max_data() == 10 && b.max_data() == 20)
     );
     scratch.clear();
@@ -456,7 +460,7 @@ fn late_ack_after_immediate_loss_notification_reclaims_original() {
     records.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
     records.resend(&mut [0].into_iter(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     scratch.clear();
     assert_eq!(acknowledged_values(&records, 0), [10]);
@@ -481,7 +485,7 @@ async fn retention_starts_at_submission_and_is_not_reset_by_loss() {
     tokio::time::advance(Duration::from_secs(1)).await;
     records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     assert!(records.lock_guard().packet(0).is_some());
     scratch.clear();
@@ -507,7 +511,7 @@ async fn loss_notification_delivers_data_even_after_retention_deadline() {
         }
         records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
         assert!(
-            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+            matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
         );
         scratch.clear();
         records.on_tick(Instant::now(), |frame| scratch.push(frame.clone()));
@@ -534,7 +538,7 @@ async fn timer_and_loss_feedback_schedule_each_packet_once() {
         scratch.push(frame.clone())
     });
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 0)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 0)
     );
     scratch.clear();
 
@@ -542,7 +546,7 @@ async fn timer_and_loss_feedback_schedule_each_packet_once() {
         scratch.push(frame.clone())
     });
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 2)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 2)
     );
     scratch.clear();
     records.resend(&mut [0, 2].into_iter(), |frame| scratch.push(frame.clone()));
@@ -560,7 +564,7 @@ async fn timer_and_loss_feedback_schedule_each_packet_once() {
     assert!(records.lock_guard().packet(3).is_some());
     records.cancel(3, |frame| scratch.push(frame));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 3)
     );
     scratch.clear();
 
@@ -572,7 +576,7 @@ async fn timer_and_loss_feedback_schedule_each_packet_once() {
         scratch.push(frame.clone())
     });
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 4)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 4)
     );
     assert!((0..5).all(|pn| records.lock_guard().packet(pn).is_none()));
 }
@@ -600,7 +604,7 @@ async fn deadlines_order_by_time_and_keep_packets_with_equal_times() {
         scratch.push(frame.clone())
     });
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(a)), Frame::Reliable(ReliableFrame::MaxData(b))]
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(a))), Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(b)))]
         if a.max_data() == 1 && b.max_data() == 2)
     );
     scratch.clear();
@@ -609,7 +613,7 @@ async fn deadlines_order_by_time_and_keep_packets_with_equal_times() {
     assert_eq!(acknowledged_values(&records, 0), [0]);
     records.resend(&mut [3, 3].into_iter(), |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 3)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 3)
     );
     scratch.clear();
     records.on_tick(now + Duration::from_millis(4999), |_| {
@@ -638,7 +642,7 @@ async fn equal_retransmission_and_retirement_deadlines_deliver_data_once() {
     records.on_sent(0, true, Duration::ZERO, Duration::ZERO);
     records.on_tick(now, |frame| scratch.push(frame.clone()));
     assert!(
-        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 10)
+        matches!(scratch.as_slice(), [Frame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 10)
     );
     scratch.clear();
     records.on_tick(now, |frame| scratch.push(frame.clone()));
