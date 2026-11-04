@@ -18,7 +18,7 @@ use qbase::{
     role::Role,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qconnection::{ConnPhase, Error, Paths, Scope, ServerRegistry, TlsContext, server_growing};
+use qconnection::{Error, Paths, Scope, ServerRegistry, TlsContext, server_growing};
 use qprotocol::{QuicProtocol, UdpSocket};
 use qrecovery::journal::ArcSentJournal;
 use qtransport::{
@@ -95,7 +95,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         Duration::ZERO,
         pending_as_lost,
     );
-    let phase = paths.phase();
     paths.add_path(pathway);
 
     let data = [hello];
@@ -143,7 +142,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         ),
         "a failed handshake must not invoke the accept callback"
     );
-    assert!(matches!(phase.get(), ConnPhase::Initial(_)));
     assert!(paths.entries.lock().unwrap().is_empty());
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
     ServerRegistry::global().remove("localhost");

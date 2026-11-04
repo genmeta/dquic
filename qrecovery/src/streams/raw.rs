@@ -6,8 +6,9 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     error::{Error, ErrorKind, QuicError},
+    flow::FlowController,
     frame::{
-        FrameType, GetFrameType, ResetStreamFrame, StreamCtlFrame, StreamFrame,
+        Fin, FrameType, GetFrameType, Len, Offset, ResetStreamFrame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
     metric::ArcConnectionMetrics,
@@ -109,6 +110,7 @@ use crate::{
 pub struct DataStreams<TX> {
     // 该queue与space中的transmitter中的frame_queue共享，为了方便向transmitter中写入帧
     ctrl_frames: TX,
+    flow_ctrl: FlowController<Ext<TX>>,
 
     parameters: ArcParameters,
     stream_ids: StreamIds<Ext<TX>, Ext<TX>>,
@@ -299,10 +301,11 @@ where
     pub fn recv_data(
         &self,
         (stream_frame, body): (StreamFrame, bytes::Bytes),
-    ) -> Result<usize, QuicError> {
+    ) -> Result<usize, Error> {
         if self.input.streams().is_err() {
             return Ok(0);
         }
+        let frame_type = stream_frame.frame_type();
         let sid = stream_frame.stream_id();
         // 对方必须是发送端，才能发送此帧
         if sid.role() != self.parameters.role() {
@@ -316,11 +319,12 @@ where
                     ErrorKind::StreamState,
                     stream_frame.frame_type().into(),
                     format!("local {sid} cannot receive STREAM_FRAME"),
-                ));
+                )
+                .into());
             }
         }
 
-        if let Ok(set) = self.input.streams().as_mut()
+        let fresh = if let Ok(set) = self.input.streams().as_mut()
             && let Some((incoming, s)) = set.get(&sid)
         {
             let (is_into_rcvd, fresh_data) = incoming.recv_data(stream_frame, body.clone())?;
@@ -332,9 +336,11 @@ where
                 }
                 set.remove(&sid);
             }
-            return Ok(fresh_data);
-        }
-        Ok(0)
+            fresh_data
+        } else {
+            0
+        };
+        self.flow_ctrl.recver.on_new_rcvd(frame_type, fresh)
     }
 
     /// Called when a stream control frame which from peer is received by local.
@@ -342,15 +348,19 @@ where
     /// If the correspoding stream is not exist, `accept` the stream first.
     ///
     /// Actually calls the corresponding method of the corresponding stream for the corresponding frame type.
-    pub fn recv_stream_control(
-        &self,
-        stream_ctl_frame: StreamCtlFrame,
-    ) -> Result<usize, QuicError> {
-        if self.output.streams().is_err() {
-            return Ok(0);
-        }
+    pub fn recv_stream_control(&self, stream_ctl_frame: StreamCtlFrame) -> Result<usize, Error> {
+        let frame_type = stream_ctl_frame.frame_type();
         let mut sync_fresh_data = 0;
         match stream_ctl_frame {
+            StreamCtlFrame::MaxData(frame) => {
+                self.flow_ctrl.sender.recv_frame(frame)?;
+                return Ok(0);
+            }
+            StreamCtlFrame::DataBlocked(frame) => {
+                self.flow_ctrl.recver.recv_frame(frame)?;
+                return Ok(0);
+            }
+            _ if self.output.streams().is_err() => return Ok(0),
             StreamCtlFrame::ResetStream(reset) => {
                 let sid = reset.stream_id();
                 // 对方必须是发送端，才能发送此帧
@@ -364,7 +374,8 @@ where
                             ErrorKind::StreamState,
                             reset.frame_type().into(),
                             format!("local {sid} cannot receive RESET_STREAM frame"),
-                        ));
+                        )
+                        .into());
                     }
                 }
                 if let Ok(set) = self.input.streams().as_mut()
@@ -387,7 +398,8 @@ where
                             ErrorKind::StreamState,
                             stop_sending.frame_type().into(),
                             format!("remote {sid} must not send STOP_SENDING_FRAME"),
-                        ));
+                        )
+                        .into());
                     }
                     self.try_accept_sid(sid)
                         .map_err(wrapper_error(stop_sending.frame_type()))?;
@@ -416,7 +428,8 @@ where
                             ErrorKind::StreamState,
                             max_stream_data.frame_type().into(),
                             format!("remote {sid} must not send MAX_STREAM_DATA_FRAME"),
-                        ));
+                        )
+                        .into());
                     }
                     self.try_accept_sid(sid)
                         .map_err(wrapper_error(max_stream_data.frame_type()))?;
@@ -444,7 +457,8 @@ where
                             ErrorKind::StreamState,
                             stream_data_blocked.frame_type().into(),
                             format!("local {sid} cannot receive STREAM_DATA_BLOCKED_FRAME"),
-                        ));
+                        )
+                        .into());
                     }
                 }
                 // 仅仅起到通知作用?主动更新窗口的，此帧没多大用，或许要进一步放大缓冲区大小；被动更新窗口的，此帧有用
@@ -458,7 +472,9 @@ where
                 _ = self.stream_ids.remote.recv_frame(streams_blocked);
             }
         }
-        Ok(sync_fresh_data)
+        self.flow_ctrl
+            .recver
+            .on_new_rcvd(frame_type, sync_fresh_data)
     }
 
     /// Called when a connection error occured.
@@ -499,6 +515,11 @@ where
     ) -> Self {
         let tx_wakers = ArcSendWakers::default();
         Self {
+            flow_ctrl: FlowController::new(
+                parameters.remote(ParameterId::InitialMaxData),
+                parameters.local(ParameterId::InitialMaxData),
+                Ext(ctrl_frames.clone()),
+            ),
             stream_ids: StreamIds::new(
                 &parameters,
                 Ext(ctrl_frames.clone()),
@@ -740,6 +761,35 @@ where
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
+        buffer.for_frame(qbase::frame::FrameType::Stream(
+            Offset::Zero,
+            Len::Explicit,
+            Fin::No,
+        ));
+        let previous = buffer.limits.flow_ctrl();
+        let requested = self.fresh_bytes_up_to(buffer.remaining_mut().min(previous));
+        let mut credit = self.flow_ctrl.sender.credit(requested);
+        if requested > 0 && credit.available() == 0 {
+            credit = std::task::ready!(self.flow_ctrl.sender.poll_credit(cx, requested));
+        }
+        // Refunding unused credit must only notify senders still waiting for flow credit.
+        if requested == 0 || credit.available() > 0 {
+            self.flow_ctrl.sender.unregister(cx.waker());
+        }
+        let available = credit.available();
+        buffer.limits.set_flow_ctrl(available);
+        let result = self.poll_dump_streams(cx, buffer);
+        let sent = available - buffer.limits.flow_ctrl();
+        credit.post_sent(sent);
+        buffer.limits.set_flow_ctrl(previous - sent);
+        result
+    }
+
+    fn poll_dump_streams<B: BufMut + ?Sized>(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut PacketBuffer<'_, B>,
+    ) -> Poll<Result<usize, Error>> {
         // Keep stream insertion serialized with checking readiness and registering.
         let mut guard = self.output.streams();
         let output = match guard.as_mut() {
@@ -773,6 +823,7 @@ where
     }
 
     pub(crate) fn unregister(&self, waker: &Waker) {
+        self.flow_ctrl.sender.unregister(waker);
         self.tx_wakers.unregister(waker);
         if let Ok(output) = self.output.streams().as_ref() {
             for (outgoing, _) in output.values() {

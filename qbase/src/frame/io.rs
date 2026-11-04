@@ -38,8 +38,10 @@ fn complete_frame(
         FrameType::RetireConnectionId => {
             map(be_retire_connection_id_frame, Frame::RetireConnectionId).parse(input)
         }
-        FrameType::DataBlocked => map(be_data_blocked_frame, Frame::DataBlocked).parse(input),
-        FrameType::MaxData => map(be_max_data_frame, Frame::MaxData).parse(input),
+        FrameType::DataBlocked => {
+            map(be_data_blocked_frame, |f| Frame::StreamCtl(f.into())).parse(input)
+        }
+        FrameType::MaxData => map(be_max_data_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::PathChallenge => map(be_path_challenge_frame, Frame::PathChallenge).parse(input),
         FrameType::PathResponse => map(be_path_response_frame, Frame::PathResponse).parse(input),
         FrameType::HandshakeDone => Ok((input, Frame::HandshakeDone(HandshakeDoneFrame))),
@@ -170,8 +172,6 @@ where
             Frame::Ack(f) => put(&mut buf, f),
             Frame::Close(f) => put(&mut buf, f),
             Frame::NewToken(f) => put(&mut buf, f),
-            Frame::MaxData(f) => put(&mut buf, f),
-            Frame::DataBlocked(f) => put(&mut buf, f),
             Frame::AddAddress(f) => put(&mut buf, f),
             Frame::RemoveAddress(f) => put(&mut buf, f),
             Frame::PunchMeNow(f) => put(&mut buf, f),

@@ -44,28 +44,26 @@ impl Paths {
     }
 }
 
-pub use crate::common::phase::{MatureFixture, SpaceFixture};
+pub use crate::common::spaces::{DataFixture, SpaceFixture};
 use crate::common::take_heartbeat;
 
-pub fn enter_mature(paths: &Paths, mature: &MatureFixture) {
-    if matches!(paths.phase().get(), crate::ConnPhase::Initial(_)) {
-        enter_handshake(paths, mature.spaces.handshake.clone());
-    }
-    paths
-        .loss_resender
-        .write_guard()
-        .push_back(mature.spaces.data.clone())
-        .unwrap();
-    paths
+pub fn install_data(paths: &Paths, data: &DataFixture) {
+    if paths
         .spaces
-        .write_guard()
-        .push_back(mature.spaces.data.clone())
-        .unwrap();
-    paths.enter_mature(mature.phase.clone());
+        .read_guard()
+        .get(qbase::Epoch::Data as u64)
+        .is_some()
+    {
+        return;
+    }
+    if !paths.progress.facts().has_handshake_key() {
+        install_handshake(paths, data.spaces.handshake.clone());
+    }
+    paths.progress.install_data(paths, data.spaces.data.clone());
 }
 
-/// Install resources before switching phase, as growing does.
-pub fn enter_handshake(
+/// Install synthetic spaces without retiring the fixture's Initial CRYPTO source.
+pub fn install_handshake(
     paths: &Paths,
     handshake: std::sync::Arc<qtransport::space::HandshakeSpace>,
 ) {
@@ -76,9 +74,10 @@ pub fn enter_handshake(
         .unwrap();
     paths.spaces.write_guard().push_back(handshake).unwrap();
     paths.progress.facts().install_handshake_key();
-    // The isolated TLS fixture uses its current CID as the simulated peer SCID.
     paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.phase().enter_handshake();
+    for path in paths.entries.lock().unwrap().values() {
+        path.send_waker.wake_all();
+    }
 }
 
 pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {

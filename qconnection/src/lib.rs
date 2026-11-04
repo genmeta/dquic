@@ -1,13 +1,12 @@
 //! QUIC growth and staged packet wiring on qtls, qprotocol and qtransport.
 //!
-//! Both roles publish [`InitialPhase`] immediately, allowing the server to
+//! Both roles install the Initial space immediately, allowing the server to
 //! acknowledge Initial fragments before it has received a complete ClientHello.
-//! Every path burst reads that shared sending snapshot.
+//! Every path burst reads the shared packet-number spaces.
 
 mod endpoint;
 pub(crate) mod lifecycle;
 mod paths;
-pub mod phase;
 mod progress;
 pub mod recv;
 pub mod send;
@@ -18,7 +17,6 @@ use std::sync::Arc;
 pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
 pub use lifecycle::{Interceptor, client_growing, server_growing};
 pub use paths::Paths;
-pub use phase::{ArcConnPhase, ConnPhase, HandshakePhase, InitialPhase, MaturePhase};
 use qbase::util::ArcIndexDeque;
 pub use qbase::{
     error::Error,
@@ -28,7 +26,6 @@ pub use qbase::{
 pub use qtransport::{ArcConnection, ArcReliableFrames, CloseReason};
 pub use tls::TlsContext;
 pub type DataStreams = qrecovery::streams::DataStreams<ArcReliableFrames>;
-pub type FlowController = qbase::flow::FlowController<ArcReliableFrames>;
 pub type ArcLocalCids =
     qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
 pub type ArcRemoteCids = qbase::cid::ArcRemoteCids<ArcReliableFrames>;

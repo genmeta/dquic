@@ -5,7 +5,7 @@ use qbase::{
     cid::ConnectionId,
     frame::{
         CryptoFrame, DatagramFrame, Frame, MaxDataFrame, PathChallengeFrame, PathResponseFrame,
-        PingFrame, ReliableFrame,
+        PingFrame, ReliableFrame, StreamCtlFrame,
     },
     packet::{LongHeaderBuilder, Packet as ParsedPacket, PacketReader},
 };
@@ -175,7 +175,9 @@ async fn burst_submits_many_packets_and_preserves_partial_suffix_and_recovery() 
                 if remaining == 0 {
                     return Ok(None);
                 }
-                let frame = ReliableFrame::MaxData(MaxDataFrame::new((remaining as u32).into()));
+                let frame = ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
+                    (remaining as u32).into(),
+                )));
                 let packet = sender.assemble_1rtt_packet(
                     &keys,
                     header(),
@@ -315,7 +317,9 @@ async fn burst_records_ack_and_path_intents_once_and_drop_returns_reliable_data(
                 if count == 3 {
                     return Ok(None);
                 }
-                let frame = ReliableFrame::MaxData(MaxDataFrame::new(100u32.into()));
+                let frame = ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
+                    100u32.into(),
+                )));
                 let packet = sender.assemble_1rtt_packet(
                     &keys,
                     header(),
@@ -487,7 +491,9 @@ async fn repeated_mediated_bursts_reuse_iovecs_and_wrap_each_datagram_once() {
                     return Ok(None);
                 }
                 once = true;
-                let frame = ReliableFrame::MaxData(MaxDataFrame::new(value.into()));
+                let frame = ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
+                    value.into(),
+                )));
                 sender.assemble_1rtt_packet(
                     &keys,
                     header(),

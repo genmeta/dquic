@@ -5,7 +5,7 @@ use qbase::{error::ErrorKind, net::tx::UnregisterWaker};
 use qtransport::path::Path;
 
 use super::{Burst, MAX_BURST_PACKETS, no_viable_path};
-use crate::{ConnPhase, Paths};
+use crate::Paths;
 
 pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut datagrams =
@@ -63,21 +63,10 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
 pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
-        let phase = paths.phase();
-        let phase = phase.get();
         path.cc.cancel(waker);
         for space in paths.spaces.read_guard().iter() {
             space.unregister(waker);
         }
         paths.reliable_frames.unregister(waker);
-        match &phase {
-            ConnPhase::Initial(p) => {
-                p.upgrade_wakers.unregister(waker);
-            }
-            ConnPhase::Handshake(p) => {
-                p.upgrade_wakers.unregister(waker);
-            }
-            ConnPhase::Mature(p) => p.flow_ctrl.sender.unregister(waker),
-        }
     }
 }

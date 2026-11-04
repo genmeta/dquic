@@ -15,12 +15,10 @@ use qtransport::{
     packet::channel::RcvdPacket,
     space::{DataSpace, HandshakeSpace, InitialSpace},
 };
-use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use super::{any, finish};
 use crate::{
-    ArcParameters, ConnPhase, Connected, DataStreams, Error, FlowController, MaturePhase, Paths,
-    TlsContext,
+    ArcParameters, Connected, DataStreams, Error, Paths, TlsContext,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -39,13 +37,9 @@ pub async fn client_growing(
     token_registry: ArcTokenRegistry,
     established: impl FnOnce(Result<Connected, Error>),
 ) -> Error {
-    let phase = paths.phase();
     let progress = &paths.progress;
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(tls_context.clone()));
-    let ConnPhase::Initial(_) = phase.get() else {
-        unreachable!("client_growing starts with InitialPhase")
-    };
 
     let reliable_frames = paths.reliable_frames.clone();
     let cid_registry = &paths.cid_registry;
@@ -92,7 +86,7 @@ pub async fn client_growing(
                 paths.is_mp_handshaking.clone(),
             ));
             assert!(
-                progress.install_handshake(hs_space.clone()),
+                progress.install_handshake(&paths, hs_space.clone()),
                 "first Handshake key installation"
             );
             let server_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx))
@@ -137,38 +131,24 @@ pub async fn client_growing(
                 Default::default(),
             );
             terminator.register(Arc::new(streams.clone()));
-            let flow_ctrl = FlowController::new(
-                parameters.remote(ParameterId::InitialMaxData),
-                parameters.local(ParameterId::InitialMaxData),
-                reliable_frames.clone(),
-            );
             let data_space = Arc::new(DataSpace::new(
                 scid,
                 keys,
                 streams,
                 reliable_frames.clone(),
+                parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
+                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
                 paths.is_mp_handshaking.clone(),
             ));
-            progress.install_data(data_space.clone());
-            let puncher = ArcPuncher::new(
-                reliable_frames.clone(),
-                ProbeEncoder::new(data_space.clone(), server_scid),
-            );
-            paths.enter_mature(Arc::new(MaturePhase {
-                parameters: parameters.clone(),
-                flow_ctrl: flow_ctrl.clone(),
-                puncher: puncher.clone(),
-            }));
+            progress.install_data(&paths, data_space.clone());
+            let puncher = paths.puncher.clone();
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             let handshake_done = ArcHandshake::new_client();
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, None),
                 data_space.clone(),
-                flow_ctrl,
-                puncher.clone(),
                 paths.clone(),
-                parameters,
                 token_registry,
                 handshake_done.clone(),
             ));

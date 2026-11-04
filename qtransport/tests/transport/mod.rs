@@ -13,7 +13,6 @@ use qbase::{
     Epoch,
     cid::{ConnectionId, RetireCid},
     error::{AppError, ErrorKind, QuicError},
-    flow::FlowController,
     frame::{AckFrame, Frame, MaxStreamsFrame, PingFrame, StreamCtlFrame, io::ReceiveFrame},
     net::{
         addr::EndpointAddr,
@@ -45,7 +44,6 @@ use crate::{
 pub(crate) struct Transport {
     pub(crate) data: Arc<DataSpace>,
     pub(crate) parameters: ArcParameters,
-    pub(crate) flow: FlowController<ArcReliableFrames>,
 }
 
 impl Transport {
@@ -189,23 +187,19 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         reliable.clone(),
         Default::default(),
     );
-    let flow = FlowController::new(
-        params.remote(ParameterId::InitialMaxData),
-        params.local(ParameterId::InitialMaxData),
-        reliable.clone(),
-    );
     let data = Arc::new(DataSpace::new(
         Default::default(),
         ArcOneRttKeys::from(keys),
         streams,
         reliable,
+        params.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
+        params.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         Default::default(),
     ));
     data.keys.allow_update();
     Arc::new(Transport {
         data,
         parameters: params,
-        flow,
     })
 }
 pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 2] {
@@ -296,20 +290,14 @@ fn emit(sender: &mut Sender) -> BytesMut {
     wire
 }
 fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Result<(), Error> {
-    use qbase::frame::GetFrameType;
-    let kind = frame.frame_type();
     match frame {
         Frame::Stream(frame, bytes) => {
-            let fresh = transport.data.streams.recv_frame((frame, bytes))?;
-            transport.flow.recver.on_new_rcvd(kind, fresh)?;
+            transport.data.streams.recv_frame((frame, bytes))?;
         }
         Frame::StreamCtl(frame) => {
-            let fresh = transport.data.streams.recv_frame(frame)?;
-            transport.flow.recver.on_new_rcvd(kind, fresh)?;
+            transport.data.streams.recv_frame(frame)?;
         }
         Frame::Ack(frame) => acknowledge(transport, &frame, path)?,
-        Frame::MaxData(frame) => transport.flow.sender.recv_frame(frame)?,
-        Frame::DataBlocked(frame) => transport.flow.recver.recv_frame(frame)?,
         Frame::PathChallenge(frame) => path.validation.recv_frame(frame)?,
         Frame::PathResponse(frame) => path.validation.recv_frame(frame)?,
         Frame::Crypto(frame, bytes) => transport
@@ -362,13 +350,9 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
 }
 fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Result<(), Error> {
     let keys = keys(transport);
-    send::acknowledge(
-        &transport.data,
-        &transport.parameters,
-        ack,
-        path,
-        |generation| keys.on_ack(generation),
-    )
+    send::acknowledge(&transport.data, ack, path, |generation| {
+        keys.on_ack(generation)
+    })
 }
 fn ack(pn: u64) -> AckFrame {
     AckFrame::new(
@@ -923,9 +907,11 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
     use qbase::frame::{MaxDataFrame, ReliableFrame, io::SendFrame};
 
     let mut reliable = ArcReliableFrames::with_capacity(600);
-    reliable.send_frame(
-        (0..600).map(|i| ReliableFrame::MaxData(MaxDataFrame::new(VarInt::from_u32(1000 + i)))),
-    );
+    reliable.send_frame((0..600).map(|i| {
+        ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
+            VarInt::from_u32(1000 + i),
+        )))
+    }));
     let bytes = [Bytes::from_static(b"later")];
     let mut crypto = (
         qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()),
@@ -953,7 +939,10 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
             )
             .unwrap();
         for frame in recorded.as_slice() {
-            if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(frame)) = frame {
+            if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
+                StreamCtlFrame::MaxData(frame),
+            )) = frame
+            {
                 sent.push(frame.max_data());
             }
         }
@@ -988,7 +977,9 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
         .unwrap();
     ct.data
         .reliable_frames
-        .send_frame([ReliableFrame::MaxData(MaxDataFrame::new(4096u32.into()))]);
+        .send_frame([ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(
+            MaxDataFrame::new(4096u32.into()),
+        ))]);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write_all(b"stream").await.unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
@@ -1011,7 +1002,7 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
             Frame::Ack(_),
             Frame::Crypto(..),
             Frame::PathResponse(_),
-            Frame::MaxData(_),
+            Frame::StreamCtl(StreamCtlFrame::MaxData(_)),
             Frame::Stream(..),
         ]
     ));
@@ -1522,7 +1513,7 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
     ct.data
         .reliable_frames
-        .send_frame([MaxDataFrame::new(123u32.into())]);
+        .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
     emit(&mut sender);
     drop(sender);
@@ -1555,7 +1546,7 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
         )
         .unwrap();
     assert!(matches!(frames.as_slice(),
-        [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::MaxData(f)), GuaranteedFrame::Stream(_)]
+        [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f))), GuaranteedFrame::Stream(_)]
         if f.max_data() == 123));
 }
 
@@ -1578,19 +1569,17 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
 }
 
 #[tokio::test]
-async fn loss_requeues_stream_ranges_without_charging_flow_credit_twice() {
+async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"lost once")).unwrap();
     let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
     let dropped = emit(&mut sender);
-    let credit = ct.flow.sender.credit(usize::MAX).available();
     ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
         &mut [0].into_iter(),
     );
     let retry = emit(&mut sender);
-    assert_eq!(ct.flow.sender.credit(usize::MAX).available(), credit);
     assert_eq!(receive(&st, &sp, &retry), Some(1));
     acknowledge(&ct, &ack(1), &cp).unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
@@ -1629,7 +1618,6 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let (retransmit_after, _) = original.cc.retransmit_and_expire_time(Epoch::Data);
     let mut sender = Sender::new(keys(&transport), transport.clone(), original.clone()).unwrap();
     emit(&mut sender);
-    let credit = transport.flow.sender.credit(usize::MAX).available();
     original.close();
     drop(sender);
     drop(original);
@@ -1665,7 +1653,6 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let replacement = path(&transport, 1);
     let mut sender = Sender::new(keys(&transport), transport.clone(), replacement.clone()).unwrap();
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
-    assert_eq!(transport.flow.sender.credit(usize::MAX).available(), credit);
     transport.data.on_tick(tokio::time::Instant::now());
     assert!(
         !sender.prepare().unwrap(),

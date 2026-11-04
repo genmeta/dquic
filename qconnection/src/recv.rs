@@ -4,7 +4,7 @@ use std::sync::Arc;
 use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
-    frame::{Frame, FrameReader, GetFrameType, io::ReceiveFrame},
+    frame::{Frame, FrameReader, io::ReceiveFrame},
     net::route::Scopes,
     packet::{GetScid, GetType, OneRttHeader, PacketContent},
     role::Role,
@@ -17,10 +17,9 @@ use qtransport::{
     recv,
     space::{DataSpace, Space},
 };
-use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::time::Instant;
 
-use crate::{ArcHandshake, ArcParameters, ArcReliableFrames, ConnPhase, FlowController, Paths};
+use crate::{ArcHandshake, Paths};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -82,9 +81,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
             let _ = path.heartbeat.on_rcvd_at(content, now);
-            if let Some(dcid) = initial_scid
-                && let ConnPhase::Initial(_) = paths.phase().get()
-            {
+            if let Some(dcid) = initial_scid {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
                 paths.update_initial_dcid(dcid);
             }
@@ -151,10 +148,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
 pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     (mut packets, scopes): (PacketReceiver<OneRttHeader>, Option<Scopes>),
     data: Arc<DataSpace>,
-    flow: FlowController,
-    puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
     paths: Arc<Paths>,
-    parameters: ArcParameters,
     tokens: ArcTokenRegistry,
     handshake: ArcHandshake,
 ) {
@@ -202,11 +196,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             let _ = idle.on_rcvd_at(now);
             let _ = path.heartbeat.on_rcvd_at(content, now);
             for frame in parsed_frames.drain(..) {
-                let fty = frame.frame_type();
                 match frame {
                     Frame::Ping(_) => {}
                     Frame::Ack(frame) => {
-                        recv::acknowledge(&data, &parameters, &frame, &path, |generation| {
+                        recv::acknowledge(&data, &frame, &path, |generation| {
                             keys.on_ack(generation)
                         })?;
                     }
@@ -214,15 +207,11 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                         data.crypto.incoming().recv_frame((frame, bytes))?;
                     }
                     Frame::Stream(frame, bytes) => {
-                        let fresh = data.streams.recv_frame((frame, bytes))?;
-                        flow.recver.on_new_rcvd(fty, fresh)?;
+                        data.streams.recv_frame((frame, bytes))?;
                     }
                     Frame::StreamCtl(frame) => {
-                        let fresh = data.streams.recv_frame(frame)?;
-                        flow.recver.on_new_rcvd(fty, fresh)?;
+                        data.streams.recv_frame(frame)?;
                     }
-                    Frame::MaxData(frame) => flow.sender.recv_frame(frame)?,
-                    Frame::DataBlocked(frame) => flow.recver.recv_frame(frame)?,
                     Frame::NewConnectionId(frame) => {
                         paths.cid_registry.remote.recv_frame(frame)?;
                     }
@@ -244,19 +233,21 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                             .recv_conn_close_frame(frame.clone(), path.cc.pto_base(Epoch::Data));
                         return Ok(());
                     }
-                    Frame::AddAddress(frame) => puncher.recv_add_address(frame),
+                    Frame::AddAddress(frame) => paths.puncher.recv_add_address(frame),
                     Frame::RemoveAddress(frame) => {
                         // Unknown sequence numbers are ignored; do not truncate a
                         // wire VarInt into an existing 32-bit punch address ID.
                         if let Ok(seq) = u32::try_from(frame.seq_num.into_u64()) {
-                            puncher.recv_remove_address(seq);
+                            paths.puncher.recv_remove_address(seq);
                         }
                     }
-                    Frame::PunchMeNow(frame) => puncher.recv_punch_me_now(path.pathway, frame),
-                    Frame::PunchHello(frame) => {
-                        puncher.recv_punch_hello(path.pathway, link, frame);
+                    Frame::PunchMeNow(frame) => {
+                        paths.puncher.recv_punch_me_now(path.pathway, frame)
                     }
-                    Frame::PunchDone(frame) => puncher.recv_punch_done(link, frame),
+                    Frame::PunchHello(frame) => {
+                        paths.puncher.recv_punch_hello(path.pathway, link, frame);
+                    }
+                    Frame::PunchDone(frame) => paths.puncher.recv_punch_done(link, frame),
                     _ => {
                         return Err(QuicError::with_default_fty(
                             ErrorKind::ProtocolViolation,

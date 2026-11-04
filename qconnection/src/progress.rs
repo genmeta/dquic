@@ -9,7 +9,7 @@ use qtransport::{
     terminate::ArcTerminator,
 };
 
-use crate::{ArcConnPhase, ArcResend, ConnPhase, Paths};
+use crate::{ArcResend, Paths};
 
 /// Serializes edge-triggered lifecycle effects for the shared handshake facts.
 #[derive(Clone)]
@@ -18,14 +18,12 @@ pub(crate) struct ArcProgress(Arc<Mutex<Progress>>);
 impl ArcProgress {
     pub(crate) fn new(
         role: Role,
-        phase: ArcConnPhase,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
         Self(Arc::new(Mutex::new(Progress::new(
             role,
-            phase,
             spaces,
             loss_resender,
             terminator,
@@ -36,12 +34,12 @@ impl ArcProgress {
         self.0.lock().unwrap().facts.clone()
     }
 
-    pub(crate) fn install_handshake(&self, space: Arc<HandshakeSpace>) -> bool {
-        self.0.lock().unwrap().install_handshake(space)
+    pub(crate) fn install_handshake(&self, paths: &Paths, space: Arc<HandshakeSpace>) -> bool {
+        self.0.lock().unwrap().install_handshake(paths, space)
     }
 
-    pub(crate) fn install_data(&self, space: Arc<DataSpace>) {
-        self.0.lock().unwrap().install_data(space);
+    pub(crate) fn install_data(&self, paths: &Paths, space: Arc<DataSpace>) {
+        self.0.lock().unwrap().install(paths, space);
     }
 
     pub(crate) fn on_tls_finished(&self) {
@@ -73,7 +71,6 @@ impl ArcProgress {
 struct Progress {
     facts: Arc<HandshakeFacts>,
     role: Role,
-    phase: ArcConnPhase,
     spaces: ArcSpaces,
     loss_resender: ArcResend,
     terminator: ArcTerminator,
@@ -82,7 +79,6 @@ struct Progress {
 impl Progress {
     fn new(
         role: Role,
-        phase: ArcConnPhase,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
@@ -90,30 +86,24 @@ impl Progress {
         Self {
             facts: Arc::new(HandshakeFacts::with_role(role)),
             role,
-            phase,
             spaces,
             loss_resender,
             terminator,
         }
     }
 
-    fn install_handshake(&mut self, space: Arc<HandshakeSpace>) -> bool {
+    fn install_handshake(&mut self, paths: &Paths, space: Arc<HandshakeSpace>) -> bool {
         if !self.facts.install_handshake_key() {
             return false;
         }
-        self.install(space);
+        self.install(paths, space);
         if let Some(initial) = self.spaces.read_guard().get(Epoch::Initial as u64) {
             initial.crypto().recver.retire();
             if self.role == Role::Client {
                 initial.crypto().sender.retire();
             }
         }
-        self.phase.enter_handshake();
         true
-    }
-
-    fn install_data(&mut self, space: Arc<DataSpace>) {
-        self.install(space);
     }
 
     fn on_tls_finished(&mut self) {
@@ -157,9 +147,6 @@ impl Progress {
     }
 
     fn on_handshake_done(&mut self, paths: &Arc<Paths>) {
-        let ConnPhase::Mature(_) = self.phase.get() else {
-            return;
-        };
         let Some(data) = Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data) else {
             // Cleanup may have removed Data before this confirmation was handled.
             return;
@@ -204,7 +191,8 @@ impl Progress {
     }
 
     /// Called under the lifecycle lock; queue guards never enclose a CC operation.
-    fn install(&self, space: Arc<impl Encapsulate + qcongestion::Resend>) {
+    fn install(&self, paths: &Paths, space: Arc<impl Encapsulate + qcongestion::Resend>) {
+        let entries = paths.entries.lock().unwrap();
         {
             let mut spaces = self.spaces.write_guard();
             let mut resender = self.loss_resender.write_guard();
@@ -214,6 +202,9 @@ impl Progress {
                 .expect("next recovery epoch");
         }
         self.terminator.register(Arc::new(space.crypto().clone()));
+        for path in entries.values() {
+            path.send_waker.wake_all();
+        }
     }
 
     fn retire_initial(&self) {

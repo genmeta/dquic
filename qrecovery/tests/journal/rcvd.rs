@@ -18,7 +18,11 @@ use tokio::time::Instant;
 const MAX_TRACKED_ACK_RANGES: usize = 256;
 
 fn ack_package(records: &ArcRcvdJournal, pn: u64) -> AckFrame {
-    let mut package = records.ack_package(Some((pn, Instant::now())));
+    ack_package_at(records, pn, Instant::now())
+}
+
+fn ack_package_at(records: &ArcRcvdJournal, pn: u64, received: Instant) -> AckFrame {
+    let mut package = records.ack_package(Some((pn, received)));
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let mut limits = Constraints {
@@ -41,6 +45,20 @@ fn ack_package(records: &ArcRcvdJournal, pn: u64) -> AckFrame {
     };
     assert!(frames.next().is_none());
     ack
+}
+
+#[tokio::test(start_paused = true)]
+async fn ack_package_uses_its_configured_delay_exponent() {
+    for exponent in [0, 3, 10] {
+        let records = ArcRcvdJournal::with_capacity(8, None).with_ack_delay_exponent(exponent);
+        let received = Instant::now();
+        records.on_rcvd_pn(0, true, Duration::ZERO);
+        tokio::time::advance(Duration::from_micros(1024)).await;
+        assert_eq!(
+            ack_package_at(&records, 0, received).delay(),
+            1024 >> exponent
+        );
+    }
 }
 
 #[test]

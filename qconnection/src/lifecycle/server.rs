@@ -14,13 +14,11 @@ use qtransport::{
     packet::channel::RcvdPacket,
     space::{DataSpace, HandshakeSpace, InitialSpace},
 };
-use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::io::AsyncWriteExt;
 
 use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcParameters, DataStreams, Error, FlowController, Interceptor, MaturePhase, Paths,
-    ServerRegistry,
+    ArcParameters, DataStreams, Error, Interceptor, Paths, ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -34,11 +32,7 @@ pub async fn server_growing(
     paths: Arc<Paths>,
     token: ArcTokenRegistry,
 ) -> Error {
-    let phase = paths.phase();
     let progress = &paths.progress;
-    let crate::ConnPhase::Initial(_) = phase.get() else {
-        unreachable!("server_growing starts with InitialPhase")
-    };
     let terminator = paths.terminator.clone();
     let reliable_frames = paths.reliable_frames.clone();
     let cid_registry = &paths.cid_registry;
@@ -114,7 +108,7 @@ pub async fn server_growing(
                 ArcKeys::from(hs_keys),
                 paths.is_mp_handshaking.clone(),
             ));
-            let _ = progress.install_handshake(hs_space.clone());
+            let _ = progress.install_handshake(&paths, hs_space.clone());
 
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
@@ -139,23 +133,16 @@ pub async fn server_growing(
                 Default::default(),
             );
             terminator.register(Arc::new(streams.clone()));
-            let flow_ctrl = FlowController::new(
-                parameters.remote(ParameterId::InitialMaxData),
-                parameters.local(ParameterId::InitialMaxData),
-                reliable_frames.clone(),
-            );
             let data_space = Arc::new(DataSpace::new(
                 scid,
                 keys,
                 streams,
                 reliable_frames.clone(),
+                parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
+                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
                 paths.is_mp_handshaking.clone(),
             ));
-            progress.install_data(data_space.clone());
-            let puncher = ArcPuncher::new(
-                reliable_frames.clone(),
-                ProbeEncoder::new(data_space.clone(), client_scid),
-            );
+            let puncher = paths.puncher.clone();
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             for space in [&initial_space.space, &hs_space.0] {
@@ -190,15 +177,11 @@ pub async fn server_growing(
             ));
 
             // Receiving Finished selects the handshake path before waking TLS.
-            // Until then, Handshake keeps the first flight independent of path CIDs.
+            // Publish Data only after the peer Finished has been authenticated.
             let summary = tls_ctx.finished().await?;
             progress.on_tls_finished();
+            progress.install_data(&paths, data_space.clone());
             let handshake = ArcHandshake::new_server(reliable_frames.clone());
-            paths.enter_mature(Arc::new(MaturePhase {
-                parameters: parameters.clone(),
-                flow_ctrl: flow_ctrl.clone(),
-                puncher: puncher.clone(),
-            }));
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
                 data_space.as_ref(),
@@ -207,10 +190,7 @@ pub async fn server_growing(
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, Some(scopes)),
                 data_space.clone(),
-                flow_ctrl.clone(),
-                puncher.clone(),
                 paths.clone(),
-                parameters.clone(),
                 token,
                 handshake.clone(),
             ));

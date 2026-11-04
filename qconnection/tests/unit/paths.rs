@@ -130,7 +130,7 @@ async fn cancelled_idle_timer_does_not_request_close() {
 
 #[tokio::test]
 async fn client_paths_are_exempt_without_local_challenges() {
-    let (paths, mature) = super::send::mature_phase(Role::Client, Duration::ZERO);
+    let (paths, mature) = super::send::data_spaces(Role::Client, Duration::ZERO);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
     let incoming = paths.get_or_create_path(&pathway(30004));
@@ -144,7 +144,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
     assert_eq!(super::selection(&paths, &second), 0);
     assert_eq!(super::selection(&paths, &incoming), 0);
     assert!(second.validation.is_validated());
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     assert!(paths.add_path(pathway(30005)).validation.is_validated());
     assert!(
         matches!(super::borrow(&paths, &first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
@@ -214,10 +214,10 @@ async fn removed_undecided_path_cannot_override_selection() {
 
 #[tokio::test]
 async fn reserved_initial_cell_is_bound_only_after_path_selection() {
-    let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+    let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
-    super::enter_mature(&paths, &mature);
+    super::install_data(&paths, &mature);
     assert!(
         matches!(super::borrow(&paths, &first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );

@@ -183,7 +183,7 @@ async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
                     .terminator
                     .clone()
                     .register(Arc::new(space.crypto.clone()));
-                super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
+                super::install_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
                 space
             };
             let peer_keys = keys(role != Role::Server);
@@ -255,7 +255,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 Default::default(),
             ));
             terminator.register(Arc::new(space.crypto.clone()));
-            super::enter_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
+            super::install_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
             space
         };
         terminator.close(
@@ -424,7 +424,7 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
                 let (paths, first, _) = paths(role);
                 let dcid = paths.new_dcid();
                 receive_ping(role, epoch, corrupt, &paths, &first).await;
-                assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
+                assert!(!paths.progress.facts().has_handshake_key());
                 assert_eq!(
                     crate::common::cid_value(&dcid),
                     ConnectionId::from_slice(
@@ -446,7 +446,7 @@ async fn client_selects_handshake_but_not_initial_ping() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let (paths, first, second) = paths(Role::Client);
         let dcid = paths.new_dcid();
-        assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
+        assert!(!paths.progress.facts().has_handshake_key());
         let original_dcid = crate::common::cid_value(&dcid);
         assert_eq!(
             (
@@ -751,9 +751,9 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
 
     use crate::send::{Burst, MAX_BURST_PACKETS};
 
-    let (paths, mature) = super::send::mature_phase(Role::Server, Duration::ZERO);
+    let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
     paths.update_initial_dcid(mature.peer_cid());
-    super::enter_handshake(&paths, mature.spaces.handshake.clone());
+    super::install_handshake(&paths, mature.spaces.handshake.clone());
     let make_path = |port| {
         let path = crate::common::registered_path(
             &paths,
@@ -778,17 +778,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     };
     let first = make_path(34301);
     let second = make_path(34302);
-    // Data keys can be installed while the server is still completing TLS.
-    paths
-        .loss_resender
-        .write_guard()
-        .push_back(mature.spaces.data.clone())
-        .unwrap();
-    paths
-        .spaces
-        .write_guard()
-        .push_back(mature.spaces.data.clone())
-        .unwrap();
+    // Data keys are prepared locally while the server is still completing TLS.
     mature
         .spaces
         .data
@@ -797,10 +787,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         .write_all(b"application crypto")
         .await
         .unwrap();
-    assert!(matches!(
-        paths.phase().get(),
-        crate::ConnPhase::Handshake(_)
-    ));
+    assert!(paths.progress.facts().has_handshake_key());
     assert!(
         matches!(super::borrow(&paths, &first), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
@@ -868,9 +855,11 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         matches!(super::borrow(&paths, &second), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
 
-    // Publishing Mature also assigns every path's CID under the path-table lock.
-    paths.enter_mature(mature.phase.clone());
-    assert!(matches!(paths.phase().get(), crate::ConnPhase::Mature(_)));
+    // Publish Data only after the server has completed TLS.
+    paths
+        .progress
+        .install_data(&paths, mature.spaces.data.clone());
+    assert!(paths.spaces.read_guard().get(Epoch::Data as u64).is_some());
     assert!(super::borrow(&paths, &first).is_pending());
     assert!(matches!(super::borrow(&paths, &second),
         Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
@@ -884,7 +873,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         .unwrap();
     assert!(
         matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0),
-        "the selected path must have its CID before entering Mature"
+        "the selected path must have its CID before Data is published"
     );
     assert!(burst.packets.iter().any(|p| p[Epoch::Handshake].is_some()));
     assert!(burst.packets.iter().any(|p| p[Epoch::Data].is_some()));

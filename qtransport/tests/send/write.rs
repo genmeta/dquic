@@ -2,7 +2,10 @@ use std::task::Poll;
 
 use bytes::{Buf, BufMut, BytesMut};
 use qbase::{
-    frame::{self, Frame, FrameType, PathChallengeFrame, PathResponseFrame, ReliableFrame},
+    frame::{
+        self, Frame, FrameType, PathChallengeFrame, PathResponseFrame, ReliableFrame,
+        StreamCtlFrame,
+    },
     packet::{
         GetType, HeaderSize, KeyPhaseBit, LongSpecificBits, Package, PacketContent, PacketNumber,
         ShortSpecificBits, Type, WritePacketNumber, header::io::WriteHeader,
@@ -348,7 +351,9 @@ mod tests {
         )
         .unwrap();
         let mut frames = Vec::new();
-        let frame = ReliableFrame::MaxData(frame::MaxDataFrame::new(42u32.into()));
+        let frame = ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(frame::MaxDataFrame::new(
+            42u32.into(),
+        )));
         packet
             .assemble(
                 &Constraints {
@@ -369,7 +374,7 @@ mod tests {
         assert!(frames.is_empty());
         assert!(super::super::finish_sealing(result, pn, &journal, &mut frames).is_err());
         assert!(
-            matches!(frames.as_slice(), [GuaranteedFrame::Reliable(ReliableFrame::MaxData(f))] if f.max_data() == 42)
+            matches!(frames.as_slice(), [GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f)))] if f.max_data() == 42)
         );
         let ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
         assert!(

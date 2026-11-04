@@ -35,6 +35,7 @@ pub struct DataSpace {
     pub space: Space<ArcOneRttKeys>,
     pub streams: DataStreams<ArcReliableFrames>,
     pub reliable_frames: ArcReliableFrames,
+    pub peer_ack_delay_exponent: u32,
 }
 
 impl DataSpace {
@@ -43,12 +44,19 @@ impl DataSpace {
         keys: ArcOneRttKeys,
         streams: DataStreams<ArcReliableFrames>,
         reliable_frames: ArcReliableFrames,
+        local_ack_delay_exponent: u32,
+        peer_ack_delay_exponent: u32,
         is_mp_handshaking: Arc<AtomicBool>,
     ) -> Self {
+        let mut space = Space::new(Epoch::Data, initial_scid, keys, is_mp_handshaking);
+        space.rcvd_journal = space
+            .rcvd_journal
+            .with_ack_delay_exponent(local_ack_delay_exponent);
         Self {
-            space: Space::new(Epoch::Data, initial_scid, keys, is_mp_handshaking),
+            space,
             streams,
             reliable_frames,
+            peer_ack_delay_exponent,
         }
     }
 }
@@ -127,14 +135,6 @@ impl Recover for DataSpace {
         if !self.keys.is_retired() {
             self.sent_journal.on_tick(now, |frame| self.recover(frame));
         }
-    }
-
-    fn fresh_bytes(&self) -> usize {
-        self.streams.fresh_bytes()
-    }
-
-    fn fresh_bytes_up_to(&self, limit: usize) -> usize {
-        self.streams.fresh_bytes_up_to(limit)
     }
 
     fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>) {

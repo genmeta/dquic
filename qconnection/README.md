@@ -1,18 +1,17 @@
 # qconnection
 
-顺序 TLS 成长与收发接线。`InitialPhase`、`MaturePhase` 只提供发送材料，连接级组件由角色各自的 growing 协程及任务闭包持有。
+顺序 TLS 成长与收发接线。连接资源由 `Paths` 与各组件持有，发送任务直接读取已发布的包空间。
 
 ## 组件归属
 
-- `InitialPhase`：仅有 Initial Space、SCID 和 ODCID；创建它时不分配 Handshake Space。
-- `MaturePhase`：通过 qtransport::space::Spaces 保存 initial、handshake、data 三个空间，另持有 SCID、DataStreams、FlowController、可靠帧与确定的 ArcParameters；不保存 InitialPhase 引用。
-- `ArcConnPhase`：Initial 只有 Initial space；Connecting 增加 Handshake space；参数齐备进入 Handshaking；客户端收到 HANDSHAKE_DONE 后进入 Mature。每条路径每轮 Burst 重新取快照。
-- `Paths`：连接级外部控制项，持有 `ArcConnPhase`、空闲计时、关闭状态、拥塞反馈和当前路径。
-- `client_growing`：接收 `Paths` 与外部已注册的 Router channel，推进 TLS、连接空间接收拓扑和关闭流程。
-- `server_growing`：从传入的 `Paths` 取得同一份阶段、路径及关闭状态，推进服务端连接。
-- 路径发送任务：每轮 Burst 读取阶段材料，结合本路径的 ACK、Challenge、Response、心跳及发送约束，依次尝试 Initial、Handshake、Data，再批量发送。Phase 不提供 assemble/send 方法。
-- `Paths::add_path`：创建并登记 `Path`，在 `Path` 上记录是否为握手选中路径，并启动该路径唯一的发送任务。重复添加同一 `Pathway` 返回已有路径。
-- `Paths::get(&pathway)`：取得已有路径，缺失时创建并启动发送、验证任务；`add_path` 也通过该入口复用路径。`remove(&pathway)` 按地址删除路径并停止其任务。
+- `Paths`：持有 CID 注册表、包空间、恢复跟踪器、Puncher、路径表、验证、空闲计时和关闭状态。
+- `Progress`：串行处理握手事件、空间安装与退休、路径选择及握手确认；与每条路径的拥塞控制器共享握手事实。
+- `Spaces`：只发布可以发送的空间。Handshake keys 到达后安装 Handshake；客户端 Data 资源就绪后安装 Data，服务端在客户端 Finished 验证成功后安装 Data。
+- `DataStreams`：持有连接级流控，在 STREAM 封装时预留和结算共享额度，接收 STREAM/RESET_STREAM 时记账，并处理 MAX_DATA/DATA_BLOCKED。
+- ACK 生成日志持有本地 delay exponent；DataSpace 持有对端 exponent。growing 协程验证并分发参数，Paths 和 Burst 不保存参数表。
+- `client_growing`、`server_growing`：消费 TLS 密钥和结果，组装组件，推进接收拓扑与关闭流程。
+- 路径发送任务：每轮 Burst 读取空间快照，结合 ACK、路径验证、心跳、拥塞和反放大预算组包，再批量发送。空间安装及首次 peer SCID 更新通过 `Path::send_waker` 唤醒任务。
+- `Paths::add_path`、`get_or_create_path`：登记或复用同一 Pathway 的路径，启动该路径唯一的发送任务。`del_path` 删除路径并停止其任务。
 
 ## 全局入口
 
@@ -85,25 +84,35 @@ DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignore
 
 客户端调用者准备 TLS context、本地参数、Initial keys 和 `Paths`，向 Router 注册 SCID，并通过 `Paths::add_path` 添加可用路径。`client_growing` 接收同一份 `Paths`。服务端收到第一条 Initial 后创建 `Paths` 并添加来源路径；原始 DCID 仍由 listener 通过同一 Router 注册，listener 保留其 entry 至成长协程退出。
 
-`Paths::new(role, phase, max_idle_timeout, defer_idle_timeout)` 创建连接共享的 `ArcIdleTimer`，并启动等待 `timeout().await` 的任务；超时通过 `close_reason` 进入已有关闭流程。各空间成功收发的所有包都通知该计时器，包括 ACK-only 和 PING。每条路径单独持有 `ArcHeartbeat`，接收真实的 `PacketContent`，并作为 `Package` 参与 Initial、Handshake 和 Data 组包；只有有效载荷更新其活动计时。参数协商后更新连接超时和已有路径的心跳间隔，新路径使用更新后的配置。关闭连接时取消空闲计时和心跳，路径退休时取消该路径的心跳。
+`Paths::new(initial_space, role, cid_registry, reliable_frames, max_idle_timeout, defer_idle_timeout, is_mp_handshaking)` 创建连接共享的 `ArcIdleTimer`，并启动等待 `timeout().await` 的任务；超时通过 `close_reason` 进入已有关闭流程。各空间成功收发的所有包都通知该计时器，包括 ACK-only 和 PING。每条路径单独持有 `ArcHeartbeat`，接收真实的 `PacketContent`，并作为 `Package` 参与 Initial、Handshake 和 Data 组包；只有有效载荷更新其活动计时。参数协商后更新连接超时和已有路径的心跳间隔，新路径使用更新后的配置。关闭连接时取消空闲计时和心跳，路径退休时取消该路径的心跳。
 
 客户端和服务端都在创建连接任务时，将成长协程与 `recv::tick(paths.clone())` 放进同一个 `tokio::join!`。直接使用底层成长协程的调用者也需要这样接线；取消连接任务会同时取消 tick。
 
 ```rust,ignore
-let phase = ArcConnPhase::initial(InitialPhase::new(scid, original_dcid, initial_keys));
-let paths = qconnection::Paths::new(Role::Client, phase, max_idle_timeout, defer_idle_timeout);
 let (inbox, rcvd_pkt) = qtransport::packet::channel::new();
-let cid_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames);
+let router_registry = QuicRouter::global()
+    .registry_on_issuing_scid(inbox, reliable_frames.clone());
+let cid_registry = qconnection::CidRegistry::new(
+    qconnection::ArcLocalCids::new(Role::Client, original_dcid, scid, router_registry),
+    qconnection::ArcRemoteCids::client(original_dcid, reliable_frames.clone()),
+);
+let initial_space = Arc::new(InitialSpace::new(
+    scid, initial_keys, None, is_mp_handshaking.clone(),
+));
+let paths = qconnection::Paths::new(
+    initial_space.clone(), Role::Client, cid_registry, reliable_frames,
+    max_idle_timeout, defer_idle_timeout, is_mp_handshaking,
+);
 
 paths.add_path(pathway);
 let tick = qconnection::recv::tick(paths.clone());
 let growing = qconnection::client_growing(
+    initial_space,
     server_name,
     client_params,
     paths,
     rcvd_pkt,
     tls,
-    cid_registry,
     tokens,
     |result| {
         // 回调只调用一次：TLS 验证后交付身份和连接，失败时交付建连错误。
@@ -113,17 +122,17 @@ let growing = qconnection::client_growing(
 tokio::spawn(async move { tokio::join!(growing, tick).0 });
 ```
 
-服务端调用 `server_growing` 并从 SNI 注册项取得服务端参数。双方各自先创建 `param::Requirements`，客户端初始化原始 DCID；Initial 包解密和解析成功后，在交付 CRYPTO 数据前记录包头 SCID。双方参数齐备后构造 `param::ArcParameters`，由 growing 调用 `authenticate_cids(requirements)` 验证 CID，再创建 MaturePhase。Retry 的 CID 记录和校验接口已具备，完整 Retry 握手仍未接入。
+服务端调用 `server_growing` 并从 SNI 注册项取得服务端参数。双方各自先创建 `param::Requirements`，客户端初始化原始 DCID；Initial 包解密和解析成功后，在交付 CRYPTO 数据前记录包头 SCID。双方参数齐备后构造 `param::ArcParameters`，由 growing 调用 `authenticate_cids(requirements)` 验证 CID，再将各参数分发到具体组件。Retry 的 CID 记录和校验接口已具备，完整 Retry 握手仍未接入。
 
 ## 阶段与退出
 
 客户端首先启动 Initial 接收与 TLS/CRYPTO 接线。取得 Handshake keys 后才建立 Handshake space，退役 Initial CRYPTO 两端，启动 Handshake 收包及 CRYPTO 输入。TLS 输出任务等待各 level 的 CRYPTO stream 就绪，不负责组包或发送。
 
-server parameters 到达后才创建可靠帧、成对 CID 管理、DataStreams、FlowController 和 Data space，进入 Handshaking。取得 1-RTT keys 并完成 TLS 验证后退役 Handshake CRYPTO recver、开放 Data 接收并交付应用连接。Handshake CRYPTO sender 保留 Finished 的恢复能力，直到 HANDSHAKE_DONE 才退役并进入 Mature。客户端实际发送 Handshake 包后退役 Initial 包空间。
+可靠帧队列、CID 管理和 Puncher 从连接创建起存在。server parameters 到达后创建 DataStreams 及其流控；1-RTT keys 到达后组装并发布客户端 Data space。TLS 验证完成后退役 Handshake CRYPTO recver 并交付应用连接。Handshake CRYPTO sender 保留 Finished 的恢复能力，直到 HANDSHAKE_DONE 才退休。客户端实际发送 Handshake 包后退役 Initial 包空间。
 
 外层 select 覆盖每次 TLS 等待、HANDSHAKE_DONE 等待和成熟阶段，close 可在任一阶段打断成长。关闭只处理已经建立的空间，不为清理预建 Handshake 或 Data。
 
-三个 CC feedback 由 `Paths` 持有。各路径发送任务观察阶段变化，在 Handshake/Data journal 就绪后接线；尚未创建的空间保持 Pending。Phase 不保存 feedback 数组。
+恢复跟踪器由 `Paths` 持有，与包空间一同安装和退休。各路径发送任务在被唤醒后重新读取空间快照，尚未发布的空间不参与组包。
 
 Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间密钥；没有统一 Packet 队列或中间分流任务。Closing 期间这些任务继续接收 CLOSE；Draining 结束后 growing 取消接收任务、淘汰密钥并释放 CID 与路由守卫。额外 ODCID entry 的拥有者在协程退出后释放它。
 
@@ -131,7 +140,7 @@ Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间
 
 ### Puncher 接线
 
-客户端和服务端在创建 `MaturePhase` 时各创建并持有一个 `ArcPuncher`，复用连接的可靠帧队列。`ProbeEncoder` 使用同一 Data space 的 1-RTT 密钥、包号和对端 CID。1-RTT 接收流程解密认证后，将 `ADD_ADDRESS`、`REMOVE_ADDRESS`、`PUNCH_ME_NOW`、`PUNCH_HELLO`、`PUNCH_DONE` 交给该 Puncher；后两者保留收到数据报时的实际 `Link`，不从广告地址重建 UDP 地址。
+客户端和服务端创建 `Paths` 时就创建并持有 `ArcPuncher`，复用连接的可靠帧队列。`ProbeEncoder` 持有共享 Spaces 和握手 CID 句柄，在实际编码时查找 Data space，复用其 1-RTT 密钥和包号。地址观察仍在握手确认后启动；关闭时取消 Puncher 事务并释放临时 socket。1-RTT 接收流程解密认证后，将 `ADD_ADDRESS`、`REMOVE_ADDRESS`、`PUNCH_ME_NOW`、`PUNCH_HELLO`、`PUNCH_DONE` 交给该 Puncher；后两者保留收到数据报时的实际 `Link`，不从广告地址重建 UDP 地址。
 
 Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `nat.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
 

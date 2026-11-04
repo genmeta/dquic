@@ -8,9 +8,9 @@ use crate::{CloseReason, lifecycle::any};
 async fn confirmation_retires_spaces_and_allows_only_the_first_key_update() {
     use qbase::Epoch;
 
-    for mature in crate::common::phase::pair() {
+    for mature in crate::common::spaces::pair() {
         let paths = &mature.paths;
-        super::enter_mature(paths, &mature);
+        super::install_data(paths, &mature);
         let path = paths.add_path(crate::common::path_fixtures::pathway(37002));
         paths.select_path(&path);
         assert!(mature.spaces.data.keys.update().is_err());
@@ -54,17 +54,14 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
 
     for (role, mature) in [Role::Client, Role::Server]
         .into_iter()
-        .zip(crate::common::phase::pair())
+        .zip(crate::common::spaces::pair())
     {
         let paths = &mature.paths;
         let initial = &mature.spaces.initial;
         let handshake = &mature.spaces.handshake;
-        assert!(paths.progress.install_handshake(handshake.clone()));
-        assert!(!paths.progress.install_handshake(handshake.clone()));
-        assert!(matches!(
-            paths.phase().get(),
-            crate::ConnPhase::Handshake(_)
-        ));
+        assert!(paths.progress.install_handshake(paths, handshake.clone()));
+        assert!(!paths.progress.install_handshake(paths, handshake.clone()));
+        assert!(paths.progress.facts().has_handshake_key());
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         let mut buffer = [0; 1];
@@ -104,12 +101,13 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
             paths.loss_resender.read_guard().offset(),
             Epoch::Handshake as u64
         );
-        paths.progress.install_data(mature.spaces.data.clone());
-        paths.enter_mature(mature.phase.clone());
+        paths
+            .progress
+            .install_data(paths, mature.spaces.data.clone());
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         assert!(!paths.progress.facts().is_handshake_done());
-        assert!(!paths.progress.install_handshake(handshake.clone()));
+        assert!(!paths.progress.install_handshake(paths, handshake.clone()));
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         paths.retire_all();
@@ -177,7 +175,7 @@ async fn packet_events_retire_initial_from_both_queues() {
             ))),
             paths.is_mp_handshaking.clone(),
         ));
-        assert!(paths.progress.install_handshake(handshake.clone()));
+        assert!(paths.progress.install_handshake(&paths, handshake.clone()));
         paths.progress.on_handshake_sent();
         paths.progress.on_handshake_received();
         assert_eq!(spaces.read_guard().len(), 1);

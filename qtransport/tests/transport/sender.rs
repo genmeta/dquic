@@ -136,8 +136,7 @@ pub(crate) fn assemble_data(
     let mut crypto = transport.data.crypto.outgoing();
     let mut reliable = transport.data.reliable_frames.clone();
     let mut streams = transport.data.streams.clone();
-    let mut credit = transport.flow.sender.credit(streams.fresh_bytes());
-    constraints.flow_ctrl.set(credit.available());
+    constraints.flow_ctrl.set(usize::MAX);
     for packet in sender.pending() {
         if packet.epoch() == Epoch::Data
             && packet
@@ -150,7 +149,7 @@ pub(crate) fn assemble_data(
     let mut ping =
         (heartbeat || path.cc.need_send_ack_eliciting(Epoch::Data) != 0).then_some(PingFrame);
     let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
-    let result = if heartbeat {
+    if heartbeat {
         sender.assemble_1rtt_packet(
             keys,
             header,
@@ -181,7 +180,5 @@ pub(crate) fn assemble_data(
                 &mut streams,
             ],
         )
-    };
-    credit.post_sent(credit.available() - constraints.flow_ctrl.get());
-    result
+    }
 }

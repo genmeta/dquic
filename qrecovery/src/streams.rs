@@ -68,12 +68,16 @@ where
 /// and also write the frames and data received from peer to this data streams.
 ///
 /// The `TX` is the frame sender, it should be able to send the [`StreamCtlFrame`], including:
+/// - [`StreamCtlFrame::MaxData`]
+/// - [`StreamCtlFrame::DataBlocked`]
 /// - [`StreamCtlFrame::MaxStreamData`]
 /// - [`StreamCtlFrame::MaxStreams`]
 /// - [`StreamCtlFrame::StreamDataBlocked`]
 /// - [`StreamCtlFrame::StreamsBlocked`]
 /// - [`StreamCtlFrame::StopSending`]
 /// - [`StreamCtlFrame::ResetStream`]
+///
+/// Connection flow control and its MAX_DATA/DATA_BLOCKED frames are handled internally.
 ///
 /// See [`raw::DataStreams`] for more details.
 #[derive(Debug, Clone, Deref)]
@@ -143,7 +147,7 @@ where
     type Output = usize;
 
     fn recv_frame(&self, frame: StreamCtlFrame) -> Result<Self::Output, Error> {
-        self.0.recv_stream_control(frame).map_err(Error::Quic)
+        self.0.recv_stream_control(frame)
     }
 }
 
@@ -154,7 +158,7 @@ where
     type Output = usize;
 
     fn recv_frame(&self, frame: (StreamFrame, Bytes)) -> Result<Self::Output, Error> {
-        self.0.recv_data(frame).map_err(Error::Quic)
+        self.0.recv_data(frame)
     }
 }
 
