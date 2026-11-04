@@ -56,7 +56,7 @@ async fn early_probe_encoder_uses_published_data_and_the_updated_peer_cid() {
         encoder.encode_probe(frame).unwrap_err().kind(),
         std::io::ErrorKind::NotConnected
     );
-    paths.update_initial_dcid(client.peer_cid());
+    paths.progress.on_initial_received(client.peer_cid());
     super::install_data(&paths, &client);
     let Packet::Data(packet) = PacketReader::new(encoder.encode_probe(frame).unwrap(), 8)
         .next()
@@ -157,7 +157,7 @@ async fn receive(
         paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
-        paths.new_dcid(),
+        paths.cid_registry.remote.apply_dcid(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -289,7 +289,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         paths.progress.facts(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         paths.loss_resender.clone(),
-        paths.new_dcid(),
+        paths.cid_registry.remote.apply_dcid(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     let terminator = paths.terminator.clone();
@@ -606,14 +606,14 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let pair = pair();
         let (receiver, sender) = (&pair[receiver], &pair[1 - receiver]);
         let paths = empty_paths(receiver);
-        paths.update_initial_dcid(receiver.peer_cid());
+        paths.progress.on_initial_received(receiver.peer_cid());
         let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
         qprotocol::QuicProtocol::global()
             .register(local, &socket)
             .unwrap();
         let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
-        paths.select_path(&original);
+        paths.progress.on_path_selected(&paths, &original);
         super::install_data(&paths, receiver);
         super::confirm_handshake(&paths);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
@@ -824,7 +824,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             paths.progress.facts(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
             paths.loss_resender.clone(),
-            paths.new_dcid(),
+            paths.cid_registry.remote.apply_dcid(),
         ));
         paths
             .entries

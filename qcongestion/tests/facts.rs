@@ -9,7 +9,8 @@ mod facts;
 
 use facts::HandshakeFacts;
 
-const EVENTS: [fn(&HandshakeFacts) -> bool; 6] = [
+const EVENTS: [fn(&HandshakeFacts) -> bool; 7] = [
+    HandshakeFacts::on_initial_received,
     HandshakeFacts::install_handshake_key,
     HandshakeFacts::on_handshake_sent,
     HandshakeFacts::on_handshake_received,
@@ -22,12 +23,14 @@ const EVENTS: [fn(&HandshakeFacts) -> bool; 6] = [
 fn each_fact_reports_only_its_first_transition() {
     for role in [Role::Client, Role::Server] {
         let facts = HandshakeFacts::with_role(role);
+        assert!(!facts.has_received_initial());
         for event in EVENTS {
             assert!(event(&facts));
         }
         for event in EVENTS {
             assert!(!event(&facts));
         }
+        assert!(facts.has_received_initial());
     }
 }
 

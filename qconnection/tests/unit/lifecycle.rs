@@ -12,7 +12,7 @@ async fn confirmation_retires_spaces_and_allows_only_the_first_key_update() {
         let paths = &mature.paths;
         super::install_data(paths, &mature);
         let path = paths.add_path(crate::common::path_fixtures::pathway(37002));
-        paths.select_path(&path);
+        paths.progress.on_path_selected(paths, &path);
         assert!(mature.spaces.data.keys.update().is_err());
 
         std::thread::scope(|scope| {
@@ -59,8 +59,8 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
         let paths = &mature.paths;
         let initial = &mature.spaces.initial;
         let handshake = &mature.spaces.handshake;
-        assert!(paths.progress.install_handshake(paths, handshake.clone()));
-        assert!(!paths.progress.install_handshake(paths, handshake.clone()));
+        assert!(paths.progress.install_handshake(handshake.clone()));
+        assert!(!paths.progress.install_handshake(handshake.clone()));
         assert!(paths.progress.facts().has_handshake_key());
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
@@ -101,13 +101,11 @@ async fn progress_preserves_role_specific_crypto_and_key_retirement() {
             paths.loss_resender.read_guard().offset(),
             Epoch::Handshake as u64
         );
-        paths
-            .progress
-            .install_data(paths, mature.spaces.data.clone());
+        paths.progress.install_data(mature.spaces.data.clone());
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         assert!(!paths.progress.facts().is_handshake_done());
-        assert!(!paths.progress.install_handshake(paths, handshake.clone()));
+        assert!(!paths.progress.install_handshake(handshake.clone()));
         assert_eq!(paths.spaces.read_guard().len(), 2);
         assert_eq!(paths.loss_resender.read_guard().len(), 2);
         paths.retire_all();
@@ -175,7 +173,7 @@ async fn packet_events_retire_initial_from_both_queues() {
             ))),
             paths.is_mp_handshaking.clone(),
         ));
-        assert!(paths.progress.install_handshake(&paths, handshake.clone()));
+        assert!(paths.progress.install_handshake(handshake.clone()));
         paths.progress.on_handshake_sent();
         paths.progress.on_handshake_received();
         assert_eq!(spaces.read_guard().len(), 1);

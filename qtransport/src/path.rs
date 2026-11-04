@@ -1,6 +1,9 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
-    sync::{Arc, atomic::AtomicU16},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU16, Ordering},
+    },
     time::Duration,
 };
 
@@ -26,10 +29,13 @@ pub struct Path {
     pub send_waker: ArcSendWakers,
     pub validation: ArcValidation,
     pub heartbeat: ArcHeartbeat,
+    /// Payload eligibility; ACKs and heartbeats remain available while inactive.
+    is_active: AtomicBool,
 }
 
 impl Path {
     /// Construct a path using the connection's shared handshake lifecycle.
+    /// New paths stay inactive between handshake path selection and confirmation.
     pub fn new(
         pathway: Pathway,
         hs_facts: Arc<HandshakeFacts>,
@@ -37,6 +43,7 @@ impl Path {
         trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
         dcid: ArcDcid<ArcReliableFrames>,
     ) -> Self {
+        let is_active = !hs_facts.has_selected_path() || hs_facts.is_handshake_done();
         let send_waker = ArcSendWakers::default();
         let validation = ArcValidation::new();
         let cc = ArcCC::new(
@@ -54,7 +61,26 @@ impl Path {
             send_waker,
             validation,
             heartbeat,
+            is_active: AtomicBool::new(is_active),
         }
+    }
+
+    /// Allow payload collection and wake this path's sender.
+    pub fn enable(&self) {
+        if !self.is_active.swap(true, Ordering::AcqRel) {
+            self.send_waker.wake_all();
+        }
+    }
+
+    /// Keep ACKs and heartbeats running without collecting payload.
+    pub fn disable(&self) {
+        if self.is_active.swap(false, Ordering::AcqRel) {
+            self.send_waker.wake_all();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.is_active.load(Ordering::Acquire)
     }
 
     /// Account one successfully submitted datagram under the submission's CC lock.
@@ -94,6 +120,7 @@ impl Path {
     }
 
     pub fn close(&self) {
+        self.is_active.store(false, Ordering::Release);
         self.validation.cancel();
         self.dcid.retire();
         self.heartbeat.stop();

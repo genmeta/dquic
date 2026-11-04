@@ -96,6 +96,7 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
         cx: &mut Context<'_>,
         dcid: ConnectionId,
         pn: (u64, PacketNumber),
+        is_active: bool,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
@@ -104,7 +105,7 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
         if !buffer.begin(&header, pn.1, min_size) {
             return Poll::Ready(Ok(0));
         }
-        let mut crypto = self.crypto.outgoing();
+        let mut crypto = is_active.then(|| self.crypto.outgoing());
         let crypto: &mut dyn for<'b> Package<&'b mut [u8]> = &mut crypto;
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()

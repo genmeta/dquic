@@ -83,7 +83,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             let _ = path.heartbeat.on_rcvd_at(content, now);
             if let Some(dcid) = initial_scid {
                 // This runs before CRYPTO delivery can wake the TLS consumer.
-                paths.update_initial_dcid(dcid);
+                paths.progress.on_initial_received(dcid);
             }
             // An Initial ACK proves receipt, but does not identify the path
             // carrying the server's TLS flight. Keep racing until CRYPTO arrives.

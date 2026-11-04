@@ -19,6 +19,56 @@ use crate::{
 };
 
 #[tokio::test(start_paused = true)]
+async fn selection_disables_other_paths_and_confirmation_enables_them_for_validation() {
+    for role in [Role::Client, Role::Server] {
+        let (paths, data) = super::send::data_spaces(role, Duration::ZERO);
+        let make_path = |port| {
+            crate::common::registered_path(
+                &paths,
+                qtransport::path::Path::new(
+                    pathway(port),
+                    paths.progress.facts(),
+                    qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                    paths.loss_resender.clone(),
+                    paths.cid_registry.remote.apply_dcid(),
+                ),
+            )
+        };
+        let selected = make_path(30002);
+        let other = make_path(30003);
+        assert!(selected.is_active());
+        assert!(other.is_active());
+        assert!(paths.progress.on_path_selected(&paths, &selected));
+        assert!(selected.is_active());
+        assert!(!other.is_active());
+        let later = paths.add_path(pathway(30004));
+        assert!(!later.is_active());
+        super::install_data(&paths, &data);
+        super::confirm_handshake(&paths);
+        for path in [&selected, &other, &later] {
+            assert!(path.is_active());
+        }
+        assert!(selected.validation.is_validated());
+        assert!(paths.add_path(pathway(30005)).is_active());
+        tokio::task::yield_now().await;
+        if role == Role::Server {
+            assert!(!other.validation.is_validated());
+            assert!(matches!(
+                super::take_validation_frames(&other).as_slice(),
+                [Frame::PathChallenge(_)]
+            ));
+        }
+        other.disable();
+        paths.progress.on_handshake_done(&paths);
+        assert!(
+            !other.is_active(),
+            "duplicate confirmation must preserve later path management"
+        );
+        paths.retire_all();
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn existing_and_new_paths_observe_shared_handshake_progress_on_tick() {
     use qcongestion::Transport as _;
 
@@ -84,10 +134,7 @@ async fn clean_stops_idle_expiry_and_releases_paths_spaces_and_recovery() {
     for path in [&first, &second] {
         assert!(paths.validations.get(&path.pathway).is_none());
         assert!(path.validation.credit().is_err());
-        assert!(matches!(
-            super::borrow(&paths, path),
-            std::task::Poll::Ready(None)
-        ));
+        assert!(matches!(super::borrow(path), std::task::Poll::Ready(None)));
         assert!(
             path.heartbeat
                 .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
@@ -139,7 +186,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
         assert_eq!(crate::common::path_credit(path), usize::MAX);
         assert_eq!(super::selection(&paths, path), u8::MAX);
     }
-    paths.select_path(&first);
+    paths.progress.on_path_selected(&paths, &first);
     assert_eq!(super::selection(&paths, &first), 1);
     assert_eq!(super::selection(&paths, &second), 0);
     assert_eq!(super::selection(&paths, &incoming), 0);
@@ -147,9 +194,9 @@ async fn client_paths_are_exempt_without_local_challenges() {
     super::install_data(&paths, &mature);
     assert!(paths.add_path(pathway(30005)).validation.is_validated());
     assert!(
-        matches!(super::borrow(&paths, &first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
+        matches!(super::borrow(&first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
-    assert!(super::borrow(&paths, &second).is_pending());
+    assert!(super::borrow(&second).is_pending());
     super::confirm_handshake(&paths);
     let added = paths.add_path(pathway(30006));
     assert!(Arc::ptr_eq(&added, &paths.add_path(added.pathway)));
@@ -192,9 +239,9 @@ async fn selecting_a_live_handshake_path_stops_crypto_replay() {
         let stale = paths.add_path(pathway(30002));
         paths.del_path(&stale.pathway);
         let selected = paths.add_path(pathway(30002));
-        paths.select_path(&stale);
+        paths.progress.on_path_selected(&paths, &stale);
         assert!(is_mp_handshaking.load(Ordering::Relaxed));
-        paths.select_path(&selected);
+        paths.progress.on_path_selected(&paths, &selected);
         assert!(!is_mp_handshaking.load(Ordering::Relaxed));
         paths.retire_all();
     }
@@ -206,8 +253,8 @@ async fn removed_undecided_path_cannot_override_selection() {
     let stale = paths.add_path(pathway(30002));
     let selected = paths.add_path(pathway(30003));
     paths.del_path(&stale.pathway);
-    paths.select_path(&selected);
-    paths.select_path(&stale);
+    paths.progress.on_path_selected(&paths, &selected);
+    paths.progress.on_path_selected(&paths, &stale);
     assert_eq!(super::selection(&paths, &selected), 1);
     paths.retire_all();
 }
@@ -219,15 +266,15 @@ async fn reserved_initial_cell_is_bound_only_after_path_selection() {
     let second = paths.add_path(pathway(30003));
     super::install_data(&paths, &mature);
     assert!(
-        matches!(super::borrow(&paths, &first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
+        matches!(super::borrow(&first), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
     assert!(
-        matches!(super::borrow(&paths, &second), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
+        matches!(super::borrow(&second), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
-    paths.select_path(&second);
-    assert!(super::borrow(&paths, &first).is_pending());
+    paths.progress.on_path_selected(&paths, &second);
+    assert!(super::borrow(&first).is_pending());
     assert!(
-        matches!(super::borrow(&paths, &second), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
+        matches!(super::borrow(&second), std::task::Poll::Ready(Some(cid)) if cid == mature.peer_cid())
     );
     paths.retire_all();
 }
@@ -237,14 +284,17 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     let paths = paths(Role::Client);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
-    paths.select_path(&first);
+    paths.progress.on_path_selected(&paths, &first);
     paths.del_path(&first.pathway);
     let added = paths.add_path(pathway(30004));
     assert_eq!(super::selection(&paths, &added), 0);
-    paths.select_path(&second);
-    paths.select_path(&added);
+    paths.progress.on_path_selected(&paths, &second);
+    paths.progress.on_path_selected(&paths, &added);
     let remaining: Vec<_> = paths.entries.lock().unwrap().values().cloned().collect();
-    assert!(remaining.iter().all(|path| !paths.is_selected(path)));
+    assert!(
+        paths.progress.facts().is_handshake_done()
+            || remaining.iter().all(|path| !path.dcid.is_allocated())
+    );
     paths.retire_all();
 }
 
@@ -502,12 +552,14 @@ fn confirm_validation(paths: &Arc<Paths>) {
             paths.progress.facts(),
             qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
-            paths.new_dcid(),
+            paths.cid_registry.remote.apply_dcid(),
         ),
     );
-    paths.select_path(&selected);
+    paths.progress.on_path_selected(paths, &selected);
     paths.progress.facts().on_handshake_done();
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
     paths.cid_registry.remote.upgrade();
     for path in paths.entries.lock().unwrap().values() {
         path.dcid.upgrade();

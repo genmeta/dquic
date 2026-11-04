@@ -171,6 +171,7 @@ impl Encapsulate for DataSpace {
         cx: &mut Context<'_>,
         dcid: ConnectionId,
         pn: (u64, PacketNumber),
+        is_active: bool,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,
@@ -179,9 +180,9 @@ impl Encapsulate for DataSpace {
         if !buffer.begin(&header, pn.1, min_size) {
             return Poll::Ready(Ok(0));
         }
-        let mut crypto = self.crypto.outgoing();
-        let mut reliable = self.reliable_frames.clone();
-        let mut streams = self.streams.clone();
+        let mut crypto = is_active.then(|| self.crypto.outgoing());
+        let mut reliable = is_active.then(|| self.reliable_frames.clone());
+        let mut streams = is_active.then(|| self.streams.clone());
         let internal: [&mut dyn Package<&mut [u8]>; 3] = [&mut crypto, &mut reliable, &mut streams];
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()

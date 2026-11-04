@@ -25,6 +25,44 @@ impl std::task::Wake for Counter {
     }
 }
 
+#[tokio::test]
+async fn activation_changes_wake_the_sender_without_retiring_the_path() {
+    let path = Path::new(
+        Pathway::new(
+            "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
+            "127.0.0.1:5500".parse().unwrap(),
+        ),
+        Arc::new(HandshakeFacts::with_role(Role::Client)),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        ArcIndexDeque::default(),
+        qbase::cid::ArcRemoteCids::client(
+            Default::default(),
+            qtransport::ArcReliableFrames::with_capacity(0),
+        )
+        .apply_dcid(),
+    );
+    let counter = Arc::new(Counter(AtomicUsize::new(0)));
+    path.send_waker.register(&Waker::from(counter.clone()));
+    assert!(path.is_active());
+    path.disable();
+    path.disable();
+    assert!(!path.is_active());
+    assert!(!path.validation.is_cancelled());
+    assert!(
+        path.dcid
+            .poll_borrow(&mut Context::from_waker(Waker::noop()))
+            .is_ready()
+    );
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    path.enable();
+    path.enable();
+    assert!(path.is_active());
+    assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+    path.close();
+    assert!(!path.is_active());
+    assert!(path.validation.is_cancelled());
+}
+
 #[tokio::test(start_paused = true)]
 async fn handshake_events_stop_early_epoch_pto() {
     use qbase::Epoch;

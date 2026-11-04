@@ -9,6 +9,7 @@ use qbase::role::Role;
 pub struct HandshakeFacts {
     role: Role,
     path_selected: AtomicBool,
+    has_received_initial: AtomicBool,
     got_handshake_key: AtomicBool,
     has_sent_handshake: AtomicBool,
     has_received_handshake: AtomicBool,
@@ -22,6 +23,7 @@ impl HandshakeFacts {
         Self {
             role,
             path_selected: AtomicBool::new(false),
+            has_received_initial: AtomicBool::new(false),
             got_handshake_key: AtomicBool::new(false),
             has_sent_handshake: AtomicBool::new(false),
             has_received_handshake: AtomicBool::new(false),
@@ -38,6 +40,14 @@ impl HandshakeFacts {
 
     pub fn has_selected_path(&self) -> bool {
         self.path_selected.load(Ordering::Acquire)
+    }
+
+    pub fn on_initial_received(&self) -> bool {
+        !self.has_received_initial.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn has_received_initial(&self) -> bool {
+        self.has_received_initial.load(Ordering::Acquire)
     }
 
     pub fn install_handshake_key(&self) -> bool {

@@ -5,12 +5,13 @@
 ## 组件归属
 
 - `Paths`：持有 CID 注册表、包空间、恢复跟踪器、Puncher、路径表、验证、空闲计时和关闭状态。
-- `Progress`：串行处理握手事件、空间安装与退休、路径选择及握手确认；与每条路径的拥塞控制器共享握手事实。
+- `Path`：通过 `is_active`、`enable`、`disable` 管理自身激活状态。非激活路径只收集 ACK、心跳和关闭响应，保留排队的有效数据；停用时取消尚未提交的有效数据批次。选中握手路径时停用其他路径，握手确认后激活所有路径并启动验证。
+- `Progress`：串行处理首次 Initial 接收、空间安装与退休、路径选择及握手确认；与每条路径的拥塞控制器共享握手事实。
 - `Spaces`：只发布可以发送的空间。Handshake keys 到达后安装 Handshake；客户端 Data 资源就绪后安装 Data，服务端在客户端 Finished 验证成功后安装 Data。
 - `DataStreams`：持有连接级流控，在 STREAM 封装时预留和结算共享额度，接收 STREAM/RESET_STREAM 时记账，并处理 MAX_DATA/DATA_BLOCKED。
 - ACK 生成日志持有本地 delay exponent；DataSpace 持有对端 exponent。growing 协程验证并分发参数，Paths 和 Burst 不保存参数表。
 - `client_growing`、`server_growing`：消费 TLS 密钥和结果，组装组件，推进接收拓扑与关闭流程。
-- 路径发送任务：每轮 Burst 读取空间快照，结合 ACK、路径验证、心跳、拥塞和反放大预算组包，再批量发送。空间安装及首次 peer SCID 更新通过 `Path::send_waker` 唤醒任务。
+- 路径发送任务：每轮 Burst 读取空间快照，结合 ACK、路径验证、心跳、拥塞和反放大预算组包，再批量发送。空间安装通过 `Path::send_waker` 唤醒任务；首次 peer SCID 由 `Progress` 记录，CID cell 只唤醒等待该 CID 的选中路径。
 - `Paths::add_path`、`get_or_create_path`：登记或复用同一 Pathway 的路径，启动该路径唯一的发送任务。`del_path` 删除路径并停止其任务。
 
 ## 全局入口

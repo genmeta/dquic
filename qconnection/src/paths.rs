@@ -6,7 +6,6 @@ use std::{
 
 use qbase::{
     Epoch,
-    cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
@@ -24,9 +23,11 @@ use qtransport::{
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use super::progress::ArcProgress;
-use crate::{ArcDcid, ArcReliableFrames, ArcResend, CidRegistry, CloseReason};
+use crate::{ArcReliableFrames, ArcResend, CidRegistry, CloseReason};
 
-/// Shared connection resources and path control. Every path has exactly one sending task.
+/// Manages the path collection and holds shared resources for path sending tasks.
+/// Call components such as `progress` directly for their own operations.
+/// Every path has exactly one sending task.
 pub struct Paths {
     pub cid_registry: CidRegistry,
     pub puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
@@ -34,7 +35,7 @@ pub struct Paths {
     pub reliable_frames: ArcReliableFrames,
     pub(crate) loss_resender: ArcResend,
     pub terminator: ArcTerminator,
-    pub(crate) progress: ArcProgress,
+    pub progress: ArcProgress,
     /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
     pub(crate) is_mp_handshaking: Arc<AtomicBool>,
     pub entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
@@ -74,6 +75,7 @@ impl Paths {
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(
             role,
+            cid_registry.clone(),
             spaces.clone(),
             loss_resender.clone(),
             terminator.clone(),
@@ -148,6 +150,13 @@ impl Paths {
         true
     }
 
+    /// Wake every registered path's sending task.
+    pub fn wake_all_to_send(&self) {
+        for path in self.entries.lock().unwrap().values() {
+            path.send_waker.wake_all();
+        }
+    }
+
     /// Opening-key retention needs a PTO before an unknown path is admitted.
     /// Use existing path measurements without allocating a path or sender.
     pub(crate) fn pto_for(&self, pathway: &Pathway, epoch: Epoch) -> Duration {
@@ -187,44 +196,6 @@ impl Paths {
         path
     }
 
-    /// Construct a distinct CID source for a path added by a connection driver.
-    pub fn new_dcid(&self) -> ArcDcid {
-        let _entries = self.entries.lock().unwrap();
-        self.cid_registry.remote.apply_dcid()
-    }
-
-    pub fn update_initial_dcid(&self, cid: ConnectionId) {
-        if self.cid_registry.remote.on_receive_from(cid) {
-            for path in self.entries.lock().unwrap().values() {
-                path.send_waker.wake_all();
-            }
-        }
-    }
-
-    pub fn select_path(&self, path: &Arc<Path>) -> bool {
-        self.progress.on_path_selected(self, path)
-    }
-
-    pub fn is_initial(&self) -> bool {
-        !self.progress.facts().has_selected_path()
-    }
-
-    pub fn is_confirmed(&self) -> bool {
-        self.progress.facts().is_handshake_done()
-    }
-
-    pub fn is_selected(&self, path: &Path) -> bool {
-        !self.is_confirmed() && path.dcid.is_allocated()
-    }
-
-    /// A ready CID does not open additional paths before handshake confirmation.
-    pub(crate) fn can_send(&self, path: &Path) -> bool {
-        let facts = self.progress.facts();
-        // Wait for the path bindings and validation associated with a transition.
-        let _entries = self.entries.lock().unwrap();
-        !facts.has_selected_path() || facts.is_handshake_done() || path.dcid.is_allocated()
-    }
-
     pub(crate) fn role(&self) -> Role {
         self.role
     }
@@ -261,7 +232,7 @@ impl Paths {
     /// Spawn one round at path creation or handshake confirmation.
     /// After revalidation, the caller explicitly starts the next round.
     pub fn start_validation(self: &Arc<Self>, path: &Arc<Path>) {
-        if !self.is_confirmed() {
+        if !self.progress.facts().is_handshake_done() {
             return;
         }
         self.spawn_validation(path);

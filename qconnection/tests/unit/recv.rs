@@ -422,8 +422,12 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             for corrupt in [true, false] {
                 let (paths, first, _) = paths(role);
-                let dcid = paths.new_dcid();
+                let dcid = paths.cid_registry.remote.apply_dcid();
                 receive_ping(role, epoch, corrupt, &paths, &first).await;
+                assert_eq!(
+                    paths.progress.facts().has_received_initial(),
+                    !corrupt && epoch == Epoch::Initial
+                );
                 assert!(!paths.progress.facts().has_handshake_key());
                 assert_eq!(
                     crate::common::cid_value(&dcid),
@@ -445,7 +449,7 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
 async fn client_selects_handshake_but_not_initial_ping() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let (paths, first, second) = paths(Role::Client);
-        let dcid = paths.new_dcid();
+        let dcid = paths.cid_registry.remote.apply_dcid();
         assert!(!paths.progress.facts().has_handshake_key());
         let original_dcid = crate::common::cid_value(&dcid);
         assert_eq!(
@@ -561,7 +565,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     );
     assert!(ipv6.cc.need_ack(Epoch::Initial).is_none());
     assert_eq!(
-        crate::common::cid_value(&paths.new_dcid()),
+        crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()),
         ConnectionId::from_slice(b"peercid0")
     );
 
@@ -752,7 +756,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     use crate::send::{Burst, MAX_BURST_PACKETS};
 
     let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
-    paths.update_initial_dcid(mature.peer_cid());
+    paths.progress.on_initial_received(mature.peer_cid());
     super::install_handshake(&paths, mature.spaces.handshake.clone());
     let make_path = |port| {
         let path = crate::common::registered_path(
@@ -765,7 +769,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
                 paths.progress.facts(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 paths.loss_resender.clone(),
-                paths.new_dcid(),
+                paths.cid_registry.remote.apply_dcid(),
             ),
         );
         path.validation.enter_validated().unwrap();
@@ -788,12 +792,8 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         .await
         .unwrap();
     assert!(paths.progress.facts().has_handshake_key());
-    assert!(
-        matches!(super::borrow(&paths, &first), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
-    );
-    assert!(
-        matches!(super::borrow(&paths, &second), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
-    );
+    assert!(matches!(super::borrow(&first), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
+    assert!(matches!(super::borrow(&second), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
     assert_eq!(
         (
             super::selection(&paths, &first),
@@ -851,17 +851,13 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         ),
         (0, 1)
     );
-    assert!(
-        matches!(super::borrow(&paths, &second), Poll::Ready(Some(cid)) if cid == mature.peer_cid())
-    );
+    assert!(matches!(super::borrow(&second), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
 
     // Publish Data only after the server has completed TLS.
-    paths
-        .progress
-        .install_data(&paths, mature.spaces.data.clone());
+    paths.progress.install_data(mature.spaces.data.clone());
     assert!(paths.spaces.read_guard().get(Epoch::Data as u64).is_some());
-    assert!(super::borrow(&paths, &first).is_pending());
-    assert!(matches!(super::borrow(&paths, &second),
+    assert!(super::borrow(&first).is_pending());
+    assert!(matches!(super::borrow(&second),
         Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
     mature
         .spaces
@@ -912,7 +908,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                     paths.progress.facts(),
                     ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
                     paths.loss_resender.clone(),
-                    paths.new_dcid(),
+                    paths.cid_registry.remote.apply_dcid(),
                 ),
             );
             paths

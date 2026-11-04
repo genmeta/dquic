@@ -296,12 +296,14 @@ pub trait Encapsulate: Transmit {
     /// Returns `None` after the space's sending keys have retired.
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize>;
 
+    /// Include CRYPTO and application sources only when the sending path is active.
     #[allow(clippy::too_many_arguments)]
     fn encapsulate(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
         pn: (u64, PacketNumber),
+        is_active: bool,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut PacketBuffer<'_, &mut [u8]>,
         min_size: Option<usize>,

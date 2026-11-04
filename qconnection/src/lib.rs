@@ -17,6 +17,7 @@ use std::sync::Arc;
 pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
 pub use lifecycle::{Interceptor, client_growing, server_growing};
 pub use paths::Paths;
+pub use progress::ArcProgress;
 use qbase::util::ArcIndexDeque;
 pub use qbase::{
     error::Error,

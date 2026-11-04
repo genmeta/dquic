@@ -14,7 +14,7 @@ use qbase::{
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{GuaranteedFrame, PingFrame},
-    packet::{Package, assemble::Metadata},
+    packet::{Package, PacketContent, assemble::Metadata},
 };
 use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
@@ -97,11 +97,20 @@ impl<'a, 'path> Burst<'a, 'path> {
         let mut first = 0;
         while first < count {
             let mut sent_handshake = false;
-            let sent = poll_fn(|cx| -> Poll<std::io::Result<usize>> {
+            let sent = poll_fn(|cx| -> Poll<std::io::Result<Option<usize>>> {
                 // ACK handling takes the same lock as submission and completion.
                 let mut cc = path.cc.lock();
                 // Retirement also cancels a batch already waiting for UDP writability.
                 path.validation.credit().map_err(std::io::Error::other)?;
+                if !path.is_active()
+                    && self.packets[first..count]
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .any(|meta| meta.content == PacketContent::EffectivePayload)
+                {
+                    return Poll::Ready(Ok(None));
+                }
                 let sent = ready!(QuicProtocol::global().poll_send(
                     cx,
                     path.pathway,
@@ -131,10 +140,14 @@ impl<'a, 'path> Burst<'a, 'path> {
                         .map_or(0, |credit| credit.unwrap_or(usize::MAX)),
                     QuicProtocol::packet_overhead(path.pathway),
                 );
-                Poll::Ready(Ok(sent))
+                Poll::Ready(Ok(Some(sent)))
             })
             .await
             .map_err(no_viable_path)?;
+            let Some(sent) = sent else {
+                self.cancel();
+                return Ok(());
+            };
             if sent_handshake {
                 self.paths.progress.on_handshake_sent();
             }
@@ -158,9 +171,6 @@ impl Burst<'_, '_> {
         path.send_waker.register(cx.waker());
         if path.validation.is_cancelled() {
             return Poll::Ready(Err(no_viable_path("path CID binding retired")));
-        }
-        if !self.paths.can_send(path) {
-            return Poll::Pending;
         }
         let cid = ready!(path.dcid.poll_borrow(cx))
             .ok_or_else(|| no_viable_path("path CID binding retired"))?;
@@ -239,6 +249,8 @@ impl Burst<'_, '_> {
         let dcids = [Some(dcid); 3];
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
+            let is_active = path.is_active();
+            let mut validation = is_active.then_some(&mut validation);
             // A sealed packet consumes its epoch's PTO allowance, even without a PING.
             let mut probes = Epoch::EPOCHS
                 .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
@@ -259,6 +271,7 @@ impl Burst<'_, '_> {
             let (size, _) = spaces.package(
                 cx,
                 dcids,
+                is_active,
                 &mut sources,
                 buffer,
                 limits,
