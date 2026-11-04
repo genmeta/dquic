@@ -508,7 +508,7 @@ fn confirm_validation(paths: &Arc<Paths>) {
     paths.select_path(&selected);
     paths.progress.facts().on_handshake_done();
     paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.phase().remote_cids().upgrade();
+    paths.cid_registry.remote.upgrade();
     for path in paths.entries.lock().unwrap().values() {
         path.dcid.upgrade();
     }

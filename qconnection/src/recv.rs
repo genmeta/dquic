@@ -20,9 +20,7 @@ use qtransport::{
 use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 use tokio::time::Instant;
 
-use crate::{
-    ArcHandshake, ArcParameters, ArcReliableFrames, CidRegistry, ConnPhase, FlowController, Paths,
-};
+use crate::{ArcHandshake, ArcParameters, ArcReliableFrames, ConnPhase, FlowController, Paths};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -157,7 +155,6 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
     paths: Arc<Paths>,
     parameters: ArcParameters,
-    cid_registry: CidRegistry,
     tokens: ArcTokenRegistry,
     handshake: ArcHandshake,
 ) {
@@ -227,10 +224,10 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                     Frame::MaxData(frame) => flow.sender.recv_frame(frame)?,
                     Frame::DataBlocked(frame) => flow.recver.recv_frame(frame)?,
                     Frame::NewConnectionId(frame) => {
-                        cid_registry.remote.recv_frame(frame)?;
+                        paths.cid_registry.remote.recv_frame(frame)?;
                     }
                     Frame::RetireConnectionId(frame) => {
-                        cid_registry.local.recv_frame(frame)?;
+                        paths.cid_registry.local.recv_frame(frame)?;
                     }
                     Frame::NewToken(frame) => {
                         tokens.recv_frame(frame)?;

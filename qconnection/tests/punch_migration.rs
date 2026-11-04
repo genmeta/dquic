@@ -90,8 +90,8 @@ impl Drop for Peer {
         if let ConnPhase::Mature(phase) = self.phase.get() {
             phase.puncher.abort_transactions();
             phase.puncher.release_temporary_sockets();
-            phase.cid_registry.local.clear();
         }
+        self.paths.cid_registry.local.clear();
         common::retire_all(&self.paths);
         self.growing.abort();
     }
@@ -130,9 +130,11 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let paths = Paths::new(
             initial_space.clone(),
             Role::Server,
-            qbase::cid::ArcRemoteCids::server(*packet.scid(), reliable.clone()),
+            qconnection::CidRegistry::new(
+                local_cids,
+                qconnection::ArcRemoteCids::server(*packet.scid(), reliable.clone()),
+            ),
             reliable,
-            local_cids,
             Duration::ZERO,
             Duration::ZERO,
             pending_as_lost,
@@ -177,9 +179,11 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        qbase::cid::ArcRemoteCids::client(odcid, reliable.clone()),
+        qconnection::CidRegistry::new(
+            local_cids,
+            qconnection::ArcRemoteCids::client(odcid, reliable.clone()),
+        ),
         reliable,
-        local_cids,
         Duration::ZERO,
         Duration::ZERO,
         pending_as_lost,

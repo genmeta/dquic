@@ -60,7 +60,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         Arc::new(qcongestion::HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
-        qbase::cid::ArcRemoteCids::client(
+        qconnection::ArcRemoteCids::client(
             Default::default(),
             qconnection::ArcReliableFrames::with_capacity(0),
         )

@@ -279,7 +279,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                         paths.select_path(&path);
                         paths.progress.facts().on_handshake_done();
                         paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-                        paths.phase().remote_cids().upgrade();
+                        paths.cid_registry.remote.upgrade();
                         for path in paths.entries.lock().unwrap().values() {
                             path.dcid.upgrade();
                         }
@@ -534,11 +534,8 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
         Arc::new(ServerParameters::default()),
     );
     let terminator = &paths.terminator;
-    let registry = crate::CidRegistry::new(
-        crate::common::initial_phase(&paths).local_cids.clone(),
-        paths.phase().remote_cids(),
-    );
-    registry
+    paths
+        .cid_registry
         .remote
         .set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
     paths.update_initial_dcid(parameters.remote(ParameterId::InitialSourceConnectionId));
@@ -583,7 +580,6 @@ pub(super) fn mature_phase(role: Role, defer: Duration) -> (Arc<Paths>, super::M
     };
     let mature = Arc::new(MaturePhase {
         flow_ctrl: flow,
-        cid_registry: registry,
         parameters,
         puncher,
     });
@@ -681,18 +677,27 @@ async fn phase_upgrade_wakes_senders_and_releases_subscriptions() {
 #[tokio::test]
 async fn phase_upgrades_preserve_cid_cleanup_and_termination() {
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
-    let local_cids = crate::common::initial_phase(&paths).local_cids.clone();
+    let cid_registry = paths.cid_registry.clone();
+    let scid = cid_registry.local.initial_scid();
+    let dcid = cid_registry.remote.apply_dcid();
+    assert!(scid.is_some());
     let terminator = paths.terminator.clone();
     let phase = paths.phase();
     super::enter_handshake(&paths, mature.spaces.handshake.clone());
-    let ConnPhase::Handshake(handshake) = phase.get() else {
+    let ConnPhase::Handshake(_) = phase.get() else {
         panic!("expected Handshake");
     };
+    assert_eq!(paths.cid_registry.local.initial_scid(), scid);
+    assert_eq!(crate::common::cid_value(&dcid), mature.peer_cid());
     super::enter_mature(&paths, &mature);
+    assert_eq!(paths.cid_registry.local.initial_scid(), scid);
+    assert_eq!(
+        crate::common::cid_value(&paths.new_dcid()),
+        mature.peer_cid()
+    );
 
-    local_cids.clear();
-    assert!(handshake.local_cids.initial_scid().is_none());
-    assert!(mature.cid_registry.local.initial_scid().is_none());
+    cid_registry.local.clear();
+    assert!(paths.cid_registry.local.initial_scid().is_none());
     terminator.terminate();
     let error = terminator.now_or_never().unwrap();
     assert_eq!(paths.terminator.clone().now_or_never(), Some(error));
@@ -789,7 +794,7 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
     use qbase::frame::{NewConnectionIdFrame, io::ReceiveFrame};
 
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     let next = ConnectionId::from_slice(b"client01");
     remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
@@ -848,7 +853,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     };
 
     let (paths, mature) = mature_phase(Role::Server, Duration::ZERO);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     let initial_cell = remote.apply_dcid();
     initial_cell.upgrade();
     super::enter_mature(&paths, &mature);
@@ -1025,7 +1030,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         .await
         .unwrap();
     paths.progress.facts().on_handshake_done();
-    paths.phase().remote_cids().upgrade();
+    paths.cid_registry.remote.upgrade();
     assert!(matches!(
         collect(Burst::new(
             &paths,
@@ -1817,7 +1822,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     paths.select_path(&selected);
     super::enter_mature(&paths, &mature);
     super::confirm_handshake(&paths);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     let old = ConnectionId::from_slice(b"client01");
     remote
         .recv_frame(NewConnectionIdFrame::new(old, 1u32.into(), 0u32.into()))

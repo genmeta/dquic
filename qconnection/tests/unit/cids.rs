@@ -46,25 +46,30 @@ fn ready(paths: &Paths, path: &Path) -> ConnectionId {
 
 #[tokio::test(start_paused = true)]
 async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
-    let paths = paths(Role::Client);
-    let a = path(&paths, 4001);
-    let b = path(&paths, 4002);
-    let original = ready(&paths, &a);
-    assert_eq!(original, ready(&paths, &b));
-    let peer = ConnectionId::from_slice(b"peer0000");
-    let counter = Arc::new(Counter::default());
-    let waker = Waker::from(counter.clone());
-    let phase = paths.phase();
-    drop(phase.poll_phase(&mut Context::from_waker(&waker)));
-    paths.update_initial_dcid(peer);
-    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-    paths.update_initial_dcid(ConnectionId::from_slice(b"ignored0"));
-    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-    assert_ne!(original, peer);
-    assert_eq!(ready(&paths, &a), peer);
-    assert_eq!(ready(&paths, &b), peer);
-    assert_eq!(ready(&paths, &path(&paths, 4003)), peer);
-    paths.retire_all();
+    for handshaking in [false, true] {
+        let paths = paths(Role::Client);
+        let a = path(&paths, 4001);
+        let b = path(&paths, 4002);
+        let original = ready(&paths, &a);
+        assert_eq!(original, ready(&paths, &b));
+        let peer = ConnectionId::from_slice(b"peer0000");
+        let counter = Arc::new(Counter::default());
+        let waker = Waker::from(counter.clone());
+        let phase = paths.phase();
+        if handshaking {
+            phase.enter_handshake();
+        }
+        drop(phase.poll_phase(&mut Context::from_waker(&waker)));
+        paths.update_initial_dcid(peer);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        paths.update_initial_dcid(ConnectionId::from_slice(b"ignored0"));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_ne!(original, peer);
+        assert_eq!(ready(&paths, &a), peer);
+        assert_eq!(ready(&paths, &b), peer);
+        assert_eq!(ready(&paths, &path(&paths, 4003)), peer);
+        paths.retire_all();
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -77,7 +82,7 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
         paths.update_initial_dcid(initial);
         let other = path(&paths, 4001);
         let selected = path(&paths, 4002);
-        let remote = &mature.cid_registry.remote;
+        let remote = &paths.cid_registry.remote;
         remote
             .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
             .unwrap();
@@ -121,7 +126,7 @@ async fn concurrent_selection_registry_installation_and_path_creation_preserve_c
     let selected = paths.add_path(pathway(4001));
     let initial = mature.peer_cid();
     let next = ConnectionId::from_slice(b"peer0001");
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
         .unwrap();
@@ -186,7 +191,7 @@ async fn removal_before_registry_installation_still_reserves_zero_for_the_old_ha
     let other = path(&paths, 4002);
     paths.select_path(&old);
     paths.del_path(&old.pathway);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     super::enter_mature(&paths, &mature);
     let next = ConnectionId::from_slice(b"peer0001");
     remote
@@ -209,7 +214,7 @@ async fn the_handshake_cell_rotates_before_confirmation_after_refresh() {
     let initial = mature.peer_cid();
     let selected = path(&paths, 4001);
     paths.select_path(&selected);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     assert!(matches!(paths.phase().get(), crate::ConnPhase::Initial(_)));
     let pinned = selected
         .dcid
@@ -242,7 +247,7 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     let selected = path(&paths, 4001);
     let other = path(&paths, 4002);
     paths.select_path(&selected);
-    let remote = &mature.cid_registry.remote;
+    let remote = &paths.cid_registry.remote;
     super::enter_mature(&paths, &mature);
     let counter = Arc::new(Counter::default());
     let waker = Waker::from(counter.clone());
@@ -326,7 +331,7 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
             assert_eq!(burst.dcid, Some(mature.peer_cid()));
         }
         let next = ConnectionId::from_slice(b"client01");
-        mature
+        paths
             .cid_registry
             .remote
             .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
@@ -374,7 +379,7 @@ async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_send
     assert!(close.notified().is_none());
     assert!(paths.entries.lock().unwrap().contains_key(&live.pathway));
     let next = ConnectionId::from_slice(b"client01");
-    mature
+    paths
         .cid_registry
         .remote
         .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))

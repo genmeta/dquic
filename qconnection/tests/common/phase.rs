@@ -91,11 +91,7 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
                 std::time::Duration::ZERO,
                 pending_as_lost.clone(),
             );
-            let registry = qconnection::CidRegistry::new(
-                super::initial_phase(&paths).local_cids.clone(),
-                paths.phase().remote_cids(),
-            );
-            registry.remote.set_limit(2);
+            paths.cid_registry.remote.set_limit(2);
             paths.update_initial_dcid(peer);
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
@@ -135,7 +131,6 @@ pub fn pair() -> [Arc<MatureFixture>; 2] {
             };
             let phase = Arc::new(MaturePhase {
                 flow_ctrl: flow,
-                cid_registry: registry,
                 parameters,
                 puncher,
             });

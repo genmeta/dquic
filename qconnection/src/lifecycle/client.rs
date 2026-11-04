@@ -19,8 +19,8 @@ use qtraversal::punch::{ArcPuncher, ProbeEncoder};
 
 use super::{any, finish};
 use crate::{
-    ArcParameters, CidRegistry, ConnPhase, Connected, DataStreams, Error, FlowController,
-    MaturePhase, Paths, TlsContext,
+    ArcParameters, ConnPhase, Connected, DataStreams, Error, FlowController, MaturePhase, Paths,
+    TlsContext,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -43,18 +43,18 @@ pub async fn client_growing(
     let progress = &paths.progress;
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(tls_context.clone()));
-    let ConnPhase::Initial(initial_phase) = phase.get() else {
+    let ConnPhase::Initial(_) = phase.get() else {
         unreachable!("client_growing starts with InitialPhase")
     };
 
     let reliable_frames = paths.reliable_frames.clone();
-    let local_cids = initial_phase.local_cids.clone();
+    let cid_registry = &paths.cid_registry;
     let scid = initial_space.initial_scid;
-    let odcid = local_cids.origin_dcid();
-    let remote_cids = phase.remote_cids();
-    remote_cids.set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
-    let handshake_dcid = remote_cids.apply_dcid();
-    drop(initial_phase);
+    let odcid = cid_registry.local.origin_dcid();
+    cid_registry
+        .remote
+        .set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
+    let handshake_dcid = cid_registry.remote.apply_dcid();
 
     let discovery = tokio::spawn({
         let paths = paths.clone();
@@ -122,8 +122,9 @@ pub async fn client_growing(
                 Arc::new(tls_context.read_server_parameters().await?),
             );
             parameters.authenticate_cids(Requirements::require_server(server_scid, odcid))?;
-            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
-            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
+            cid_registry
+                .local
+                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             let keys = ArcOneRttKeys::from(tls_context.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
                 parameters.local(ParameterId::InitialMaxStreamsBidi),
@@ -156,7 +157,6 @@ pub async fn client_growing(
             paths.enter_mature(Arc::new(MaturePhase {
                 parameters: parameters.clone(),
                 flow_ctrl: flow_ctrl.clone(),
-                cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
             }));
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
@@ -169,7 +169,6 @@ pub async fn client_growing(
                 puncher.clone(),
                 paths.clone(),
                 parameters,
-                cid_registry.clone(),
                 token_registry,
                 handshake_done.clone(),
             ));
@@ -224,7 +223,7 @@ pub async fn client_growing(
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(reason.clone()));
-            return shutdown(&paths, &local_cids, reason, discovery).await;
+            return shutdown(&paths, reason, discovery).await;
         }
     };
     established(Ok(connected));
@@ -247,20 +246,15 @@ pub async fn client_growing(
             reason
         }
     };
-    shutdown(&paths, &local_cids, reason, discovery).await
+    shutdown(&paths, reason, discovery).await
 }
 
-async fn shutdown(
-    paths: &Paths,
-    local_cids: &crate::ArcLocalCids,
-    error: Error,
-    discovery: tokio::task::JoinHandle<()>,
-) -> Error {
+async fn shutdown(paths: &Paths, error: Error, discovery: tokio::task::JoinHandle<()>) -> Error {
     // Stop discovery before path cleanup so late DNS results cannot create senders.
     discovery.abort();
     let _ = discovery.await;
     let reason = finish(paths, error).await;
-    local_cids.clear();
+    paths.cid_registry.local.clear();
     reason
 }
 
