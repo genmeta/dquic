@@ -255,34 +255,26 @@ pub fn initial_paths_with_timeouts(
     ));
     let remote_cids = match role {
         qbase::role::Role::Client => {
-            qbase::cid::ArcRemoteCids::client(odcid, reliable_frames.clone())
+            qconnection::ArcRemoteCids::client(odcid, reliable_frames.clone())
         }
         qbase::role::Role::Server => {
-            qbase::cid::ArcRemoteCids::server(odcid, reliable_frames.clone())
+            qconnection::ArcRemoteCids::server(odcid, reliable_frames.clone())
         }
     };
     remote_cids.set_limit(10);
     qconnection::Paths::new(
         initial_space,
         role,
-        remote_cids,
+        qconnection::CidRegistry::new(local_cids, remote_cids),
         reliable_frames,
-        local_cids,
         max_idle_timeout,
         defer_idle_timeout,
         pending_as_lost,
     )
 }
 
-pub fn initial_phase(paths: &qconnection::Paths) -> Arc<qconnection::InitialPhase> {
-    let qconnection::ConnPhase::Initial(initial) = paths.phase().get() else {
-        panic!("expected Initial");
-    };
-    initial
-}
-
 /// Read and return one test batch through its already applied CID handle.
-pub fn cid_value(dcid: &qbase::cid::ArcDcid<qconnection::ArcReliableFrames>) -> ConnectionId {
+pub fn cid_value(dcid: &qconnection::ArcDcid) -> ConnectionId {
     let std::task::Poll::Ready(Some(cid)) =
         dcid.poll_borrow(&mut std::task::Context::from_waker(std::task::Waker::noop()))
     else {
@@ -293,9 +285,9 @@ pub fn cid_value(dcid: &qbase::cid::ArcDcid<qconnection::ArcReliableFrames>) -> 
 }
 
 /// A ready CID cell for component tests that do not run the connection lifecycle.
-pub fn dcid(cid: ConnectionId) -> qbase::cid::ArcDcid<qconnection::ArcReliableFrames> {
+pub fn dcid(cid: ConnectionId) -> qconnection::ArcDcid {
     let remote =
-        qbase::cid::ArcRemoteCids::server(cid, qconnection::ArcReliableFrames::with_capacity(0));
+        qconnection::ArcRemoteCids::server(cid, qconnection::ArcReliableFrames::with_capacity(0));
     remote.upgrade();
     remote.apply_dcid()
 }

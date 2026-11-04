@@ -181,7 +181,7 @@ impl Progress {
                 resender.pop_front();
             }
         }
-        self.phase.remote_cids().upgrade();
+        paths.cid_registry.remote.upgrade();
         for path in entries.values() {
             if path.dcid.is_allocated() {
                 let _ = path.validation.enter_validated();

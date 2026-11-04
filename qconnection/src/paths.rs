@@ -6,7 +6,7 @@ use std::{
 
 use qbase::{
     Epoch,
-    cid::{ArcDcid, ArcRemoteCids, ConnectionId},
+    cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     net::route::Pathway,
@@ -24,13 +24,14 @@ use qtransport::{
 
 use super::progress::ArcProgress;
 use crate::{
-    ArcConnPhase, ArcLocalCids, ArcReliableFrames, ArcResend, CloseReason, ConnPhase, InitialPhase,
-    MaturePhase,
+    ArcConnPhase, ArcDcid, ArcReliableFrames, ArcResend, CidRegistry, CloseReason, ConnPhase,
+    InitialPhase, MaturePhase,
 };
 
 /// Shared connection resources and path control. Every path has exactly one sending task.
 pub struct Paths {
     phase: ArcConnPhase,
+    pub cid_registry: CidRegistry,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
     pub(crate) loss_resender: ArcResend,
@@ -47,13 +48,11 @@ pub struct Paths {
 }
 
 impl Paths {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_space: Arc<InitialSpace>,
         role: Role,
-        remote_cids: ArcRemoteCids<ArcReliableFrames>,
+        cid_registry: CidRegistry,
         reliable_frames: ArcReliableFrames,
-        local_cids: ArcLocalCids,
         max_idle_timeout: Duration,
         defer_idle_timeout: Duration,
         is_mp_handshaking: Arc<AtomicBool>,
@@ -70,7 +69,7 @@ impl Paths {
             .write_guard()
             .push_back(initial_space)
             .expect("Initial epoch");
-        let phase = ArcConnPhase::initial(InitialPhase::new(remote_cids, local_cids));
+        let phase = ArcConnPhase::initial(InitialPhase::default());
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(
             role,
@@ -81,6 +80,7 @@ impl Paths {
         );
         let paths = Arc::new(Self {
             phase,
+            cid_registry,
             spaces,
             reliable_frames,
             loss_resender,
@@ -172,7 +172,7 @@ impl Paths {
                 *self.max_idle_timeout.lock().unwrap(),
             ),
             self.loss_resender.clone(),
-            self.phase.remote_cids().apply_dcid(),
+            self.cid_registry.remote.apply_dcid(),
         ));
         if self.role == Role::Client {
             let _ = path.validation.exempt();
@@ -188,13 +188,19 @@ impl Paths {
     }
 
     /// Construct a distinct CID source for a path added by a connection driver.
-    pub fn new_dcid(&self) -> ArcDcid<ArcReliableFrames> {
+    pub fn new_dcid(&self) -> ArcDcid {
         let _entries = self.entries.lock().unwrap();
-        self.phase.remote_cids().apply_dcid()
+        self.cid_registry.remote.apply_dcid()
     }
 
     pub fn update_initial_dcid(&self, cid: ConnectionId) {
-        self.phase.on_receive_from(cid);
+        if self.cid_registry.remote.on_receive_from(cid) {
+            match self.phase.get() {
+                ConnPhase::Initial(p) => p.upgrade_wakers.wake_all(),
+                ConnPhase::Handshake(p) => p.upgrade_wakers.wake_all(),
+                ConnPhase::Mature(_) => {}
+            }
+        }
     }
 
     pub fn select_path(&self, path: &Arc<Path>) -> bool {

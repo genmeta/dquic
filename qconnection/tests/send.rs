@@ -940,8 +940,8 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
             1 => paths.update_initial_dcid(ConnectionId::from_slice(b"server00")),
             _ => {
                 paths
-                    .phase()
-                    .remote_cids()
+                    .cid_registry
+                    .remote
                     .recv_frame(NewConnectionIdFrame::new(
                         ConnectionId::from_slice(b"server00"),
                         1u32.into(),

@@ -19,8 +19,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcLocalCids, ArcParameters, CidRegistry, DataStreams, Error, FlowController, Interceptor,
-    MaturePhase, Paths, ServerRegistry,
+    ArcParameters, DataStreams, Error, FlowController, Interceptor, MaturePhase, Paths,
+    ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -36,16 +36,15 @@ pub async fn server_growing(
 ) -> Error {
     let phase = paths.phase();
     let progress = &paths.progress;
-    let crate::ConnPhase::Initial(initial_phase) = phase.get() else {
+    let crate::ConnPhase::Initial(_) = phase.get() else {
         unreachable!("server_growing starts with InitialPhase")
     };
     let terminator = paths.terminator.clone();
     let reliable_frames = paths.reliable_frames.clone();
-    let local_cids = initial_phase.local_cids.clone();
+    let cid_registry = &paths.cid_registry;
     let scid = initial_space.initial_scid;
-    let origin_dcid = local_cids.origin_dcid();
-    let handshake_dcid = phase.remote_cids().apply_dcid();
-    drop(initial_phase);
+    let origin_dcid = cid_registry.local.origin_dcid();
+    let handshake_dcid = cid_registry.remote.apply_dcid();
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames(
         (rcvd_pkt.initial, None),
@@ -66,13 +65,12 @@ pub async fn server_growing(
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
-            return shutdown(&paths, &local_cids, reason).await;
+            return shutdown(&paths, reason).await;
         }
     };
     let Some(server) = ServerRegistry::global().get(hello.server_name()) else {
         return shutdown(
             &paths,
-            &local_cids,
             Error::from(QuicError::with_default_fty(
                 ErrorKind::ConnectionRefused,
                 "no matching server is listening",
@@ -90,7 +88,7 @@ pub async fn server_growing(
             Ok(ready) => ready,
             Err(error) => {
                 tracing::warn!(%error, "QUIC server handshake failed");
-                return shutdown(&paths, &local_cids, error).await;
+                return shutdown(&paths, error).await;
             }
         };
     terminator.register(Arc::new(tls_ctx.clone()));
@@ -103,10 +101,12 @@ pub async fn server_growing(
                 .expect("handshake CID is available");
             handshake_dcid.refresh();
             parameters.authenticate_cids(Requirements::require_client(client_scid))?;
-            local_cids.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
-            let remote_cids = phase.remote_cids();
-            remote_cids.set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
-            let cid_registry = CidRegistry::new(local_cids.clone(), remote_cids);
+            cid_registry
+                .local
+                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            cid_registry
+                .remote
+                .set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
 
             let hs_keys = tls_ctx.read_keys().await?;
             let hs_space = Arc::new(HandshakeSpace::new(
@@ -197,7 +197,6 @@ pub async fn server_growing(
             paths.enter_mature(Arc::new(MaturePhase {
                 parameters: parameters.clone(),
                 flow_ctrl: flow_ctrl.clone(),
-                cid_registry: cid_registry.clone(),
                 puncher: puncher.clone(),
             }));
             tokio::spawn(read_space_to_tls(
@@ -212,7 +211,6 @@ pub async fn server_growing(
                 puncher.clone(),
                 paths.clone(),
                 parameters.clone(),
-                cid_registry.clone(),
                 token,
                 handshake.clone(),
             ));
@@ -255,7 +253,7 @@ pub async fn server_growing(
         Ok(connection) => connection,
         Err(reason) => {
             tracing::warn!(error = %reason, "QUIC server handshake failed");
-            return shutdown(&paths, &local_cids, reason).await;
+            return shutdown(&paths, reason).await;
         }
     };
 
@@ -269,11 +267,11 @@ pub async fn server_growing(
     let reason = terminator.await;
     drop(stop);
     let _ = observer.await;
-    shutdown(&paths, &local_cids, reason).await
+    shutdown(&paths, reason).await
 }
 
-async fn shutdown(paths: &Paths, local_cids: &ArcLocalCids, reason: Error) -> Error {
+async fn shutdown(paths: &Paths, reason: Error) -> Error {
     let reason = finish(paths, reason).await;
-    local_cids.clear();
+    paths.cid_registry.local.clear();
     reason
 }

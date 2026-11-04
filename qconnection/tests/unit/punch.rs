@@ -94,9 +94,8 @@ fn empty_paths(phase: &super::MatureFixture) -> Arc<Paths> {
     let paths = Paths::new(
         initial,
         role,
-        phase.cid_registry.remote.clone(),
+        phase.paths.cid_registry.clone(),
         phase.spaces.data.reliable_frames.clone(),
-        phase.cid_registry.local.clone(),
         Duration::ZERO,
         Duration::ZERO,
         is_mp_handshaking,
@@ -163,7 +162,6 @@ async fn receive_on_paths(
         phase.puncher.clone(),
         paths.clone(),
         phase.parameters.clone(),
-        phase.cid_registry.clone(),
         tokens,
         handshake.clone(),
     )
@@ -273,7 +271,6 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         receiver.puncher.clone(),
         paths.clone(),
         receiver.parameters.clone(),
-        receiver.cid_registry.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         ArcHandshake::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
     ));
@@ -407,7 +404,6 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             receiver.puncher.clone(),
             paths.clone(),
             receiver.parameters.clone(),
-            receiver.cid_registry.clone(),
             ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
             handshake.clone(),
         )

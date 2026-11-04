@@ -31,8 +31,9 @@ pub type DataStreams = qrecovery::streams::DataStreams<ArcReliableFrames>;
 pub type FlowController = qbase::flow::FlowController<ArcReliableFrames>;
 pub type ArcLocalCids =
     qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
-pub type CidRegistry =
-    qbase::cid::Registry<ArcLocalCids, qbase::cid::ArcRemoteCids<ArcReliableFrames>>;
+pub type ArcRemoteCids = qbase::cid::ArcRemoteCids<ArcReliableFrames>;
+pub type ArcDcid = qbase::cid::ArcDcid<ArcReliableFrames>;
+pub type CidRegistry = qbase::cid::Registry<ArcLocalCids, ArcRemoteCids>;
 pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
 pub type ArcResend = ArcIndexDeque<Arc<dyn qcongestion::Resend>, 2>;
 

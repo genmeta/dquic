@@ -109,12 +109,14 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        qbase::cid::ArcRemoteCids::client(
-            ConnectionId::from_slice(b"original"),
-            reliable_frames.clone(),
+        qconnection::CidRegistry::new(
+            local_cids,
+            qconnection::ArcRemoteCids::client(
+                ConnectionId::from_slice(b"original"),
+                reliable_frames.clone(),
+            ),
         ),
         reliable_frames,
-        local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
         pending_as_lost,
@@ -138,7 +140,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     tokio::pin!(growing);
     assert!(growing.as_mut().now_or_never().is_none());
     assert_eq!(
-        common::cid_value(&phase.remote_cids().apply_dcid()),
+        common::cid_value(&paths.cid_registry.remote.apply_dcid()),
         ConnectionId::from_slice(b"original")
     );
     let initial_only = matches!(phase.get(), ConnPhase::Initial(_));
@@ -208,12 +210,14 @@ async fn close_at_client_stage(wait: ClientWait) {
     let paths = Paths::new(
         initial_space.clone(),
         Role::Client,
-        qbase::cid::ArcRemoteCids::client(
-            ConnectionId::from_slice(b"original"),
-            reliable_frames.clone(),
+        qconnection::CidRegistry::new(
+            local_cids,
+            qconnection::ArcRemoteCids::client(
+                ConnectionId::from_slice(b"original"),
+                reliable_frames.clone(),
+            ),
         ),
         reliable_frames,
-        local_cids,
         Duration::from_secs(5),
         Duration::ZERO,
         pending_as_lost,

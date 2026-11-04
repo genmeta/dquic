@@ -6,7 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    cid::{ArcRemoteCids, ConnectionId, GenUniqueCid},
+    cid::{ConnectionId, GenUniqueCid},
     endpoint::{Anonymous, Endpoint},
     error::{AppError, ErrorKind, QuicError},
     net::route::Scopes,
@@ -19,7 +19,8 @@ use qtransport::{keys::ArcKeys, packet::channel, router::QuicRouter, space::Init
 use tokio::sync::oneshot;
 
 use crate::{
-    Accepted, ArcLocalCids, ArcReliableFrames, Connected, Error, Paths, TlsContext, client_growing,
+    Accepted, ArcLocalCids, ArcReliableFrames, ArcRemoteCids, CidRegistry, Connected, Error, Paths,
+    TlsContext, client_growing,
 };
 
 /// A QUIC endpoint with optional local credentials.
@@ -187,9 +188,11 @@ impl QuicEndpoint {
         let paths = Paths::new(
             initial_space.clone(),
             Role::Client,
-            ArcRemoteCids::client(origin_dcid, reliable_frames.clone()),
+            CidRegistry::new(
+                local_cids,
+                ArcRemoteCids::client(origin_dcid, reliable_frames.clone()),
+            ),
             reliable_frames,
-            local_cids,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
             is_mp_handshaking,
@@ -328,9 +331,11 @@ impl ServerRegistry {
                 let paths = Paths::new(
                     initial_space.clone(),
                     Role::Server,
-                    ArcRemoteCids::server(client_scid, reliable_frames.clone()),
+                    CidRegistry::new(
+                        local_cids,
+                        ArcRemoteCids::server(client_scid, reliable_frames.clone()),
+                    ),
                     reliable_frames,
-                    local_cids,
                     Duration::ZERO,
                     Duration::ZERO,
                     is_mp_handshaking,
