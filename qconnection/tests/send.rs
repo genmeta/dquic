@@ -126,6 +126,7 @@ async fn mixed_packets_consume_shared_budget_once() {
         .package(
             &mut cx,
             [Some(Default::default()); 3],
+            true,
             &mut [],
             &mut bytes,
             &mut limits,
@@ -377,6 +378,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             .package(
                 &mut Context::from_waker(Waker::noop()),
                 [Some(sender.peer_cid()); 3],
+                true,
                 &mut external,
                 &mut bytes[..1200],
                 &mut limits,
@@ -512,6 +514,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
             .package(
                 &mut Context::from_waker(Waker::noop()),
                 [Some(sender.peer_cid()); 3],
+                true,
                 &mut external,
                 &mut bytes[..capacity],
                 &mut limits,
@@ -534,6 +537,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
             .package(
                 &mut Context::from_waker(Waker::noop()),
                 [Some(sender.peer_cid()); 3],
+                true,
                 &mut [&mut (Epoch::Data, &mut ping)],
                 &mut bytes[..1200],
                 &mut Constraints {
@@ -579,6 +583,7 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
             .package(
                 &mut cx,
                 [Some(dcid); 3],
+                true,
                 &mut [&mut (Epoch::Initial, &mut ping)],
                 &mut bytes,
                 &mut Constraints {
@@ -644,6 +649,7 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
     let result = spaces.package(
         &mut cx,
         [Some(Default::default()); 3],
+        true,
         &mut [
             &mut (Epoch::Initial, &mut ping),
             &mut (Epoch::Handshake, Failed),
@@ -661,6 +667,7 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         .package(
             &mut cx,
             [Some(Default::default()); 3],
+            true,
             &mut [],
             &mut bytes,
             &mut limits,
@@ -712,6 +719,7 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
             .package(
                 &mut cx,
                 [Some(Default::default()); 3],
+                true,
                 &mut sources,
                 &mut bytes,
                 &mut limits,
@@ -728,6 +736,7 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
             .package(
                 &mut cx,
                 [Some(Default::default()); 3],
+                true,
                 &mut sources,
                 &mut bytes,
                 &mut limits,
@@ -888,7 +897,7 @@ async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
 }
 
 #[tokio::test]
-async fn collected_burst_completes_when_selection_or_cid_source_changes() {
+async fn collected_burst_cancels_on_deactivation_and_completes_when_cid_source_changes() {
     use qbase::{
         frame::{NewConnectionIdFrame, io::ReceiveFrame},
         net::route::{Line, Link},
@@ -916,8 +925,10 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
             EndpointAddr::direct("127.0.0.1:9".parse().unwrap()),
         ));
         if change == 2 {
-            paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-            paths.select_path(&first);
+            paths.progress.on_initial_received(crate::common::cid_value(
+                &paths.cid_registry.remote.apply_dcid(),
+            ));
+            paths.progress.on_path_selected(&paths, &first);
         }
         let initial = common::initial_space(&paths.spaces);
         initial
@@ -933,10 +944,16 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
         let count = burst.collect().now_or_never().unwrap().unwrap();
         match change {
             0 => {
-                paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-                paths.select_path(&second);
+                paths.progress.on_initial_received(crate::common::cid_value(
+                    &paths.cid_registry.remote.apply_dcid(),
+                ));
+                paths.progress.on_path_selected(&paths, &second);
             }
-            1 => paths.update_initial_dcid(ConnectionId::from_slice(b"server00")),
+            1 => {
+                paths
+                    .progress
+                    .on_initial_received(ConnectionId::from_slice(b"server00"));
+            }
             _ => {
                 paths
                     .cid_registry
@@ -960,6 +977,19 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
             None,
             1500,
         )];
+        if change == 0 {
+            assert!(!first.is_active());
+            assert!(
+                peer.receive(&mut received, &mut lines)
+                    .now_or_never()
+                    .is_none()
+            );
+            common::retire_all(&paths);
+            common::wait_for_sender_exit(&first).await;
+            common::wait_for_sender_exit(&second).await;
+            QuicProtocol::global().unregister(socket.local_addr().unwrap());
+            continue;
+        }
         tokio::time::timeout(
             Duration::from_secs(1),
             peer.receive(&mut received, &mut lines),
@@ -995,17 +1025,13 @@ async fn collected_burst_completes_when_selection_or_cid_source_changes() {
                 assert!(journal.packet(opened.pn()).unwrap().size > 0);
             }
         }
-        if change == 0 {
-            assert!(!paths.is_selected(&first));
-        } else {
-            assert_eq!(
-                first
-                    .dcid
-                    .poll_borrow(&mut Context::from_waker(Waker::noop())),
-                Poll::Ready(Some(ConnectionId::from_slice(b"server00")))
-            );
-            first.dcid.refresh();
-        }
+        assert_eq!(
+            first
+                .dcid
+                .poll_borrow(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Some(ConnectionId::from_slice(b"server00")))
+        );
+        first.dcid.refresh();
         common::retire_all(&paths);
         common::wait_for_sender_exit(&first).await;
         common::wait_for_sender_exit(&second).await;

@@ -59,8 +59,10 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
         EndpointAddr::direct("127.0.0.1:0".parse().unwrap()),
         EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
     ));
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.select_path(&path);
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
+    paths.progress.on_path_selected(&paths, &path);
     common::wait_for_sender_exit(&path).await;
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(path.validation.is_cancelled());
@@ -101,8 +103,10 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         EndpointAddr::direct(peer.local_addr().unwrap()),
     ));
     path.validation.enter_validated().unwrap();
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.select_path(&path);
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
+    paths.progress.on_path_selected(&paths, &path);
     space
         .rcvd_journal
         .on_rcvd_pn(0, true, Duration::from_secs(1));
@@ -210,8 +214,10 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
         local,
         EndpointAddr::direct(peer.local_addr().unwrap()),
     ));
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.select_path(&path);
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
+    paths.progress.on_path_selected(&paths, &path);
     let terminator = paths.terminator.clone();
     let error: qconnection::Error = AppError::new(42u32.into(), "closed").into();
     // Component failure is observable to its writer, not a fresh send-task error.
@@ -307,8 +313,10 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
         local,
         EndpointAddr::direct(peer.local_addr().unwrap()),
     ));
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    paths.select_path(&path);
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
+    paths.progress.on_path_selected(&paths, &path);
     for message in [b"first".as_slice(), b"second".as_slice()] {
         tokio::task::yield_now().await;
         assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));

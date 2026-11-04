@@ -59,7 +59,7 @@ pub fn install_data(paths: &Paths, data: &DataFixture) {
     if !paths.progress.facts().has_handshake_key() {
         install_handshake(paths, data.spaces.handshake.clone());
     }
-    paths.progress.install_data(paths, data.spaces.data.clone());
+    paths.progress.install_data(data.spaces.data.clone());
 }
 
 /// Install synthetic spaces without retiring the fixture's Initial CRYPTO source.
@@ -74,10 +74,9 @@ pub fn install_handshake(
         .unwrap();
     paths.spaces.write_guard().push_back(handshake).unwrap();
     paths.progress.facts().install_handshake_key();
-    paths.update_initial_dcid(crate::common::cid_value(&paths.new_dcid()));
-    for path in paths.entries.lock().unwrap().values() {
-        path.send_waker.wake_all();
-    }
+    paths.progress.on_initial_received(crate::common::cid_value(
+        &paths.cid_registry.remote.apply_dcid(),
+    ));
 }
 
 pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {
@@ -86,24 +85,23 @@ pub fn confirm_handshake(paths: &std::sync::Arc<Paths>) {
 
 /// Observe the same four scenarios across existing sending and receiving tests.
 fn selection(paths: &Paths, path: &qtransport::path::Path) -> u8 {
-    if paths.is_confirmed() {
+    let facts = paths.progress.facts();
+    if facts.is_handshake_done() {
         2
-    } else if paths.is_initial() {
+    } else if !facts.has_selected_path() {
         u8::MAX
     } else {
-        u8::from(paths.is_selected(path))
+        u8::from(path.is_active())
     }
 }
 
-fn borrow(
-    paths: &Paths,
-    path: &qtransport::path::Path,
-) -> std::task::Poll<Option<qbase::cid::ConnectionId>> {
+/// Borrow a CID for payload collection on an active path.
+fn borrow(path: &qtransport::path::Path) -> std::task::Poll<Option<qbase::cid::ConnectionId>> {
     use std::task::{Context, Poll, Waker};
     if path.validation.is_cancelled() {
         return Poll::Ready(None);
     }
-    if !paths.can_send(path) {
+    if !path.is_active() {
         return Poll::Pending;
     }
     let result = path

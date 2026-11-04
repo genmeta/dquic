@@ -371,8 +371,11 @@ async fn close_at_client_stage(wait: ClientWait) {
                 max_size: 4096,
                 ..Default::default()
             };
-            let ty = OneRttHeader::new(Default::default(), common::cid_value(&paths.new_dcid()))
-                .get_type();
+            let ty = OneRttHeader::new(
+                Default::default(),
+                common::cid_value(&paths.cid_registry.remote.apply_dcid()),
+            )
+            .get_type();
             let _ = paths.reliable_frames.clone().poll_dump(
                 &mut std::task::Context::from_waker(std::task::Waker::noop()),
                 &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),

@@ -319,7 +319,7 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let (mut client, mut server) = connect(&server_socket).await;
     let old_route = Pathway::new(old_socket.endpoint(), server_socket.endpoint());
     assert!(
-        wait_for(|| client.paths.is_confirmed()
+        wait_for(|| client.paths.progress.facts().is_handshake_done()
             && client
                 .paths
                 .entries

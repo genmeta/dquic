@@ -1,7 +1,7 @@
 //! Connection-level handshake transitions and packet-space lifetime.
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
-use qbase::{Epoch, role::Role};
+use qbase::{Epoch, cid::ConnectionId, role::Role};
 use qcongestion::HandshakeFacts;
 use qtransport::{
     path::Path,
@@ -9,37 +9,44 @@ use qtransport::{
     terminate::ArcTerminator,
 };
 
-use crate::{ArcResend, Paths};
+use crate::{ArcResend, CidRegistry, Paths};
 
 /// Serializes edge-triggered lifecycle effects for the shared handshake facts.
 #[derive(Clone)]
-pub(crate) struct ArcProgress(Arc<Mutex<Progress>>);
+pub struct ArcProgress(Arc<Mutex<Progress>>);
 
 impl ArcProgress {
     pub(crate) fn new(
         role: Role,
+        cid_registry: CidRegistry,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
         Self(Arc::new(Mutex::new(Progress::new(
             role,
+            cid_registry,
             spaces,
             loss_resender,
             terminator,
         ))))
     }
 
-    pub(crate) fn facts(&self) -> Arc<HandshakeFacts> {
+    pub fn facts(&self) -> Arc<HandshakeFacts> {
         self.0.lock().unwrap().facts.clone()
     }
 
-    pub(crate) fn install_handshake(&self, paths: &Paths, space: Arc<HandshakeSpace>) -> bool {
-        self.0.lock().unwrap().install_handshake(paths, space)
+    /// Record the first authenticated Initial and publish its peer SCID before TLS delivery.
+    pub fn on_initial_received(&self, peer_scid: ConnectionId) -> bool {
+        self.0.lock().unwrap().on_initial_received(peer_scid)
     }
 
-    pub(crate) fn install_data(&self, paths: &Paths, space: Arc<DataSpace>) {
-        self.0.lock().unwrap().install(paths, space);
+    pub(crate) fn install_handshake(&self, space: Arc<HandshakeSpace>) -> bool {
+        self.0.lock().unwrap().install_handshake(space)
+    }
+
+    pub(crate) fn install_data(&self, space: Arc<DataSpace>) {
+        self.0.lock().unwrap().install(space);
     }
 
     pub(crate) fn on_tls_finished(&self) {
@@ -54,7 +61,7 @@ impl ArcProgress {
         self.0.lock().unwrap().on_handshake_received();
     }
 
-    pub(crate) fn on_path_selected(&self, paths: &Paths, path: &Arc<Path>) -> bool {
+    pub fn on_path_selected(&self, paths: &Paths, path: &Arc<Path>) -> bool {
         self.0.lock().unwrap().on_path_selected(paths, path)
     }
 
@@ -71,6 +78,7 @@ impl ArcProgress {
 struct Progress {
     facts: Arc<HandshakeFacts>,
     role: Role,
+    cid_registry: CidRegistry,
     spaces: ArcSpaces,
     loss_resender: ArcResend,
     terminator: ArcTerminator,
@@ -79,6 +87,7 @@ struct Progress {
 impl Progress {
     fn new(
         role: Role,
+        cid_registry: CidRegistry,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
@@ -86,17 +95,27 @@ impl Progress {
         Self {
             facts: Arc::new(HandshakeFacts::with_role(role)),
             role,
+            cid_registry,
             spaces,
             loss_resender,
             terminator,
         }
     }
 
-    fn install_handshake(&mut self, paths: &Paths, space: Arc<HandshakeSpace>) -> bool {
+    fn on_initial_received(&mut self, peer_scid: ConnectionId) -> bool {
+        if !self.facts.on_initial_received() {
+            return false;
+        }
+        // Assigning sequence zero wakes only the path waiting for that CID cell.
+        self.cid_registry.remote.on_receive_from(peer_scid);
+        true
+    }
+
+    fn install_handshake(&mut self, space: Arc<HandshakeSpace>) -> bool {
         if !self.facts.install_handshake_key() {
             return false;
         }
-        self.install(paths, space);
+        self.install(space);
         if let Some(initial) = self.spaces.read_guard().get(Epoch::Initial as u64) {
             initial.crypto().recver.retire();
             if self.role == Role::Client {
@@ -140,9 +159,13 @@ impl Progress {
         }
         path.dcid.upgrade();
         paths.is_mp_handshaking.store(false, Ordering::Relaxed);
-        for path in entries.values() {
-            path.send_waker.wake_all();
+        for other in entries.values() {
+            if !Arc::ptr_eq(other, path) {
+                other.disable();
+            }
         }
+        path.enable();
+        path.send_waker.wake_all();
         true
     }
 
@@ -168,15 +191,15 @@ impl Progress {
                 resender.pop_front();
             }
         }
-        paths.cid_registry.remote.upgrade();
+        self.cid_registry.remote.upgrade();
         for path in entries.values() {
             if path.dcid.is_allocated() {
                 let _ = path.validation.enter_validated();
             } else {
                 path.dcid.upgrade();
                 paths.spawn_validation(path);
-                path.send_waker.wake_all();
             }
+            path.enable();
         }
     }
 
@@ -191,8 +214,7 @@ impl Progress {
     }
 
     /// Called under the lifecycle lock; queue guards never enclose a CC operation.
-    fn install(&self, paths: &Paths, space: Arc<impl Encapsulate + qcongestion::Resend>) {
-        let entries = paths.entries.lock().unwrap();
+    fn install(&self, space: Arc<impl Encapsulate + qcongestion::Resend>) {
         {
             let mut spaces = self.spaces.write_guard();
             let mut resender = self.loss_resender.write_guard();
@@ -202,9 +224,6 @@ impl Progress {
                 .expect("next recovery epoch");
         }
         self.terminator.register(Arc::new(space.crypto().clone()));
-        for path in entries.values() {
-            path.send_waker.wake_all();
-        }
     }
 
     fn retire_initial(&self) {

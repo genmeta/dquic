@@ -85,7 +85,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 pending_as_lost.clone(),
             );
             paths.cid_registry.remote.set_limit(2);
-            paths.update_initial_dcid(peer);
+            paths.progress.on_initial_received(peer);
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(super::initial_keys(role == Role::Server))),

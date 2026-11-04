@@ -80,11 +80,13 @@ pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
 pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
 
 impl Spaces {
+    /// Assemble external sources; collect internal payload only on an active path.
     #[allow(clippy::too_many_arguments)]
     pub fn package(
         &self,
         cx: &mut Context<'_>,
         dcids: [Option<ConnectionId>; 3],
+        is_active: bool,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut [u8],
         limits: &mut Constraints,
@@ -105,6 +107,7 @@ impl Spaces {
             self.0.offset(),
             cx,
             dcids,
+            is_active,
             external,
             buffer,
             limits,
@@ -145,6 +148,7 @@ impl Spaces {
         index: u64,
         cx: &mut Context<'_>,
         dcids: [Option<ConnectionId>; 3],
+        is_active: bool,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
         buffer: &mut [u8],
         limits: &mut Constraints,
@@ -168,6 +172,7 @@ impl Spaces {
                 index + 1,
                 cx,
                 dcids,
+                is_active,
                 external,
                 buffer,
                 limits,
@@ -212,7 +217,15 @@ impl Spaces {
             } else {
                 0
             });
-            let result = space.encapsulate(cx, dcid, pn, external, &mut constrained, required);
+            let result = space.encapsulate(
+                cx,
+                dcid,
+                pn,
+                is_active,
+                external,
+                &mut constrained,
+                required,
+            );
             (
                 result,
                 constrained.pn_offset(),
@@ -233,6 +246,7 @@ impl Spaces {
                     index + 1,
                     cx,
                     dcids,
+                    is_active,
                     external,
                     buffer,
                     limits,
@@ -254,6 +268,7 @@ impl Spaces {
             index + 1,
             cx,
             dcids,
+            is_active,
             external,
             &mut buffer[size..],
             limits,

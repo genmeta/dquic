@@ -108,7 +108,7 @@ pub async fn server_growing(
                 ArcKeys::from(hs_keys),
                 paths.is_mp_handshaking.clone(),
             ));
-            let _ = progress.install_handshake(&paths, hs_space.clone());
+            let _ = progress.install_handshake(hs_space.clone());
 
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),
@@ -180,7 +180,7 @@ pub async fn server_growing(
             // Publish Data only after the peer Finished has been authenticated.
             let summary = tls_ctx.finished().await?;
             progress.on_tls_finished();
-            progress.install_data(&paths, data_space.clone());
+            progress.install_data(data_space.clone());
             let handshake = ArcHandshake::new_server(reliable_frames.clone());
             tokio::spawn(read_space_to_tls(
                 tls_ctx.clone(),

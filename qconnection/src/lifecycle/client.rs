@@ -86,7 +86,7 @@ pub async fn client_growing(
                 paths.is_mp_handshaking.clone(),
             ));
             assert!(
-                progress.install_handshake(&paths, hs_space.clone()),
+                progress.install_handshake(hs_space.clone()),
                 "first Handshake key installation"
             );
             let server_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx))
@@ -140,7 +140,7 @@ pub async fn client_growing(
                 parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
                 paths.is_mp_handshaking.clone(),
             ));
-            progress.install_data(&paths, data_space.clone());
+            progress.install_data(data_space.clone());
             let puncher = paths.puncher.clone();
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
