@@ -1,6 +1,6 @@
 //! Handshake packet-number space.
 use std::{
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -9,6 +9,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     frame::AckFrame,
+    handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
         LongHeaderBuilder, PacketNumber,
@@ -30,13 +31,8 @@ use crate::{
 pub struct HandshakeSpace<K = ArcKeys>(pub Space<K>);
 
 impl<K> HandshakeSpace<K> {
-    pub fn new(initial_scid: ConnectionId, keys: K, is_mp_handshaking: Arc<AtomicBool>) -> Self {
-        Self(Space::new(
-            Epoch::Handshake,
-            initial_scid,
-            keys,
-            is_mp_handshaking,
-        ))
+    pub fn new(initial_scid: ConnectionId, keys: K, facts: Arc<HandshakeFacts>) -> Self {
+        Self(Space::new(Epoch::Handshake, initial_scid, keys, facts))
     }
 }
 

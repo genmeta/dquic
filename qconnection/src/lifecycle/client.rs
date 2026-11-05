@@ -83,7 +83,7 @@ pub async fn client_growing(
             let hs_space = Arc::new(HandshakeSpace::new(
                 scid,
                 ArcKeys::from(handshake_keys),
-                paths.is_mp_handshaking.clone(),
+                progress.facts(),
             ));
             assert!(
                 progress.install_handshake(hs_space.clone()),
@@ -138,7 +138,7 @@ pub async fn client_growing(
                 reliable_frames.clone(),
                 parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
                 parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
-                paths.is_mp_handshaking.clone(),
+                progress.facts(),
             ));
             progress.install_data(data_space.clone());
             let puncher = paths.puncher.clone();

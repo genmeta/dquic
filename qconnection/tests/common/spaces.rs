@@ -70,7 +70,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
             );
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
-            let pending_as_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let facts = crate::common::handshake_facts(role, false);
             let paths = super::initial_paths_with_timeouts(
                 role,
                 scid,
@@ -82,14 +82,14 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 super::initial_keys(role == Role::Server),
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
-                pending_as_lost.clone(),
+                facts.clone(),
             );
             paths.cid_registry.remote.set_limit(2);
             paths.progress.on_initial_received(peer);
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(super::initial_keys(role == Role::Server))),
-                pending_as_lost.clone(),
+                facts.clone(),
             ));
             let reliable_frames = paths.reliable_frames.clone();
             let streams = qconnection::DataStreams::new(
@@ -108,7 +108,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 reliable_frames.clone(),
                 parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
                 parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-                pending_as_lost,
+                facts,
             ));
             let concrete = SpaceFixture {
                 initial: super::initial_space(&paths.spaces),

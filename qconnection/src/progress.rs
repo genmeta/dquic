@@ -1,8 +1,7 @@
 //! Connection-level handshake transitions and packet-space lifetime.
-use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::sync::{Arc, Mutex};
 
-use qbase::{Epoch, cid::ConnectionId, role::Role};
-use qcongestion::HandshakeFacts;
+use qbase::{Epoch, cid::ConnectionId, handshake::HandshakeFacts, role::Role};
 use qtransport::{
     path::Path,
     space::{ArcSpaces, DataSpace, Encapsulate, HandshakeSpace, Spaces},
@@ -17,14 +16,14 @@ pub struct ArcProgress(Arc<Mutex<Progress>>);
 
 impl ArcProgress {
     pub(crate) fn new(
-        role: Role,
+        facts: Arc<HandshakeFacts>,
         cid_registry: CidRegistry,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
         Self(Arc::new(Mutex::new(Progress::new(
-            role,
+            facts,
             cid_registry,
             spaces,
             loss_resender,
@@ -86,15 +85,15 @@ struct Progress {
 
 impl Progress {
     fn new(
-        role: Role,
+        facts: Arc<HandshakeFacts>,
         cid_registry: CidRegistry,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
         Self {
-            facts: Arc::new(HandshakeFacts::with_role(role)),
-            role,
+            role: facts.role(),
+            facts,
             cid_registry,
             spaces,
             loss_resender,
@@ -158,7 +157,7 @@ impl Progress {
             return false;
         }
         path.dcid.upgrade();
-        paths.is_mp_handshaking.store(false, Ordering::Relaxed);
+        self.facts.quit_mp_handshaking();
         for other in entries.values() {
             if !Arc::ptr_eq(other, path) {
                 other.disable();

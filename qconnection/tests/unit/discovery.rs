@@ -218,7 +218,7 @@ fn paths() -> Arc<Paths> {
         keys,
         Duration::ZERO,
         Duration::ZERO,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        crate::common::handshake_facts(Role::Client, true),
     )
 }
 

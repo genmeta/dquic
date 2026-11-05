@@ -4,10 +4,11 @@ use common::*;
 use qbase::{
     Epoch,
     frame::AckFrame,
+    handshake::HandshakeFacts,
     role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{ArcCC, HandshakeFacts, MSS, Resend, Transport};
+use qcongestion::{ArcCC, MSS, Resend, Transport};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 

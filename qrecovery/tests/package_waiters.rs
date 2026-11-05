@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
     time::Duration,
@@ -11,6 +11,7 @@ use bytes::BytesMut;
 use qbase::{
     error::Error,
     frame::io::SendFrame,
+    handshake::HandshakeFacts,
     packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     param::{ArcParameters, ClientParameters, ServerParameters},
     role::Role,
@@ -20,6 +21,14 @@ use qrecovery::{
     crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::DataStreams,
 };
 use tokio::io::AsyncWriteExt;
+
+fn handshake_facts(multipath: bool) -> Arc<HandshakeFacts> {
+    let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+    if !multipath {
+        facts.quit_mp_handshaking();
+    }
+    facts
+}
 
 #[derive(Default)]
 struct Counter(AtomicUsize);
@@ -56,7 +65,7 @@ fn poll(
 async fn crypto_registers_only_when_no_frame_was_written() {
     for quota in [0, 128] {
         for pending_as_lost in [false, true] {
-            let stream = CryptoStream::new(Arc::new(AtomicBool::new(pending_as_lost)));
+            let stream = CryptoStream::with_facts(handshake_facts(pending_as_lost));
             let mut writer = stream.writer();
             writer.write_all(b"hello").await.unwrap();
             let counter = Arc::new(Counter::default());
@@ -67,7 +76,7 @@ async fn crypto_registers_only_when_no_frame_was_written() {
             assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         }
     }
-    let stream = CryptoStream::default();
+    let stream = CryptoStream::with_facts(handshake_facts(false));
     let counter = Arc::new(Counter::default());
     let waker = Waker::from(counter.clone());
     assert!(poll(&mut stream.outgoing(), 128, &waker).is_pending());
@@ -117,12 +126,14 @@ async fn closed_crypto_sources_are_empty_for_every_close_reason() {
         QuicError::with_default_fty(ErrorKind::Internal, "failed").into(),
         AppError::new(42u32.into(), "application close").into(),
     ] {
-        let pending_as_lost = Arc::new(AtomicBool::new(true));
-        let stream = CryptoStream::new(pending_as_lost.clone());
+        let facts = handshake_facts(true);
+        let stream = CryptoStream::with_facts(facts.clone());
         stream.writer().write_all(b"queued").await.unwrap();
         stream.on_error(&error);
         for enabled in [true, false] {
-            pending_as_lost.store(enabled, Ordering::Relaxed);
+            if !enabled {
+                facts.quit_mp_handshaking();
+            }
             assert_eq!(
                 poll(&mut stream.outgoing(), 128, Waker::noop()),
                 Poll::Ready(Ok(0))

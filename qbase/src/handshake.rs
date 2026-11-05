@@ -17,6 +17,9 @@ use crate::{
     role::Role,
 };
 
+mod facts;
+pub use facts::HandshakeFacts;
+
 /// Client handshake confirmation, with at most one pending waiter.
 #[derive(Debug, Default)]
 pub enum ClientHandshake {

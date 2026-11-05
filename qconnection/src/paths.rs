@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -8,13 +8,14 @@ use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
+    handshake::HandshakeFacts,
     net::route::Pathway,
     role::Role,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::IndexDeque,
     validate::ArcValidations,
 };
-use qcongestion::{HandshakeFacts, Transport};
+use qcongestion::Transport;
 use qtransport::{
     path::Path,
     space::{ArcSpaces, InitialSpace},
@@ -36,8 +37,6 @@ pub struct Paths {
     pub(crate) loss_resender: ArcResend,
     pub terminator: ArcTerminator,
     pub progress: ArcProgress,
-    /// Shared by every CRYPTO sender; cleared by path selection or a CRYPTO ACK.
-    pub(crate) is_mp_handshaking: Arc<AtomicBool>,
     pub entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub validations: ArcValidations,
     role: Role,
@@ -49,13 +48,13 @@ pub struct Paths {
 impl Paths {
     pub fn new(
         initial_space: Arc<InitialSpace>,
-        role: Role,
+        facts: Arc<HandshakeFacts>,
         cid_registry: CidRegistry,
         reliable_frames: ArcReliableFrames,
         max_idle_timeout: Duration,
         defer_idle_timeout: Duration,
-        is_mp_handshaking: Arc<AtomicBool>,
     ) -> Arc<Self> {
+        let role = facts.role();
         let idle = ArcIdleTimer::new(max_idle_timeout);
         let mut loss_resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
         loss_resender
@@ -74,7 +73,7 @@ impl Paths {
         );
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(
-            role,
+            facts,
             cid_registry.clone(),
             spaces.clone(),
             loss_resender.clone(),
@@ -88,7 +87,6 @@ impl Paths {
             loss_resender,
             terminator: terminator.clone(),
             progress,
-            is_mp_handshaking,
             entries: Mutex::new(BTreeMap::new()),
             validations: ArcValidations::default(),
             role,

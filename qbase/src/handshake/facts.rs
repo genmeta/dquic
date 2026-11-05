@@ -1,13 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use qbase::role::Role;
+use crate::role::Role;
 
-/// Connection-wide handshake facts shared by every path's recovery controller.
-/// Mutators return true only for the first false-to-true transition.
+/// Connection-wide handshake facts shared by CRYPTO streams and path recovery.
+/// Event mutators return true only for the first false-to-true transition.
 /// A set fact records the event, independently of its lifecycle callback's completion.
 #[derive(Debug)]
 pub struct HandshakeFacts {
     role: Role,
+    is_mp_handshaking: AtomicBool,
     path_selected: AtomicBool,
     has_received_initial: AtomicBool,
     got_handshake_key: AtomicBool,
@@ -22,6 +23,7 @@ impl HandshakeFacts {
     pub fn with_role(role: Role) -> Self {
         Self {
             role,
+            is_mp_handshaking: AtomicBool::new(true),
             path_selected: AtomicBool::new(false),
             has_received_initial: AtomicBool::new(false),
             got_handshake_key: AtomicBool::new(false),
@@ -31,6 +33,15 @@ impl HandshakeFacts {
             is_tls_finished: AtomicBool::new(false),
             is_handshake_done: AtomicBool::new(false),
         }
+    }
+
+    pub fn is_mp_handshaking(&self) -> bool {
+        self.is_mp_handshaking.load(Ordering::Acquire)
+    }
+
+    /// Stop replaying unacknowledged CRYPTO across handshake paths.
+    pub fn quit_mp_handshaking(&self) {
+        self.is_mp_handshaking.store(false, Ordering::Release);
     }
 
     /// Record selection once, without retaining the selected path's identity.
@@ -62,7 +73,7 @@ impl HandshakeFacts {
         !self.has_received_handshake.swap(true, Ordering::AcqRel)
     }
 
-    pub(crate) fn on_handshake_acked(&self) -> bool {
+    pub fn on_handshake_acked(&self) -> bool {
         !self.has_handshake_acked.swap(true, Ordering::AcqRel)
     }
 

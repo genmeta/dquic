@@ -12,8 +12,10 @@ use qtransport::{ArcConnection, Error, terminate::ArcTerminator};
 async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pto() {
     use std::time::Duration;
 
-    use qbase::{Epoch, net::route::Pathway, role::Role, time::heartbeat::ArcHeartbeat};
-    use qcongestion::HandshakeFacts;
+    use qbase::{
+        Epoch, handshake::HandshakeFacts, net::route::Pathway, role::Role,
+        time::heartbeat::ArcHeartbeat,
+    };
     use qtransport::path::Path;
     use tokio::time::Instant;
 

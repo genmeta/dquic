@@ -10,13 +10,14 @@ use std::{
 use qbase::{
     Epoch,
     cid::ArcDcid,
+    handshake::HandshakeFacts,
     net::{route::Pathway, tx::ArcSendWakers},
     packet::assemble::Metadata,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::ArcIndexDeque,
     validate::ArcValidation,
 };
-use qcongestion::{Algorithm, ArcCC, CongestionController, HandshakeFacts, MSS, Resend};
+use qcongestion::{Algorithm, ArcCC, CongestionController, MSS, Resend};
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 

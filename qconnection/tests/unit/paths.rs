@@ -1,10 +1,4 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use qbase::{
     Epoch,
@@ -226,7 +220,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
 #[tokio::test]
 async fn selecting_a_live_handshake_path_stops_crypto_replay() {
     for role in [Role::Client, Role::Server] {
-        let is_mp_handshaking = Arc::new(AtomicBool::new(true));
+        let facts = crate::common::handshake_facts(role, true);
         let paths = crate::common::initial_paths_with_timeouts(
             role,
             qbase::cid::ConnectionId::from_slice(b"localcid"),
@@ -234,15 +228,15 @@ async fn selecting_a_live_handshake_path_stops_crypto_replay() {
             crate::common::initial_keys(role == Role::Server),
             Duration::ZERO,
             Duration::ZERO,
-            is_mp_handshaking.clone(),
+            facts.clone(),
         );
         let stale = paths.add_path(pathway(30002));
         paths.del_path(&stale.pathway);
         let selected = paths.add_path(pathway(30002));
         paths.progress.on_path_selected(&paths, &stale);
-        assert!(is_mp_handshaking.load(Ordering::Relaxed));
+        assert!(facts.is_mp_handshaking());
         paths.progress.on_path_selected(&paths, &selected);
-        assert!(!is_mp_handshaking.load(Ordering::Relaxed));
+        assert!(!facts.is_mp_handshaking());
         paths.retire_all();
     }
 }

@@ -9,13 +9,14 @@ use std::{
 
 use qbase::{
     frame::{PathChallengeFrame, io::ReceiveFrame},
+    handshake::HandshakeFacts,
     net::{addr::EndpointAddr, route::Pathway},
     packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
     role::Role,
     time::heartbeat::ArcHeartbeat,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{HandshakeFacts, Transport as _};
+use qcongestion::Transport as _;
 use qtransport::path::Path;
 
 struct Counter(AtomicUsize);

@@ -171,7 +171,7 @@ async fn packet_events_retire_initial_from_both_queues() {
             qtransport::keys::ArcKeys::new(std::sync::Arc::new(crate::common::initial_keys(
                 role == Role::Server,
             ))),
-            paths.is_mp_handshaking.clone(),
+            paths.progress.facts(),
         ));
         assert!(paths.progress.install_handshake(handshake.clone()));
         paths.progress.on_handshake_sent();

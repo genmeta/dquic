@@ -194,7 +194,7 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         reliable,
         params.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         params.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        Default::default(),
+        confirmed_handshake(role),
     ));
     data.keys.allow_update();
     Arc::new(Transport {
@@ -549,11 +549,13 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 material.opening.packet.tag_len(),
             )
             .unwrap();
+        let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Server));
+        facts.quit_mp_handshaking();
         let space = Arc::new(Space::new(
             epoch,
             Default::default(),
             ArcKeys::new(Arc::new(material)),
-            Default::default(),
+            facts,
         ));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
@@ -1928,7 +1930,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
         Epoch::Initial,
         Default::default(),
         crate::keys::ArcKeys::new(Arc::new(fixed_keys())),
-        Default::default(),
+        Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Server)),
     ));
     let mut task = tokio::spawn(receive_packets(
         rcvd_pkt.initial,
@@ -1986,8 +1988,9 @@ async fn sealing_does_not_wait_for_socket_submission() {
     worker.join().unwrap();
 }
 
-fn confirmed_handshake(role: Role) -> Arc<qcongestion::HandshakeFacts> {
-    let handshake = Arc::new(qcongestion::HandshakeFacts::with_role(role));
+fn confirmed_handshake(role: Role) -> Arc<qbase::handshake::HandshakeFacts> {
+    let handshake = Arc::new(qbase::handshake::HandshakeFacts::with_role(role));
     handshake.on_handshake_done();
+    handshake.quit_mp_handshaking();
     handshake
 }

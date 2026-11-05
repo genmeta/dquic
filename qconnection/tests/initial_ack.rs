@@ -57,7 +57,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let pathway = Pathway::new(EndpointAddr::direct(client_addr), local);
     let path = Path::new(
         pathway,
-        Arc::new(qcongestion::HandshakeFacts::with_role(Role::Client)),
+        Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
         qconnection::ArcRemoteCids::client(
