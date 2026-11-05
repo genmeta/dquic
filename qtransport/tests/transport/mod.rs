@@ -33,7 +33,7 @@ use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
     keys::{ArcOneRttKeys, KeyRetired, Open, Seal},
-    packet::{assemble::Packet as SendingPacket, channel},
+    packet::{channel, encrypt::Packet as SendingPacket},
     path::Path,
     space::{DataSpace, Space},
     *,

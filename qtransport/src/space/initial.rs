@@ -17,7 +17,7 @@ use super::{Allocate, Encapsulate, Recover, Space};
 use crate::{
     Error, GuaranteedFrame,
     keys::{ArcKeys, Seal},
-    packet::assemble::Packet,
+    packet::encrypt::Packet,
 };
 
 /// Initial headers retain their token across every packet in this space.

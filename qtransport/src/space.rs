@@ -27,7 +27,7 @@ use qrecovery::{
 use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::assemble::Packet};
+use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 pub mod assemble;
 pub mod data;
