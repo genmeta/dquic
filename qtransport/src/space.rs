@@ -330,6 +330,7 @@ pub trait Encapsulate: Transmit {
     }
 
     /// Assemble only the space ACK and the path heartbeat.
+    #[allow(clippy::too_many_arguments)]
     fn poll_ping(
         &self,
         cx: &mut Context<'_>,
