@@ -8,7 +8,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-pub use packet::{Envelope, Packet};
+pub use packet::Packet;
 use qbase::{
     Epoch,
     cid::ConnectionId,
@@ -75,9 +75,19 @@ impl<'a, 'path> Burst<'a, 'path> {
     }
 
     pub async fn batch(&mut self) -> Result<(), Error> {
-        let count = self.collect().await?;
-        self.submit(count).await?;
-        Ok(())
+        let mut first = true;
+        loop {
+            let count = poll_fn(|cx| match self.poll_collect(cx) {
+                Poll::Pending if !first => Poll::Ready(Ok(0)),
+                result => result,
+            })
+            .await?;
+            if count == 0 {
+                return Ok(());
+            }
+            self.submit(count).await?;
+            first = false;
+        }
     }
 
     pub async fn submit(&mut self, count: usize) -> Result<(), Error> {
@@ -204,11 +214,14 @@ impl Burst<'_, '_> {
                 credit,
                 overhead,
             );
+            if credit == 0 {
+                ready!(cc.poll_send_quota(cx)).map_err(no_viable_path)?;
+                drop(cc);
+                path.cc.cancel(cx.waker());
+                return Poll::Pending;
+            }
             ready!(cc.poll_send_quota(cx)).map_err(no_viable_path)?
         };
-        if credit == 0 {
-            return Poll::Pending;
-        }
         let mut limits = Constraints {
             send_quota,
             credit,
@@ -246,38 +259,39 @@ impl Burst<'_, '_> {
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
         let mut validation = path.validation.clone();
-        let dcids = [Some(dcid); 3];
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
-            let is_active = path.is_active();
-            let mut validation = is_active.then_some(&mut validation);
-            // A sealed packet consumes its epoch's PTO allowance, even without a PING.
-            let mut probes = Epoch::EPOCHS
-                .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
-            let [a0, a1, a2] = &mut acks;
-            let [p0, p1, p2] = &mut probes;
-            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
-                &mut terminator,
-                a0,
-                a1,
-                a2,
-                &mut validation,
-                &mut heartbeat,
-                p0,
-                p1,
-                p2,
-            ];
             buffer.resize(1200, 0);
-            let (size, _) = spaces.package(
-                cx,
-                dcids,
-                is_active,
-                &mut sources,
-                buffer,
-                limits,
-                self.frames,
-                packets,
-            )?;
+            let size = if path.is_active() {
+                // A sealed packet consumes its epoch's PTO allowance, even without a PING.
+                let mut probes = Epoch::EPOCHS
+                    .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
+                let [a0, a1, a2] = &mut acks;
+                let [p0, p1, p2] = &mut probes;
+                let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
+                    &mut terminator,
+                    a0,
+                    a1,
+                    a2,
+                    &mut validation,
+                    &mut heartbeat,
+                    p0,
+                    p1,
+                    p2,
+                ];
+                spaces.poll_dump(cx, dcid, buffer, limits, self.frames, packets, &mut sources)?
+            } else {
+                spaces.poll_ping(
+                    cx,
+                    dcid,
+                    &mut heartbeat,
+                    &mut acks,
+                    buffer,
+                    limits,
+                    self.frames,
+                    packets,
+                )?
+            };
             buffer.truncate(size);
             if size == 0 {
                 break;

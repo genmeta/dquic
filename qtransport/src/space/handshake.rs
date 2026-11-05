@@ -1,8 +1,5 @@
 //! Handshake packet-number space.
-use std::{
-    sync::Arc,
-    task::{Context, Poll, Waker},
-};
+use std::{sync::Arc, task::Waker};
 
 use derive_more::Deref;
 use qbase::{
@@ -11,19 +8,16 @@ use qbase::{
     frame::AckFrame,
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
-    packet::{
-        LongHeaderBuilder, PacketNumber,
-        assemble::{Assemble, Package, PacketBuffer},
-    },
+    packet::{DataHeader, LongHeaderBuilder},
 };
 use qevent::quic::recovery::PacketLostTrigger;
-use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use super::{Encapsulate, Recover, Space};
+use super::{Allocate, Encapsulate, Recover, Space};
 use crate::{
     Error, GuaranteedFrame,
     keys::{ArcKeys, Seal},
+    packet::assemble::Packet,
 };
 
 /// Handshake headers carry no token or application-data sources.
@@ -87,27 +81,11 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
         ))
     }
 
-    fn encapsulate(
-        &self,
-        cx: &mut Context<'_>,
-        dcid: ConnectionId,
-        pn: (u64, PacketNumber),
-        is_active: bool,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-        buffer: &mut PacketBuffer<'_, &mut [u8]>,
-        min_size: Option<usize>,
-    ) -> Poll<Result<usize, Error>> {
+    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
-        if !buffer.begin(&header, pn.1, min_size) {
-            return Poll::Ready(Ok(0));
-        }
-        let mut crypto = is_active.then(|| self.crypto.outgoing());
-        let crypto: &mut dyn for<'b> Package<&'b mut [u8]> = &mut crypto;
-        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
-            .iter_mut()
-            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
-            .chain([crypto as &mut dyn Package<&mut [u8]>])
-            .collect();
-        buffer.assemble(cx, &mut sources)
+        let Some((pn, keys)) = self.pn_and_keys()? else {
+            return Ok(None);
+        };
+        Ok(Some(Packet::new(DataHeader::Long(header.into()), pn, keys)))
     }
 }

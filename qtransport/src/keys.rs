@@ -409,6 +409,25 @@ impl Open for qtls::DirectionalKeys {
     }
 }
 
+impl<K: Seal + ?Sized> Seal for &K {
+    type Output = K::Output;
+
+    fn tag_len(&self) -> usize {
+        (**self).tag_len()
+    }
+
+    fn seal(
+        &self,
+        pn: u64,
+        buffer: &mut [u8],
+        pn_offset: usize,
+        body_offset: usize,
+        tag_len: usize,
+    ) -> Result<Self::Output, PacketError> {
+        (**self).seal(pn, buffer, pn_offset, body_offset, tag_len)
+    }
+}
+
 impl Seal for qtls::DirectionalKeys {
     type Output = ();
 
@@ -566,4 +585,39 @@ fn open_with(
         .into());
     }
     Ok(Some((pn, FrameReader::new(payload, kind))))
+}
+
+pub enum Keys {
+    Long(Arc<qtls::BidirectionalKeys>),
+    Short(Arc<OneRttKeys>),
+}
+
+impl Seal for Keys {
+    type Output = Option<u64>;
+
+    fn tag_len(&self) -> usize {
+        match self {
+            Self::Long(keys) => keys.sealing.tag_len(),
+            Self::Short(keys) => keys.tag_len(),
+        }
+    }
+
+    fn seal(
+        &self,
+        pn: u64,
+        bytes: &mut [u8],
+        pn_offset: usize,
+        body_offset: usize,
+        tag_len: usize,
+    ) -> Result<Self::Output, PacketError> {
+        match self {
+            Self::Long(keys) => keys
+                .sealing
+                .seal(pn, bytes, pn_offset, body_offset, tag_len)
+                .map(|()| None),
+            Self::Short(keys) => keys
+                .seal(pn, bytes, pn_offset, body_offset, tag_len)
+                .map(|(generation, _)| Some(generation)),
+        }
+    }
 }

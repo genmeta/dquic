@@ -153,6 +153,8 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
             )),
             paths.closing_pto(),
         );
+        assert!(burst.poll_collect(&mut cx).is_pending());
+        path.enable();
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))));
         assert!(
             burst
@@ -1725,6 +1727,113 @@ async fn path_validation_respects_small_amplification_credit() {
             paths.terminator.terminate();
         }
     }
+}
+
+#[tokio::test]
+async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for blocked in [false, true] {
+        let paths = crate::common::initial_paths(
+            Role::Server,
+            ConnectionId::from_slice(b"server00"),
+            ConnectionId::from_slice(b"original"),
+            keys(true),
+        );
+        let path = crate::common::registered_path(
+            &paths,
+            Path::new(
+                crate::common::path_fixtures::pathway(34601),
+                paths.progress.facts(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                paths.loss_resender.clone(),
+                paths.cid_registry.remote.apply_dcid(),
+            ),
+        );
+        if blocked {
+            path.cc
+                .on_pkt_sent(Epoch::Initial, 0, true, 12000, true, None);
+        } else {
+            path.validation.exempt().unwrap();
+        }
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut datagrams = [BytesMut::new()];
+        let mut frames = Vec::new();
+        let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
+        assert!(
+            burst
+                .poll_collect(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        counter.0.store(0, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0, "blocked={blocked}");
+        if blocked {
+            path.validation.on_received(400);
+            assert!(counter.0.load(Ordering::Relaxed) > 0);
+        }
+        burst.cancel();
+        path.send_waker.register(&waker);
+        task::cancel_waiters(&paths, &path);
+        path.close();
+        paths.terminator.terminate();
+    }
+}
+
+#[tokio::test]
+async fn burst_uses_its_budget_across_multiple_udp_batches() {
+    use qprotocol::{QuicProtocol, UdpSocket};
+
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local = EndpointAddr::direct(socket.local_addr().unwrap());
+    QuicProtocol::global().register(local, &socket).unwrap();
+    let paths = crate::common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let space = crate::common::initial_space(&paths.spaces);
+    space.crypto.writer().write_all(&[42; 24000]).await.unwrap();
+    let path = crate::common::registered_path(
+        &paths,
+        Path::new(
+            Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())),
+            paths.progress.facts(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+            paths.loss_resender.clone(),
+            paths.cid_registry.remote.apply_dcid(),
+        ),
+    );
+    path.validation.exempt().unwrap();
+    let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
+    let mut frames = Vec::new();
+    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
+    burst.batch().await.unwrap();
+    let (next, _) = space.next_pn().unwrap();
+    let journal = space.sent_journal.lock_guard();
+    let sent = (0..next).filter(|&pn| journal.packet(pn).is_some()).count();
+    assert!(
+        sent > MAX_BURST_PACKETS,
+        "burst stopped after {sent} datagrams"
+    );
+    drop(journal);
+    burst.cancel();
+    task::cancel_waiters(&paths, &path);
+    path.close();
+    paths.terminator.terminate();
+    QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
 #[tokio::test]

@@ -10,13 +10,13 @@ use qbase::{
     cid::ArcDcid,
     frame::GuaranteedFrame,
     packet::{
-        OneRttHeader,
-        assemble::{Assemble, Constraints, Package},
+        DataHeader, OneRttHeader,
+        assemble::{Constraints, Package},
     },
 };
 use qtransport::{
     ArcReliableFrames,
-    packet::assemble::{Envelope, Packet},
+    packet::assemble::Packet,
     space::{Allocate, ArcSpaces, DataSpace, Keys, Recover, Spaces},
 };
 
@@ -68,8 +68,7 @@ impl PunchPacketEncoder for ProbeEncoder {
             let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
             let header = OneRttHeader::new(Default::default(), peer_cid);
             let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
-            let packet =
-                Packet::new(header, pn, &mut bytes, &mut frames).map_err(io::Error::other)?;
+            let mut sending = Packet::new(DataHeader::Short(header), pn, key.as_ref());
             let mut limits = Constraints {
                 flow_ctrl: usize::MAX,
                 send_quota: usize::MAX,
@@ -78,14 +77,17 @@ impl PunchPacketEncoder for ProbeEncoder {
                 max_size: MAX_PUNCH_PACKET_SIZE,
                 ..Default::default()
             };
-            let mut sending = Envelope {
-                packet,
-                keys: key.as_ref(),
-                limits: &mut limits,
-            };
-            match sending.assemble(&mut Context::from_waker(Waker::noop()), &mut [&mut frame]) {
-                Poll::Ready(Ok(1)) => {
-                    sending.seal().map_err(io::Error::other)?;
+            let result = sending.assemble(
+                &mut Context::from_waker(Waker::noop()),
+                &mut &mut bytes,
+                &mut limits,
+                &mut frames,
+                &mut [&mut frame],
+            );
+            match result {
+                Poll::Ready(Ok(size)) if size > 0 => {
+                    bytes.resize(sending.len(), 0);
+                    sending.seal(&mut bytes).map_err(io::Error::other)?;
                     Ok(bytes)
                 }
                 Poll::Ready(Err(error)) => Err(io::Error::other(error)),

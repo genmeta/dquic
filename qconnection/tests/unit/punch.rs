@@ -80,7 +80,7 @@ fn encode_frames<const N: usize>(
     phase: &super::DataFixture,
     frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut BytesMut>; N],
 ) -> BytesMut {
-    use qbase::packet::{Constraints, assemble::Assemble};
+    use qbase::packet::Constraints;
 
     let space = &phase.spaces.data;
     use qtransport::space::{Allocate, Keys};
@@ -89,13 +89,11 @@ fn encode_frames<const N: usize>(
     };
     let mut bytes = BytesMut::with_capacity(1200);
     let mut recorded = Vec::new();
-    let packet = crate::send::Packet::new(
-        OneRttHeader::new(Default::default(), phase.peer_cid()),
+    let mut sending = crate::send::Packet::new(
+        qbase::packet::DataHeader::Short(OneRttHeader::new(Default::default(), phase.peer_cid())),
         pn,
-        &mut bytes,
-        &mut recorded,
-    )
-    .unwrap();
+        key.as_ref(),
+    );
     let mut limits = Constraints {
         flow_ctrl: usize::MAX,
         send_quota: 1200,
@@ -103,19 +101,16 @@ fn encode_frames<const N: usize>(
         max_size: 1200,
         ..Default::default()
     };
-    let mut sending = crate::send::Envelope {
-        packet,
-        keys: key.as_ref(),
-        limits: &mut limits,
-    };
     assert!(matches!(
         sending.assemble(
             &mut std::task::Context::from_waker(std::task::Waker::noop()),
+            &mut &mut bytes, &mut limits, &mut recorded,
             &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
         ),
         std::task::Poll::Ready(Ok(n)) if n > 0
     ));
-    sending.seal().unwrap();
+    bytes.resize(sending.len(), 0);
+    sending.seal(&mut bytes).unwrap();
     bytes
 }
 

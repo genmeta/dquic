@@ -15,13 +15,13 @@ use qbase::{
     net::{addr::EndpointAddr, route::Pathway},
     packet::{
         DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketReader,
-        assemble::{Assemble, Constraints},
+        assemble::{Constraints, Limit},
         long,
     },
     role::Role,
 };
 use qcongestion::Transport as _;
-use qconnection::send::{Burst, Envelope, MAX_BURST_PACKETS, Packet};
+use qconnection::send::{Burst, MAX_BURST_PACKETS, Packet};
 use qtransport::{keys::ArcKeys, packet::CipherPacket, space::HandshakeSpace};
 use tokio::io::AsyncWriteExt;
 
@@ -35,15 +35,20 @@ use common::initial_keys as keys;
 fn packet_continues_after_pending_and_no_space_sources() {
     let header =
         LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
+    let keys = keys(false);
     let mut bytes = [0u8; 64];
     let mut frames = Vec::new();
+    let mut limits = Constraints {
+        send_quota: 64,
+        credit: 64,
+        max_size: 64,
+        ..Default::default()
+    };
     let mut packet = Packet::new(
-        header,
+        DataHeader::Long(header.into()),
         (7, qbase::packet::PacketNumber::U16(7)),
-        &mut bytes[..],
-        &mut frames,
-    )
-    .unwrap();
+        &keys.sealing,
+    );
     let mut absent: Option<PingFrame> = None;
     let data = [0u8; 100];
     let mut large = (
@@ -51,10 +56,9 @@ fn packet_continues_after_pending_and_no_space_sources() {
         data.as_slice(),
     );
     let mut ping = PingFrame;
-    let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        packet.assemble(&mut cx, &mut [&mut absent, &mut large, &mut ping]),
-        Poll::Ready(Ok(1))
+        packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut bytes[..], &mut limits, &mut frames, &mut [&mut absent, &mut large, &mut ping]),
+        Poll::Ready(Ok(n)) if n > 0
     ));
     assert_eq!(packet.meta.content, qbase::packet::PacketContent::JustPing);
     assert!(frames.is_empty());
@@ -63,27 +67,37 @@ fn packet_continues_after_pending_and_no_space_sources() {
 #[test]
 fn repeated_assembly_does_not_append_after_close() {
     let header = qbase::packet::OneRttHeader::new(Default::default(), Default::default());
+    let keys = keys(false);
     let mut bytes = BytesMut::with_capacity(128);
     let mut frames = Vec::new();
+    let mut limits = Constraints {
+        send_quota: 128,
+        credit: 128,
+        max_size: 128,
+        ..Default::default()
+    };
     let mut packet = Packet::new(
-        header,
+        DataHeader::Short(header),
         (0, qbase::packet::PacketNumber::U16(0)),
-        &mut bytes,
-        &mut frames,
-    )
-    .unwrap();
+        &keys.sealing,
+    );
     let mut close = qbase::frame::ConnectionCloseFrame::new_app(0u32.into(), "closed");
     let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(
-        packet.assemble(&mut cx, &mut [&mut close]),
-        Poll::Ready(Ok(1))
+    assert!(
+        matches!(packet.assemble(&mut cx, &mut &mut bytes, &mut limits, &mut frames, &mut [&mut close]), Poll::Ready(Ok(n)) if n > 0)
     );
-    let size = packet.buffer.len();
+    let size = bytes.len();
     assert_eq!(
-        packet.assemble(&mut cx, &mut [&mut PingFrame]),
+        packet.assemble(
+            &mut cx,
+            &mut &mut bytes,
+            &mut limits,
+            &mut frames,
+            &mut [&mut PingFrame]
+        ),
         Poll::Ready(Ok(0))
     );
-    assert_eq!(packet.buffer.len(), size);
+    assert_eq!(bytes.len(), size);
     assert_eq!(packet.meta.nframes, 1);
     assert!(frames.is_empty());
 }
@@ -123,16 +137,15 @@ async fn mixed_packets_consume_shared_budget_once() {
     let mut frames = Vec::new();
     let mut pns = [None; 3];
     let mut cx = Context::from_waker(Waker::noop());
-    let (size, _) = spaces
-        .package(
+    let size = spaces
+        .poll_dump(
             &mut cx,
-            [Some(Default::default()); 3],
-            true,
-            &mut [],
+            Default::default(),
             &mut bytes,
             &mut limits,
             &mut frames,
             &mut pns,
+            &mut [],
         )
         .unwrap();
     assert_eq!(size, 1200);
@@ -197,28 +210,30 @@ fn probe_uses_credit_without_replenishing_congestion_budget() {
         probe_quota: 1200,
         ..Default::default()
     };
-    let mut cx = Context::from_waker(Waker::noop());
     let mut frames = Vec::new();
     for pn in 0..2 {
         let header =
             LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
-        let packet = Packet::new(
-            header,
+        let mut packet = Packet::new(
+            DataHeader::Long(header.into()),
             (pn, qbase::packet::PacketNumber::U8(pn as u8)),
-            Vec::new(),
+            &keys.sealing,
+        );
+        let mut bytes = Vec::new();
+        let result = packet.assemble(
+            &mut Context::from_waker(Waker::noop()),
+            &mut bytes,
+            &mut limits,
             &mut frames,
-        )
-        .unwrap();
-        let mut packet = Envelope {
-            packet,
-            keys: &keys.sealing,
-            limits: &mut limits,
-        };
-        let result = packet.assemble(&mut cx, &mut [&mut PingFrame]);
+            &mut [&mut PingFrame],
+        );
         if pn == 0 {
             assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
-            packet.seal().unwrap();
-            assert_eq!(packet.packet.buffer.len(), 1160);
+            bytes.resize(1160, 0);
+            packet.padding(&mut bytes, 1160 - packet.len()).unwrap();
+            packet.seal(&mut bytes).unwrap();
+            limits.take(packet.len(), packet.len());
+            assert_eq!(bytes.len(), 1160);
         } else {
             assert!(matches!(result, Poll::Ready(Ok(0))));
         }
@@ -234,72 +249,73 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     use std::io::IoSliceMut;
 
     use qbase::packet::{GetType, PacketNumber};
-    fn limits() -> Constraints {
-        Constraints {
-            flow_ctrl: 0,
-            send_quota: 1200,
-            credit: 1200,
-            min_size: 1200,
-            max_size: 1200,
-            ..Default::default()
-        }
-    }
-    fn verify(bytes: BytesMut) {
-        assert_eq!(bytes.len(), 1200);
-        let ParsedPacket::Data(parsed) = PacketReader::new(bytes, 0).next().unwrap().unwrap()
-        else {
-            panic!()
-        };
-        let DataHeader::Long(long::DataHeader::Initial(header)) = parsed.header else {
-            panic!()
-        };
-        let ty = header.get_type();
-        let opened = CipherPacket::new(header, parsed.bytes, parsed.offset)
-            .decrypt_long_packet(&keys(true).opening, |_| Ok(7))
-            .unwrap()
-            .unwrap();
-        assert!(
-            FrameReader::new(opened.body(), ty).any(|f| matches!(f.unwrap().0, Frame::Ping(_)))
-        );
-    }
     let keys = keys(false);
     let header =
         || LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
     let mut frames = Vec::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    let packet = Packet::new(header(), (7, PacketNumber::U16(7)), Vec::new(), &mut frames).unwrap();
-    let mut constraints = limits();
-    let mut packet = Envelope {
-        packet,
-        keys: &keys.sealing,
-        limits: &mut constraints,
+    let mut limits = Constraints {
+        send_quota: 1200,
+        credit: 1200,
+        min_size: 1200,
+        max_size: 1200,
+        ..Default::default()
     };
-    assert!(matches!(
-        packet.assemble(&mut cx, &mut [&mut PingFrame]),
-        Poll::Ready(Ok(_))
-    ));
-    packet.seal().unwrap();
-    assert_eq!(packet.packet.meta.pn, 7);
-    assert_eq!(packet.packet.meta.pktlen, 1200);
-    verify(BytesMut::from(packet.packet.buffer.as_slice()));
-    assert_eq!(constraints.send_quota, 0);
-    assert_eq!(constraints.credit, 0);
+    let mut packet = Packet::new(
+        DataHeader::Long(header().into()),
+        (7, PacketNumber::U16(7)),
+        &keys.sealing,
+    );
+    let mut bytes = Vec::new();
+    assert!(
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut bytes, &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready(Ok(n)) if n > 0)
+    );
+    bytes.resize(1200, 0);
+    packet.padding(&mut bytes, 1200 - packet.len()).unwrap();
+    packet.seal(&mut bytes).unwrap();
+    limits.take(packet.len(), packet.len());
+    assert_eq!(packet.meta.pn, 7);
+    assert_eq!(packet.meta.pktlen, 1200);
+    let ParsedPacket::Data(parsed) = PacketReader::new(BytesMut::from(bytes.as_slice()), 0)
+        .next()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!()
+    };
+    let DataHeader::Long(long::DataHeader::Initial(parsed_header)) = parsed.header else {
+        panic!()
+    };
+    let ty = parsed_header.get_type();
+    let opened = CipherPacket::new(parsed_header, parsed.bytes, parsed.offset)
+        .decrypt_long_packet(&common::initial_keys(true).opening, |_| Ok(7))
+        .unwrap()
+        .unwrap();
+    assert!(
+        FrameReader::new(opened.body(), ty).any(|frame| matches!(frame.unwrap().0, Frame::Ping(_)))
+    );
+    assert_eq!(limits.send_quota, 0);
+    assert_eq!(limits.credit, 0);
 
     let mut storage = [0; 1200];
     let mut io = IoSliceMut::new(&mut storage);
     let header = header();
     let pn_offset = qbase::packet::HeaderSize::size(&header) + 2;
-    frames.clear();
-    let mut packet =
-        Packet::new(header, (7, PacketNumber::U16(7)), &mut io[..], &mut frames).unwrap();
-    assert!(matches!(
-        packet.assemble(&mut cx, &mut [&mut PingFrame]),
-        Poll::Ready(Ok(1))
-    ));
-    let written = 1200 - packet.buffer.len();
-    drop(packet);
+    let mut packet = Packet::new(
+        DataHeader::Long(header.into()),
+        (7, PacketNumber::U16(7)),
+        &keys.sealing,
+    );
+    let mut limits = Constraints {
+        send_quota: 1200,
+        credit: 1200,
+        max_size: 1200,
+        ..Default::default()
+    };
+    assert!(
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut io[..], &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready(Ok(n)) if n > 0)
+    );
     assert_eq!(&io[pn_offset..pn_offset + 2], &[0, 7]);
-    assert_eq!(io[written - 1], 1);
+    assert_eq!(io[pn_offset + 2], 1);
 }
 
 #[tokio::test]
@@ -375,16 +391,15 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         };
         let mut frames = Vec::new();
         let mut pns = [None; 3];
-        let (size, nframes) = spaces
-            .package(
+        let size = spaces
+            .poll_dump(
                 &mut Context::from_waker(Waker::noop()),
-                [Some(sender.peer_cid()); 3],
-                true,
-                &mut external,
+                sender.peer_cid(),
                 &mut bytes[..1200],
                 &mut limits,
                 &mut frames,
                 &mut pns,
+                &mut external,
             )
             .unwrap();
         assert_eq!(size, expected.iter().sum::<usize>());
@@ -413,7 +428,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         }
         assert_eq!(recorded, expected.iter().filter(|&&size| size != 0).count());
         assert_eq!(
-            nframes,
+            pns.iter().flatten().map(|meta| meta.nframes).sum::<usize>(),
             recorded
                 + expected
                     .iter()
@@ -511,16 +526,15 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         };
         let mut frames = Vec::new();
         let mut pns = [None; 3];
-        let (size, _) = spaces
-            .package(
+        let size = spaces
+            .poll_dump(
                 &mut Context::from_waker(Waker::noop()),
-                [Some(sender.peer_cid()); 3],
-                true,
-                &mut external,
+                sender.peer_cid(),
                 &mut bytes[..capacity],
                 &mut limits,
                 &mut frames,
                 &mut pns,
+                &mut external,
             )
             .unwrap();
         assert!(pns[0].is_none());
@@ -534,12 +548,10 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         spaces.0.pop_front();
         assert_eq!(spaces.0.offset(), 2);
         let mut ping = Some(PingFrame);
-        let (size, _) = spaces
-            .package(
+        let size = spaces
+            .poll_dump(
                 &mut Context::from_waker(Waker::noop()),
-                [Some(sender.peer_cid()); 3],
-                true,
-                &mut [&mut (Epoch::Data, &mut ping)],
+                sender.peer_cid(),
                 &mut bytes[..1200],
                 &mut Constraints {
                     send_quota: 1200,
@@ -548,6 +560,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
                 },
                 &mut frames,
                 &mut [None; 3],
+                &mut [&mut (Epoch::Data, &mut ping)],
             )
             .unwrap();
         assert!(size > 0 && size < 1200);
@@ -582,11 +595,9 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         let mut ping = Some(PingFrame);
         let mut pns = [None; 3];
         spaces
-            .package(
+            .poll_dump(
                 &mut cx,
-                [Some(dcid); 3],
-                true,
-                &mut [&mut (Epoch::Initial, &mut ping)],
+                dcid,
                 &mut bytes,
                 &mut Constraints {
                     send_quota: 1200,
@@ -595,6 +606,7 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
                 },
                 &mut frames,
                 &mut pns,
+                &mut [&mut (Epoch::Initial, &mut ping)],
             )
             .unwrap();
         let ParsedPacket::Data(packet) = PacketReader::new(BytesMut::from(bytes.as_slice()), 8)
@@ -648,33 +660,31 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         credit: 1232,
         ..Default::default()
     };
-    let result = spaces.package(
+    let result = spaces.poll_dump(
         &mut cx,
-        [Some(Default::default()); 3],
-        true,
-        &mut [
-            &mut (Epoch::Initial, &mut ping),
-            &mut (Epoch::Handshake, Failed),
-        ],
+        Default::default(),
         &mut bytes,
         &mut limits,
         &mut frames,
         &mut pns,
+        &mut [
+            &mut (Epoch::Initial, &mut ping),
+            &mut (Epoch::Handshake, Failed),
+        ],
     );
     assert!(result.is_err());
     assert!(pns.iter().all(Option::is_none));
     assert!(frames.is_empty());
     assert_eq!((limits.send_quota, limits.credit), (1232, 1232));
     spaces
-        .package(
+        .poll_dump(
             &mut cx,
-            [Some(Default::default()); 3],
-            true,
-            &mut [],
+            Default::default(),
             &mut bytes,
             &mut limits,
             &mut frames,
             &mut pns,
+            &mut [],
         )
         .unwrap();
     assert!(initial.sent_journal.lock_guard().frames(pns[0].unwrap().pn)
@@ -717,16 +727,15 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         let mut frames = Vec::new();
         let mut pns = [None; 3];
         let mut cx = Context::from_waker(Waker::noop());
-        let (size, _) = spaces
-            .package(
+        let size = spaces
+            .poll_dump(
                 &mut cx,
-                [Some(Default::default()); 3],
-                true,
-                &mut sources,
+                Default::default(),
                 &mut bytes,
                 &mut limits,
                 &mut frames,
                 &mut pns,
+                &mut sources,
             )
             .unwrap();
         assert!(size > 0);
@@ -734,16 +743,15 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         assert_eq!(limits.send_quota, 2400 - if flight { size + 32 } else { 0 });
         assert_eq!(limits.probe_quota, [1200, 0, 1200]);
         let before = limits.clone();
-        let (size, _) = spaces
-            .package(
+        let size = spaces
+            .poll_dump(
                 &mut cx,
-                [Some(Default::default()); 3],
-                true,
-                &mut sources,
+                Default::default(),
                 &mut bytes,
                 &mut limits,
                 &mut frames,
                 &mut [None; 3],
+                &mut sources,
             )
             .unwrap();
         assert_eq!(size, 0);
