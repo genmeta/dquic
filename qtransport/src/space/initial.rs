@@ -1,6 +1,6 @@
 //! Initial packet-number space and token-bearing headers.
 use std::{
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -9,6 +9,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     frame::AckFrame,
+    handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
         LongHeaderBuilder, PacketNumber,
@@ -38,10 +39,10 @@ impl InitialSpace {
         initial_scid: ConnectionId,
         keys: ArcKeys,
         token: Option<Vec<u8>>,
-        is_mp_handshaking: Arc<AtomicBool>,
+        facts: Arc<HandshakeFacts>,
     ) -> Self {
         Self {
-            space: Space::new(Epoch::Initial, initial_scid, keys, is_mp_handshaking),
+            space: Space::new(Epoch::Initial, initial_scid, keys, facts),
             token,
         }
     }

@@ -99,16 +99,16 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
-    let pending_as_lost = Arc::new(AtomicBool::new(true));
+    let facts = crate::common::handshake_facts(Role::Client, true);
     let initial_space = Arc::new(InitialSpace::new(
         cid,
         ArcKeys::new(Arc::new(initial_keys(false))),
         None,
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
-        Role::Client,
+        facts,
         qconnection::CidRegistry::new(
             local_cids,
             qconnection::ArcRemoteCids::client(
@@ -119,7 +119,6 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         reliable_frames,
         Duration::from_secs(5),
         Duration::ZERO,
-        pending_as_lost,
     );
     let (endpoint, _) = common::endpoints(false);
     let tls = TlsContext::client(&endpoint, "localhost".try_into().unwrap(), &parameters).unwrap();
@@ -203,16 +202,16 @@ async fn close_at_client_stage(wait: ClientWait) {
         cid,
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
-    let pending_as_lost = Arc::new(AtomicBool::new(true));
+    let facts = crate::common::handshake_facts(Role::Client, true);
     let initial_space = Arc::new(InitialSpace::new(
         cid,
         ArcKeys::new(Arc::new(initial_keys(false))),
         None,
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
-        Role::Client,
+        facts,
         qconnection::CidRegistry::new(
             local_cids,
             qconnection::ArcRemoteCids::client(
@@ -223,7 +222,6 @@ async fn close_at_client_stage(wait: ClientWait) {
         reliable_frames,
         Duration::from_secs(5),
         Duration::ZERO,
-        pending_as_lost,
     );
 
     let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());

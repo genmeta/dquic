@@ -1,7 +1,7 @@
 mod common;
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -73,16 +73,16 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         scid,
         router.insert(odcid.into(), inbox.clone(), reliable_frames.clone()),
     );
-    let pending_as_lost = Arc::new(AtomicBool::new(true));
+    let facts = crate::common::handshake_facts(Role::Server, true);
     let initial_space = Arc::new(InitialSpace::new(
         scid,
         ArcKeys::new(Arc::new(server_keys)),
         None,
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
-        Role::Server,
+        facts,
         qconnection::CidRegistry::new(
             local_cids,
             qconnection::ArcRemoteCids::server(
@@ -93,7 +93,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         reliable_frames,
         Duration::ZERO,
         Duration::ZERO,
-        pending_as_lost,
     );
     paths.add_path(pathway);
 

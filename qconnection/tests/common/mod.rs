@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use qbase::{
@@ -211,6 +211,17 @@ pub fn use_system_resolver() {
     REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
 }
 
+pub fn handshake_facts(
+    role: qbase::role::Role,
+    multipath: bool,
+) -> Arc<qbase::handshake::HandshakeFacts> {
+    let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(role));
+    if !multipath {
+        facts.quit_mp_handshaking();
+    }
+    facts
+}
+
 /// Build an isolated connection for component tests without a live router.
 pub fn initial_paths(
     role: qbase::role::Role,
@@ -225,7 +236,7 @@ pub fn initial_paths(
         keys,
         std::time::Duration::ZERO,
         std::time::Duration::ZERO,
-        Arc::new(AtomicBool::new(true)),
+        handshake_facts(role, true),
     )
 }
 
@@ -236,7 +247,7 @@ pub fn initial_paths_with_timeouts(
     keys: qtls::BidirectionalKeys,
     max_idle_timeout: std::time::Duration,
     defer_idle_timeout: std::time::Duration,
-    pending_as_lost: Arc<AtomicBool>,
+    facts: Arc<qbase::handshake::HandshakeFacts>,
 ) -> Arc<qconnection::Paths> {
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
     let router = Arc::new(qtransport::router::QuicRouter::new());
@@ -251,7 +262,7 @@ pub fn initial_paths_with_timeouts(
         scid,
         qtransport::keys::ArcKeys::new(Arc::new(keys)),
         None,
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     let remote_cids = match role {
         qbase::role::Role::Client => {
@@ -264,12 +275,11 @@ pub fn initial_paths_with_timeouts(
     remote_cids.set_limit(10);
     qconnection::Paths::new(
         initial_space,
-        role,
+        facts,
         qconnection::CidRegistry::new(local_cids, remote_cids),
         reliable_frames,
         max_idle_timeout,
         defer_idle_timeout,
-        pending_as_lost,
     )
 }
 

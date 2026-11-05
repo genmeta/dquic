@@ -3,7 +3,7 @@ mod send {
     use std::{
         io,
         pin::Pin,
-        sync::{Arc, Mutex, atomic::AtomicBool},
+        sync::{Arc, Mutex},
         task::{Context, Poll, Waker},
     };
 
@@ -11,6 +11,7 @@ mod send {
     use qbase::{
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, FrameType},
+        handshake::HandshakeFacts,
         net::tx::{ArcSendWakers, UnregisterWaker},
         packet::{Package, PacketBuffer},
         varint::{VARINT_MAX, VarInt},
@@ -22,6 +23,7 @@ mod send {
     #[derive(Debug)]
     pub(super) struct Sender {
         sndbuf: SendBuf,
+        facts: Arc<HandshakeFacts>,
         writable_waker: Option<Waker>,
         flush_waker: Option<Waker>,
         tx_wakers: ArcSendWakers,
@@ -61,6 +63,9 @@ mod send {
 
         fn on_data_acked(&mut self, crypto_frame: &CryptoFrame) {
             self.sndbuf.on_data_acked(&crypto_frame.range());
+            if !crypto_frame.range().is_empty() {
+                self.facts.quit_mp_handshaking();
+            }
             if self.sndbuf.remaining_mut() > 0
                 && let Some(waker) = self.writable_waker.take()
             {
@@ -123,9 +128,10 @@ mod send {
 
     impl ArcSender {
         /// Create a sender with a shared policy for unacknowledged CRYPTO data.
-        pub fn new(flighting_as_lost: Arc<AtomicBool>) -> Self {
+        pub fn with_facts(facts: Arc<HandshakeFacts>) -> Self {
             Self(Arc::new(Mutex::new(Ok(Sender {
-                sndbuf: SendBuf::with_capacity(VARINT_MAX, flighting_as_lost),
+                sndbuf: SendBuf::with_capacity(VARINT_MAX),
+                facts,
                 writable_waker: None,
                 flush_waker: None,
                 tx_wakers: ArcSendWakers::default(),
@@ -228,7 +234,10 @@ mod send {
                 Err(_) => return Poll::Ready(Ok(0)),
             };
             let result = inner.poll_dump(cx, buffer);
-            inner.sndbuf.resend_flighting();
+            // Keep assembly and replay rearming under the same sender lock.
+            if inner.facts.is_mp_handshaking() {
+                inner.sndbuf.multipath_handshake();
+            }
             result
         }
     }
@@ -371,9 +380,9 @@ mod recv {
     }
 }
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
-use qbase::{Close, error::Error};
+use qbase::{Close, error::Error, handshake::HandshakeFacts};
 pub use recv::{ArcRecver, CryptoStreamIncoming, CryptoStreamReader};
 pub use send::{ArcSender, CryptoStreamOutgoing, CryptoStreamWriter};
 
@@ -382,12 +391,6 @@ pub use send::{ArcSender, CryptoStreamOutgoing, CryptoStreamWriter};
 pub struct CryptoStream {
     pub sender: ArcSender,
     pub recver: ArcRecver,
-}
-
-impl Default for CryptoStream {
-    fn default() -> Self {
-        Self::new(Arc::default())
-    }
 }
 
 impl Close for CryptoStream {
@@ -403,11 +406,11 @@ impl CryptoStream {
         self.recver.on_error(error);
     }
 
-    /// Create a CRYPTO stream with a shared policy for unacknowledged output.
-    /// Acknowledging data in any stream sharing this policy disables automatic replay.
-    pub fn new(pending_as_lost: Arc<AtomicBool>) -> Self {
+    /// Create a CRYPTO stream using the connection's shared handshake facts.
+    /// Acknowledging data in any stream sharing these facts disables automatic replay.
+    pub fn with_facts(facts: Arc<HandshakeFacts>) -> Self {
         Self {
-            sender: ArcSender::new(pending_as_lost),
+            sender: ArcSender::with_facts(facts),
             recver: recv::create(),
         }
     }

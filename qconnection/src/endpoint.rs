@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock, atomic::AtomicBool},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -9,6 +9,7 @@ use qbase::{
     cid::{ConnectionId, GenUniqueCid},
     endpoint::{Anonymous, Endpoint},
     error::{AppError, ErrorKind, QuicError},
+    handshake::HandshakeFacts,
     net::route::Scopes,
     packet::{GetDcid, GetScid},
     param::{ClientParameters, ParameterId, ParameterValue, ServerParameters, WriteParameters},
@@ -178,16 +179,16 @@ impl QuicEndpoint {
         )?;
         let local_cids =
             ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
-        let is_mp_handshaking = Arc::new(AtomicBool::new(true));
+        let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
         let initial_space = Arc::new(InitialSpace::new(
             initial_scid,
             ArcKeys::new(Arc::new(initial_keys)),
             None,
-            is_mp_handshaking.clone(),
+            facts.clone(),
         ));
         let paths = Paths::new(
             initial_space.clone(),
-            Role::Client,
+            facts,
             CidRegistry::new(
                 local_cids,
                 ArcRemoteCids::client(origin_dcid, reliable_frames.clone()),
@@ -195,7 +196,6 @@ impl QuicEndpoint {
             reliable_frames,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
-            is_mp_handshaking,
         );
         let token = ArcTokenRegistry::with_sink(tls_name, Arc::new(NoopTokenRegistry));
         let (deliver, connected) = oneshot::channel();
@@ -321,16 +321,16 @@ impl ServerRegistry {
                 let Some(initial_keys) = ServerRegistry::global().initial_keys(odcid) else {
                     return;
                 };
-                let is_mp_handshaking = Arc::new(AtomicBool::new(true));
+                let facts = Arc::new(HandshakeFacts::with_role(Role::Server));
                 let initial_space = Arc::new(InitialSpace::new(
                     initial_scid,
                     ArcKeys::new(Arc::new(initial_keys)),
                     None,
-                    is_mp_handshaking.clone(),
+                    facts.clone(),
                 ));
                 let paths = Paths::new(
                     initial_space.clone(),
-                    Role::Server,
+                    facts,
                     CidRegistry::new(
                         local_cids,
                         ArcRemoteCids::server(client_scid, reliable_frames.clone()),
@@ -338,7 +338,6 @@ impl ServerRegistry {
                     reliable_frames,
                     Duration::ZERO,
                     Duration::ZERO,
-                    is_mp_handshaking,
                 );
                 // Other receivers may already have filled the published inbox.
                 // Drive the connection even if this particular Initial is dropped.

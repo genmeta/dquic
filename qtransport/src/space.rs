@@ -2,7 +2,7 @@
 use std::{
     any::Any,
     ops::Deref,
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -12,6 +12,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     frame::AckFrame,
+    handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
         GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
@@ -62,13 +63,13 @@ impl<K> Space<K> {
         epoch: Epoch,
         initial_scid: ConnectionId,
         keys: K,
-        is_mp_handshaking: Arc<AtomicBool>,
+        facts: Arc<HandshakeFacts>,
     ) -> Self {
         Self {
             initial_scid,
             epoch,
             keys,
-            crypto: CryptoStream::new(is_mp_handshaking),
+            crypto: CryptoStream::with_facts(facts),
             sent_journal: ArcSentJournal::default(),
             rcvd_journal: ArcRcvdJournal::with_capacity(0, None),
         }

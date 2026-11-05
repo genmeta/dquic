@@ -95,7 +95,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         keys(true),
         Duration::from_secs(5),
         Duration::ZERO,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        crate::common::handshake_facts(Role::Server, true),
     );
     let space = crate::common::initial_space(&paths.spaces);
     let path = paths.add_path(Pathway::new(
@@ -306,7 +306,7 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
         keys(false),
         Duration::ZERO,
         Duration::ZERO,
-        Default::default(),
+        crate::common::handshake_facts(Role::Client, false),
     );
     let space = crate::common::initial_space(&paths.spaces);
     let path = paths.add_path(Pathway::new(

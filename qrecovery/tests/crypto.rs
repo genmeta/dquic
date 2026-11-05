@@ -3,7 +3,7 @@ mod tests {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         task::{Context, Wake, Waker},
     };
@@ -11,11 +11,19 @@ mod tests {
     use qbase::{
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, io::ReceiveFrame},
+        handshake::HandshakeFacts,
         packet::Package,
+        role::Role,
         varint::VarInt,
     };
     use qrecovery::crypto::CryptoStream;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+
+    fn single_path_stream() -> CryptoStream {
+        let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+        facts.quit_mp_handshaking();
+        CryptoStream::with_facts(facts)
+    }
 
     #[derive(Default)]
     struct WakeCount(AtomicUsize);
@@ -84,7 +92,7 @@ mod tests {
             },
         };
 
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         stream.writer().write_all(&[42; 20]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
@@ -114,9 +122,9 @@ mod tests {
     #[tokio::test]
     async fn ack_in_any_crypto_stream_stops_replay_in_every_stream() {
         for acknowledged in 0..3 {
-            let pending_as_lost = Arc::new(AtomicBool::new(true));
+            let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
             let streams =
-                std::array::from_fn::<_, 3, _>(|_| CryptoStream::new(pending_as_lost.clone()));
+                std::array::from_fn::<_, 3, _>(|_| CryptoStream::with_facts(facts.clone()));
             for stream in &streams {
                 stream.writer().write_all(b"hello world").await.unwrap();
                 for _ in 0..2 {
@@ -126,8 +134,12 @@ mod tests {
             }
             streams[acknowledged]
                 .outgoing()
+                .on_data_acked(&CryptoFrame::new(0u32.into(), 0u32.into()));
+            assert!(facts.is_mp_handshaking());
+            streams[acknowledged]
+                .outgoing()
                 .on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
-            assert!(!pending_as_lost.load(Ordering::Relaxed));
+            assert!(!facts.is_mp_handshaking());
 
             // Previously Lost ranges can still be sent once; subsequent sends wait for recovery.
             for stream in &streams {
@@ -141,7 +153,7 @@ mod tests {
             }
 
             // A later encryption level inherits the already-disabled policy.
-            let later = CryptoStream::new(pending_as_lost);
+            let later = CryptoStream::with_facts(facts);
             later.writer().write_all(b"ticket").await.unwrap();
             let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
             assert_eq!(packet.load(&mut later.outgoing()), Ok(1));
@@ -151,9 +163,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_as_lost_leaves_data_available_until_selection() {
-        let pending_as_lost = Arc::new(AtomicBool::new(true));
-        let stream = CryptoStream::new(pending_as_lost.clone());
+    async fn concurrent_paths_each_replay_the_complete_initial_flight_once() {
+        use qbase::frame::io::WriteDataFrame;
+
+        let stream = CryptoStream::with_facts(Arc::new(HandshakeFacts::with_role(Role::Client)));
+        stream.writer().write_all(b"ClientHello").await.unwrap();
+        let mut expected = bytes::BytesMut::new();
+        expected.put_data_frame(
+            &CryptoFrame::new(0u32.into(), 11u32.into()),
+            &b"ClientHello".as_slice(),
+        );
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    let stream = &stream;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut packets = Vec::new();
+                        for _ in 0..32 {
+                            barrier.wait();
+                            let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
+                            let result = packet.load(&mut stream.outgoing());
+                            packets.push((result, packet.0));
+                        }
+                        packets
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                for (result, packet) in worker.join().unwrap() {
+                    assert_eq!(result, Ok(1));
+                    assert_eq!(packet, expected);
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn multipath_handshaking_leaves_data_available_until_selection() {
+        let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+        let stream = CryptoStream::with_facts(facts.clone());
         stream.writer().write_all(b"ClientHello").await.unwrap();
         let mut outgoing = stream.outgoing();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
@@ -163,7 +213,7 @@ mod tests {
         second.load(&mut stream.outgoing()).unwrap();
         assert_eq!(second.0, first.0);
 
-        pending_as_lost.store(false, Ordering::Relaxed);
+        facts.quit_mp_handshaking();
         let mut selected = TestPacket(bytes::BytesMut::with_capacity(64));
         selected.load(&mut stream.outgoing()).unwrap();
         assert_eq!(selected.0, first.0);
@@ -178,7 +228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabling_pending_as_lost_preserves_acknowledgment_of_all_sent_ranges() {
+    async fn quitting_multipath_handshaking_preserves_acknowledgment_of_all_sent_ranges() {
         use qbase::{
             frame::{Frame, FrameReader},
             packet::{
@@ -198,13 +248,16 @@ mod tests {
             frame
         };
 
-        let pending_as_lost = Arc::new(AtomicBool::new(false));
-        let stream = CryptoStream::new(pending_as_lost.clone());
+        let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+        let stream = CryptoStream::with_facts(facts.clone());
         stream.writer().write_all(&[42; 100]).await.unwrap();
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
         let prefix = crypto_frame(&first);
-        pending_as_lost.store(true, Ordering::Relaxed);
+        facts.quit_mp_handshaking();
+        let mut replayed = TestPacket(bytes::BytesMut::with_capacity(64));
+        replayed.load(&mut stream.outgoing()).unwrap();
+        assert_eq!(crypto_frame(&replayed).range(), prefix.range());
 
         let mut second = TestPacket(bytes::BytesMut::with_capacity(64));
         second.load(&mut stream.outgoing()).unwrap();
@@ -222,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_retirement_wakes_reader_and_preserves_crypto_retransmission() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"ServerHello").await.unwrap();
@@ -266,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_retirement_wakes_flush_and_leaves_receiver_running() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
         let wakes = Arc::new(WakeCount::default());
@@ -306,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_error_wakes_both_sides_and_preserves_the_cause() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         let mut reader = stream.reader();
         let mut writer = stream.writer();
         writer.write_all(b"pending").await.unwrap();
@@ -346,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_unsupported_and_keeps_unacknowledged_data() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         stream.writer().write_all(b"outgoing").await.unwrap();
         assert_eq!(
             stream.writer().shutdown().await.unwrap_err().kind(),
@@ -360,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledging_crypto_wakes_flush() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         let mut writer = stream.writer();
         writer.write_all(b"hello").await.unwrap();
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
@@ -378,7 +431,7 @@ mod tests {
 
     #[test]
     fn sparse_crypto_cannot_allocate_an_unbounded_handshake_buffer() {
-        let stream = CryptoStream::default();
+        let stream = single_path_stream();
         let result = stream.incoming().recv_frame((
             CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)),
             bytes::Bytes::from_static(b"x"),
@@ -390,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read() {
-        let crypto_stream: CryptoStream = CryptoStream::default();
+        let crypto_stream: CryptoStream = single_path_stream();
         crypto_stream
             .writer()
             .write_all(b"hello world")
@@ -412,22 +465,23 @@ mod tests {
 
 mod poll_tests {
     use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::Arc,
         task::{Context, Poll, Waker},
     };
 
     use bytes::BytesMut;
-    use qbase::packet::{Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer};
+    use qbase::{
+        handshake::HandshakeFacts,
+        packet::{Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer},
+        role::Role,
+    };
     use qrecovery::crypto::*;
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
-    async fn pending_as_lost_repeats_each_packet_once_then_stops() {
-        let pending_as_lost = Arc::new(AtomicBool::new(true));
-        let stream = CryptoStream::new(pending_as_lost.clone());
+    async fn multipath_handshaking_repeats_each_packet_once_then_stops() {
+        let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+        let stream = CryptoStream::with_facts(facts.clone());
         stream.writer().write_all(b"client hello").await.unwrap();
         let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
             .initial(vec![])
@@ -446,7 +500,9 @@ mod poll_tests {
                 ..Default::default()
             };
             let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
-            pending_as_lost.store(pass < 2, Ordering::Relaxed);
+            if pass == 2 {
+                facts.quit_mp_handshaking();
+            }
             let result = stream.outgoing().poll_dump(&mut cx, &mut buffer);
             if pass == 3 {
                 assert!(result.is_pending());

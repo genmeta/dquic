@@ -1,6 +1,6 @@
 //! Application-data space and its CRYPTO, reliable-frame and stream sources.
 use std::{
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -10,6 +10,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     frame::{AckFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
+    handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
         OneRttHeader, PacketNumber,
@@ -46,9 +47,9 @@ impl DataSpace {
         reliable_frames: ArcReliableFrames,
         local_ack_delay_exponent: u32,
         peer_ack_delay_exponent: u32,
-        is_mp_handshaking: Arc<AtomicBool>,
+        facts: Arc<HandshakeFacts>,
     ) -> Self {
-        let mut space = Space::new(Epoch::Data, initial_scid, keys, is_mp_handshaking);
+        let mut space = Space::new(Epoch::Data, initial_scid, keys, facts);
         space.rcvd_journal = space
             .rcvd_journal
             .with_ack_delay_exponent(local_ack_delay_exponent);

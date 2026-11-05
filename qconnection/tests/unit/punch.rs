@@ -121,21 +121,20 @@ fn encode_frames<const N: usize>(
 
 fn empty_paths(phase: &super::DataFixture) -> Arc<Paths> {
     let role = phase.parameters.role();
-    let is_mp_handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let facts = phase.paths.progress.facts();
     let initial = Arc::new(qtransport::space::InitialSpace::new(
         phase.spaces.initial.initial_scid,
         qtransport::keys::ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
         None,
-        is_mp_handshaking.clone(),
+        facts.clone(),
     ));
     let paths = Paths::new(
         initial,
-        role,
+        facts,
         phase.paths.cid_registry.clone(),
         phase.spaces.data.reliable_frames.clone(),
         Duration::ZERO,
         Duration::ZERO,
-        is_mp_handshaking,
     );
     super::install_data(&paths, phase);
     let terminator = paths.terminator.clone();

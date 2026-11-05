@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use qbase::{
+    handshake::HandshakeFacts,
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::handy::DemandConcurrency,
 };
@@ -25,6 +26,8 @@ pub(crate) fn data() -> Arc<DataSpace> {
         reliable.clone(),
         Default::default(),
     );
+    let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
+    facts.quit_mp_handshaking();
     Arc::new(DataSpace::new(
         Default::default(),
         ArcOneRttKeys::from(keys),
@@ -32,6 +35,6 @@ pub(crate) fn data() -> Arc<DataSpace> {
         reliable,
         parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        Default::default(),
+        facts,
     ))
 }

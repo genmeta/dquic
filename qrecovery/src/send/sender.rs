@@ -59,7 +59,7 @@ impl<TX> ReadySender<TX> {
     ) -> ReadySender<TX> {
         ReadySender {
             stream_id,
-            sndbuf: SendBuf::with_capacity(buf_size, Arc::default()),
+            sndbuf: SendBuf::with_capacity(buf_size),
             flush_waker: None,
             shutdown_waker: None,
             broker,

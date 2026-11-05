@@ -2,10 +2,7 @@
 //! Keep this in its own test process: Dock, AddressBook and the router are globals.
 mod common;
 
-use std::{
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use qbase::{
     cid::{ConnectionId, GenUniqueCid},
@@ -110,7 +107,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let registry = router.insert(odcid.into(), inbox.clone(), reliable.clone());
         let scid = registry.gen_unique_cid();
         let local_cids = ArcLocalCids::new(Role::Server, odcid, scid, registry);
-        let pending_as_lost = Arc::new(AtomicBool::new(true));
+        let facts = common::handshake_facts(Role::Server, true);
         let initial_space = Arc::new(InitialSpace::new(
             scid,
             ArcKeys::new(Arc::new(
@@ -120,11 +117,11 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
                     .unwrap(),
             )),
             None,
-            pending_as_lost.clone(),
+            facts.clone(),
         ));
         let paths = Paths::new(
             initial_space.clone(),
-            Role::Server,
+            facts,
             qconnection::CidRegistry::new(
                 local_cids,
                 qconnection::ArcRemoteCids::server(*packet.scid(), reliable.clone()),
@@ -132,7 +129,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
             reliable,
             Duration::ZERO,
             Duration::ZERO,
-            pending_as_lost,
         );
 
         assert!(inbox.try_send_initial(packet, pathway, link));
@@ -159,7 +155,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         .unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
     let local_cids = ArcLocalCids::new(Role::Client, odcid, scid, registry);
-    let pending_as_lost = Arc::new(AtomicBool::new(true));
+    let facts = common::handshake_facts(Role::Client, true);
     let initial_space = Arc::new(InitialSpace::new(
         scid,
         ArcKeys::new(Arc::new(
@@ -168,11 +164,11 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
                 .unwrap(),
         )),
         None,
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
-        Role::Client,
+        facts,
         qconnection::CidRegistry::new(
             local_cids,
             qconnection::ArcRemoteCids::client(odcid, reliable.clone()),
@@ -180,7 +176,6 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         reliable,
         Duration::ZERO,
         Duration::ZERO,
-        pending_as_lost,
     );
 
     let (deliver, connected) = oneshot::channel();

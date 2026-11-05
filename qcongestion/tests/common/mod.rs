@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex, atomic::AtomicU16};
 
 use qbase::{
+    handshake::HandshakeFacts,
     net::tx::ArcSendWakers,
     role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
-use qcongestion::{Algorithm, ArcCC, HandshakeFacts, MSS, Resend};
+use qcongestion::{Algorithm, ArcCC, MSS, Resend};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Duration;
 

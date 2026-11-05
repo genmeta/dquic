@@ -238,7 +238,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
         Arc::new(HandshakeSpace::new(
             Default::default(),
             ArcKeys::new(Arc::new(keys(false))),
-            Default::default(),
+            paths.progress.facts(),
         )),
     );
     let path = crate::common::registered_path(
@@ -294,7 +294,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         keys(false),
         Duration::ZERO,
         Duration::ZERO,
-        Default::default(),
+        crate::common::handshake_facts(Role::Client, false),
     );
     let message = vec![42; 7200];
     crate::common::initial_space(&paths.spaces)
@@ -306,7 +306,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         ArcKeys::new(Arc::new(keys(false))),
-        Default::default(),
+        paths.progress.facts(),
     ));
     handshake
         .crypto
@@ -422,7 +422,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                         Arc::new(HandshakeSpace::new(
                             Default::default(),
                             crate::common::initial_space(&paths.spaces).keys.clone(),
-                            paths.is_mp_handshaking.clone(),
+                            paths.progress.facts(),
                         )),
                     );
                 }
@@ -546,7 +546,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
             let handshake = Arc::new(HandshakeSpace::new(
                 Default::default(),
                 ArcKeys::new(Arc::new(keys(true))),
-                Default::default(),
+                paths.progress.facts(),
             ));
             super::install_handshake(&paths, handshake.clone());
             space.retire();
@@ -704,7 +704,7 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
 
 pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::DataFixture) {
     use qbase::param::{ArcParameters, ClientParameters, ServerParameters};
-    let pending_as_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let facts = crate::common::handshake_facts(role, false);
     let paths = crate::common::initial_paths_with_timeouts(
         role,
         ConnectionId::from_slice(b"server00"),
@@ -716,7 +716,7 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
         keys(true),
         Duration::ZERO,
         defer,
-        pending_as_lost.clone(),
+        facts.clone(),
     );
     let mut client = ClientParameters::default();
     client
@@ -741,7 +741,7 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         ArcKeys::new(Arc::new(keys(true))),
-        pending_as_lost.clone(),
+        facts.clone(),
     ));
     terminator.register(Arc::new(handshake.crypto.clone()));
     let reliable_frames = paths.reliable_frames.clone();
@@ -762,7 +762,7 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
         reliable_frames.clone(),
         parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        pending_as_lost,
+        facts,
     ));
     terminator.register(Arc::new(data.crypto.clone()));
     let concrete = super::SpaceFixture {
@@ -1898,7 +1898,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         initial.keys.clone(),
-        Default::default(),
+        paths.progress.facts(),
     ));
     initial.crypto.writer().write_all(b"initial").await.unwrap();
     handshake

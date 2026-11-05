@@ -6,14 +6,16 @@ use std::{
     task::{Context, Poll},
 };
 
-use qbase::{Epoch, frame::AckFrame, net::tx::ArcSendWakers, role::Role, util::ArcIndexDeque};
+use qbase::{
+    Epoch, frame::AckFrame, handshake::HandshakeFacts, net::tx::ArcSendWakers, role::Role,
+    util::ArcIndexDeque,
+};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
 use crate::{
     Algorithm, MSS, Resend, TooManyPtos,
     algorithm::{Control, new_reno::NewReno},
-    facts::HandshakeFacts,
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
     rtt::{ArcRtt, INITIAL_RTT},
@@ -794,10 +796,9 @@ impl super::Transport for ArcCC {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU16};
 
-    use qbase::{net::tx::ArcSendWakers, util::IndexDeque};
+    use qbase::{handshake::HandshakeFacts, net::tx::ArcSendWakers, util::IndexDeque};
 
     use super::*;
-    use crate::HandshakeFacts;
 
     struct NoopFeedback;
 

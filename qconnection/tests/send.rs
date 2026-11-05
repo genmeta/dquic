@@ -91,16 +91,17 @@ fn repeated_assembly_does_not_append_after_close() {
 #[tokio::test]
 async fn mixed_packets_consume_shared_budget_once() {
     use qtransport::space::{InitialSpace, Spaces, assemble::Constraints};
+    let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(
         Default::default(),
         ArcKeys::new(Arc::new(keys(false))),
         None,
-        Default::default(),
+        facts.clone(),
     ));
     let handshake = Arc::new(HandshakeSpace::new(
         Default::default(),
         initial.keys.clone(),
-        Default::default(),
+        facts.clone(),
     ));
     initial.crypto.writer().write_all(b"hello").await.unwrap();
     handshake
@@ -558,16 +559,17 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
     use qbase::packet::{GetDcid, GetScid, GetType, Package};
     use qtransport::space::{InitialSpace, Spaces, assemble::Constraints};
     let scid = ConnectionId::from_slice(b"local000");
+    let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(
         scid,
         ArcKeys::new(Arc::new(keys(false))),
         Some(b"token".to_vec()),
-        Default::default(),
+        facts.clone(),
     ));
     let handshake = Arc::new(HandshakeSpace::new(
         scid,
         initial.keys.clone(),
-        Default::default(),
+        facts.clone(),
     ));
     let mut spaces = Spaces(qbase::util::IndexDeque::with_capacity(3));
     spaces.0.push_back(initial.clone()).unwrap();
@@ -691,7 +693,7 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         .push_back(Arc::new(HandshakeSpace::new(
             Default::default(),
             ArcKeys::new(Arc::new(keys(false))),
-            Default::default(),
+            crate::common::handshake_facts(Role::Client, false),
         )))
         .unwrap();
     for flight in [false, true] {

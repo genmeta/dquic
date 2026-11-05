@@ -1,15 +1,9 @@
 use std::sync::{Arc, Barrier};
 
-use qbase::role::Role;
+use qbase::{handshake::HandshakeFacts, role::Role};
 
-// White-box access keeps the ACK transition crate-private.
-#[path = "../src/facts.rs"]
-#[allow(dead_code)]
-mod facts;
-
-use facts::HandshakeFacts;
-
-const EVENTS: [fn(&HandshakeFacts) -> bool; 7] = [
+const EVENTS: [fn(&HandshakeFacts) -> bool; 8] = [
+    HandshakeFacts::on_path_selected,
     HandshakeFacts::on_initial_received,
     HandshakeFacts::install_handshake_key,
     HandshakeFacts::on_handshake_sent,
@@ -58,5 +52,24 @@ fn concurrent_updates_claim_each_fact_once() {
         });
         assert_eq!(winners, 1);
         assert!(!event(&facts));
+    }
+}
+
+#[test]
+fn quitting_multipath_handshaking_is_shared_and_events_cannot_restart_it() {
+    for role in [Role::Client, Role::Server] {
+        let facts = Arc::new(HandshakeFacts::with_role(role));
+        assert!(facts.is_mp_handshaking());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let facts = facts.clone();
+                scope.spawn(move || facts.quit_mp_handshaking());
+            }
+        });
+        assert!(!facts.is_mp_handshaking());
+        for event in EVENTS {
+            event(&facts);
+            assert!(!facts.is_mp_handshaking());
+        }
     }
 }
