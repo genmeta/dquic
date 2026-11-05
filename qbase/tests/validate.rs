@@ -14,11 +14,13 @@ use qbase::{
         Frame, FrameReader, PathChallengeFrame, PathResponseFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::route::Pathway,
+    net::{
+        route::Pathway,
+        validate::{ArcValidation, ArcValidations, Validation},
+    },
     packet::{
         Assemble, Constraints, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer,
     },
-    validate::{ArcValidation, ArcValidations, Validation},
 };
 
 #[derive(Default)]

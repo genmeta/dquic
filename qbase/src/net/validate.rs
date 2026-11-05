@@ -306,7 +306,7 @@ impl<B: BufMut + ?Sized> Package<B> for Validation {
 /// The validation task retains the challenge and explicitly grants credit on success:
 ///
 /// ```no_run
-/// # use qbase::{Cancelled, frame::{PathChallengeFrame, PathResponseFrame}, validate::ArcValidation};
+/// # use qbase::{Cancelled, frame::{PathChallengeFrame, PathResponseFrame}, net::validate::ArcValidation};
 /// # async fn attempt(validation: ArcValidation) -> Result<(), Cancelled> {
 /// let challenge = PathChallengeFrame::random();
 /// validation.challenge(challenge)?;

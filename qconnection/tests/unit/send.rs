@@ -852,7 +852,9 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         let counter = Arc::new(Counter::default());
         let other_counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        other.send_waker.register(&Waker::from(other_counter.clone()));
+        other
+            .send_waker
+            .register(&Waker::from(other_counter.clone()));
         let mut cx = Context::from_waker(&waker);
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
