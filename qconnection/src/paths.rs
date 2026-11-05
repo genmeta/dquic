@@ -9,11 +9,10 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     handshake::HandshakeFacts,
-    net::route::Pathway,
+    net::{route::Pathway, validate::ArcValidations},
     role::Role,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::IndexDeque,
-    validate::ArcValidations,
 };
 use qcongestion::Transport;
 use qtransport::{

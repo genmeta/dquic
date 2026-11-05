@@ -19,6 +19,8 @@ pub mod addr;
 pub mod nat;
 pub mod route;
 pub mod tx;
+/// Per-path address validation and anti-amplification credit.
+pub mod validate;
 
 pub use nat::{NatType, NetFeature};
 

@@ -11,11 +11,10 @@ use qbase::{
     Epoch,
     cid::ArcDcid,
     handshake::HandshakeFacts,
-    net::{route::Pathway, tx::ArcSendWakers},
+    net::{route::Pathway, tx::ArcSendWakers, validate::ArcValidation},
     packet::assemble::Metadata,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::ArcIndexDeque,
-    validate::ArcValidation,
 };
 use qcongestion::{Algorithm, ArcCC, CongestionController, MSS, Resend};
 use qprotocol::QuicProtocol;

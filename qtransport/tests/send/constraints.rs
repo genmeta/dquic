@@ -8,7 +8,7 @@ pub struct Constraints {
 
 use std::task::{Context, Poll, Waker};
 
-use qbase::validate::ArcValidation;
+use qbase::net::validate::ArcValidation;
 
 pub fn credit(validation: &ArcValidation) -> usize {
     match validation.poll_credit(&mut Context::from_waker(Waker::noop())) {
