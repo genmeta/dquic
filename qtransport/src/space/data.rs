@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Keys, Recover, Space, Transmit};
 use crate::{
-    ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, packet::assemble::Packet,
+    ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, packet::encrypt::Packet,
 };
 
 /// Application-data space and all of its retransmittable frame sources.

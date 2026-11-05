@@ -16,7 +16,7 @@ use qbase::{
 };
 use qtransport::{
     ArcReliableFrames,
-    packet::assemble::Packet,
+    packet::encrypt::Packet,
     space::{Allocate, ArcSpaces, DataSpace, Keys, Recover, Spaces},
 };
 

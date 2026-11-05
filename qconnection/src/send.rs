@@ -1,4 +1,4 @@
-pub use qtransport::packet::assemble as packet;
+pub use qtransport::packet::encrypt as packet;
 pub(crate) mod task;
 use std::{
     future::poll_fn,

@@ -17,7 +17,7 @@ use super::{Allocate, Encapsulate, Recover, Space};
 use crate::{
     Error, GuaranteedFrame,
     keys::{ArcKeys, Seal},
-    packet::assemble::Packet,
+    packet::encrypt::Packet,
 };
 
 /// Handshake headers carry no token or application-data sources.
