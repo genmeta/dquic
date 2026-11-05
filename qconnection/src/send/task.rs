@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::poll_fn, sync::Arc, task::Poll};
 
 use bytes::BytesMut;
 use qbase::{error::ErrorKind, net::tx::UnregisterWaker};
@@ -13,6 +13,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut frames = Vec::with_capacity(256);
     let mut packets = [[None; 3]; MAX_BURST_PACKETS];
     let terminator = paths.terminator.clone();
+    let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     let error = loop {
         let result = tokio::select! {
@@ -33,6 +34,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
         }
     };
     burst.cancel();
+    path.send_waker.register(&waker);
     cancel_waiters(&paths, &path);
     // A removed path may already have been replaced while its sender was exiting.
     let no_paths = {

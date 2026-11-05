@@ -8,13 +8,12 @@ use std::{
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::{Frame, GuaranteedFrame, PaddingFrame},
-    packet::{
-        GetType, OneRttHeader,
-        assemble::{Limit, Metadata, Package, PacketBuffer},
-    },
+    frame::GuaranteedFrame,
+    packet::assemble::{Constraints as PacketLimits, Metadata, Package},
+    time::heartbeat::ArcHeartbeat,
     util::{ArcIndexDeque, IndexDeque},
 };
+use qrecovery::journal::AckPackege;
 
 use super::Encapsulate;
 use crate::Error;
@@ -37,299 +36,238 @@ impl Constraints {
     }
 }
 
-struct PacketLimit<'a> {
-    shared: &'a mut Constraints,
-    epoch: Epoch,
-    max_size: usize,
-    flow_ctrl: usize,
-}
-
-impl Limit for PacketLimit<'_> {
-    fn flow_ctrl(&self) -> usize {
-        self.flow_ctrl
-    }
-    fn set_flow_ctrl(&mut self, amount: usize) {
-        self.flow_ctrl = amount;
-    }
-    fn send_quota(&self) -> usize {
-        self.shared
-            .send_quota
-            .max(self.shared.probe_quota[self.epoch])
-    }
-    fn credit(&self) -> usize {
-        self.shared.credit
-    }
-    fn min_size(&self) -> usize {
-        0
-    }
-    fn max_size(&self) -> usize {
-        self.max_size
-    }
-    fn set_max_size(&mut self, size: usize) {
-        self.max_size = size;
-    }
-    fn fresh(&mut self, amount: usize) {
-        self.flow_ctrl -= amount;
-    }
-    fn take(&mut self, sent: usize, credit: usize) {
-        self.shared.take(self.epoch, sent, credit);
-    }
-}
-
 pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
 pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
 
 impl Spaces {
-    /// Assemble external sources; collect internal payload only on an active path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn package(
+    pub fn poll_dump(
         &self,
         cx: &mut Context<'_>,
-        dcids: [Option<ConnectionId>; 3],
-        is_active: bool,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-        buffer: &mut [u8],
+        dcid: ConnectionId,
+        bytes: &mut [u8],
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         packets: &mut [Option<Metadata>; 3],
-    ) -> Result<(usize, usize), Error> {
-        if limits.credit <= limits.overhead {
-            return Ok((0, 0));
-        }
-        let before = limits.clone();
-        limits.credit -= limits.overhead;
-        limits.send_quota = limits.send_quota.saturating_sub(limits.overhead);
-        for quota in &mut limits.probe_quota {
-            *quota = quota.saturating_sub(limits.overhead);
-        }
-        let start = frames.len();
-        let result = self.package_at(
-            self.0.offset(),
-            cx,
-            dcids,
-            is_active,
-            external,
-            buffer,
-            limits,
-            frames,
-            packets,
-            0,
-            None,
-        );
-        if result.is_err() {
-            for (index, space) in self.0.enumerate() {
-                if let Some(meta) = packets[index as usize].take() {
-                    space.cancel(meta.pn, &mut frames.drain(start..));
-                }
-            }
-        }
-        match result {
-            Ok((size, nframes, flight)) if size > 0 => {
-                if !flight {
-                    limits.send_quota = before.send_quota;
-                }
-                for epoch in qbase::Epoch::EPOCHS {
-                    if packets[epoch].is_none() {
-                        limits.probe_quota[epoch] = before.probe_quota[epoch];
-                    }
-                }
-                Ok((size, nframes))
-            }
-            result => {
-                *limits = before;
-                result.map(|_| (0, 0))
-            }
-        }
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+    ) -> Result<usize, Error> {
+        self.package(cx, dcid, external, bytes, limits, frames, packets, None)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn package_at(
+    pub fn poll_ping(
         &self,
-        index: u64,
         cx: &mut Context<'_>,
-        dcids: [Option<ConnectionId>; 3],
-        is_active: bool,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-        buffer: &mut [u8],
+        dcid: ConnectionId,
+        heartbeat: &mut ArcHeartbeat,
+        acks: &mut [(Epoch, Option<AckPackege<'_>>); 3],
+        bytes: &mut [u8],
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         packets: &mut [Option<Metadata>; 3],
-        prefix: usize,
-        min_bytes: Option<usize>,
-    ) -> Result<(usize, usize, bool), Error> {
-        let Some(space) = self.0.get(index) else {
-            return Ok((0, 0, false));
-        };
-        let epoch = space.epoch();
-        let reserved = match dcids[epoch] {
-            Some(dcid) if space.sent_journal().has_capacity() => {
-                space.pn_and_keys()?.map(|(pn, keys)| (dcid, pn, keys))
-            }
-            _ => None,
-        };
-        let Some((dcid, pn, keys)) = reserved else {
-            return self.package_at(
-                index + 1,
-                cx,
-                dcids,
-                is_active,
-                external,
-                buffer,
-                limits,
-                frames,
-                packets,
-                prefix,
-                min_bytes,
-            );
-        };
-        let start = frames.len();
-        let required = if epoch == Epoch::Initial {
-            Some(min_bytes.unwrap_or(0).max(1200usize.saturating_sub(prefix)))
-        } else {
-            min_bytes
-        };
-        let tag = keys.tag_len();
-        let (result, pn_offset, cursor, mut meta, required) = {
-            let mut limit = PacketLimit {
-                shared: limits,
-                epoch,
-                max_size: buffer.len().min(16383),
-                flow_ctrl: usize::MAX,
-            };
-            let mut writer = &mut buffer[..];
-            let mut constrained = PacketBuffer::new(
-                &mut writer,
-                &mut limit,
-                frames,
-                OneRttHeader::new(Default::default(), dcid).get_type(),
-                0,
-                tag,
-            );
-            constrained.meta.pn = pn.0;
-            // RFC 9000 Sections 8.2.1 and 8.2.2 require datagrams containing
-            // PATH_CHALLENGE or PATH_RESPONSE to be at least 1200 bytes, except
-            // when the path's anti-amplification limit prevents expansion.
-            // Congestion limits are enforced separately by PacketBuffer (RFC 9000
-            // Section 8.2.2 and RFC 9002 Section 7, including its PTO/recovery exceptions).
-            let validation_min_size = 1200usize.saturating_sub(prefix);
-            constrained.scope(if constrained.limits.credit() >= validation_min_size {
-                validation_min_size
-            } else {
-                0
-            });
-            let result = space.encapsulate(
-                cx,
-                dcid,
-                pn,
-                is_active,
-                external,
-                &mut constrained,
-                required,
-            );
-            (
-                result,
-                constrained.pn_offset(),
-                constrained.written(),
-                constrained.meta,
-                constrained.min_size(),
-            )
-        };
-        match result {
-            Poll::Ready(Err(error)) => {
-                space.cancel(pn.0, &mut frames.drain(start..));
-                return Err(error);
-            }
-            Poll::Ready(Ok(n)) if n > 0 => {}
-            _ => {
-                space.cancel(pn.0, &mut frames.drain(start..));
-                return self.package_at(
-                    index + 1,
-                    cx,
-                    dcids,
-                    is_active,
-                    external,
-                    buffer,
-                    limits,
-                    frames,
-                    packets,
-                    prefix,
-                    min_bytes,
-                );
-            }
-        }
-        let size = (cursor + tag).max(pn_offset + 4 + 16);
-        if size > cursor + tag {
-            buffer[cursor..size - tag].fill(0);
-            meta.record(&Frame::Padding(PaddingFrame));
-        }
-        let flight = meta.in_flight;
-        limits.take(epoch, if flight { size } else { 0 }, size);
-        let tail = self.package_at(
-            index + 1,
+    ) -> Result<usize, Error> {
+        self.package(
             cx,
-            dcids,
-            is_active,
-            external,
-            &mut buffer[size..],
+            dcid,
+            &mut [],
+            bytes,
             limits,
             frames,
             packets,
-            prefix + size,
-            Some(required.saturating_sub(size)).filter(|&min| min != 0),
-        );
-        let (tail_size, tail_frames, tail_flight) = match tail {
-            Ok(tail) => tail,
-            Err(error) => {
-                space.cancel(pn.0, &mut frames.drain(start..));
-                return Err(error);
-            }
-        };
-        let final_size = if tail_size == 0 {
-            size.max(required)
-        } else {
-            size
-        };
-        if final_size > size {
-            buffer[size - tag..final_size - tag].fill(0);
-            meta.record(&Frame::Padding(PaddingFrame));
-            limits.take(
-                epoch,
-                if flight {
-                    final_size - size
-                } else {
-                    final_size
-                },
-                final_size - size,
-            );
+            Some((heartbeat, acks)),
+        )
+    }
+
+    fn package(
+        &self,
+        cx: &mut Context<'_>,
+        dcid: ConnectionId,
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        bytes: &mut [u8],
+        limits: &mut Constraints,
+        frames: &mut Vec<GuaranteedFrame>,
+        packets: &mut [Option<Metadata>; 3],
+        mut ping: Option<(&mut ArcHeartbeat, &mut [(Epoch, Option<AckPackege<'_>>); 3])>,
+    ) -> Result<usize, Error> {
+        if limits.credit <= limits.overhead {
+            return Ok(0);
         }
-        let generation = match keys.seal(
-            pn,
-            pn_offset,
-            &mut buffer[..final_size],
-            epoch != Epoch::Data,
-        ) {
-            Ok(generation) => generation,
-            Err(error) => {
-                space.cancel(pn.0, &mut frames.drain(start..));
-                return Err(error);
-            }
-        };
-        meta.pktlen = final_size;
-        let own_frames = meta.nframes;
-        space.on_sealed(
-            pn.0,
-            generation,
-            final_size,
-            meta,
-            &mut frames.drain(start..),
+        let mut remaining = limits.clone();
+        remaining.credit -= remaining.overhead;
+        remaining.send_quota = remaining.send_quota.saturating_sub(remaining.overhead);
+        for quota in &mut remaining.probe_quota {
+            *quota = quota.saturating_sub(remaining.overhead);
+        }
+        let start = frames.len();
+        let result = self.poll_dump_at(
+            0,
+            bytes,
+            None,
+            cx,
+            dcid,
+            &mut remaining,
+            external,
+            frames,
+            packets,
+            &mut ping,
+            0,
         );
-        packets[epoch] = Some(meta);
-        limits.probe_quota[epoch] = 0;
-        Ok((
-            final_size + tail_size,
-            own_frames + tail_frames,
-            meta.in_flight || tail_flight,
-        ))
+        match result {
+            Ok(size) if size > 0 => {
+                if !packets.iter().flatten().any(|meta| meta.in_flight) {
+                    remaining.send_quota = limits.send_quota;
+                }
+                for epoch in Epoch::EPOCHS {
+                    if packets[epoch].is_none() {
+                        remaining.probe_quota[epoch] = limits.probe_quota[epoch];
+                    }
+                }
+                *limits = remaining;
+            }
+            Err(_) => {
+                for (epoch, space) in self.0.enumerate() {
+                    if let Some(meta) = packets[epoch as usize].take() {
+                        space.cancel(meta.pn, &mut frames.drain(start..));
+                    }
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn poll_dump_at(
+        &self,
+        level: u64,
+        bytes: &mut [u8],
+        min_size: Option<usize>,
+        cx: &mut Context<'_>,
+        dcid: ConnectionId,
+        limits: &mut Constraints,
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        frames: &mut Vec<GuaranteedFrame>,
+        packets: &mut [Option<Metadata>; 3],
+        ping: &mut Option<(&mut ArcHeartbeat, &mut [(Epoch, Option<AckPackege<'_>>); 3])>,
+        prefix: usize,
+    ) -> Result<usize, Error> {
+        if level > Epoch::Data as u64 {
+            return Ok(0);
+        }
+        let Some(space) = self.0.get(level) else {
+            return self.poll_dump_at(
+                level + 1,
+                bytes,
+                min_size,
+                cx,
+                dcid,
+                limits,
+                external,
+                frames,
+                packets,
+                ping,
+                prefix,
+            );
+        };
+        let epoch = space.epoch();
+        let start = frames.len();
+        let mut packet_limits = PacketLimits {
+            flow_ctrl: usize::MAX,
+            send_quota: limits.send_quota,
+            probe_quota: limits.probe_quota[epoch],
+            credit: limits.credit,
+            min_size: if epoch == Epoch::Initial {
+                min_size.unwrap_or(0).max(1200usize.saturating_sub(prefix))
+            } else {
+                min_size.unwrap_or(0)
+            },
+            max_size: 1200usize.saturating_sub(prefix),
+            ..Default::default()
+        };
+        let result = match ping {
+            Some((heartbeat, acks)) => space.poll_ping(
+                cx,
+                dcid,
+                &mut packet_limits,
+                bytes,
+                heartbeat,
+                &mut acks[epoch].1,
+                frames,
+            ),
+            None => space.poll_dump(cx, dcid, &mut packet_limits, bytes, frames, external),
+        };
+        let (packet, pktlen) = match result {
+            Poll::Ready(result) => result?,
+            Poll::Pending => (None, 0),
+        };
+        let min_size = if pktlen > 0 && epoch == Epoch::Initial {
+            Some(1200usize.saturating_sub(prefix))
+        } else {
+            min_size
+        };
+        let min_size = if pktlen > 0 {
+            Some(min_size.unwrap_or(0).max(packet_limits.min_size))
+        } else {
+            min_size
+        };
+        let Some(mut packet) = packet else {
+            return self.poll_dump_at(
+                level + 1,
+                bytes,
+                min_size,
+                cx,
+                dcid,
+                limits,
+                external,
+                frames,
+                packets,
+                ping,
+                prefix,
+            );
+        };
+        let result = (|| {
+            let in_flight = packet.meta.in_flight;
+            limits.take(epoch, if in_flight { pktlen } else { 0 }, pktlen);
+            let n = self.poll_dump_at(
+                level + 1,
+                &mut bytes[pktlen..],
+                min_size.map(|size| size.saturating_sub(pktlen)),
+                cx,
+                dcid,
+                limits,
+                external,
+                frames,
+                packets,
+                ping,
+                prefix + pktlen,
+            )?;
+            let mut padlen = 0;
+            if pktlen > 0
+                && n == 0
+                && let Some(min_size) = min_size
+            {
+                padlen = packet.padding(bytes, min_size.saturating_sub(pktlen))?;
+            }
+            if padlen > 0 {
+                limits.take(
+                    epoch,
+                    if in_flight { padlen } else { pktlen + padlen },
+                    padlen,
+                );
+            }
+            let generation = packet.seal(&mut bytes[..pktlen + padlen])?;
+            space.on_sealed(
+                packet.pn.0,
+                generation,
+                pktlen + padlen,
+                packet.meta,
+                &mut frames.drain(start..),
+            );
+            packets[epoch] = Some(packet.meta);
+            limits.probe_quota[epoch] = 0;
+            Ok(pktlen + n + padlen)
+        })();
+        if result.is_err() {
+            space.cancel(packet.pn.0, &mut frames.drain(start..));
+        }
+        result
     }
 
     /// Obtain a concrete handle when starting a receiver or encoding a probe.

@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use bytes::BufMut;
 use qbase::{
     Epoch,
     cid::ConnectionId,
@@ -15,21 +14,20 @@ use qbase::{
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
-        GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
-        assemble::{Metadata, Package, PacketBuffer},
+        GetType, HeaderSize, PacketNumber, Type,
+        assemble::{Constraints, Metadata, Package},
     },
+    time::heartbeat::ArcHeartbeat,
 };
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
-    journal::{ArcRcvdJournal, ArcSentJournal},
+    journal::{AckPackege, ArcRcvdJournal, ArcSentJournal},
 };
+use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use crate::{
-    Error, GuaranteedFrame,
-    keys::{ArcKeys, OneRttKeys, Seal},
-};
+use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::assemble::Packet};
 
 pub mod assemble;
 pub mod data;
@@ -40,6 +38,8 @@ pub use assemble::{ArcSpaces, Spaces};
 pub use data::DataSpace;
 pub use handshake::HandshakeSpace;
 pub use initial::InitialSpace;
+
+pub use crate::keys::Keys;
 
 #[derive(Clone)]
 pub struct Space<K> {
@@ -293,71 +293,76 @@ where
 
 /// Space-specific packet header and frame assembly.
 pub trait Encapsulate: Transmit {
-    /// Minimum datagram size for a PING in this space, without reserving a PN.
-    /// Returns `None` after the space's sending keys have retired.
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize>;
 
-    /// Include CRYPTO and application sources only when the sending path is active.
-    #[allow(clippy::too_many_arguments)]
-    fn encapsulate(
+    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error>;
+
+    fn poll_dump(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        pn: (u64, PacketNumber),
-        is_active: bool,
+        limits: &mut Constraints,
+        bytes: &mut [u8],
+        frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-        buffer: &mut PacketBuffer<'_, &mut [u8]>,
-        min_size: Option<usize>,
-    ) -> Poll<Result<usize, Error>>;
+    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
+        if !self.sent_journal().has_capacity() {
+            return Poll::Ready(Ok((None, 0)));
+        }
+        let Some(mut packet) = self.packet(dcid)? else {
+            return Poll::Ready(Ok((None, 0)));
+        };
+        let start = frames.len();
+        let mut crypto = self.crypto().outgoing();
+        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
+            .iter_mut()
+            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
+            .collect();
+        sources.push(&mut crypto);
+        let mut writer = &mut bytes[..];
+        match packet.assemble(cx, &mut writer, limits, frames, &mut sources) {
+            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+            result => {
+                self.cancel(packet.pn.0, &mut frames.drain(start..));
+                result.map(|result| result.map(|_| (None, 0)))
+            }
+        }
+    }
+
+    /// Assemble only the space ACK and the path heartbeat.
+    fn poll_ping(
+        &self,
+        cx: &mut Context<'_>,
+        dcid: ConnectionId,
+        limits: &mut Constraints,
+        bytes: &mut [u8],
+        heartbeat: &mut ArcHeartbeat,
+        ack: &mut Option<AckPackege<'_>>,
+        frames: &mut Vec<GuaranteedFrame>,
+    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
+        if !self.sent_journal().has_capacity() {
+            return Poll::Ready(Ok((None, 0)));
+        }
+        let Some(mut packet) = self.packet(dcid)? else {
+            return Poll::Ready(Ok((None, 0)));
+        };
+        let start = frames.len();
+        let mut sources: [&mut dyn Package<&mut [u8]>; 2] = [ack, heartbeat];
+        let mut writer = &mut bytes[..];
+        match packet.assemble(cx, &mut writer, limits, frames, &mut sources) {
+            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+            result => {
+                self.cancel(packet.pn.0, &mut frames.drain(start..));
+                result.map(|result| result.map(|_| (None, 0)))
+            }
+        }
+    }
 }
 
 fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usize) -> usize {
     let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
     // A PING occupies one byte. Header protection also needs a full sample.
     (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
-}
-
-pub enum Keys {
-    Long(Arc<qtls::BidirectionalKeys>),
-    Short(Arc<OneRttKeys>),
-}
-
-impl Keys {
-    fn tag_len(&self) -> usize {
-        match self {
-            Self::Long(keys) => keys.sealing.tag_len(),
-            Self::Short(keys) => keys.tag_len(),
-        }
-    }
-
-    fn seal(
-        &self,
-        pn: (u64, PacketNumber),
-        pn_offset: usize,
-        bytes: &mut [u8],
-        long: bool,
-    ) -> Result<Option<u64>, Error> {
-        bytes[0] |= if long {
-            *LongSpecificBits::from_pn(&pn.1)
-        } else {
-            *ShortSpecificBits::from_pn(&pn.1)
-        };
-        if long {
-            let length = bytes.len() - pn_offset;
-            (&mut bytes[pn_offset - 2..pn_offset]).put_u16(0x4000 | length as u16);
-        }
-        let body_offset = pn_offset + pn.1.size();
-        match self {
-            Self::Long(keys) => keys
-                .sealing
-                .seal(pn.0, bytes, pn_offset, body_offset, self.tag_len())
-                .map(|()| None),
-            Self::Short(keys) => keys
-                .seal(pn.0, bytes, pn_offset, body_offset, self.tag_len())
-                .map(|(generation, _)| Some(generation)),
-        }
-        .map_err(packet_error)
-    }
 }
 
 fn packet_error(error: crate::keys::PacketError) -> Error {

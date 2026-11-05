@@ -13,8 +13,8 @@ use qbase::{
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
-        OneRttHeader, PacketNumber,
-        assemble::{Assemble, Package, PacketBuffer},
+        DataHeader, OneRttHeader, PacketNumber,
+        assemble::{Constraints, Package},
     },
 };
 use qevent::quic::recovery::PacketLostTrigger;
@@ -27,7 +27,9 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Keys, Recover, Space, Transmit};
-use crate::{ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys};
+use crate::{
+    ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, packet::assemble::Packet,
+};
 
 /// Application-data space and all of its retransmittable frame sources.
 #[derive(Deref)]
@@ -167,29 +169,46 @@ impl Encapsulate for DataSpace {
         ))
     }
 
-    fn encapsulate(
+    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error> {
+        let header = OneRttHeader::new(Default::default(), dcid);
+        let Some((pn, keys)) = self.pn_and_keys()? else {
+            return Ok(None);
+        };
+        Ok(Some(Packet::new(DataHeader::Short(header), pn, keys)))
+    }
+
+    fn poll_dump(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        pn: (u64, PacketNumber),
-        is_active: bool,
+        limits: &mut Constraints,
+        bytes: &mut [u8],
+        frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-        buffer: &mut PacketBuffer<'_, &mut [u8]>,
-        min_size: Option<usize>,
-    ) -> Poll<Result<usize, Error>> {
-        let header = OneRttHeader::new(Default::default(), dcid);
-        if !buffer.begin(&header, pn.1, min_size) {
-            return Poll::Ready(Ok(0));
+    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
+        if !self.sent_journal.has_capacity() {
+            return Poll::Ready(Ok((None, 0)));
         }
-        let mut crypto = is_active.then(|| self.crypto.outgoing());
-        let mut reliable = is_active.then(|| self.reliable_frames.clone());
-        let mut streams = is_active.then(|| self.streams.clone());
+        let Some(mut packet) = self.packet(dcid)? else {
+            return Poll::Ready(Ok((None, 0)));
+        };
+        let start = frames.len();
+        let mut crypto = self.crypto.outgoing();
+        let mut reliable = self.reliable_frames.clone();
+        let mut streams = self.streams.clone();
         let internal: [&mut dyn Package<&mut [u8]>; 3] = [&mut crypto, &mut reliable, &mut streams];
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .chain(internal)
             .collect();
-        buffer.assemble(cx, &mut sources)
+        let mut writer = &mut bytes[..];
+        match packet.assemble(cx, &mut writer, limits, frames, &mut sources) {
+            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+            result => {
+                self.cancel(packet.pn.0, &mut frames.drain(start..));
+                result.map(|result| result.map(|_| (None, 0)))
+            }
+        }
     }
 }

@@ -169,14 +169,14 @@ pub fn seal<H, const N: usize>(
     sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
 ) -> Result<BytesMut, qbase::error::Error>
 where
-    H: qbase::packet::HeaderSize + qbase::packet::GetType,
+    H: qbase::packet::HeaderSize + qbase::packet::GetType + Into<qbase::packet::long::DataHeader>,
     for<'a> &'a mut BytesMut: qbase::packet::header::io::WriteHeader<H>,
 {
-    use qbase::packet::assemble::Assemble;
     let mut buffer = BytesMut::with_capacity(1200);
     let pn = journal.next_pn().unwrap();
     let mut frames = Vec::new();
-    let packet = qconnection::send::Packet::new(header, pn, &mut buffer, &mut frames)?;
+    let mut packet =
+        qconnection::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
     let mut limits = qbase::packet::assemble::Constraints {
         flow_ctrl: usize::MAX,
         send_quota: 1200,
@@ -185,23 +185,14 @@ where
         max_size: 1200,
         ..Default::default()
     };
-    let mut packet = qconnection::send::Envelope {
-        packet,
-        keys,
-        limits: &mut limits,
-    };
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready(Ok(n)) if n > 0)
     );
-    packet.seal()?;
-    journal.on_sealed(
-        pn.0,
-        None,
-        packet.packet.buffer.len(),
-        packet.packet.meta,
-        frames.drain(..),
-    );
+    buffer.resize(1200, 0);
+    packet.padding(&mut buffer, 1200 - packet.len())?;
+    packet.seal(&mut buffer)?;
+    journal.on_sealed(pn.0, None, buffer.len(), packet.meta, frames.drain(..));
     Ok(buffer)
 }
 

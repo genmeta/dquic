@@ -660,10 +660,14 @@ impl ArcCC {
                     tokio::time::interval_at(Instant::now() + TICK_INTERVAL, TICK_INTERVAL);
                 loop {
                     ticker.tick().await;
-                    if weak.upgrade().is_none() {
-                        break;
+                    let Some(cc) = weak.upgrade() else { break };
+                    let needs_wake = {
+                        let cc = cc.lock().unwrap();
+                        cc.pending_burst || cc.loss_detection_timer.is_some() || cc.need_ack()
+                    };
+                    if needs_wake {
+                        tx_waker.wake_all();
                     }
-                    tx_waker.wake_all();
                 }
             });
         }
