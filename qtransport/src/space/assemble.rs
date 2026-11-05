@@ -40,6 +40,8 @@ pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
 pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
 
 impl Spaces {
+    // Keep caller-owned buffers, budgets and sources explicit.
+    #[allow(clippy::too_many_arguments)]
     pub fn poll_dump(
         &self,
         cx: &mut Context<'_>,
@@ -53,6 +55,7 @@ impl Spaces {
         self.package(cx, dcid, external, bytes, limits, frames, packets, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn poll_ping(
         &self,
         cx: &mut Context<'_>,
@@ -76,6 +79,7 @@ impl Spaces {
         )
     }
 
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn package(
         &self,
         cx: &mut Context<'_>,
@@ -134,6 +138,7 @@ impl Spaces {
         result
     }
 
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn poll_dump_at(
         &self,
         level: u64,

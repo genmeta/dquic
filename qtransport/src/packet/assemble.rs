@@ -88,6 +88,8 @@ impl<K: Seal> Packet<K> {
         result.map(|result| result.map(|n| if n > 0 { self.len() } else { 0 }))
     }
 
+    // Encoded wire size; Packet does not expose a collection API.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         if self.meta.nframes == 0 {
             0

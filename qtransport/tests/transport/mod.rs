@@ -18,7 +18,10 @@ use qbase::{
         addr::EndpointAddr,
         route::{Link, Pathway},
     },
-    packet::{DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader},
+    packet::{
+        DataHeader, DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader,
+        assemble::{Constraints, Package},
+    },
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
     time::heartbeat::ArcHeartbeat,
@@ -30,12 +33,8 @@ use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
     keys::{ArcOneRttKeys, KeyRetired, Open, Seal},
-    packet::channel,
+    packet::{assemble::Packet as SendingPacket, channel},
     path::Path,
-    send::{
-        constraints::Constraints,
-        write::{Packet as SendingPacket, PacketError},
-    },
     space::{DataSpace, Space},
     *,
 };
@@ -350,7 +349,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
 }
 fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Result<(), Error> {
     let keys = keys(transport);
-    send::acknowledge(&transport.data, ack, path, |generation| {
+    crate::recv::acknowledge(&transport.data, ack, path, |generation| {
         keys.on_ack(generation)
     })
 }
@@ -363,47 +362,56 @@ fn ack(pn: u64) -> AckFrame {
         None,
     )
 }
-pub(crate) fn seal_packet(
-    packet: SendingPacket,
-    keys: &ArcOneRttKeys,
-    journal: &send::records::ArcSentJournal,
-    records: &mut Vec<GuaranteedFrame>,
-) -> Result<send::write::PendingPacket, PacketError> {
-    let ((pn, encoded), key) = send::records::reserve(keys, journal, records)?;
-    send::finish_sealing(packet.seal(key.as_ref(), pn, encoded), pn, journal, records)
-}
-
-// Receive and encoding tests supply packet numbers without constructing recovery history.
-fn seal_packet_with_pn(
-    packet: SendingPacket,
+// Receive tests encode explicit packet numbers without constructing recovery history.
+fn encode_packet(
     keys: &ArcOneRttKeys,
     pn: u64,
-) -> Result<send::write::PendingPacket, PacketError> {
-    let key = keys.get()?;
-    packet.seal(key.as_ref(), pn, PacketNumber::encode(pn, 0))
+    limits: &mut Constraints,
+    frames: &mut Vec<GuaranteedFrame>,
+    sources: &mut [&mut dyn Package<BytesMut>],
+) -> BytesMut {
+    let key = keys.get().unwrap();
+    let mut packet = SendingPacket::new(
+        DataHeader::Short(OneRttHeader::new(
+            Default::default(),
+            ConnectionId::from_slice(b"original"),
+        )),
+        (pn, PacketNumber::encode(pn, 0)),
+        key.as_ref(),
+    );
+    let mut bytes = BytesMut::with_capacity(1200);
+    let result = packet.assemble(
+        &mut Context::from_waker(std::task::Waker::noop()),
+        &mut bytes,
+        limits,
+        frames,
+        sources,
+    );
+    match result {
+        Poll::Ready(Ok(size)) if size > 0 => {
+            bytes.resize(size, 0);
+            packet.seal(&mut bytes).unwrap();
+        }
+        Poll::Ready(Err(error)) => panic!("packet assembly failed: {error}"),
+        _ => bytes.clear(),
+    }
+    bytes
 }
 
 fn ping(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
+    encode_packet(
+        keys,
+        pn,
+        &mut Constraints {
+            flow_ctrl: usize::MAX,
+            send_quota: 1200,
+            credit: 1200,
+            max_size: 1200,
+            ..Default::default()
+        },
+        &mut Vec::new(),
+        &mut [&mut PingFrame],
     )
-    .unwrap();
-    packet
-        .assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            &mut recorded,
-            [&mut PingFrame],
-        )
-        .unwrap();
-    seal_packet_with_pn(packet, keys, pn).unwrap().into_buffer()
 }
 
 #[test]
@@ -434,36 +442,105 @@ fn short_packet_numbers_round_trip_with_header_protection_padding() {
     }
 }
 
+#[tokio::test]
+async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys() {
+    use qbase::{frame::DatagramFrame, packet::LongHeaderBuilder};
+    use qtransport::keys::Keys;
+
+    let [(_client, ct, cp), (_server, st, sp)] = pair(1);
+    let material = Arc::new(fixed_keys());
+    let header = LongHeaderBuilder::with_cid(
+        ConnectionId::from_slice(b"original"),
+        ConnectionId::from_slice(b"clientid"),
+    )
+    .zero_rtt();
+    let pn = ct.data.sent_journal.next_pn().unwrap();
+    let mut packet = SendingPacket::new(
+        DataHeader::Long(header.into()),
+        pn,
+        Keys::Long(material.clone()),
+    );
+    let mut bytes = BytesMut::with_capacity(1200);
+    let mut frames = Vec::new();
+    let mut datagram = (
+        DatagramFrame::new(true, 5u32.into()),
+        Bytes::from_static(b"hello"),
+    );
+    let mut limits = Constraints {
+        send_quota: 1200,
+        credit: 1200,
+        max_size: 1200,
+        ..Default::default()
+    };
+    assert!(matches!(packet.assemble(
+        &mut Context::from_waker(std::task::Waker::noop()), &mut bytes, &mut limits,
+        &mut frames, &mut [&mut datagram, &mut PingFrame],
+    ), Poll::Ready(Ok(n)) if n > 0));
+    bytes.resize(packet.len(), 0);
+    let generation = packet.seal(&mut bytes).unwrap();
+    assert_eq!(generation, None);
+    let (_, received) = material
+        .sealing
+        .open(parse(&bytes), |_| Ok(pn.0), Duration::ZERO)
+        .unwrap()
+        .unwrap();
+    let received: Vec<_> = received.map(|frame| frame.unwrap().0).collect();
+    assert!(
+        matches!(received.as_slice(), [Frame::Datagram(_, body), Frame::Ping(_)] if body.as_ref() == b"hello")
+    );
+    ct.data
+        .sent_journal
+        .on_sealed(pn.0, generation, bytes.len(), packet.meta, frames.drain(..));
+    ct.data.sent_journal.on_sent(
+        pn.0,
+        packet.meta.in_flight,
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+    );
+
+    let mut sender = Sender::new(ct.clone(), cp);
+    sender.heartbeat();
+    assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(1));
+    assert_eq!(
+        ct.data.sent_journal.on_acked(&ack(0), |_| {}).unwrap(),
+        None
+    );
+    assert_eq!(
+        ct.data.sent_journal.on_acked(&ack(1), |_| {}).unwrap(),
+        Some(0)
+    );
+}
+
 #[test]
 fn header_protection_padding_obeys_every_packet_limit() {
     use qbase::packet::HeaderSize;
+    let ([client, _], _) = handshake();
+    let keys = ArcOneRttKeys::from(client);
     let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
-    let minimum = header.size() + 22; // Four-byte reservation plus padding for a two-byte PN.
+    let minimum = header.size() + 20;
     for limited in 0..3 {
         let mut recorded = Vec::new();
-        let mut packet = SendingPacket::new(BytesMut::zeroed(minimum), header, 16).unwrap();
-        let mut constraints = Constraints {
-            flow_ctrl: std::cell::Cell::new(usize::MAX),
-            capacity: minimum,
-            congestion: minimum,
-            anti_amplification: minimum,
+        let mut limits = Constraints {
+            max_size: minimum,
+            send_quota: minimum,
+            credit: minimum,
+            ..Default::default()
         };
         match limited {
-            0 => constraints.capacity -= 1,
-            1 => constraints.congestion -= 1,
-            _ => constraints.anti_amplification -= 1,
+            0 => limits.max_size -= 1,
+            1 => limits.send_quota -= 1,
+            _ => limits.credit -= 1,
         }
         assert!(
-            packet
-                .assemble(&constraints, &mut recorded, [&mut PingFrame])
-                .is_err()
+            encode_packet(&keys, 0, &mut limits, &mut recorded, &mut [&mut PingFrame]).is_empty()
         );
-        constraints.capacity = minimum;
-        constraints.congestion = minimum;
-        constraints.anti_amplification = minimum;
-        packet
-            .assemble(&constraints, &mut recorded, [&mut PingFrame])
-            .unwrap();
+        limits.max_size = minimum;
+        limits.send_quota = minimum;
+        limits.credit = minimum;
+        assert_eq!(
+            encode_packet(&keys, 0, &mut limits, &mut recorded, &mut [&mut PingFrame]).len(),
+            minimum
+        );
     }
 }
 
@@ -483,30 +560,23 @@ fn initial_datagram(cid: ConnectionId, size: usize) -> BytesMut {
 }
 
 fn close_packet(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
     let mut close = qbase::frame::ConnectionCloseFrame::from(Error::from(AppError::new(
         VarInt::from_u32(7),
         "peer closed",
     )));
-    packet
-        .assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            &mut recorded,
-            [&mut PingFrame, &mut close],
-        )
-        .unwrap();
-    seal_packet_with_pn(packet, keys, pn).unwrap().into_buffer()
+    encode_packet(
+        keys,
+        pn,
+        &mut Constraints {
+            flow_ctrl: usize::MAX,
+            send_quota: 1200,
+            credit: 1200,
+            max_size: 1200,
+            ..Default::default()
+        },
+        &mut Vec::new(),
+        &mut [&mut PingFrame, &mut close],
+    )
 }
 
 #[tokio::test]
@@ -733,7 +803,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     ));
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"wired stream")).unwrap();
-    let bytes = emit(&mut Sender::new(keys(&ct), ct.clone(), cp).unwrap());
+    let bytes = emit(&mut Sender::new(ct.clone(), cp));
     router.receive(bytes.clone(), link.into(), link, 8);
     router.receive(bytes, link.into(), link, 8);
     let (_, mut reader) = tokio::time::timeout(Duration::from_secs(2), server.accept_uni_stream())
@@ -846,7 +916,7 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
         writer.write_all(&[7; 250]).await.unwrap();
         writers.push(writer);
     }
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
     let (_, frames) = st
         .data
@@ -877,30 +947,30 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
 
 #[test]
 fn a_large_frame_that_fits_is_assembled_before_later_sources() {
+    let ([client, _], _) = handshake();
+    let keys = ArcOneRttKeys::from(client);
     let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
     let bytes = [Bytes::from(vec![1; 800])];
     let mut crypto = (
-        qbase::frame::CryptoFrame::new(VarInt::from_u32(0), VarInt::from_u32(800)),
+        qbase::frame::CryptoFrame::new(0u32.into(), 800u32.into()),
         bytes.as_slice(),
     );
-    packet
-        .assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
+    assert!(
+        !encode_packet(
+            &keys,
+            0,
+            &mut Constraints {
+                flow_ctrl: usize::MAX,
+                max_size: 1200,
+                send_quota: 1200,
+                credit: 1200,
+                ..Default::default()
             },
             &mut recorded,
-            [&mut crypto, &mut PingFrame],
+            &mut [&mut crypto, &mut PingFrame]
         )
-        .unwrap();
+        .is_empty()
+    );
     assert!(matches!(recorded.as_slice(), [GuaranteedFrame::Crypto(frame)] if frame.len() == 800));
 }
 
@@ -919,27 +989,24 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
         qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()),
         bytes.as_slice(),
     );
+    let ([client, _], _) = handshake();
+    let keys = ArcOneRttKeys::from(client);
     let mut sent = Vec::new();
     for pn in 0..2 {
         let mut recorded = Vec::new();
-        let mut packet = SendingPacket::new(
-            BytesMut::zeroed(1200),
-            OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-            16,
-        )
-        .unwrap();
-        packet
-            .assemble(
-                &Constraints {
-                    flow_ctrl: std::cell::Cell::new(usize::MAX),
-                    capacity: 1200,
-                    congestion: 1200,
-                    anti_amplification: 1200,
-                },
-                &mut recorded,
-                [&mut reliable, &mut crypto],
-            )
-            .unwrap();
+        encode_packet(
+            &keys,
+            pn,
+            &mut Constraints {
+                flow_ctrl: usize::MAX,
+                max_size: 1200,
+                send_quota: 1200,
+                credit: 1200,
+                ..Default::default()
+            },
+            &mut recorded,
+            &mut [&mut reliable, &mut crypto],
+        );
         for frame in recorded.as_slice() {
             if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
                 StreamCtlFrame::MaxData(frame),
@@ -966,7 +1033,7 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
+async fn sender_assembles_ack_path_crypto_reliable_then_streams() {
     use qbase::frame::{MaxDataFrame, PathChallengeFrame, ReliableFrame, io::SendFrame};
     use tokio::io::AsyncWriteExt;
 
@@ -984,7 +1051,7 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
         ))]);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write_all(b"stream").await.unwrap();
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
     let (_, frames) = keys(&st)
         .open(
@@ -1002,8 +1069,8 @@ async fn sender_assembles_ack_crypto_path_reliable_then_streams() {
         frames.as_slice(),
         [
             Frame::Ack(_),
-            Frame::Crypto(..),
             Frame::PathResponse(_),
+            Frame::Crypto(..),
             Frame::StreamCtl(StreamCtlFrame::MaxData(_)),
             Frame::Stream(..),
         ]
@@ -1020,8 +1087,8 @@ async fn real_tls_keys_stream_roundtrip_and_ack_complete_shutdown() {
     request.write_all(b"request").await.unwrap();
     let mut shutdown = Box::pin(request.shutdown());
     assert!(futures::poll!(&mut shutdown).is_pending());
-    let mut cs = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
-    let mut ss = Sender::new(keys(&st), st.clone(), sp.clone()).unwrap();
+    let mut cs = Sender::new(ct.clone(), cp.clone());
+    let mut ss = Sender::new(st.clone(), sp.clone());
     let bytes = emit(&mut cs);
     let pn = receive(&st, &sp, &bytes).unwrap();
     acknowledge(&ct, &ack(pn), &cp).unwrap();
@@ -1124,100 +1191,41 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
 
 #[tokio::test]
 async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_budget() {
-    let (materials, _) = handshake();
-    let [client, _] = materials;
-    let transport = transport(Role::Client, client, 1);
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
-    let constraints = Constraints {
-        flow_ctrl: std::cell::Cell::new(usize::MAX),
-        capacity: 1200,
-        congestion: 0,
-        anti_amplification: 1200,
+    let [(_client, transport, _), (_server, peer, _)] = pair(1);
+    let mut limits = Constraints {
+        flow_ctrl: usize::MAX,
+        max_size: 1200,
+        send_quota: 0,
+        credit: 1200,
+        ..Default::default()
     };
-    packet
-        .assemble(&constraints, &mut recorded, [&mut ack(0), &mut PingFrame])
-        .unwrap();
-    assert!(packet.pad_to(1200, &constraints).is_err());
-    let packet = seal_packet(
-        packet,
+    let mut recorded = Vec::new();
+    let bytes = encode_packet(
         &keys(&transport),
-        &transport.data.sent_journal,
+        0,
+        &mut limits,
         &mut recorded,
-    )
-    .unwrap();
-    assert!(!packet.in_flight);
-    assert_eq!(constraints.congestion, 0);
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
-    assert!(matches!(
-        packet.assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 10
-            },
+        &mut [&mut ack(0), &mut PingFrame],
+    );
+    let (_, frames) = keys(&peer)
+        .open(parse(&bytes), |_| Ok(0), Duration::ZERO)
+        .unwrap()
+        .unwrap();
+    let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).collect();
+    assert!(matches!(frames.as_slice(), [Frame::Ack(_)]));
+    assert_eq!(limits.send_quota, 0);
+    limits.send_quota = 1200;
+    limits.credit = 10;
+    assert!(
+        encode_packet(
+            &keys(&transport),
+            1,
+            &mut limits,
             &mut recorded,
-            [&mut ack(0)]
-        ),
-        Err(PacketError::Blocked(_))
-    ));
-}
-
-#[test]
-fn packet_assembly_uses_fixed_limits_across_ack_data_and_padding() {
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
-    let mut constraints = Constraints {
-        flow_ctrl: std::cell::Cell::new(usize::MAX),
-        capacity: 100,
-        congestion: 0,
-        anti_amplification: 100,
-    };
-    packet
-        .assemble(&constraints, &mut recorded, [&mut ack(0)])
-        .unwrap();
-    assert_eq!(constraints.capacity, 100);
-    assert_eq!(constraints.anti_amplification, 100);
-    assert!(
-        packet
-            .assemble(&constraints, &mut recorded, [&mut PingFrame])
-            .is_err()
+            &mut [&mut ack(0)]
+        )
+        .is_empty()
     );
-    assert!(packet.pad_to(100, &constraints).is_err());
-
-    constraints.congestion = 100;
-    packet
-        .assemble(&constraints, &mut recorded, [&mut PingFrame])
-        .unwrap();
-    packet.pad_to(100, &constraints).unwrap();
-    assert_eq!(constraints.congestion, 100);
-    assert!(
-        packet
-            .assemble(&constraints, &mut recorded, [&mut PingFrame])
-            .is_err()
-    );
-    assert!(packet.pad_to(101, &constraints).is_err());
-    assert!(recorded.is_empty());
-    assert_eq!(constraints.capacity, 100);
-    assert_eq!(constraints.anti_amplification, 100);
-    assert_eq!(constraints.congestion, 100);
 }
 
 #[tokio::test]
@@ -1241,39 +1249,38 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
         let mut constraints = Constraints {
-            flow_ctrl: std::cell::Cell::new(usize::MAX),
-            capacity: 1200,
-            congestion: 1200,
-            anti_amplification: 1200,
+            flow_ctrl: usize::MAX,
+            max_size: 1200,
+            send_quota: 1200,
+            credit: 1200,
+            ..Default::default()
         };
         let sealing = keys(&ct);
         let opening = keys(&st);
         for pn in 0..32 {
             let mut recorded = Vec::new();
-            let mut packet = SendingPacket::new(
-                BytesMut::zeroed(1200),
-                OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-                16,
-            )
-            .unwrap();
             let limit = match limited {
-                0 => &mut constraints.capacity,
-                1 => &mut constraints.congestion,
-                _ => &mut constraints.anti_amplification,
+                0 => &mut constraints.max_size,
+                1 => &mut constraints.send_quota,
+                _ => &mut constraints.credit,
             };
             *limit = if pn == 0 { 24 } else { 80 };
-            let result = packet.assemble(&constraints, &mut recorded, [&mut crypto, &mut streams]);
+            let bytes = encode_packet(
+                &sealing,
+                pn,
+                &mut constraints,
+                &mut recorded,
+                &mut [&mut crypto, &mut streams],
+            );
             if pn == 0 {
-                assert!(result.is_err());
+                assert!(bytes.is_empty());
                 assert!(recorded.is_empty());
                 continue;
             }
-            result.unwrap();
             assert!(!recorded.is_empty());
-            let pending = seal_packet_with_pn(packet, &sealing, pn).unwrap();
-            assert!(pending.bytes().len() <= 80);
+            assert!(bytes.len() <= 80);
             let (_, frames) = opening
-                .open(parse(pending.bytes()), |_| Ok(pn), Duration::from_secs(1))
+                .open(parse(&bytes), |_| Ok(pn), Duration::from_secs(1))
                 .unwrap()
                 .unwrap();
             for frame in frames {
@@ -1302,14 +1309,22 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
 }
 
 #[tokio::test]
-async fn empty_assembly_does_not_allocate_packet_numbers() {
+async fn empty_assembly_cancels_packet_reservations() {
     let [(_client, ct, cp), (_server, st, sp)] = pair(1);
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp);
     for _ in 0..5 {
         assert!(!sender.prepare().unwrap());
     }
+    for pn in 0..5 {
+        assert!(
+            ct.data
+                .sent_journal
+                .on_acked(&ack(pn), |_| panic!("empty packet has recovery frames"))
+                .is_err()
+        );
+    }
     sender.heartbeat();
-    assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(0));
+    assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(5));
 }
 
 #[tokio::test]
@@ -1317,7 +1332,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     let [(client, ct, cp), (_server, st, sp)] = pair(4);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"retained")).unwrap();
-    let mut slow = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    let mut slow = Sender::new(ct.clone(), cp.clone());
     assert!(slow.prepare().unwrap());
     assert!(
         slow.poll_send_with(
@@ -1328,7 +1343,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     );
     keys(&ct).update().unwrap();
     let other = path(&ct, 1);
-    let mut fast = Sender::new(keys(&ct), ct.clone(), other).unwrap();
+    let mut fast = Sender::new(ct.clone(), other);
     fast.heartbeat();
     let fast_bytes = emit(&mut fast);
     assert_eq!(receive(&st, &sp, &fast_bytes), Some(1));
@@ -1419,31 +1434,10 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     let [(_client, ct, _), (_server, st, sp)] = pair(1);
     let (inbox, packets) = channel::new();
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
-    let mut recorded = Vec::new();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
-    let mut close = qbase::frame::ConnectionCloseFrame::from(Error::from(AppError::new(
-        VarInt::from_u32(7),
-        "peer",
-    )));
-    packet
-        .assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            &mut recorded,
-            [&mut PingFrame, &mut close],
-        )
-        .unwrap();
-    let bytes = seal_packet_with_pn(packet, &keys(&ct), 1).unwrap();
-    assert!(enqueue(&inbox, Packet::Data(parse(bytes.bytes()))));
+    assert!(enqueue(
+        &inbox,
+        Packet::Data(parse(&close_packet(&keys(&ct), 1)))
+    ));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 2)))));
     drop(inbox);
     let inspected = std::cell::Cell::new(0);
@@ -1516,7 +1510,7 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     ct.data
         .reliable_frames
         .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp);
     emit(&mut sender);
     drop(sender);
 
@@ -1525,28 +1519,23 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
         &mut [0, 0].into_iter(),
     );
     // Read the components directly: no Sender or timer may extract journal work first.
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
     let mut frames = Vec::new();
     let mut crypto = ct.data.crypto.outgoing();
     let mut reliable = ct.data.reliable_frames.clone();
     let mut streams = ct.data.streams.clone();
-    packet
-        .assemble(
-            &Constraints {
-                flow_ctrl: std::cell::Cell::new(usize::MAX),
-                capacity: 1200,
-                congestion: 1200,
-                anti_amplification: 1200,
-            },
-            &mut frames,
-            [&mut crypto, &mut reliable, &mut streams],
-        )
-        .unwrap();
+    encode_packet(
+        &keys(&ct),
+        1,
+        &mut Constraints {
+            flow_ctrl: usize::MAX,
+            max_size: 1200,
+            send_quota: 1200,
+            credit: 1200,
+            ..Default::default()
+        },
+        &mut frames,
+        &mut [&mut crypto, &mut reliable, &mut streams],
+    );
     assert!(matches!(frames.as_slice(),
         [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f))), GuaranteedFrame::Stream(_)]
         if f.max_data() == 123));
@@ -1560,7 +1549,7 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"stream")).unwrap();
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp.clone());
     emit(&mut sender);
     ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
@@ -1575,7 +1564,7 @@ async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() 
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"lost once")).unwrap();
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp.clone());
     let dropped = emit(&mut sender);
     ct.data.resend(
         qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
@@ -1597,10 +1586,10 @@ async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() 
 #[tokio::test]
 async fn retired_path_replacement_has_its_own_sender_and_waiter() {
     let [(_client, ct, cp), _] = pair(1);
-    let old_sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    let old_sender = Sender::new(ct.clone(), cp.clone());
     cp.close();
     let replacement = path(&ct, 0);
-    let mut sender = Sender::new(keys(&ct), ct.clone(), replacement.clone()).unwrap();
+    let mut sender = Sender::new(ct.clone(), replacement.clone());
     drop(old_sender);
     assert!(cp.validation.is_cancelled());
     assert!(!Arc::ptr_eq(&cp, &replacement));
@@ -1618,42 +1607,21 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"retired path")).unwrap();
     let (retransmit_after, _) = original.cc.retransmit_and_expire_time(Epoch::Data);
-    let mut sender = Sender::new(keys(&transport), transport.clone(), original.clone()).unwrap();
+    let mut sender = Sender::new(transport.clone(), original.clone());
     emit(&mut sender);
     original.close();
     drop(sender);
     drop(original);
     // Path retirement alone must not make the stream range available again.
     let mut streams = transport.data.streams.clone();
-    let mut packet = SendingPacket::new(
-        BytesMut::zeroed(1200),
-        OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original")),
-        16,
-    )
-    .unwrap();
-    let constraints = Constraints {
-        flow_ctrl: std::cell::Cell::new(usize::MAX),
-        capacity: 1200,
-        congestion: 1200,
-        anti_amplification: 1200,
-    };
-    let mut frames = Vec::new();
-    assert!(
-        packet
-            .assemble(&constraints, &mut frames, [&mut streams])
-            .is_err()
-    );
+    assert!(take_frames(&mut streams).is_empty());
     transport.data.on_tick(tokio::time::Instant::now());
-    assert!(
-        packet
-            .assemble(&constraints, &mut frames, [&mut streams])
-            .is_err()
-    );
+    assert!(take_frames(&mut streams).is_empty());
 
     tokio::time::advance(retransmit_after).await;
     transport.data.on_tick(tokio::time::Instant::now());
     let replacement = path(&transport, 1);
-    let mut sender = Sender::new(keys(&transport), transport.clone(), replacement.clone()).unwrap();
+    let mut sender = Sender::new(transport.clone(), replacement.clone());
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
     transport.data.on_tick(tokio::time::Instant::now());
     assert!(
@@ -1677,7 +1645,7 @@ async fn connection_close_preserves_completed_streams_and_errors_active_streams(
     writer.write_all(b"unread").await.unwrap();
     let mut shutdown = Box::pin(writer.shutdown());
     assert!(futures::poll!(&mut shutdown).is_pending());
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp.clone());
     let pn = receive(&st, &sp, &emit(&mut sender)).unwrap();
     acknowledge(&ct, &ack(pn), &cp).unwrap();
     shutdown.await.unwrap();
@@ -1778,7 +1746,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     path.validation.enter_validated().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
-    let mut sender = Sender::new(keys(&ct), ct.clone(), path).unwrap();
+    let mut sender = Sender::new(ct.clone(), path);
     assert!(sender.prepare().unwrap());
     assert!(
         std::future::poll_fn(|cx| sender.poll_send(cx, &protocol))
@@ -1801,7 +1769,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
 #[tokio::test]
 async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
     let [(_client, transport, path), _] = pair(1);
-    let mut sender = Sender::new(keys(&transport), transport.clone(), path.clone()).unwrap();
+    let mut sender = Sender::new(transport.clone(), path.clone());
     sender.heartbeat();
     assert!(sender.prepare().unwrap());
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -1832,7 +1800,7 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 }
 
 #[tokio::test]
-async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_validated() {
+async fn path_validation_replies_on_ingress_and_allows_data_within_credit() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
         Arc::new(Path::new(
@@ -1854,23 +1822,20 @@ async fn path_validation_replies_on_ingress_and_withholds_stream_data_until_vali
     let waiting = cp.validation.respond();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"validated")).unwrap();
-    let mut cs = Sender::new(keys(&ct), ct.clone(), cp.clone()).unwrap();
-    let mut ss = Sender::new(keys(&st), st.clone(), sp.clone()).unwrap();
+    let mut cs = Sender::new(ct.clone(), cp.clone());
+    let mut ss = Sender::new(st.clone(), sp.clone());
     let challenge = emit(&mut cs);
     assert_eq!(challenge.len(), 1200);
-    assert_eq!(crate::send::constraints::credit(&sp.validation), 0);
+    assert_eq!(sp.validation.credit().unwrap().unwrap(), 0);
     receive(&st, &sp, &challenge);
-    let mut accepting = Box::pin(server.accept_uni_stream());
-    assert!(futures::poll!(&mut accepting).is_pending());
+    let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     let response = emit(&mut ss);
     assert_eq!(response.len(), 1200);
-    assert_eq!(crate::send::constraints::credit(&sp.validation), 2400);
+    assert_eq!(sp.validation.credit().unwrap().unwrap(), 2400);
     receive(&ct, &cp, &response);
     assert_eq!(waiting.await.unwrap(), Some(challenge_frame.into()));
     cp.validation.enter_validated().unwrap();
     assert!(cp.validation.is_validated());
-    receive(&st, &sp, &emit(&mut cs));
-    let (_, mut reader) = accepting.await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut body = [0; 9];
     reader.read_exact(&mut body).await.unwrap();
@@ -1882,9 +1847,8 @@ async fn shared_ack_only_updates_the_receiving_paths_congestion_control() {
     use qcongestion::Transport as _;
     let [(_client, transport, first), _] = pair(1);
     let second = path(&transport, 1);
-    let mut first_sender = Sender::new(keys(&transport), transport.clone(), first.clone()).unwrap();
-    let mut second_sender =
-        Sender::new(keys(&transport), transport.clone(), second.clone()).unwrap();
+    let mut first_sender = Sender::new(transport.clone(), first.clone());
+    let mut second_sender = Sender::new(transport.clone(), second.clone());
     first_sender.heartbeat();
     emit(&mut first_sender);
     second_sender.heartbeat();
@@ -1906,7 +1870,7 @@ async fn resetting_one_stream_does_not_close_the_connection() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.cancel(17);
-    let mut sender = Sender::new(keys(&ct), ct.clone(), cp).unwrap();
+    let mut sender = Sender::new(ct.clone(), cp);
     receive(&st, &sp, &emit(&mut sender));
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     assert!(matches!(
@@ -1964,7 +1928,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
 async fn sealing_does_not_wait_for_socket_submission() {
     let [(_client, transport, path), _] = pair(1);
     let keys = transport.data.keys.clone();
-    let mut sender = Sender::new(keys.clone(), transport, path).unwrap();
+    let mut sender = Sender::new(transport, path);
     sender.heartbeat();
     assert!(sender.prepare().unwrap());
     let (start, started) = std::sync::mpsc::channel();

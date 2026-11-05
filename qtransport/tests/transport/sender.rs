@@ -1,184 +1,132 @@
-//! Component wiring for the established-connection integration tests.
+//! One-datagram fixture for receive and recovery tests, using production assembly.
+use qbase::{packet::assemble::Metadata, time::timer::ArcIdleTimer};
 use qprotocol::protocol::quic::QuicProtocol;
+use qtransport::space::{Recover, Spaces, Transmit, assemble::Constraints};
 
 use super::*;
-use crate::send::{MAX_BURST_PACKETS, fixture::TestSender as PacketSender, write::PendingPacket};
 
 pub(crate) struct Sender {
-    inner: PacketSender,
-    keys: ArcOneRttKeys,
     transport: Arc<Transport>,
     path: Arc<Path>,
+    bytes: BytesMut,
+    pending: Option<Metadata>,
     heartbeat: bool,
-    packets: Vec<std::io::IoSlice<'static>>,
 }
 
 impl Sender {
-    pub(crate) fn new(
-        keys: ArcOneRttKeys,
-        transport: Arc<Transport>,
-        path: Arc<Path>,
-    ) -> Result<Self, Error> {
-        let inner = PacketSender::new(
-            path.pathway,
-            path.cc.clone(),
-            path.validation.clone(),
-            Some(transport.data.clone()),
-        );
-        Ok(Self {
-            inner,
-            keys,
+    pub(crate) fn new(transport: Arc<Transport>, path: Arc<Path>) -> Self {
+        Self {
             transport,
             path,
+            bytes: BytesMut::zeroed(1200),
+            pending: None,
             heartbeat: false,
-            packets: Vec::with_capacity(MAX_BURST_PACKETS),
-        })
+        }
     }
+
     pub(crate) fn heartbeat(&mut self) {
         self.heartbeat = true;
     }
+
     pub(crate) fn prepare(&mut self) -> Result<bool, Error> {
-        if self.inner.pending().next().is_some() {
+        if self.pending.is_some() {
             return Ok(true);
         }
-        if self.path.validation.is_cancelled() {
-            return Err(
-                QuicError::with_default_fty(ErrorKind::NoViablePath, "path retired").into(),
-            );
-        }
-        let mut once = false;
-        let count = self.inner.burst(|sender, constraints| {
-            if once {
-                return Ok(None);
-            }
-            once = true;
-            let packet = assemble_data(
-                sender,
-                constraints,
-                &self.keys,
-                &self.transport,
-                &self.path,
-                self.heartbeat,
-            )?;
-            if packet.is_some() {
-                self.heartbeat = false;
-            }
-            Ok(packet)
+        let credit = self.path.validation.credit().map_err(|error| {
+            QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
         })?;
-        Ok(count != 0)
+        let mut spaces = Spaces(IndexDeque::with_capacity(1));
+        spaces.0.reset_offset(Epoch::Data as u64);
+        spaces.0.push_back(self.transport.data.clone()).unwrap();
+        let mut limits = Constraints {
+            send_quota: self.path.cc.send_quota(),
+            credit: credit.unwrap_or(usize::MAX),
+            probe_quota: Epoch::EPOCHS.map(|epoch| {
+                if self.path.cc.need_send_ack_eliciting(epoch) > 0 {
+                    1200
+                } else {
+                    0
+                }
+            }),
+            overhead: QuicProtocol::packet_overhead(self.path.pathway),
+        };
+        let mut ack = self
+            .transport
+            .data
+            .rcvd_journal
+            .ack_package(self.path.cc.need_ack(Epoch::Data));
+        let mut validation = self.path.validation.clone();
+        let mut ping = (self.heartbeat || limits.probe_quota[Epoch::Data] > 0).then_some(PingFrame);
+        self.bytes.resize(1200, 0);
+        let mut packets = [None; 3];
+        let size = spaces.poll_dump(
+            &mut Context::from_waker(std::task::Waker::noop()),
+            ConnectionId::from_slice(b"original"),
+            &mut self.bytes,
+            &mut limits,
+            &mut Vec::new(),
+            &mut packets,
+            &mut [&mut ack, &mut validation, &mut ping],
+        )?;
+        self.bytes.truncate(size);
+        self.pending = packets[Epoch::Data];
+        if size > 0 {
+            self.heartbeat = false;
+        }
+        Ok(size > 0)
     }
+
     pub(crate) fn poll_send_with(
         &mut self,
         cx: &mut Context<'_>,
         mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<std::io::Result<usize>>,
     ) -> Poll<Result<bool, Error>> {
-        self.inner
-            .poll_send_with(
-                cx,
-                &mut self.packets,
-                |cx, path, packets| submit(cx, path, &packets[0]).map(|result| result.map(|_| 1)),
-                |_| !self.path.validation.is_cancelled(),
-                |_| {},
-            )
-            .map(|result| result.map(|n| n != 0))
+        let Some(meta) = self.pending else {
+            return Poll::Ready(Ok(false));
+        };
+        let delay = self.path.cc.retransmit_and_expire_time(Epoch::Data).0;
+        let retention = self.path.cc.pto_base(Epoch::Data) * 3;
+        let mut cc = self.path.cc.lock();
+        std::task::ready!(submit(cx, self.path.pathway, &self.bytes)).map_err(|error| {
+            QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
+        })?;
+        Transmit::on_sent(
+            self.transport.data.as_ref(),
+            meta.pn,
+            meta.in_flight,
+            delay,
+            retention,
+        );
+        self.path.on_sent(
+            &mut cc,
+            self.bytes.len(),
+            [None, None, self.pending.take()],
+            &ArcIdleTimer::new(Duration::ZERO),
+        );
+        Poll::Ready(Ok(true))
     }
+
     pub(crate) fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
         protocol: &QuicProtocol,
     ) -> Poll<Result<bool, Error>> {
-        self.inner
-            .poll_send_with(
-                cx,
-                &mut self.packets,
-                |cx, pathway, packets| protocol.poll_send_datagrams(cx, pathway, packets),
-                |_| !self.path.validation.is_cancelled(),
-                |_| {},
-            )
-            .map(|result| result.map(|n| n != 0))
-    }
-}
-impl Drop for Sender {
-    fn drop(&mut self) {
-        self.inner.cancel_pending();
+        self.poll_send_with(cx, |cx, path, bytes| {
+            protocol
+                .poll_send(cx, path, &[std::io::IoSlice::new(bytes)])
+                .map(|result| result.map(|_| bytes.len()))
+        })
     }
 }
 
-pub(crate) fn assemble_data(
-    sender: &mut PacketSender,
-    constraints: &Constraints,
-    keys: &ArcOneRttKeys,
-    transport: &Transport,
-    path: &Path,
-    heartbeat: bool,
-) -> Result<Option<PendingPacket>, Error> {
-    let mut ack = path
-        .cc
-        .need_ack(Epoch::Data)
-        .and_then(|(pn, time)| {
-            transport
-                .data
-                .rcvd_journal
-                .gen_ack_frame_util(pn, time, 400)
-                .ok()
-        })
-        .map(|ack| {
-            let exponent: u64 = transport.parameters.local(ParameterId::AckDelayExponent);
-            AckFrame::new(
-                VarInt::from_u64(ack.largest()).unwrap(),
-                VarInt::from_u64(ack.delay() >> exponent).unwrap(),
-                VarInt::from_u64(ack.first_range()).unwrap(),
-                ack.ranges().clone(),
-                None,
-            )
-        });
-    let mut validation = path.validation.clone();
-    let mut crypto = transport.data.crypto.outgoing();
-    let mut reliable = transport.data.reliable_frames.clone();
-    let mut streams = transport.data.streams.clone();
-    constraints.flow_ctrl.set(usize::MAX);
-    for packet in sender.pending() {
-        if packet.epoch() == Epoch::Data
-            && packet
-                .largest_acked
-                .is_some_and(|pn| ack.as_ref().is_some_and(|ack| pn >= ack.largest()))
-        {
-            ack = None;
+impl Drop for Sender {
+    fn drop(&mut self) {
+        if let Some(meta) = self.pending.take() {
+            Recover::cancel(
+                self.transport.data.as_ref(),
+                meta.pn,
+                &mut std::iter::empty(),
+            );
         }
-    }
-    let mut ping =
-        (heartbeat || path.cc.need_send_ack_eliciting(Epoch::Data) != 0).then_some(PingFrame);
-    let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
-    if heartbeat {
-        sender.assemble_1rtt_packet(
-            keys,
-            header,
-            &transport.data.sent_journal,
-            constraints,
-            [&mut ping],
-        )
-    } else if !path.validation.is_validated() {
-        sender.assemble_1rtt_packet(
-            keys,
-            header,
-            &transport.data.sent_journal,
-            constraints,
-            [&mut ack, &mut validation, &mut ping],
-        )
-    } else {
-        sender.assemble_1rtt_packet(
-            keys,
-            header,
-            &transport.data.sent_journal,
-            constraints,
-            [
-                &mut ack,
-                &mut crypto,
-                &mut validation,
-                &mut reliable,
-                &mut ping,
-                &mut streams,
-            ],
-        )
     }
 }
