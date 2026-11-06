@@ -49,9 +49,7 @@ impl<TX: Clone> Sender<TX> {
         buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let capacity = buffer.remaining_mut();
         let flow_limit = *credit;
-        let predicate = |offset| {
-            StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(tokens))
-        };
+        let predicate = |offset| StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(tokens));
         let start = buffer.meta.nframes;
         let mut write = |(range, fresh, data, eos): StreamData<'_>| {
             let mut frame = StreamFrame::new(sid, range.start, (range.end - range.start) as usize);
@@ -227,17 +225,9 @@ impl<TX> Outgoing<TX> {
             Ok(sending_state) => {
                 // THINK: sending_state.stream_id() -> StreamId, sending_state.state() -> GranularStreamStates
                 let (stream_id, old_state, final_size) = match sending_state {
-                    Sender::Ready(s) => {
-                        (s.stream_id(), GranularStreamStates::Ready, s.be_stopped())
-                    }
-                    Sender::Sending(s) => {
-                        (s.stream_id(), GranularStreamStates::Send, s.be_stopped())
-                    }
-                    Sender::DataSent(s) => (
-                        s.stream_id(),
-                        GranularStreamStates::DataSent,
-                        s.be_stopped(),
-                    ),
+                    Sender::Ready(s) => (s.stream_id(), GranularStreamStates::Ready, s.be_stopped()),
+                    Sender::Sending(s) => (s.stream_id(), GranularStreamStates::Send, s.be_stopped()),
+                    Sender::DataSent(s) => (s.stream_id(), GranularStreamStates::DataSent, s.be_stopped()),
                     _ => return None,
                 };
                 let reset = ResetStreamError::new(
@@ -281,9 +271,7 @@ impl<TX> Outgoing<TX> {
                     *sending_state = Sender::ResetRcvd(*r);
                 }
                 Sender::ResetRcvd(..) => {}
-                _ => unreachable!(
-                    "If no RESET_STREAM has been sent, how can there be a received acknowledgment?"
-                ),
+                _ => unreachable!("If no RESET_STREAM has been sent, how can there be a received acknowledgment?"),
             }
         }
     }

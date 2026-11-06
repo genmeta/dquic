@@ -34,11 +34,7 @@ pub enum Error {
 
 impl From<Error> for QuicError {
     fn from(e: Error) -> Self {
-        Self::new(
-            QuicErrorKind::TransportParameter,
-            FrameType::Crypto.into(),
-            e.to_string(),
-        )
+        Self::new(QuicErrorKind::TransportParameter, FrameType::Crypto.into(), e.to_string())
     }
 }
 

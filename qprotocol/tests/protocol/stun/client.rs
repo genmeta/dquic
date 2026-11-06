@@ -42,9 +42,7 @@ impl Network {
         let dock = isolated_dock(&protocol);
         dock.add(client.clone()).unwrap();
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        listener
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        listener.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let port = listener.local_addr().unwrap().port();
         Self {
             protocol,
@@ -64,10 +62,7 @@ impl Network {
     fn binding(&self, server: usize, mapped: SocketAddr) -> Step {
         Step {
             source: self.servers[server],
-            response: Some(Response::with(vec![
-                Attr::MappedAddress(mapped),
-                Attr::ChangedAddress(self.servers[(server + 1) % 3]),
-            ])),
+            response: Some(Response::with(vec![Attr::MappedAddress(mapped), Attr::ChangedAddress(self.servers[(server + 1) % 3])])),
             attempts: 1,
         }
     }
@@ -76,19 +71,9 @@ impl Network {
         let source = if change_ip {
             self.servers[(server + 1) % 3]
         } else {
-            SocketAddr::new(
-                self.servers[server].ip(),
-                self.servers[(server + 1) % 3].port(),
-            )
+            SocketAddr::new(self.servers[server].ip(), self.servers[(server + 1) % 3].port())
         };
-        Step {
-            source,
-            response: Some(Response::with(vec![
-                Attr::MappedAddress(mapped),
-                Attr::SourceAddress(source),
-            ])),
-            attempts: 1,
-        }
+        Step { source, response: Some(Response::with(vec![Attr::MappedAddress(mapped), Attr::SourceAddress(source)])), attempts: 1 }
     }
 
     async fn run<T: std::fmt::Debug>(&self, task: impl Future<Output = T>, steps: Vec<Step>) -> T {
@@ -100,19 +85,14 @@ impl Network {
             for _ in 0..step.attempts {
                 poll_fn(|cx| {
                     let state = detection.as_mut().poll(cx);
-                    assert!(
-                        state.is_pending(),
-                        "unexpected detection completion: {state:?}"
-                    );
+                    assert!(state.is_pending(), "unexpected detection completion: {state:?}");
                     Poll::Ready(())
                 })
                 .await;
                 let mut bytes = [0; 512];
                 let (len, source) = self.listener.recv_from(&mut bytes).unwrap();
                 assert_eq!(source, self.local);
-                let Datagram::Stun(id, Message::Request(_)) =
-                    be_datagram(BytesMut::from(&bytes[..len])).unwrap()
-                else {
+                let Datagram::Stun(id, Message::Request(_)) = be_datagram(BytesMut::from(&bytes[..len])).unwrap() else {
                     panic!("expected STUN binding request");
                 };
                 if let Some(previous) = step_id {
@@ -123,12 +103,7 @@ impl Network {
                 }
                 if let Some(response) = &step.response {
                     self.protocol
-                        .on_datagram(
-                            &self.client,
-                            id,
-                            Message::Response(response.clone()),
-                            Link::new(self.local, step.source),
-                        )
+                        .on_datagram(&self.client, id, Message::Response(response.clone()), Link::new(self.local, step.source))
                         .await
                         .unwrap();
                 } else {
@@ -146,11 +121,7 @@ impl Network {
 
 #[tokio::test(start_paused = true)]
 async fn public_filtering_targets_the_first_server() {
-    for nat in [
-        NatType::FullCone,
-        NatType::RestrictedCone,
-        NatType::RestrictedPort,
-    ] {
+    for nat in [NatType::FullCone, NatType::RestrictedCone, NatType::RestrictedPort] {
         let network = Network::new();
         let ip_filter = network.filter(0, true, network.local);
         let port_filter = network.filter(0, false, network.local);
@@ -167,18 +138,7 @@ async fn public_filtering_targets_the_first_server() {
                 port_filter
             },
         ];
-        assert_eq!(
-            network
-                .run(
-                    network
-                        .protocol
-                        .detect_nat(network.local, network.servers[0]),
-                    steps
-                )
-                .await
-                .unwrap(),
-            nat
-        );
+        assert_eq!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), steps).await.unwrap(), nat);
     }
 }
 
@@ -188,21 +148,13 @@ async fn invalid_input_and_unregistered_socket_are_errors() {
     let server = "127.0.0.1:3478".parse().unwrap();
     for local in ["0.0.0.0:10000", "[::]:10000", "127.0.0.1:0"] {
         let result = protocol.detect_nat(local.parse().unwrap(), server).await;
-        assert!(
-            matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput)
-        );
+        assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
         let result = protocol.detect_outer(local.parse().unwrap(), server).await;
-        assert!(
-            matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput)
-        );
+        assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
     }
-    let result = protocol
-        .detect_nat("127.0.0.1:10000".parse().unwrap(), server)
-        .await;
+    let result = protocol.detect_nat("127.0.0.1:10000".parse().unwrap(), server).await;
     assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::NotFound));
-    let result = protocol
-        .detect_outer("127.0.0.1:10000".parse().unwrap(), server)
-        .await;
+    let result = protocol.detect_outer("127.0.0.1:10000".parse().unwrap(), server).await;
     assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::NotFound));
 }
 
@@ -214,22 +166,12 @@ async fn rejects_unchanged_source_and_inconsistent_source_attribute() {
         if unchanged {
             filter.source = network.servers[0];
         } else {
-            filter.response = Some(Response::with(vec![
-                Attr::MappedAddress(network.local),
-                Attr::SourceAddress(network.servers[0]),
-            ]));
+            filter.response = Some(Response::with(vec![Attr::MappedAddress(network.local), Attr::SourceAddress(network.servers[0])]));
         }
         let result = network
-            .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                vec![network.binding(0, network.local), filter],
-            )
+            .run(network.protocol.detect_nat(network.local, network.servers[0]), vec![network.binding(0, network.local), filter])
             .await;
-        assert!(
-            matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
-        );
+        assert!(matches!(result, Err(StunError::Io(error)) if error.kind() == io::ErrorKind::InvalidData));
     }
 }
 
@@ -238,29 +180,11 @@ async fn outer_discovery_needs_only_a_mapped_address() {
     let network = Network::new();
     let mut first = network.binding(0, network.outer);
     first.response = Some(Response::with(vec![Attr::MappedAddress(network.outer)]));
-    let outer = network
-        .run(
-            network
-                .protocol
-                .detect_outer(network.local, network.servers[0]),
-            vec![first.clone()],
-        )
-        .await
-        .unwrap();
+    let outer = network.run(network.protocol.detect_outer(network.local, network.servers[0]), vec![first.clone()]).await.unwrap();
     assert_eq!(outer, Some(network.outer));
 
     // Classification makes its own first request and can fail independently.
-    assert!(
-        network
-            .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                vec![first]
-            )
-            .await
-            .is_err()
-    );
+    assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
     assert_eq!(outer, Some(network.outer));
 }
 
@@ -269,9 +193,7 @@ async fn outer_discovery_timeout_and_invalid_response() {
     let network = Network::new();
     let result = network
         .run(
-            network
-                .protocol
-                .detect_outer(network.local, network.servers[0]),
+            network.protocol.detect_outer(network.local, network.servers[0]),
             vec![network.binding(0, network.outer).unanswered(PROBE_ATTEMPTS)],
         )
         .await;
@@ -279,29 +201,14 @@ async fn outer_discovery_timeout_and_invalid_response() {
 
     let mut first = network.binding(0, network.outer);
     first.response = Some(Response::with(vec![]));
-    assert!(
-        network
-            .run(
-                network
-                    .protocol
-                    .detect_outer(network.local, network.servers[0]),
-                vec![first],
-            )
-            .await
-            .is_err()
-    );
+    assert!(network.run(network.protocol.detect_outer(network.local, network.servers[0]), vec![first],).await.is_err());
 }
 
 #[tokio::test(start_paused = true)]
 async fn nat_detection_uses_a_fresh_mapping_after_outer_discovery() {
     let network = Network::new();
     let outer = network
-        .run(
-            network
-                .protocol
-                .detect_outer(network.local, network.servers[0]),
-            vec![network.binding(0, network.outer)],
-        )
+        .run(network.protocol.detect_outer(network.local, network.servers[0]), vec![network.binding(0, network.outer)])
         .await
         .unwrap();
     assert_eq!(outer, Some(network.outer));
@@ -311,14 +218,8 @@ async fn nat_detection_uses_a_fresh_mapping_after_outer_discovery() {
     assert_eq!(
         network
             .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                vec![
-                    network.binding(0, network.local),
-                    network.filter(0, true, network.local),
-                    network.filter(0, false, network.local),
-                ]
+                network.protocol.detect_nat(network.local, network.servers[0]),
+                vec![network.binding(0, network.local), network.filter(0, true, network.local), network.filter(0, false, network.local),]
             )
             .await
             .unwrap(),
@@ -332,9 +233,7 @@ async fn initial_timeout_is_blocked() {
     assert_eq!(
         network
             .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
+                network.protocol.detect_nat(network.local, network.servers[0]),
                 vec![network.binding(0, network.outer).unanswered(PROBE_ATTEMPTS)]
             )
             .await
@@ -345,42 +244,16 @@ async fn initial_timeout_is_blocked() {
 
 #[tokio::test(start_paused = true)]
 async fn missing_attributes_and_invalid_first_server_topology_are_errors() {
-    for attrs in [
-        vec![],
-        vec![Attr::MappedAddress("203.0.113.1:40000".parse().unwrap())],
-    ] {
+    for attrs in [vec![], vec![Attr::MappedAddress("203.0.113.1:40000".parse().unwrap())]] {
         let network = Network::new();
         let mut first = network.binding(0, network.outer);
         first.response = Some(Response::with(attrs));
-        assert!(
-            network
-                .run(
-                    network
-                        .protocol
-                        .detect_nat(network.local, network.servers[0]),
-                    vec![first]
-                )
-                .await
-                .is_err()
-        );
+        assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
     }
     let network = Network::new();
     let mut first = network.binding(0, network.outer);
-    first.response = Some(Response::with(vec![
-        Attr::MappedAddress(network.outer),
-        Attr::ChangedAddress(network.servers[0]),
-    ]));
-    assert!(
-        network
-            .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                vec![first]
-            )
-            .await
-            .is_err()
-    );
+    first.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(network.servers[0])]));
+    assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -400,9 +273,7 @@ async fn mapping_timeout_is_an_error() {
         let mut bytes = [0; 512];
         let (len, source) = server.recv_from(&mut bytes).await.unwrap();
         assert_eq!(source, local);
-        let Datagram::Stun(id, Message::Request(_)) =
-            be_datagram(BytesMut::from(&bytes[..len])).unwrap()
-        else {
+        let Datagram::Stun(id, Message::Request(_)) = be_datagram(BytesMut::from(&bytes[..len])).unwrap() else {
             panic!("expected STUN binding request");
         };
         protocol

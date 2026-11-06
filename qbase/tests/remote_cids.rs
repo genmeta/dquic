@@ -27,11 +27,7 @@ fn cid(seq: u64) -> ConnectionId {
 }
 
 fn frame(seq: u64, retire_prior_to: u64) -> NewConnectionIdFrame {
-    NewConnectionIdFrame::new(
-        cid(seq),
-        VarInt::from_u64(seq).unwrap(),
-        VarInt::from_u64(retire_prior_to).unwrap(),
-    )
+    NewConnectionIdFrame::new(cid(seq), VarInt::from_u64(seq).unwrap(), VarInt::from_u64(retire_prior_to).unwrap())
 }
 
 fn remote(limit: u64) -> (ArcRemoteCids<Retired>, Retired) {
@@ -51,16 +47,7 @@ fn replacing_nonconsecutive_retired_cids_preserves_capacity() {
     let cells = (0..6).map(|_| remote.apply_dcid()).collect::<Vec<_>>();
     cells[1].retire();
     cells[4].retire();
-    assert_eq!(
-        retired
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|frame| frame.sequence())
-            .collect::<Vec<_>>(),
-        vec![1, 4]
-    );
+    assert_eq!(retired.0.lock().unwrap().iter().map(|frame| frame.sequence()).collect::<Vec<_>>(), vec![1, 4]);
 
     remote.recv_frame(frame(10, 0)).unwrap();
     remote.recv_frame(frame(11, 0)).unwrap();
@@ -100,10 +87,7 @@ fn retransmitting_a_locally_retired_cid_does_not_reactivate_it() {
     retired.retire();
     remote.recv_frame(frame(2, 0)).unwrap();
     remote.recv_frame(first).unwrap();
-    assert!(matches!(
-        retired.poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(None)
-    ));
+    assert!(matches!(retired.poll_borrow(&mut Context::from_waker(Waker::noop())), Poll::Ready(None)));
     let replacement = remote.apply_dcid();
     assert!(matches!(
         replacement.poll_borrow(&mut Context::from_waker(Waker::noop())),
@@ -143,13 +127,7 @@ impl std::task::Wake for WakeCounter {
 }
 
 fn retired_sequences(retired: &Retired) -> Vec<u64> {
-    retired
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|frame| frame.sequence())
-        .collect()
+    retired.0.lock().unwrap().iter().map(|frame| frame.sequence()).collect()
 }
 
 #[test]
@@ -191,16 +169,8 @@ fn repolling_a_pending_cell_replaces_the_waiter_for_allocation_and_retirement() 
         let current = Arc::new(WakeCounter::default());
         let old_waker = Waker::from(old.clone());
         let current_waker = Waker::from(current.clone());
-        assert!(
-            pending
-                .poll_borrow(&mut Context::from_waker(&old_waker))
-                .is_pending()
-        );
-        assert!(
-            pending
-                .poll_borrow(&mut Context::from_waker(&current_waker))
-                .is_pending()
-        );
+        assert!(pending.poll_borrow(&mut Context::from_waker(&old_waker)).is_pending());
+        assert!(pending.poll_borrow(&mut Context::from_waker(&current_waker)).is_pending());
         if close {
             pending.retire();
         } else {

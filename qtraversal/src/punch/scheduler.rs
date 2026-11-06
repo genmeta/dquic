@@ -10,8 +10,7 @@ use std::{
 use qbase::net::{AddrFamily, Family};
 use tokio::time::Instant;
 
-pub static SCHEDULER: LazyLock<Arc<Mutex<Scheduler>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(Scheduler::new())));
+pub static SCHEDULER: LazyLock<Arc<Mutex<Scheduler>>> = LazyLock::new(|| Arc::new(Mutex::new(Scheduler::new())));
 
 const MAX_SOCKETS_PER_DEVICE: u32 = 300;
 const MAX_PORTS_PER_DEVICE: u32 = 600;
@@ -29,13 +28,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     fn new() -> Self {
-        Self {
-            devices: HashMap::new(),
-            total_sockets: 0,
-            total_ports: 0,
-            cooling: VecDeque::new(),
-            waiters: VecDeque::new(),
-        }
+        Self { devices: HashMap::new(), total_sockets: 0, total_ports: 0, cooling: VecDeque::new(), waiters: VecDeque::new() }
     }
 
     fn reap_cooling(&mut self) {
@@ -56,13 +49,7 @@ impl Scheduler {
         by_socket.min(by_port)
     }
 
-    pub fn poll_allocate(
-        &mut self,
-        cx: &Context,
-        dest: SocketAddr,
-        device: String,
-        count: u32,
-    ) -> Poll<io::Result<u32>> {
+    pub fn poll_allocate(&mut self, cx: &Context, dest: SocketAddr, device: String, count: u32) -> Poll<io::Result<u32>> {
         self.reap_cooling();
         let global_avail = self.global_available();
 
@@ -160,12 +147,7 @@ struct DeviceLedger {
 
 impl DeviceLedger {
     fn new() -> Self {
-        Self {
-            sockets: 0,
-            ports: 0,
-            cooling: VecDeque::new(),
-            per_dest: HashMap::new(),
-        }
+        Self { sockets: 0, ports: 0, cooling: VecDeque::new(), per_dest: HashMap::new() }
     }
 
     fn reap_cooling(&mut self) {

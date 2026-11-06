@@ -42,11 +42,7 @@ impl<B: BufMut + ?Sized> Package<B> for PathValidateFrames {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         if self.responses.is_empty() && self.challenge.is_none() {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
@@ -114,13 +110,7 @@ impl Validation {
     /// Snapshot the allowance without registering a credit waiter.
     pub fn credit(&self) -> Result<Option<usize>, Cancelled> {
         match self {
-            Self::Validating {
-                rcvd_bytes,
-                sent_bytes,
-                ..
-            } => Ok(Some(
-                rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes),
-            )),
+            Self::Validating { rcvd_bytes, sent_bytes, .. } => Ok(Some(rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes))),
             Self::Validated { .. } => Ok(None),
             Self::Cancelled { .. } => Err(Cancelled),
         }
@@ -140,13 +130,7 @@ impl Validation {
 
     /// Account for each received UDP datagram once.
     pub fn on_received(&mut self, bytes: usize) {
-        if let Self::Validating {
-            rcvd_bytes,
-            sent_bytes,
-            credit_waker,
-            ..
-        } = self
-        {
+        if let Self::Validating { rcvd_bytes, sent_bytes, credit_waker, .. } = self {
             *rcvd_bytes = rcvd_bytes.saturating_add(bytes);
             if rcvd_bytes.saturating_mul(3) > *sent_bytes {
                 if let Some(waker) = credit_waker.take() {
@@ -173,12 +157,7 @@ impl Validation {
     pub fn trust(&mut self) -> Result<(), Cancelled> {
         let response = self.respond();
         match std::mem::replace(self, Self::Cancelled { response }) {
-            Self::Validating {
-                response,
-                mut frames,
-                credit_waker,
-                ..
-            } => {
+            Self::Validating { response, mut frames, credit_waker, .. } => {
                 frames.challenge = None;
                 *self = Self::Validated { frames, response };
                 if let Some(waker) = credit_waker {
@@ -231,9 +210,7 @@ impl Validation {
     /// The caller owns challenge matching, retries and the validated transition.
     pub fn respond(&self) -> ArcReceiving<PathResponseFrame> {
         match self {
-            Self::Validating { response, .. }
-            | Self::Validated { response, .. }
-            | Self::Cancelled { response } => response.clone(),
+            Self::Validating { response, .. } | Self::Validated { response, .. } | Self::Cancelled { response } => response.clone(),
         }
     }
 
@@ -257,22 +234,14 @@ impl Validation {
     pub fn cancel(&mut self) {
         let response = self.respond();
         match std::mem::replace(self, Self::Cancelled { response }) {
-            Self::Validating {
-                response,
-                mut frames,
-                credit_waker,
-                ..
-            } => {
+            Self::Validating { response, mut frames, credit_waker, .. } => {
                 response.cancel();
                 if let Some(waker) = credit_waker {
                     waker.wake();
                 }
                 frames.wake();
             }
-            Self::Validated {
-                response,
-                mut frames,
-            } => {
+            Self::Validated { response, mut frames } => {
                 response.cancel();
                 frames.wake();
             }
@@ -286,18 +255,12 @@ impl<B: BufMut + ?Sized> Package<B> for Validation {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         if matches!(self.credit(), Ok(Some(credit)) if credit < 1200) {
             buffer.scope(0);
         }
         match self {
-            Self::Validating { frames, .. } | Self::Validated { frames, .. } => {
-                frames.poll_dump(cx, buffer)
-            }
+            Self::Validating { frames, .. } | Self::Validated { frames, .. } => frames.poll_dump(cx, buffer),
             Self::Cancelled { .. } => Poll::Ready(Ok(0)),
         }
     }
@@ -427,11 +390,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcValidation {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         self.0.lock().unwrap().poll_dump(cx, buffer)
     }
 }

@@ -3,28 +3,16 @@ use qbase::packet::number::{PacketNumber, WritePacketNumber};
 #[test]
 fn test_read_packet_number() {
     let buf = [0x00];
-    assert_eq!(
-        (&[][..], qbase::packet::number::PacketNumber::U8(0)),
-        qbase::packet::number::take_pn_len(1)(&buf).unwrap()
-    );
+    assert_eq!((&[][..], qbase::packet::number::PacketNumber::U8(0)), qbase::packet::number::take_pn_len(1)(&buf).unwrap());
 
     let buf = [0x01, 0x00];
-    assert_eq!(
-        (&[][..], qbase::packet::number::PacketNumber::U16(1 << 8)),
-        qbase::packet::number::take_pn_len(2)(&buf).unwrap()
-    );
+    assert_eq!((&[][..], qbase::packet::number::PacketNumber::U16(1 << 8)), qbase::packet::number::take_pn_len(2)(&buf).unwrap());
 
     let buf = [0x01, 0x00, 0x00];
-    assert_eq!(
-        (&[][..], qbase::packet::number::PacketNumber::U24(1 << 16)),
-        qbase::packet::number::take_pn_len(3)(&buf).unwrap()
-    );
+    assert_eq!((&[][..], qbase::packet::number::PacketNumber::U24(1 << 16)), qbase::packet::number::take_pn_len(3)(&buf).unwrap());
 
     let buf = [0x01, 0x00, 0x00, 0x00];
-    assert_eq!(
-        (&[][..], qbase::packet::number::PacketNumber::U32(1 << 24)),
-        qbase::packet::number::take_pn_len(4)(&buf).unwrap()
-    );
+    assert_eq!((&[][..], qbase::packet::number::PacketNumber::U32(1 << 24)), qbase::packet::number::take_pn_len(4)(&buf).unwrap());
 }
 
 #[test]

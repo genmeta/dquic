@@ -55,11 +55,7 @@ impl super::EncodeSize for DatagramFrame {
     }
 
     fn encoding_size(&self) -> usize {
-        1 + self
-            .encode_len
-            .then_some(self.len)
-            .map(VarInt::encoding_size)
-            .unwrap_or_default()
+        1 + self.encode_len.then_some(self.len).map(VarInt::encoding_size).unwrap_or_default()
     }
 }
 
@@ -70,18 +66,11 @@ pub fn datagram_frame_with_flag(flag: u8) -> impl FnOnce(&[u8]) -> IResult<&[u8]
         let (remain, len) = if flag == 1 {
             be_varint(input)?
         } else {
-            let len = VarInt::try_from(input.remaining())
-                .expect("size of datagram frame payload never exceeds limit");
+            let len = VarInt::try_from(input.remaining()).expect("size of datagram frame payload never exceeds limit");
             (input, len)
         };
         let with_len = flag == 1;
-        Ok((
-            remain,
-            DatagramFrame {
-                encode_len: with_len,
-                len,
-            },
-        ))
+        Ok((remain, DatagramFrame { encode_len: with_len, len }))
     }
 }
 

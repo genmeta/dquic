@@ -40,24 +40,13 @@ impl PunchPacketEncoder for ProbeEncoder {
     where
         P: for<'b> Package<&'b mut [u8]>,
     {
-        let space =
-            Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotConnected, "Data space is not installed")
-            })?;
-        let Poll::Ready(Some(peer_cid)) = self
-            .peer_cid
-            .poll_borrow(&mut Context::from_waker(Waker::noop()))
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "peer CID is unavailable",
-            ));
+        let space = Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Data space is not installed"))?;
+        let Poll::Ready(Some(peer_cid)) = self.peer_cid.poll_borrow(&mut Context::from_waker(Waker::noop())) else {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "peer CID is unavailable"));
         };
         self.peer_cid.refresh();
-        let (pn, Keys::Short(key)) = space
-            .pn_and_keys()
-            .ok_or_else(|| io::Error::other("keys retired"))?
-        else {
+        let (pn, Keys::Short(key)) = space.pn_and_keys().ok_or_else(|| io::Error::other("keys retired"))? else {
             unreachable!("Data space uses 1-RTT keys");
         };
         let mut bytes = BytesMut::zeroed(MAX_PUNCH_PACKET_SIZE);

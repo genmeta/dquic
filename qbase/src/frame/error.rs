@@ -29,24 +29,12 @@ impl From<Error> for QuicError {
     fn from(e: Error) -> Self {
         match e {
             // An endpoint MUST treat receipt of a packet containing no frames as a connection error of type PROTOCOL_VIOLATION.
-            Error::NoFrames => {
-                Self::with_default_fty(QuicErrorKind::ProtocolViolation, e.to_string())
-            }
-            Error::IncompleteType(_) => {
-                Self::with_default_fty(QuicErrorKind::FrameEncoding, e.to_string())
-            }
-            Error::InvalidType(_) => {
-                Self::with_default_fty(QuicErrorKind::FrameEncoding, e.to_string())
-            }
-            Error::WrongType(fty, _) => {
-                Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string())
-            }
-            Error::IncompleteFrame(fty, _) => {
-                Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string())
-            }
-            Error::ParseError(fty, _) => {
-                Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string())
-            }
+            Error::NoFrames => Self::with_default_fty(QuicErrorKind::ProtocolViolation, e.to_string()),
+            Error::IncompleteType(_) => Self::with_default_fty(QuicErrorKind::FrameEncoding, e.to_string()),
+            Error::InvalidType(_) => Self::with_default_fty(QuicErrorKind::FrameEncoding, e.to_string()),
+            Error::WrongType(fty, _) => Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string()),
+            Error::IncompleteFrame(fty, _) => Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string()),
+            Error::ParseError(fty, _) => Self::new(QuicErrorKind::FrameEncoding, fty.into(), e.to_string()),
         }
     }
 }

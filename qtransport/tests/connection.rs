@@ -12,31 +12,22 @@ use qtransport::{ArcConnection, Error, terminate::ArcTerminator};
 async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pto() {
     use std::time::Duration;
 
-    use qbase::{
-        Epoch, handshake::HandshakeFacts, net::route::Pathway, role::Role,
-        time::heartbeat::ArcHeartbeat,
-    };
+    use qbase::{Epoch, handshake::HandshakeFacts, net::route::Pathway, role::Role, time::heartbeat::ArcHeartbeat};
     use qtransport::path::Path;
     use tokio::time::Instant;
 
     let cid = Default::default();
     let paths = Arc::new([4401, 4402, 4403].map(|port| {
         Arc::new(Path::new(
-            Pathway::new(
-                "127.0.0.1:4400".parse().unwrap(),
-                format!("127.0.0.1:{port}").parse().unwrap(),
-            ),
+            Pathway::new("127.0.0.1:4400".parse().unwrap(), format!("127.0.0.1:{port}").parse().unwrap()),
             Arc::new(HandshakeFacts::with_role(Role::Client)),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Default::default(),
-            qbase::cid::ArcRemoteCids::client(cid, qtransport::ArcReliableFrames::with_capacity(0))
-                .apply_dcid(),
+            qbase::cid::ArcRemoteCids::client(cid, qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
         ))
     }));
     paths[0].validation.enter_validated().unwrap();
-    paths[1]
-        .cc
-        .set_ack_delays(Duration::ZERO, Duration::from_millis(100));
+    paths[1].cc.set_ack_delays(Duration::ZERO, Duration::from_millis(100));
     paths[2].validation.enter_validated().unwrap();
     paths[2].close();
     let largest = paths[1].cc.pto_base(Epoch::Data);
@@ -44,30 +35,24 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
 
     let data = support::data::data();
     let terminator = ArcTerminator::no_error();
-    let connection = ArcConnection::new(Bytes::new(), data.streams.clone(), terminator.clone())
-        .with_path_observer({
-            let paths = Arc::downgrade(&paths);
-            move |visit| {
-                if let Some(paths) = paths.upgrade() {
-                    for path in paths.iter() {
-                        visit(path);
-                    }
+    let connection = ArcConnection::new(Bytes::new(), data.streams.clone(), terminator.clone()).with_path_observer({
+        let paths = Arc::downgrade(&paths);
+        move |visit| {
+            if let Some(paths) = paths.upgrade() {
+                for path in paths.iter() {
+                    visit(path);
                 }
             }
-        });
+        }
+    });
     assert_eq!(connection.validated_paths(), [paths[0].pathway]);
     let start = Instant::now();
-    connection
-        .clone()
-        .close(42u32.into(), "close with live paths");
+    connection.clone().close(42u32.into(), "close with live paths");
     assert!(matches!(terminator.await, Error::App(error) if error.error_code() == 42));
     assert_eq!(Instant::now() - start, largest * 3);
 
     paths[1].validation.enter_validated().unwrap();
-    assert_eq!(
-        connection.validated_paths(),
-        [paths[0].pathway, paths[1].pathway]
-    );
+    assert_eq!(connection.validated_paths(), [paths[0].pathway, paths[1].pathway]);
     paths[0].close();
     assert_eq!(connection.validated_paths(), [paths[1].pathway]);
     let path = Arc::downgrade(&paths[1]);
@@ -83,11 +68,7 @@ async fn connection_keeps_streams_alive_without_retaining_the_data_space() {
     let space = support::data::data();
     let terminator = ArcTerminator::no_error();
     terminator.register(Arc::new(space.streams.clone()));
-    let connection = ArcConnection::new(
-        Bytes::from_static(b"h3"),
-        space.streams.clone(),
-        terminator.clone(),
-    );
+    let connection = ArcConnection::new(Bytes::from_static(b"h3"), space.streams.clone(), terminator.clone());
     let data = Arc::downgrade(&space);
     drop(space);
     assert!(data.upgrade().is_none());
@@ -108,11 +89,7 @@ async fn explicit_close_wakes_the_driver_and_preserves_the_first_reason() {
     let data = support::data::data();
     let terminator = ArcTerminator::no_error();
     terminator.register(Arc::new(data.streams.clone()));
-    let connection = ArcConnection::new(
-        Bytes::from_static(b"h3"),
-        data.streams.clone(),
-        terminator.clone(),
-    );
+    let connection = ArcConnection::new(Bytes::from_static(b"h3"), data.streams.clone(), terminator.clone());
     let close = terminator;
     assert!(futures::poll!(std::pin::pin!(close.wait())).is_pending());
     connection.clone().close(42u32.into(), "first");
@@ -129,11 +106,7 @@ async fn only_the_last_handle_drop_notifies_the_driver() {
     let data = support::data::data();
     let terminator = ArcTerminator::no_error();
     terminator.register(Arc::new(data.streams.clone()));
-    let connection = ArcConnection::new(
-        Bytes::from_static(b"h3"),
-        data.streams.clone(),
-        terminator.clone(),
-    );
+    let connection = ArcConnection::new(Bytes::from_static(b"h3"), data.streams.clone(), terminator.clone());
     let close = terminator;
     drop(connection.clone());
     assert!(futures::poll!(std::pin::pin!(close.wait())).is_pending());

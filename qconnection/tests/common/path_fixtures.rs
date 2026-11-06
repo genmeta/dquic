@@ -39,8 +39,5 @@ pub fn paths_with_timeouts(role: Role, max: Duration, defer: Duration) -> Arc<Pa
 }
 
 pub fn pathway(port: u16) -> Pathway {
-    Pathway::new(
-        EndpointAddr::direct(([127, 0, 0, 1], 30001).into()),
-        EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-    )
+    Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], 30001).into()), EndpointAddr::direct(([127, 0, 0, 1], port).into()))
 }

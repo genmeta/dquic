@@ -1,24 +1,17 @@
 //! Run: cargo run -p dquic --example echo-server
 use std::sync::Arc;
 
-use dquic::{
-    ArcConnection, CertificateDer, Dock, Endpoint, PrivateKeyDer, QuicEndpoint, RootCerts,
-    Scope::Loopback, UdpSocket,
-};
+use dquic::{ArcConnection, CertificateDer, Dock, Endpoint, PrivateKeyDer, QuicEndpoint, RootCerts, Scope::Loopback, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
-    RootCerts::set([CertificateDer::from(
-        include_bytes!("keychain/ca.der").as_slice(),
-    )])?;
+    RootCerts::set([CertificateDer::from(include_bytes!("keychain/ca.der").as_slice())])?;
     let endpoint = Endpoint::new(
         "localhost",
-        vec![CertificateDer::from(
-            include_bytes!("keychain/server.der").as_slice(),
-        )],
+        vec![CertificateDer::from(include_bytes!("keychain/server.der").as_slice())],
         PrivateKeyDer::try_from(include_bytes!("keychain/server.key.der").as_slice())?,
         include_bytes!("keychain/server.ocsp").to_vec(),
     )?;

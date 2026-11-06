@@ -3,11 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct Error {
     code: Option<u64>,
     message: Option<String>,
@@ -15,11 +11,7 @@ pub struct Error {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct Warning {
     code: Option<u64>,
     message: Option<String>,
@@ -75,25 +67,19 @@ mod rollback {
 
     impl From<Info> for legacy::GenericInfo {
         fn from(value: Info) -> Self {
-            build!(legacy::GenericInfo {
-                message: value.message
-            })
+            build!(legacy::GenericInfo { message: value.message })
         }
     }
 
     impl From<Debug> for legacy::GenericDebug {
         fn from(value: Debug) -> Self {
-            build!(legacy::GenericDebug {
-                message: value.message
-            })
+            build!(legacy::GenericDebug { message: value.message })
         }
     }
 
     impl From<Verbose> for legacy::GenericVerbose {
         fn from(value: Verbose) -> Self {
-            build!(legacy::GenericVerbose {
-                message: value.message
-            })
+            build!(legacy::GenericVerbose { message: value.message })
         }
     }
 }

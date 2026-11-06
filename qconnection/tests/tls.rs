@@ -14,8 +14,7 @@ async fn closed_tls_ignores_input_and_preserves_the_close_reason() {
         qbase::error::AppError::new(42u32.into(), "application closed").into(),
     ];
     for error in errors {
-        let [_, server] =
-            common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
+        let [_, server] = common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
         server.close_with_error(error.clone());
         for epoch in Epoch::EPOCHS {
             server.write_msg(epoch, &[1]).unwrap();

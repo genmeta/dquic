@@ -21,8 +21,5 @@ fn test_write_handshake_done_frame() {
 
 #[test]
 fn test_read_handshake_done_frame() {
-    assert_eq!(
-        super::parse_frame(&[0x1e], FrameType::HandshakeDone),
-        qbase::frame::Frame::HandshakeDone(HandshakeDoneFrame)
-    );
+    assert_eq!(super::parse_frame(&[0x1e], FrameType::HandshakeDone), qbase::frame::Frame::HandshakeDone(HandshakeDoneFrame));
 }

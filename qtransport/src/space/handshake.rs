@@ -74,11 +74,7 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
         let keys = self.keys.get().ok()?;
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
-        Some(super::probe_size(
-            &header,
-            self.sent_journal.lock_guard().next_pn_len(),
-            keys.sealing.tag_len(),
-        ))
+        Some(super::probe_size(&header, self.sent_journal.lock_guard().next_pn_len(), keys.sealing.tag_len()))
     }
 
     fn packet(&self, dcid: ConnectionId) -> Option<Packet> {

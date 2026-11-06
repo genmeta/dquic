@@ -33,24 +33,12 @@ fn test_stream_id_new() {
 
 #[test]
 fn server_can_start_with_validated_peer_stream_limits() {
-    let local = ArcLocalStreamIds::new(
-        Role::Server,
-        1,
-        1,
-        StreamsBlockedFrameTx::default(),
-        ArcSendWakers::default(),
-    );
+    let local = ArcLocalStreamIds::new(Role::Server, 1, 1, StreamsBlockedFrameTx::default(), ArcSendWakers::default());
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
-    assert_eq!(
-        local.poll_alloc_sid(&mut cx, Dir::Bi),
-        Poll::Ready(Some(StreamId::from(VarInt::from_u32(1))))
-    );
+    assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Ready(Some(StreamId::from(VarInt::from_u32(1)))));
     assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Pending);
-    assert_eq!(
-        local.poll_alloc_sid(&mut cx, Dir::Uni),
-        Poll::Ready(Some(StreamId::from(VarInt::from_u32(3))))
-    );
+    assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Ready(Some(StreamId::from(VarInt::from_u32(3)))));
     assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Pending);
 }
 
@@ -65,13 +53,7 @@ impl std::task::Wake for WakeCount {
 
 #[test]
 fn test_recv_max_stream_frames() {
-    let local = ArcLocalStreamIds::new(
-        Role::Client,
-        0,
-        0,
-        StreamsBlockedFrameTx::default(),
-        ArcSendWakers::default(),
-    );
+    let local = ArcLocalStreamIds::new(Role::Client, 0, 0, StreamsBlockedFrameTx::default(), ArcSendWakers::default());
     local.recv_max_streams_frame(MaxStreamsFrame::Bi(VarInt::from_u32(0)));
     let wakes = Arc::new(WakeCount::default());
     let waker = std::task::Waker::from(wakes.clone());
@@ -81,23 +63,14 @@ fn test_recv_max_stream_frames() {
 
     local.recv_max_streams_frame(MaxStreamsFrame::Bi(VarInt::from_u32(1)));
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        local.poll_alloc_sid(&mut cx, Dir::Bi),
-        Poll::Ready(Some(StreamId::from(VarInt::from_u32(0))))
-    );
+    assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Ready(Some(StreamId::from(VarInt::from_u32(0)))));
     assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Bi), Poll::Pending);
     local.recv_max_streams_frame(MaxStreamsFrame::Bi(VarInt::from_u32(1)));
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
 
     local.recv_max_streams_frame(MaxStreamsFrame::Uni(VarInt::from_u32(2)));
-    assert_eq!(
-        local.poll_alloc_sid(&mut cx, Dir::Uni),
-        Poll::Ready(Some(StreamId::from(VarInt::from_u32(2))))
-    );
-    assert_eq!(
-        local.poll_alloc_sid(&mut cx, Dir::Uni),
-        Poll::Ready(Some(StreamId::from(VarInt::from_u32(6))))
-    );
+    assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Ready(Some(StreamId::from(VarInt::from_u32(2)))));
+    assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Ready(Some(StreamId::from(VarInt::from_u32(6)))));
     assert_eq!(local.poll_alloc_sid(&mut cx, Dir::Uni), Poll::Pending);
     local.recv_max_streams_frame(MaxStreamsFrame::Uni(VarInt::from_u32(3)));
     assert_eq!(wakes.0.load(Ordering::Relaxed), 2);

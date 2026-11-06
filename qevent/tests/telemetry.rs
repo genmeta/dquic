@@ -64,18 +64,10 @@ fn event() {
     }
 
     fn group_id() -> GroupID {
-        GroupID::from(ConnectionID::from(ConnectionId::from_slice(&[
-            0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
-        ])))
+        GroupID::from(ConnectionID::from(ConnectionId::from_slice(&[0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef])))
     }
 
     span!(Arc::new(TestBroker), group_id = group_id()).in_scope(|| {
-        event!(
-            qevent::build!(ServerListening {
-                ip_v4: "127.0.0.1".to_owned(),
-                port_v4: 8080u16,
-            }),
-            use_strict_mode = true
-        );
+        event!(qevent::build!(ServerListening { ip_v4: "127.0.0.1".to_owned(), port_v4: 8080u16 }), use_strict_mode = true);
     });
 }

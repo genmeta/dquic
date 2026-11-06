@@ -30,22 +30,12 @@ impl Io for UdpSocket {
                 setsockopt(io, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, OPTION_ON);
                 setsockopt(io, WinSock::IPPROTO_IP, WinSock::IP_RECVTTL, OPTION_ON);
                 setsockopt(io, WinSock::IPPROTO_IP, WinSock::IP_RECVDSTADDR, OPTION_ON);
-                setsockopt(
-                    io,
-                    WinSock::IPPROTO_IP,
-                    WinSock::IP_TTL,
-                    Line::DEFAULT_TTL as c_int,
-                );
+                setsockopt(io, WinSock::IPPROTO_IP, WinSock::IP_TTL, Line::DEFAULT_TTL as c_int);
             }
             SocketAddr::V6(_) => {
                 setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_V6ONLY, OPTION_ON);
                 setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_HOPLIMIT, OPTION_ON);
-                setsockopt(
-                    io,
-                    WinSock::IPPROTO_IPV6,
-                    WinSock::IPV6_RECVTCLASS,
-                    OPTION_ON,
-                );
+                setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_RECVTCLASS, OPTION_ON);
                 setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, OPTION_ON);
             }
         }
@@ -56,11 +46,7 @@ impl Io for UdpSocket {
         Ok(())
     }
 
-    fn bind_device_to_socket(
-        _socket: &socket2::SockRef<'_>,
-        _addr: SocketAddr,
-        _device: &BoundDevice,
-    ) -> io::Result<()> {
+    fn bind_device_to_socket(_socket: &socket2::SockRef<'_>, _addr: SocketAddr, _device: &BoundDevice) -> io::Result<()> {
         Ok(())
     }
 
@@ -70,15 +56,9 @@ impl Io for UdpSocket {
 
         for buf in bufs {
             let mut ctrl_buf = Aligned([0; CMSG_LEN]);
-            let mut data = WinSock::WSABUF {
-                buf: buf.as_ptr() as *mut _,
-                len: buf.len() as _,
-            };
+            let mut data = WinSock::WSABUF { buf: buf.as_ptr() as *mut _, len: buf.len() as _ };
 
-            let ctrl = WinSock::WSABUF {
-                buf: ctrl_buf.0.as_mut_ptr(),
-                len: ctrl_buf.0.len() as _,
-            };
+            let ctrl = WinSock::WSABUF { buf: ctrl_buf.0.as_mut_ptr(), len: ctrl_buf.0.len() as _ };
 
             let mut wsa_msg = WinSock::WSAMSG {
                 name: dst.as_ptr() as *mut _,
@@ -98,31 +78,16 @@ impl Io for UdpSocket {
                     line.src
                 };
                 let src = socket2::SockAddr::from(src);
-                let ifindex = self
-                    .bound_device
-                    .as_ref()
-                    .map_or(0, |device| device.index().get());
+                let ifindex = self.bound_device.as_ref().map_or(0, |device| device.index().get());
                 match src.family() {
                     WinSock::AF_INET => {
-                        let src_ip =
-                            unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
-                        let pktinfo = WinSock::IN_PKTINFO {
-                            ipi_addr: src_ip.sin_addr,
-                            ipi_ifindex: ifindex,
-                        };
+                        let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
+                        let pktinfo = WinSock::IN_PKTINFO { ipi_addr: src_ip.sin_addr, ipi_ifindex: ifindex };
 
-                        cmsg = append_cmsg(
-                            &wsa_msg,
-                            cmsg,
-                            WinSock::IPPROTO_IP,
-                            WinSock::IP_PKTINFO,
-                            pktinfo,
-                            &mut cmsg_len,
-                        );
+                        cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, pktinfo, &mut cmsg_len);
                     }
                     WinSock::AF_INET6 => {
-                        let src_ip =
-                            unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
+                        let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
                         let scope_id = unsafe { src_ip.Anonymous.sin6_scope_id };
                         let pktinfo = WinSock::IN6_PKTINFO {
                             ipi6_addr: src_ip.sin6_addr,
@@ -133,14 +98,7 @@ impl Io for UdpSocket {
                             },
                         };
 
-                        cmsg = append_cmsg(
-                            &wsa_msg,
-                            cmsg,
-                            WinSock::IPPROTO_IPV6,
-                            WinSock::IPV6_PKTINFO,
-                            pktinfo,
-                            &mut cmsg_len,
-                        );
+                        cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, pktinfo, &mut cmsg_len);
                     }
                     _ => {
                         return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -149,48 +107,21 @@ impl Io for UdpSocket {
             }
 
             if let Some(ecn) = line.ecn {
-                let is_ipv4 = line.dst.is_ipv4()
-                    || matches!(line.dst.ip(), IpAddr::V6(addr) if addr.to_ipv4_mapped().is_some());
+                let is_ipv4 = line.dst.is_ipv4() || matches!(line.dst.ip(), IpAddr::V6(addr) if addr.to_ipv4_mapped().is_some());
                 if is_ipv4 {
-                    _ = append_cmsg(
-                        &wsa_msg,
-                        cmsg,
-                        WinSock::IPPROTO_IP,
-                        WinSock::IP_ECN,
-                        ecn,
-                        &mut cmsg_len,
-                    );
+                    _ = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_ECN, ecn, &mut cmsg_len);
                 } else {
-                    _ = append_cmsg(
-                        &wsa_msg,
-                        cmsg,
-                        WinSock::IPPROTO_IPV6,
-                        WinSock::IPV6_TCLASS,
-                        ecn,
-                        &mut cmsg_len,
-                    );
+                    _ = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_TCLASS, ecn, &mut cmsg_len);
                 }
             }
 
             wsa_msg.Control.len = cmsg_len as _;
             if cmsg_len == 0 {
-                wsa_msg.Control = WinSock::WSABUF {
-                    buf: ptr::null_mut(),
-                    len: 0,
-                };
+                wsa_msg.Control = WinSock::WSABUF { buf: ptr::null_mut(), len: 0 };
             }
 
             let mut len = 0;
-            let ret = unsafe {
-                WinSock::WSASendMsg(
-                    self.io.as_raw_socket() as usize,
-                    &wsa_msg,
-                    0,
-                    &mut len,
-                    ptr::null_mut(),
-                    None,
-                )
-            };
+            let ret = unsafe { WinSock::WSASendMsg(self.io.as_raw_socket() as usize, &wsa_msg, 0, &mut len, ptr::null_mut(), None) };
 
             if ret != 0 {
                 let e = io::Error::last_os_error();
@@ -206,28 +137,18 @@ impl Io for UdpSocket {
         Ok(count as usize)
     }
 
-    fn recvmsg(
-        &self,
-        bufs: &mut [std::io::IoSliceMut<'_>],
-        lines: &mut [Line],
-    ) -> std::io::Result<usize> {
+    fn recvmsg(&self, bufs: &mut [std::io::IoSliceMut<'_>], lines: &mut [Line]) -> std::io::Result<usize> {
         let wsa_recvmsg_ptr = wsarecvmsg_ptr().expect("valid function pointer for WSARecvMsg");
 
         let mut ctrl_buf = Aligned([0; CMSG_LEN]);
         let mut source: WinSock::SOCKADDR_INET = unsafe { mem::zeroed() };
 
-        let ctrl = WinSock::WSABUF {
-            buf: ctrl_buf.0.as_mut_ptr(),
-            len: ctrl_buf.0.len() as _,
-        };
+        let ctrl = WinSock::WSABUF { buf: ctrl_buf.0.as_mut_ptr(), len: ctrl_buf.0.len() as _ };
 
         let mut wsa_msg = WinSock::WSAMSG {
             name: &mut source as *mut _ as *mut _,
             namelen: mem::size_of_val(&source) as _,
-            lpBuffers: &mut WinSock::WSABUF {
-                buf: bufs[0].as_mut_ptr(),
-                len: bufs[0].len() as _,
-            },
+            lpBuffers: &mut WinSock::WSABUF { buf: bufs[0].as_mut_ptr(), len: bufs[0].len() as _ },
             Control: ctrl,
             dwBufferCount: 1,
             dwFlags: 0,
@@ -235,13 +156,7 @@ impl Io for UdpSocket {
 
         let mut len = 0;
         unsafe {
-            let rc = (wsa_recvmsg_ptr)(
-                self.io.as_raw_socket() as usize,
-                &mut wsa_msg,
-                &mut len,
-                ptr::null_mut(),
-                None,
-            );
+            let rc = (wsa_recvmsg_ptr)(self.io.as_raw_socket() as usize, &mut wsa_msg, &mut len, ptr::null_mut(), None);
             if rc == -1 {
                 return Err(io::Error::last_os_error());
             }
@@ -287,12 +202,7 @@ impl Io for UdpSocket {
         } else {
             self.local_addr()?
         };
-        lines[0] = Line {
-            link: Link::new(addr.unwrap(), dst),
-            ttl: Line::DEFAULT_TTL,
-            ecn: Some(ecn_bits as u8),
-            seg_size: len as u16,
-        };
+        lines[0] = Line { link: Link::new(addr.unwrap(), dst), ttl: Line::DEFAULT_TTL, ecn: Some(ecn_bits as u8), seg_size: len as u16 };
         Ok(1)
     }
 
@@ -308,12 +218,7 @@ impl Io for UdpSocket {
 
         match local.ip() {
             IpAddr::V4(_) => setsockopt(socket, WinSock::IPPROTO_IP, WinSock::IP_TTL, ttl),
-            IpAddr::V6(_) => setsockopt(
-                socket,
-                WinSock::IPPROTO_IPV6,
-                WinSock::IPV6_UNICAST_HOPS,
-                ttl,
-            ),
+            IpAddr::V6(_) => setsockopt(socket, WinSock::IPPROTO_IPV6, WinSock::IPV6_UNICAST_HOPS, ttl),
         };
         self.ttl.store(ttl, SeqCst);
         Ok(())
@@ -385,20 +290,11 @@ fn cmsg_data(cmsg: &mut WinSock::CMSGHDR) -> *mut libc::c_uchar {
 }
 
 fn setsockopt(io: SOCKET, level: libc::c_int, name: libc::c_int, value: libc::c_int) {
-    unsafe {
-        WinSock::setsockopt(
-            io,
-            level,
-            name,
-            &value as *const _ as _,
-            mem::size_of_val(&value) as _,
-        )
-    };
+    unsafe { WinSock::setsockopt(io, level, name, &value as *const _ as _, mem::size_of_val(&value) as _) };
 }
 
 fn wsarecvmsg_ptr() -> &'static WinSock::LPFN_WSARECVMSG {
-    static WSARECVMSG_PTR: std::sync::OnceLock<WinSock::LPFN_WSARECVMSG> =
-        std::sync::OnceLock::new();
+    static WSARECVMSG_PTR: std::sync::OnceLock<WinSock::LPFN_WSARECVMSG> = std::sync::OnceLock::new();
     WSARECVMSG_PTR.get_or_init(|| {
         let s = unsafe { WinSock::socket(WinSock::AF_INET as _, WinSock::SOCK_DGRAM as _, 0) };
         if s == WinSock::INVALID_SOCKET {

@@ -40,8 +40,7 @@ where
     let mut buffer = BytesMut::zeroed(1200);
     let pn = journal.next_pn().unwrap();
     let mut frames = Vec::new();
-    let mut packet =
-        crate::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
+    let mut packet = crate::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
         matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, PacketContent::EffectivePayload, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), Poll::Ready((n, _)) if n > 0)
@@ -53,13 +52,7 @@ where
     Ok(buffer)
 }
 
-async fn receive_ping(
-    role: Role,
-    epoch: Epoch,
-    corrupt: bool,
-    paths: &Arc<Paths>,
-    path: &Arc<Path>,
-) {
+async fn receive_ping(role: Role, epoch: Epoch, corrupt: bool, paths: &Arc<Paths>, path: &Arc<Path>) {
     let space = Arc::new(Space::<ArcKeys>::new(
         epoch,
         Default::default(),
@@ -67,10 +60,7 @@ async fn receive_ping(
         paths.progress.facts(),
     ));
     let keys = keys(role != Role::Server);
-    let header = LongHeaderBuilder::with_cid(
-        ConnectionId::from_slice(b"localcid"),
-        ConnectionId::from_slice(b"peercid0"),
-    );
+    let header = LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0"));
     let journal = ArcSentJournal::default();
     let mut ping = PingFrame;
     let packet = if epoch == Epoch::Initial {
@@ -87,39 +77,21 @@ async fn receive_ping(
     receive_bytes(bytes, space, paths, path).await
 }
 
-async fn receive_bytes(
-    bytes: BytesMut,
-    space: Arc<Space<ArcKeys>>,
-    paths: &Arc<Paths>,
-    path: &Arc<Path>,
-) {
+async fn receive_bytes(bytes: BytesMut, space: Arc<Space<ArcKeys>>, paths: &Arc<Paths>, path: &Arc<Path>) {
     let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
         panic!()
     };
-    let link = Link::new(
-        "127.0.0.1:30001".parse().unwrap(),
-        "127.0.0.1:30002".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:30001".parse().unwrap(), "127.0.0.1:30002".parse().unwrap());
     match packet.header {
         DataHeader::Long(long::DataHeader::Initial(header)) => {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tx.try_send((
-                CipherPacket::new(header, packet.bytes, packet.offset),
-                path.pathway,
-                link,
-            ))
-            .unwrap();
+            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), path.pathway, link)).unwrap();
             drop(tx);
             recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }
         DataHeader::Long(long::DataHeader::Handshake(header)) => {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tx.try_send((
-                CipherPacket::new(header, packet.bytes, packet.offset),
-                path.pathway,
-                link,
-            ))
-            .unwrap();
+            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), path.pathway, link)).unwrap();
             drop(tx);
             recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }
@@ -135,14 +107,8 @@ fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
         keys(role == Role::Server),
     );
     let local = EndpointAddr::direct("127.0.0.1:30001".parse().unwrap());
-    let first = paths.add_path(Pathway::new(
-        local,
-        EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()),
-    ));
-    let second = paths.add_path(Pathway::new(
-        local,
-        EndpointAddr::direct("127.0.0.1:30003".parse().unwrap()),
-    ));
+    let first = paths.add_path(Pathway::new(local, EndpointAddr::direct("127.0.0.1:30002".parse().unwrap())));
+    let second = paths.add_path(Pathway::new(local, EndpointAddr::direct("127.0.0.1:30003".parse().unwrap())));
     (paths, first, second)
 }
 
@@ -162,52 +128,27 @@ async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
                     ArcKeys::new(Arc::new(keys(role == Role::Server))),
                     paths.progress.facts(),
                 ));
-                paths
-                    .terminator
-                    .clone()
-                    .register(Arc::new(space.crypto.clone()));
+                paths.terminator.clone().register(Arc::new(space.crypto.clone()));
                 super::install_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
                 space
             };
             let peer_keys = keys(role != Role::Server);
-            let header = LongHeaderBuilder::with_cid(
-                ConnectionId::from_slice(b"localcid"),
-                ConnectionId::from_slice(b"peercid0"),
-            );
-            let mut close = qbase::frame::ConnectionCloseFrame::from(crate::Error::from(
-                QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed"),
-            ));
+            let header = LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0"));
+            let mut close = qbase::frame::ConnectionCloseFrame::from(crate::Error::from(QuicError::with_default_fty(
+                ErrorKind::ConnectionRefused,
+                "peer closed",
+            )));
             let journal = ArcSentJournal::default();
-            let mut crypto = (
-                qbase::frame::CryptoFrame::new(0u32.into(), 4u32.into()),
-                b"data".as_slice(),
-            );
+            let mut crypto = (qbase::frame::CryptoFrame::new(0u32.into(), 4u32.into()), b"data".as_slice());
             let bytes = if epoch == Epoch::Initial {
-                seal(
-                    header.initial(vec![]),
-                    &peer_keys.sealing,
-                    &journal,
-                    [&mut crypto, &mut close],
-                )
+                seal(header.initial(vec![]), &peer_keys.sealing, &journal, [&mut crypto, &mut close])
             } else {
-                seal(
-                    header.handshake(),
-                    &peer_keys.sealing,
-                    &journal,
-                    [&mut crypto, &mut close],
-                )
+                seal(header.handshake(), &peer_keys.sealing, &journal, [&mut crypto, &mut close])
             }
             .unwrap();
             receive_bytes(bytes, space.clone(), &paths, &path).await;
             let mut received = [0; 4];
-            assert!(
-                space
-                    .crypto
-                    .reader()
-                    .read_exact(&mut received)
-                    .await
-                    .is_err()
-            );
+            assert!(space.crypto.reader().read_exact(&mut received).await.is_err());
             assert!(futures::poll!(std::pin::pin!(paths.terminator.clone())).is_pending());
             paths.retire_all();
             assert_eq!(paths.terminator.clone().await, close.into());
@@ -231,28 +172,15 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         let space = if epoch == Epoch::Initial {
             crate::common::initial_space(&paths.spaces)
         } else {
-            let space = Arc::new(Space::new(
-                epoch,
-                Default::default(),
-                ArcKeys::new(Arc::new(keys(true))),
-                paths.progress.facts(),
-            ));
+            let space = Arc::new(Space::new(epoch, Default::default(), ArcKeys::new(Arc::new(keys(true))), paths.progress.facts()));
             terminator.register(Arc::new(space.crypto.clone()));
             super::install_handshake(&paths, Arc::new(HandshakeSpace(space.as_ref().clone())));
             space
         };
-        terminator.close(
-            crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "local")),
-            Duration::from_secs(1),
-        );
+        terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "local")), Duration::from_secs(1));
         assert!(space.crypto.reader().read(&mut [0; 1]).await.is_err());
         paths.del_path(&path.pathway);
-        let header = || {
-            LongHeaderBuilder::with_cid(
-                ConnectionId::from_slice(b"localcid"),
-                ConnectionId::from_slice(b"peercid0"),
-            )
-        };
+        let header = || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0"));
         let poll_close = || {
             let mut bytes = BytesMut::new();
             let mut frames = Vec::new();
@@ -261,14 +189,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             (&terminator).poll_dump(
                 &mut Context::from_waker(Waker::noop()),
-                &mut PacketBuffer::new(
-                    &mut writer_0,
-                    limits_quota,
-                    &mut frames,
-                    header().initial(vec![]).get_type(),
-                    0,
-                    0,
-                ),
+                &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, header().initial(vec![]).get_type(), 0, 0),
             )
         };
         assert!(matches!(poll_close(), Poll::Ready(Ok(n)) if n > 0));
@@ -278,26 +199,13 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
             let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
             let mut ping = PingFrame;
             let bytes = if epoch == Epoch::Initial {
-                seal(
-                    header().initial(vec![]),
-                    &peer.sealing,
-                    &journal,
-                    [&mut crypto, &mut ping],
-                )
+                seal(header().initial(vec![]), &peer.sealing, &journal, [&mut crypto, &mut ping])
             } else {
-                seal(
-                    header().handshake(),
-                    &peer.sealing,
-                    &journal,
-                    [&mut crypto, &mut ping],
-                )
+                seal(header().handshake(), &peer.sealing, &journal, [&mut crypto, &mut ping])
             }
             .unwrap();
             receive_bytes(bytes, space.clone(), &paths, &path).await;
-            assert_eq!(
-                space.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)),
-                Err(qbase::packet::InvalidPacketNumber::Duplicate)
-            );
+            assert_eq!(space.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)), Err(qbase::packet::InvalidPacketNumber::Duplicate));
             if pn < 4 {
                 assert!(poll_close().is_pending());
             }
@@ -306,42 +214,21 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         let local = keys(true);
         let mut ping = PingFrame;
         if epoch == Epoch::Initial {
-            seal(
-                header().initial(vec![]),
-                &local.sealing,
-                &space.sent_journal,
-                [&mut ping],
-            )
+            seal(header().initial(vec![]), &local.sealing, &space.sent_journal, [&mut ping])
         } else {
-            seal(
-                header().handshake(),
-                &local.sealing,
-                &space.sent_journal,
-                [&mut ping],
-            )
+            seal(header().handshake(), &local.sealing, &space.sent_journal, [&mut ping])
         }
         .unwrap();
         space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
         assert!(space.sent_journal.lock_guard().packet(0).is_some());
-        let mut close = ConnectionCloseFrame::from(crate::Error::from(
-            QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed"),
-        ));
+        let mut close =
+            ConnectionCloseFrame::from(crate::Error::from(QuicError::with_default_fty(ErrorKind::ConnectionRefused, "peer closed")));
         // Closing still delivers valid ACKs before processing the peer CLOSE.
         let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
         let bytes = if epoch == Epoch::Initial {
-            seal(
-                header().initial(vec![]),
-                &peer.sealing,
-                &journal,
-                [&mut ack, &mut close],
-            )
+            seal(header().initial(vec![]), &peer.sealing, &journal, [&mut ack, &mut close])
         } else {
-            seal(
-                header().handshake(),
-                &peer.sealing,
-                &journal,
-                [&mut ack, &mut close],
-            )
+            seal(header().handshake(), &peer.sealing, &journal, [&mut ack, &mut close])
         }
         .unwrap();
         receive_bytes(bytes, space.clone(), &paths, &path).await;
@@ -363,20 +250,11 @@ async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
             assert!(paths.entries.lock().unwrap().is_empty());
 
             receive_ping(role, epoch, true, &paths, &first).await;
-            assert!(
-                paths.entries.lock().unwrap().is_empty(),
-                "forged packet admitted a path"
-            );
+            assert!(paths.entries.lock().unwrap().is_empty(), "forged packet admitted a path");
 
             receive_ping(role, epoch, false, &paths, &first).await;
             assert_eq!(paths.entries.lock().unwrap().len(), 1);
-            let admitted = paths
-                .entries
-                .lock()
-                .unwrap()
-                .get(&first.pathway)
-                .cloned()
-                .unwrap();
+            let admitted = paths.entries.lock().unwrap().get(&first.pathway).cloned().unwrap();
             assert!(!Arc::ptr_eq(&admitted, &first));
             if epoch == Epoch::Initial {
                 assert_eq!(
@@ -404,20 +282,15 @@ async fn only_authenticated_initial_packets_update_the_peer_cid() {
                 let (paths, first, _) = paths(role);
                 let dcid = paths.cid_registry.remote.apply_dcid();
                 receive_ping(role, epoch, corrupt, &paths, &first).await;
-                assert_eq!(
-                    paths.progress.facts().has_received_initial(),
-                    !corrupt && epoch == Epoch::Initial
-                );
+                assert_eq!(paths.progress.facts().has_received_initial(), !corrupt && epoch == Epoch::Initial);
                 assert!(!paths.progress.facts().has_handshake_key());
                 assert_eq!(
                     crate::common::cid_value(&dcid),
-                    ConnectionId::from_slice(
-                        if role == Role::Client && !corrupt && epoch == Epoch::Initial {
-                            b"peercid0"
-                        } else {
-                            b"original"
-                        }
-                    )
+                    ConnectionId::from_slice(if role == Role::Client && !corrupt && epoch == Epoch::Initial {
+                        b"peercid0"
+                    } else {
+                        b"original"
+                    })
                 );
                 paths.retire_all();
             }
@@ -432,54 +305,24 @@ async fn client_selects_handshake_but_not_initial_ping() {
         let dcid = paths.cid_registry.remote.apply_dcid();
         assert!(!paths.progress.facts().has_handshake_key());
         let original_dcid = crate::common::cid_value(&dcid);
-        assert_eq!(
-            (
-                super::selection(&paths, &first),
-                super::selection(&paths, &second)
-            ),
-            (u8::MAX, u8::MAX)
-        );
+        assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
         receive_ping(Role::Client, epoch, true, &paths, &first).await;
         assert!(paths.progress.facts().is_mp_handshaking());
-        assert_eq!(
-            (
-                super::selection(&paths, &first),
-                super::selection(&paths, &second)
-            ),
-            (u8::MAX, u8::MAX)
-        );
+        assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
         assert_eq!(crate::common::cid_value(&dcid), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
-        assert_eq!(
-            paths.progress.facts().is_mp_handshaking(),
-            epoch == Epoch::Initial
-        );
+        assert_eq!(paths.progress.facts().is_mp_handshaking(), epoch == Epoch::Initial);
         let expected = if epoch == Epoch::Handshake {
             (0, 1)
         } else {
             (u8::MAX, u8::MAX)
         };
-        assert_eq!(
-            (
-                super::selection(&paths, &first),
-                super::selection(&paths, &second)
-            ),
-            expected
-        );
+        assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), expected);
         if epoch == Epoch::Initial {
-            assert_eq!(
-                crate::common::cid_value(&dcid),
-                ConnectionId::from_slice(b"peercid0")
-            );
+            assert_eq!(crate::common::cid_value(&dcid), ConnectionId::from_slice(b"peercid0"));
         }
         receive_ping(Role::Client, epoch, false, &paths, &first).await;
-        assert_eq!(
-            (
-                super::selection(&paths, &first),
-                super::selection(&paths, &second)
-            ),
-            expected
-        );
+        assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), expected);
         paths.retire_all();
     }
 }
@@ -499,30 +342,13 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let ipv6 = paths.add_path(Pathway::new(
-        "[::1]:30001".parse::<EndpointAddr>().unwrap(),
-        "[::1]:30002".parse().unwrap(),
-    ));
-    let ipv4 = paths.add_path(Pathway::new(
-        "127.0.0.1:30001".parse::<EndpointAddr>().unwrap(),
-        "127.0.0.1:30002".parse().unwrap(),
-    ));
+    let ipv6 = paths.add_path(Pathway::new("[::1]:30001".parse::<EndpointAddr>().unwrap(), "[::1]:30002".parse().unwrap()));
+    let ipv4 = paths.add_path(Pathway::new("127.0.0.1:30001".parse::<EndpointAddr>().unwrap(), "127.0.0.1:30002".parse().unwrap()));
     let space = crate::common::initial_space(&paths.spaces);
-    let header = || {
-        LongHeaderBuilder::with_cid(
-            ConnectionId::from_slice(b"localcid"),
-            ConnectionId::from_slice(b"peercid0"),
-        )
-        .initial(vec![])
-    };
+    let header =
+        || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0")).initial(vec![]);
     // Give the peer a submitted packet to acknowledge.
-    seal(
-        header(),
-        &keys(false).sealing,
-        &space.sent_journal,
-        [&mut PingFrame],
-    )
-    .unwrap();
+    seal(header(), &keys(false).sealing, &space.sent_journal, [&mut PingFrame]).unwrap();
     space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
     let peer = keys(true);
     let journal = ArcSentJournal::default();
@@ -531,45 +357,19 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     receive_bytes(bytes, space.clone(), &paths, &ipv6).await;
     assert!(paths.progress.facts().is_mp_handshaking());
 
-    assert_eq!(
-        (
-            super::selection(&paths, &ipv6),
-            super::selection(&paths, &ipv4)
-        ),
-        (u8::MAX, u8::MAX)
-    );
+    assert_eq!((super::selection(&paths, &ipv6), super::selection(&paths, &ipv4)), (u8::MAX, u8::MAX));
     assert!(space.sent_journal.lock_guard().packet(0).is_none());
-    assert_eq!(
-        space.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
-        Err(InvalidPacketNumber::Duplicate)
-    );
+    assert_eq!(space.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)), Err(InvalidPacketNumber::Duplicate));
     assert!(ipv6.cc.need_ack(Epoch::Initial).is_none());
-    assert_eq!(
-        crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()),
-        ConnectionId::from_slice(b"peercid0")
-    );
+    assert_eq!(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()), ConnectionId::from_slice(b"peercid0"));
 
-    let mut crypto = (
-        CryptoFrame::new(0u32.into(), 4u32.into()),
-        b"data".as_slice(),
-    );
+    let mut crypto = (CryptoFrame::new(0u32.into(), 4u32.into()), b"data".as_slice());
     let bytes = seal(header(), &peer.sealing, &journal, [&mut crypto]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv4).await;
     assert!(!paths.progress.facts().is_mp_handshaking());
-    assert_eq!(
-        (
-            super::selection(&paths, &ipv6),
-            super::selection(&paths, &ipv4)
-        ),
-        (0, 1)
-    );
+    assert_eq!((super::selection(&paths, &ipv6), super::selection(&paths, &ipv4)), (0, 1));
     let mut received = [0; 4];
-    space
-        .crypto
-        .reader()
-        .read_exact(&mut received)
-        .await
-        .unwrap();
+    space.crypto.reader().read_exact(&mut received).await.unwrap();
     assert_eq!(&received, b"data");
     assert!(ipv4.cc.need_ack(Epoch::Initial).is_some());
     paths.retire_all();
@@ -580,31 +380,13 @@ async fn server_initial_does_not_select_but_authenticated_handshake_does() {
     let (paths, first, second) = paths(Role::Server);
     receive_ping(Role::Server, Epoch::Initial, false, &paths, &first).await;
     assert!(paths.progress.facts().is_mp_handshaking());
-    assert_eq!(
-        (
-            super::selection(&paths, &first),
-            super::selection(&paths, &second)
-        ),
-        (u8::MAX, u8::MAX)
-    );
+    assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
     receive_ping(Role::Server, Epoch::Handshake, true, &paths, &first).await;
     assert!(paths.progress.facts().is_mp_handshaking());
-    assert_eq!(
-        (
-            super::selection(&paths, &first),
-            super::selection(&paths, &second)
-        ),
-        (u8::MAX, u8::MAX)
-    );
+    assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
     receive_ping(Role::Server, Epoch::Handshake, false, &paths, &second).await;
     assert!(!paths.progress.facts().is_mp_handshaking());
-    assert_eq!(
-        (
-            super::selection(&paths, &first),
-            super::selection(&paths, &second)
-        ),
-        (0, 1)
-    );
+    assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (0, 1));
     paths.retire_all();
 }
 #[tokio::test]
@@ -616,65 +398,26 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     let space = crate::common::initial_space(&paths.spaces);
     let server_keys = keys(true);
     first.validation.enter_validated().unwrap();
-    let header = || {
-        LongHeaderBuilder::with_cid(
-            ConnectionId::from_slice(b"peercid0"),
-            ConnectionId::from_slice(b"localcid"),
-        )
-    };
-    space
-        .crypto
-        .writer()
-        .write_all(b"server hello")
-        .await
-        .unwrap();
+    let header = || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"peercid0"), ConnectionId::from_slice(b"localcid"));
+    space.crypto.writer().write_all(b"server hello").await.unwrap();
     let mut ping = PingFrame;
-    let packet = seal(
-        header().initial(vec![]),
-        &server_keys.sealing,
-        &space.sent_journal,
-        [&mut ping],
-    )
-    .unwrap();
+    let packet = seal(header().initial(vec![]), &server_keys.sealing, &space.sent_journal, [&mut ping]).unwrap();
     drop(packet);
     let mut crypto = space.crypto.outgoing();
-    let packet = seal(
-        header().initial(vec![]),
-        &server_keys.sealing,
-        &space.sent_journal,
-        [&mut crypto],
-    )
-    .unwrap();
+    let packet = seal(header().initial(vec![]), &server_keys.sealing, &space.sent_journal, [&mut crypto]).unwrap();
     drop(packet);
     for pn in [0, 1] {
-        space
-            .sent_journal
-            .on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        space.sent_journal.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     }
     let client_keys = keys(false);
     let journal = ArcSentJournal::default();
     for pn in [0u32, 1] {
         let mut ack = AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
-        let packet = seal(
-            header().initial(vec![]),
-            &client_keys.sealing,
-            &journal,
-            [&mut ack],
-        )
-        .unwrap();
-        receive_bytes(
-            BytesMut::from(packet.as_ref()),
-            space.clone(),
-            &paths,
-            &second,
-        )
-        .await;
+        let packet = seal(header().initial(vec![]), &client_keys.sealing, &journal, [&mut ack]).unwrap();
+        receive_bytes(BytesMut::from(packet.as_ref()), space.clone(), &paths, &second).await;
         assert_eq!(paths.progress.facts().is_mp_handshaking(), pn == 0);
         assert_eq!(
-            (
-                super::selection(&paths, &first),
-                super::selection(&paths, &second)
-            ),
+            (super::selection(&paths, &first), super::selection(&paths, &second)),
             if pn == 1 { (0, 1) } else { (u8::MAX, u8::MAX) }
         );
     }
@@ -688,37 +431,15 @@ async fn client_initial_crypto_ack_stops_replay_without_selecting_a_path() {
 
     let (paths, first, second) = paths(Role::Client);
     let space = crate::common::initial_space(&paths.spaces);
-    let header = || {
-        LongHeaderBuilder::with_cid(
-            ConnectionId::from_slice(b"localcid"),
-            ConnectionId::from_slice(b"peercid0"),
-        )
-        .initial(vec![])
-    };
-    space
-        .crypto
-        .writer()
-        .write_all(b"client hello")
-        .await
-        .unwrap();
-    seal(
-        header(),
-        &keys(false).sealing,
-        &space.sent_journal,
-        [&mut space.crypto.outgoing()],
-    )
-    .unwrap();
+    let header =
+        || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0")).initial(vec![]);
+    space.crypto.writer().write_all(b"client hello").await.unwrap();
+    seal(header(), &keys(false).sealing, &space.sent_journal, [&mut space.crypto.outgoing()]).unwrap();
     space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
     assert!(paths.progress.facts().is_mp_handshaking());
 
     let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
-    let packet = seal(
-        header(),
-        &keys(true).sealing,
-        &ArcSentJournal::default(),
-        [&mut ack],
-    )
-    .unwrap();
+    let packet = seal(header(), &keys(true).sealing, &ArcSentJournal::default(), [&mut ack]).unwrap();
     receive_bytes(packet, space, &paths, &first).await;
     assert!(!paths.progress.facts().is_mp_handshaking());
     assert_eq!(super::selection(&paths, &first), u8::MAX);
@@ -742,10 +463,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         let path = crate::common::registered_path(
             &paths,
             Path::new(
-                Pathway::new(
-                    EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-                    "127.0.0.1:34300".parse().unwrap(),
-                ),
+                Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], port).into()), "127.0.0.1:34300".parse().unwrap()),
                 paths.progress.facts(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 paths.loss_resender.clone(),
@@ -753,90 +471,42 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
             ),
         );
         path.validation.enter_validated().unwrap();
-        paths
-            .entries
-            .lock()
-            .unwrap()
-            .insert(path.pathway, path.clone());
+        paths.entries.lock().unwrap().insert(path.pathway, path.clone());
         path
     };
     let first = make_path(34301);
     let second = make_path(34302);
     // Data keys are prepared locally while the server is still completing TLS.
-    mature
-        .spaces
-        .data
-        .crypto
-        .writer()
-        .write_all(b"application crypto")
-        .await
-        .unwrap();
+    mature.spaces.data.crypto.writer().write_all(b"application crypto").await.unwrap();
     assert!(paths.progress.facts().has_handshake_key());
     assert!(matches!(super::borrow(&first), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
     assert!(matches!(super::borrow(&second), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
-    assert_eq!(
-        (
-            super::selection(&paths, &first),
-            super::selection(&paths, &second)
-        ),
-        (u8::MAX, u8::MAX)
-    );
+    assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
 
-    mature
-        .spaces
-        .initial
-        .crypto
-        .writer()
-        .write_all(b"server hello")
-        .await
-        .unwrap();
-    let mut datagrams =
-        std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    mature.spaces.initial.crypto.writer().write_all(b"server hello").await.unwrap();
+    let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
     let mut packets = std::array::from_fn(|_| Default::default());
     let mut cx = Context::from_waker(Waker::noop());
     let mut burst = Burst::new(&paths, &second, &mut datagrams, &mut frames, &mut packets);
     assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
-    assert!(
-        burst
-            .packets
-            .iter()
-            .all(|p| packet_metadata(p, Epoch::Data).is_none())
-    );
+    assert!(burst.packets.iter().all(|p| packet_metadata(p, Epoch::Data).is_none()));
     let initial = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap();
     burst.packets[0].retain(|meta| meta.epoch() != Epoch::Initial);
-    mature.spaces.initial.on_sent(
-        initial.pn,
-        initial.in_flight,
-        Duration::from_secs(1),
-        Duration::from_secs(3),
-    );
+    mature.spaces.initial.on_sent(initial.pn, initial.in_flight, Duration::from_secs(1), Duration::from_secs(3));
     burst.cancel();
 
     // The client's ACK of that CRYPTO flight selects the second path.
-    let mut ack = AckFrame::new(
-        initial.pn.try_into().unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    );
+    let mut ack = AckFrame::new(initial.pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
     let bytes = seal(
-        LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"server00"), mature.peer_cid())
-            .initial(vec![]),
+        LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"server00"), mature.peer_cid()).initial(vec![]),
         &keys(false).sealing,
         &ArcSentJournal::default(),
         [&mut ack],
     )
     .unwrap();
     receive_bytes(bytes, mature.spaces.initial.clone(), &paths, &second).await;
-    assert_eq!(
-        (
-            super::selection(&paths, &first),
-            super::selection(&paths, &second)
-        ),
-        (0, 1)
-    );
+    assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (0, 1));
     assert!(matches!(super::borrow(&second), Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
 
     // Publish Data only after the server has completed TLS.
@@ -845,30 +515,13 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     assert!(super::borrow(&first).is_pending());
     assert!(matches!(super::borrow(&second),
         Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
-    mature
-        .spaces
-        .handshake
-        .crypto
-        .writer()
-        .write_all(b"remaining handshake")
-        .await
-        .unwrap();
+    mature.spaces.handshake.crypto.writer().write_all(b"remaining handshake").await.unwrap();
     assert!(
         matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0),
         "the selected path must have its CID before Data is published"
     );
-    assert!(
-        burst
-            .packets
-            .iter()
-            .any(|p| packet_metadata(p, Epoch::Handshake).is_some())
-    );
-    assert!(
-        burst
-            .packets
-            .iter()
-            .any(|p| packet_metadata(p, Epoch::Data).is_some())
-    );
+    assert!(burst.packets.iter().any(|p| packet_metadata(p, Epoch::Handshake).is_some()));
+    assert!(burst.packets.iter().any(|p| packet_metadata(p, Epoch::Data).is_some()));
     burst.cancel();
     paths.retire_all();
 }
@@ -893,10 +546,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 Duration::from_secs(60),
                 crate::common::handshake_facts(Role::Server, true),
             );
-            let link = Link::new(
-                "127.0.0.1:30001".parse().unwrap(),
-                "127.0.0.1:30002".parse().unwrap(),
-            );
+            let link = Link::new("127.0.0.1:30001".parse().unwrap(), "127.0.0.1:30002".parse().unwrap());
             let path = crate::common::registered_path(
                 &paths,
                 Path::new(
@@ -907,17 +557,8 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                     paths.cid_registry.remote.apply_dcid(),
                 ),
             );
-            paths
-                .entries
-                .lock()
-                .unwrap()
-                .insert(path.pathway, path.clone());
-            let space = Arc::new(Space::new(
-                epoch,
-                Default::default(),
-                ArcKeys::new(Arc::new(keys(true))),
-                paths.progress.facts(),
-            ));
+            paths.entries.lock().unwrap().insert(path.pathway, path.clone());
+            let space = Arc::new(Space::new(epoch, Default::default(), ArcKeys::new(Arc::new(keys(true))), paths.progress.facts()));
             let pn = space.next_pn().0;
             let header = LongHeaderBuilder::with_cid(Default::default(), Default::default());
             let packet_type = if epoch == Epoch::Initial {
@@ -925,9 +566,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             } else {
                 header.handshake().get_type()
             };
-            space
-                .sent_journal
-                .on_sealed(pn, None, 0, Metadata::new(packet_type), []);
+            space.sent_journal.on_sealed(pn, None, 0, Metadata::new(packet_type), []);
             space.on_sent(pn, false, Duration::from_secs(1), Duration::from_secs(3));
             let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
             let mut ping = PingFrame;
@@ -937,10 +576,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 1 => &mut ping,
                 _ => &mut crypto,
             };
-            let header = LongHeaderBuilder::with_cid(
-                ConnectionId::from_slice(b"localcid"),
-                ConnectionId::from_slice(b"peercid0"),
-            );
+            let header = LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0"));
             let peer = keys(false);
             let journal = ArcSentJournal::default();
             let bytes = if epoch == Epoch::Initial {
@@ -953,13 +589,8 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             receive_bytes(bytes, space, &paths, &path).await;
             let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
             let reason = paths.terminator.clone().await;
-            assert!(
-                matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
-            );
-            assert_eq!(
-                Instant::now() - start,
-                Duration::from_secs(5) + closing_duration
-            );
+            assert!(matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout"));
+            assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
             tokio::time::advance(Duration::from_secs(15)).await;
             assert_eq!(super::take_heartbeat(&path), kind == 2);
             paths.retire_all();
@@ -979,31 +610,18 @@ async fn blocked_receivers_and_tick_wait_until_termination() {
     let terminator = paths.terminator.clone();
     let (_initial_tx, initial_rx) = tokio::sync::mpsc::channel(1);
     let (_handshake_tx, handshake_rx) = tokio::sync::mpsc::channel(1);
-    let first = tokio::spawn(
-        recv_ih_pkt_and_deliver_frames::<qbase::packet::InitialHeader>(
-            (initial_rx, None),
-            space.clone(),
-            paths.clone(),
-        ),
-    );
-    let second = tokio::spawn(recv_ih_pkt_and_deliver_frames::<
-        qbase::packet::HandshakeHeader,
-    >((handshake_rx, None), space.clone(), paths.clone()));
+    let first =
+        tokio::spawn(recv_ih_pkt_and_deliver_frames::<qbase::packet::InitialHeader>((initial_rx, None), space.clone(), paths.clone()));
+    let second =
+        tokio::spawn(recv_ih_pkt_and_deliver_frames::<qbase::packet::HandshakeHeader>((handshake_rx, None), space.clone(), paths.clone()));
     let tick = tokio::spawn(crate::recv::tick(paths));
-    terminator.close(
-        crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")),
-        Duration::from_secs(1),
-    );
+    terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")), Duration::from_secs(1));
     tokio::task::yield_now().await;
     assert!(!first.is_finished());
     assert!(!second.is_finished());
     assert!(!tick.is_finished());
     assert!(space.keys.get().is_ok());
-    assert!(
-        tokio::io::AsyncReadExt::read(&mut space.crypto.reader(), &mut [0; 1])
-            .await
-            .is_err()
-    );
+    assert!(tokio::io::AsyncReadExt::read(&mut space.crypto.reader(), &mut [0; 1]).await.is_err());
     tokio::time::advance(Duration::from_secs(3)).await;
     tokio::time::timeout(Duration::from_millis(1), async {
         first.await.unwrap();

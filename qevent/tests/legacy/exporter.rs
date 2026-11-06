@@ -8,20 +8,11 @@ use qevent::{
 
 #[tokio::test]
 async fn io_exporter() {
-    let exporter = IoExpoter::new(
-        qevent::build!(QlogFileSeq {
-            title: "io exporter example",
-            trace: TraceSeq {}
-        }),
-        tokio::io::stdout(),
-    );
+    let exporter = IoExpoter::new(qevent::build!(QlogFileSeq { title: "io exporter example", trace: TraceSeq {} }), tokio::io::stdout());
 
     let meaningless_field = 112233u64;
     let task = qevent::span!(Arc::new(exporter), meaningless_field).in_scope(|| {
-        qevent::event!(ServerListening {
-            ip_v4: "127.0.0.1".to_owned(),
-            port_v4: 443u16
-        });
+        qevent::event!(ServerListening { ip_v4: "127.0.0.1".to_owned(), port_v4: 443u16 });
 
         tokio::spawn(
             async move {

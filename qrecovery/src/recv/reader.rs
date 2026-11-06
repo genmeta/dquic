@@ -96,19 +96,11 @@ impl<TX> Reader<TX> {
     /// This method is used by the `accept_bi_stream` and `accept_uni_stream` methods of
     /// [`QuicConnection`](crate::QuicConnection).
     pub(crate) fn new(inner: ArcRecver<TX>) -> Self {
-        Self {
-            inner,
-            qlog_span: qevent::telemetry::Span::current(),
-            tracing_span: tracing::Span::current(),
-        }
+        Self { inner, qlog_span: qevent::telemetry::Span::current(), tracing_span: tracing::Span::current() }
     }
 
     #[inline]
-    pub fn poll_read(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut impl bytes::BufMut,
-    ) -> Poll<Result<(), StreamError>>
+    pub fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut impl bytes::BufMut) -> Poll<Result<(), StreamError>>
     where
         TX: SendFrame<MaxStreamDataFrame>,
     {
@@ -146,10 +138,7 @@ impl<TX> Reader<TX> {
     }
 
     #[inline]
-    pub fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Bytes, StreamError>>>
+    pub fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, StreamError>>>
     where
         TX: SendFrame<MaxStreamDataFrame>,
     {
@@ -226,11 +215,7 @@ where
     TX: SendFrame<MaxStreamDataFrame>,
 {
     #[inline]
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         Reader::poll_read(self.get_mut(), cx, buf).map_err(io::Error::from)
     }
 }

@@ -58,10 +58,7 @@ pub(super) async fn receive_packets<H, M>(
                 path.send_waker.wake_all();
                 inspect(epoch, &path)?;
                 // CLOSE reaches the control owner even when ordinary component pipes are full.
-                if let Some(frame) = parsed_frames
-                    .iter()
-                    .find(|frame| matches!(frame, Frame::Close(_)))
-                {
+                if let Some(frame) = parsed_frames.iter().find(|frame| matches!(frame, Frame::Close(_))) {
                     dispatch(&keys, epoch, frame.clone(), &path, link)?;
                     return Ok(());
                 }

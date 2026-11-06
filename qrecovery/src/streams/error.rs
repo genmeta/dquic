@@ -16,9 +16,7 @@ pub enum StreamError {
 impl From<StreamError> for io::Error {
     fn from(value: StreamError) -> Self {
         match value {
-            error @ (StreamError::Connection(..) | StreamError::Reset(..)) => {
-                io::Error::new(io::ErrorKind::BrokenPipe, error)
-            }
+            error @ (StreamError::Connection(..) | StreamError::Reset(..)) => io::Error::new(io::ErrorKind::BrokenPipe, error),
             error @ StreamError::Finished => io::Error::new(io::ErrorKind::Unsupported, error),
         }
     }

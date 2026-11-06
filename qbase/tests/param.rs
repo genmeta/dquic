@@ -26,10 +26,7 @@ fn local_defaults_advertise_usable_flow_control_and_role_timeouts() {
             assert!(params.contains(id), "{id:?} must be advertised");
             assert_eq!(params.get::<u64>(id), expected);
         }
-        assert_eq!(
-            params.get::<Duration>(ParameterId::MaxIdleTimeout),
-            Duration::from_secs(timeout)
-        );
+        assert_eq!(params.get::<Duration>(ParameterId::MaxIdleTimeout), Duration::from_secs(timeout));
         assert!(!params.contains(ParameterId::InitialSourceConnectionId));
     }
     check(&ClientParameters::default(), 20);
@@ -43,10 +40,7 @@ fn absent_peer_parameters_keep_protocol_defaults() {
         assert_eq!(params.get::<u64>(ParameterId::InitialMaxData), 0);
         assert_eq!(params.get::<u64>(ParameterId::InitialMaxStreamsBidi), 0);
         assert_eq!(params.get::<u64>(ParameterId::ActiveConnectionIdLimit), 2);
-        assert_eq!(
-            params.get::<Duration>(ParameterId::MaxIdleTimeout),
-            Duration::ZERO
-        );
+        assert_eq!(params.get::<Duration>(ParameterId::MaxIdleTimeout), Duration::ZERO);
     }
     check(&ClientParameters::parse_from_bytes(&[15, 0]).unwrap());
     check(&ServerParameters::parse_from_bytes(&[0, 0, 15, 0]).unwrap());
@@ -55,26 +49,11 @@ fn absent_peer_parameters_keep_protocol_defaults() {
 
 fn parameter_sets() -> (ClientParameters, ServerParameters) {
     let mut client = ClientParameters::default();
-    client
-        .set(
-            ParameterId::InitialSourceConnectionId,
-            ConnectionId::from_slice(b"client"),
-        )
-        .unwrap();
+    client.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"client")).unwrap();
     client.set(ParameterId::InitialMaxData, 11u32).unwrap();
     let mut server = ServerParameters::default();
-    server
-        .set(
-            ParameterId::InitialSourceConnectionId,
-            ConnectionId::from_slice(b"server"),
-        )
-        .unwrap();
-    server
-        .set(
-            ParameterId::OriginalDestinationConnectionId,
-            ConnectionId::from_slice(b"origin"),
-        )
-        .unwrap();
+    server.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"server")).unwrap();
+    server.set(ParameterId::OriginalDestinationConnectionId, ConnectionId::from_slice(b"origin")).unwrap();
     server.set(ParameterId::InitialMaxData, 22u32).unwrap();
     (client, server)
 }
@@ -86,9 +65,7 @@ fn parameters(role: Role) -> ArcParameters {
 
 fn requirements(role: Role, initial_scid: ConnectionId) -> Requirements {
     match role {
-        Role::Client => {
-            Requirements::require_server(initial_scid, ConnectionId::from_slice(b"origin"))
-        }
+        Role::Client => Requirements::require_server(initial_scid, ConnectionId::from_slice(b"origin")),
         Role::Server => Requirements::require_client(initial_scid),
     }
 }
@@ -104,13 +81,7 @@ fn both_parameter_sets_are_immediately_available_for_both_roles() {
         } else {
             (22, 11)
         };
-        assert_eq!(
-            (
-                params.local::<u64>(ParameterId::InitialMaxData),
-                params.remote::<u64>(ParameterId::InitialMaxData)
-            ),
-            expected
-        );
+        assert_eq!((params.local::<u64>(ParameterId::InitialMaxData), params.remote::<u64>(ParameterId::InitialMaxData)), expected);
         assert!(params.remembered().is_none());
     }
 }
@@ -137,11 +108,7 @@ fn initial_cid_mismatches_return_transport_parameter_errors() {
         };
         assert_eq!(
             params.authenticate_cids(requirements),
-            Err(QuicError::new(
-                ErrorKind::TransportParameter,
-                FrameType::Crypto.into(),
-                reason
-            ))
+            Err(QuicError::new(ErrorKind::TransportParameter, FrameType::Crypto.into(), reason))
         );
     }
 }
@@ -185,19 +152,11 @@ fn get_returns_defaults_and_try_get_preserves_absence() {
     let mut params = ClientParameters::new();
     assert_eq!(params.get::<u64>(ParameterId::InitialMaxData), 0);
     assert!(!params.get::<bool>(ParameterId::DisableActiveMigration));
-    assert_eq!(
-        params.try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
-        None
-    );
+    assert_eq!(params.try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId), None);
 
     let scid = ConnectionId::from_slice(b"client");
-    params
-        .set(ParameterId::InitialSourceConnectionId, scid)
-        .unwrap();
-    assert_eq!(
-        params.get::<ConnectionId>(ParameterId::InitialSourceConnectionId),
-        scid
-    );
+    params.set(ParameterId::InitialSourceConnectionId, scid).unwrap();
+    assert_eq!(params.get::<ConnectionId>(ParameterId::InitialSourceConnectionId), scid);
 }
 
 #[test]
@@ -243,32 +202,17 @@ fn missing_initial_cids_return_errors_instead_of_panicking() {
 
 #[test]
 fn original_dcid_requires_an_independent_matching_observation() {
-    let requirements = Requirements::require_server(
-        ConnectionId::from_slice(b"server"),
-        ConnectionId::from_slice(b"wrong"),
-    );
+    let requirements = Requirements::require_server(ConnectionId::from_slice(b"server"), ConnectionId::from_slice(b"wrong"));
     let params = parameters(Role::Client);
     assert_eq!(
         params.authenticate_cids(requirements),
-        Err(QuicError::new(
-            ErrorKind::TransportParameter,
-            FrameType::Crypto.into(),
-            "Original Destination Connection ID mismatch"
-        ))
+        Err(QuicError::new(ErrorKind::TransportParameter, FrameType::Crypto.into(), "Original Destination Connection ID mismatch"))
     );
 
-    let requirements = Requirements::require_server(
-        ConnectionId::from_slice(b"server"),
-        ConnectionId::from_slice(b"origin"),
-    );
+    let requirements = Requirements::require_server(ConnectionId::from_slice(b"server"), ConnectionId::from_slice(b"origin"));
     let (client, _) = parameter_sets();
     let mut server = ServerParameters::default();
-    server
-        .set(
-            ParameterId::InitialSourceConnectionId,
-            ConnectionId::from_slice(b"server"),
-        )
-        .unwrap();
+    server.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"server")).unwrap();
     server.set(ParameterId::InitialMaxData, 22u32).unwrap();
     let params = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
     assert!(params.authenticate_cids(requirements).is_err());
@@ -285,19 +229,13 @@ fn retry_cid_must_match_presence_and_value() {
             }
             let (client, mut server) = parameter_sets();
             if let Some(cid) = advertised {
-                server
-                    .set(ParameterId::RetrySourceConnectionId, cid)
-                    .unwrap();
+                server.set(ParameterId::RetrySourceConnectionId, cid).unwrap();
             }
             let params = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
             let expected = if advertised == received_retry.then_some(retry) {
                 Ok(())
             } else {
-                Err(QuicError::new(
-                    ErrorKind::TransportParameter,
-                    FrameType::Crypto.into(),
-                    "Retry Source Connection ID mismatch",
-                ))
+                Err(QuicError::new(ErrorKind::TransportParameter, FrameType::Crypto.into(), "Retry Source Connection ID mismatch"))
             };
             assert_eq!(params.authenticate_cids(requirements), expected);
         }
@@ -317,12 +255,8 @@ fn idle_timeout_is_symmetric_and_uses_the_minimum_nonzero_value() {
             (long, short, short),
         ] {
             let (mut client_params, mut server_params) = parameter_sets();
-            client_params
-                .set(ParameterId::MaxIdleTimeout, client)
-                .unwrap();
-            server_params
-                .set(ParameterId::MaxIdleTimeout, server)
-                .unwrap();
+            client_params.set(ParameterId::MaxIdleTimeout, client).unwrap();
+            server_params.set(ParameterId::MaxIdleTimeout, server).unwrap();
             let params = ArcParameters::new(role, Arc::new(client_params), Arc::new(server_params));
             assert_eq!(params.negotiated_max_idle_timeout(), expected);
         }

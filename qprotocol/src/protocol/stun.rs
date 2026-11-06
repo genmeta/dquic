@@ -15,9 +15,8 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 pub use qbase::datagram::stun::{
-    Attribute as Attr, BindingRequest, BindingRequest as Request, BindingResponse,
-    BindingResponse as Response, Message, MessageType, TransactionId, Type, WriteStunMessage,
-    WriteStunType, WriteTransactionId, be_stun_message, be_stun_type, be_transaction_id,
+    Attribute as Attr, BindingRequest, BindingRequest as Request, BindingResponse, BindingResponse as Response, Message, MessageType,
+    TransactionId, Type, WriteStunMessage, WriteStunType, WriteTransactionId, be_stun_message, be_stun_type, be_transaction_id,
 };
 use qbase::{
     ArcReceiving, Cancelled,
@@ -78,11 +77,7 @@ impl Transaction {
         self.txid
     }
 
-    pub async fn request(
-        &mut self,
-        link: Link,
-        request: Request,
-    ) -> Result<(Link, Response), StunError> {
+    pub async fn request(&mut self, link: Link, request: Request) -> Result<(Link, Response), StunError> {
         self.protocol.send_request(self.txid, link, request).await?;
         (&mut self.receving).await?.ok_or(StunError::Completed)
     }
@@ -123,12 +118,8 @@ impl StunProtocol {
 
     /// One process-wide DNS result, including empty results and failures.
     pub async fn stun_servers() -> io::Result<Arc<[SocketAddr]>> {
-        static SERVERS: LazyLock<StunLookup> =
-            LazyLock::new(|| resolve_stun_servers(Arc::new(SystemResolver)));
-        SERVERS
-            .clone()
-            .await
-            .map_err(|error| io::Error::new(error.kind(), error))
+        static SERVERS: LazyLock<StunLookup> = LazyLock::new(|| resolve_stun_servers(Arc::new(SystemResolver)));
+        SERVERS.clone().await.map_err(|error| io::Error::new(error.kind(), error))
     }
 
     pub fn new() -> Self {
@@ -158,9 +149,7 @@ impl StunProtocol {
     pub fn set_change_server(&self, bound: SocketAddr, server: ChangeServer) -> io::Result<()> {
         if [bound, server.outer_address, server.change_address]
             .iter()
-            .any(|addr| {
-                addr.ip().is_unspecified() || addr.port() == 0 || addr.is_ipv4() != bound.is_ipv4()
-            })
+            .any(|addr| addr.ip().is_unspecified() || addr.port() == 0 || addr.is_ipv4() != bound.is_ipv4())
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -181,23 +170,13 @@ impl StunProtocol {
 
         // Keep the registration locked until insertion so unregister cannot
         // remove it between checking the socket and installing its configuration.
-        let _sockets_guard = self.sockets.get(&bound).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no STUN socket bound to {bound}"),
-            )
-        })?;
+        let _sockets_guard =
+            self.sockets.get(&bound).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no STUN socket bound to {bound}")))?;
         self.change_servers.insert(bound, server);
         Ok(())
     }
 
-    async fn on_request(
-        &self,
-        socket: &UdpSocket,
-        transaction_id: TransactionId,
-        request: Request,
-        link: Link,
-    ) -> io::Result<()> {
+    async fn on_request(&self, socket: &UdpSocket, transaction_id: TransactionId, request: Request, link: Link) -> io::Result<()> {
         use qbase::datagram::stun::{CHANGE_IP, CHANGE_PORT};
 
         if !self.service.load(Ordering::Acquire) {
@@ -231,20 +210,11 @@ impl StunProtocol {
         }
 
         let client_addr = request.response_address().copied().unwrap_or(link.dst);
-        let mut attributes = vec![
-            Attr::SourceAddress(source_addr),
-            Attr::MappedAddress(client_addr),
-        ];
+        let mut attributes = vec![Attr::SourceAddress(source_addr), Attr::MappedAddress(client_addr)];
         if let Some(config) = config {
             attributes.push(Attr::ChangedAddress(config.change_address));
         }
-        send_datagram(
-            socket,
-            transaction_id,
-            Message::Response(Response::with(attributes)),
-            Link::new(link.src, client_addr),
-        )
-        .await
+        send_datagram(socket, transaction_id, Message::Response(Response::with(attributes)), Link::new(link.src, client_addr)).await
     }
 
     pub fn new_transaction(self: &Arc<Self>) -> Transaction {
@@ -253,11 +223,7 @@ impl StunProtocol {
             if let Entry::Vacant(entry) = self.transactions.entry(transaction_id) {
                 let response = ArcReceiving::default();
                 entry.insert(response.clone());
-                return Transaction {
-                    txid: transaction_id,
-                    protocol: self.clone(),
-                    receving: response,
-                };
+                return Transaction { txid: transaction_id, protocol: self.clone(), receving: response };
             }
         }
     }
@@ -272,20 +238,8 @@ impl StunProtocol {
     /// traffic, packet loss or server failure; no NAT classification is performed.
     /// The address is specific to this server, particularly for `Symmetric` and
     /// `Dynamic` NATs. This task is independent of [`Self::detect_nat`].
-    pub async fn detect_outer(
-        self: &Arc<Self>,
-        local_addr: SocketAddr,
-        stun_server: SocketAddr,
-    ) -> Result<Option<SocketAddr>, StunError> {
-        let Some(first) = probe(
-            self,
-            local_addr,
-            stun_server,
-            Request::default(),
-            PROBE_ATTEMPTS,
-        )
-        .await?
-        else {
+    pub async fn detect_outer(self: &Arc<Self>, local_addr: SocketAddr, stun_server: SocketAddr) -> Result<Option<SocketAddr>, StunError> {
+        let Some(first) = probe(self, local_addr, stun_server, Request::default(), PROBE_ATTEMPTS).await? else {
             return Ok(None);
         };
         Ok(Some(first.map_addr()?))
@@ -302,30 +256,14 @@ impl StunProtocol {
     /// An unanswered initial probe returns `Blocked`; an unanswered final probe
     /// is classified as `Dynamic`. These can also reflect packet loss or server
     /// failure.
-    pub async fn detect_nat(
-        self: &Arc<Self>,
-        local_addr: SocketAddr,
-        stun_server: SocketAddr,
-    ) -> Result<NatType, StunError> {
-        let Some(first) = probe(
-            self,
-            local_addr,
-            stun_server,
-            Request::default(),
-            PROBE_ATTEMPTS,
-        )
-        .await?
-        else {
+    pub async fn detect_nat(self: &Arc<Self>, local_addr: SocketAddr, stun_server: SocketAddr) -> Result<NatType, StunError> {
+        let Some(first) = probe(self, local_addr, stun_server, Request::default(), PROBE_ATTEMPTS).await? else {
             return Ok(NatType::Blocked);
         };
         let outer_addr = first.map_addr()?;
         let server2 = first.changed_addr()?;
         if server2.ip() == stun_server.ip() || server2.port() == stun_server.port() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "CHANGED-ADDRESS must change both IP and port",
-            )
-            .into());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "CHANGED-ADDRESS must change both IP and port").into());
         }
         let mut features = NetFeature::empty();
 
@@ -333,34 +271,16 @@ impl StunProtocol {
             features |= NetFeature::Public;
             (stun_server, None)
         } else {
-            let second = probe(
-                self,
-                local_addr,
-                server2,
-                Request::default(),
-                PROBE_ATTEMPTS,
-            )
-            .await?
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("NAT mapping probe to {server2} timed out"),
-                )
-            })?;
+            let second = probe(self, local_addr, server2, Request::default(), PROBE_ATTEMPTS)
+                .await?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, format!("NAT mapping probe to {server2} timed out")))?;
 
             if second.map_addr()? != outer_addr {
                 return Ok(NatType::Symmetric);
             }
             let server3 = second.changed_addr()?;
-            if server3.ip() == stun_server.ip()
-                || server3.ip() == server2.ip()
-                || server3.port() == server2.port()
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "NAT detection requires a third IP and a changed port",
-                )
-                .into());
+            if server3.ip() == stun_server.ip() || server3.ip() == server2.ip() || server3.port() == server2.port() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "NAT detection requires a third IP and a changed port").into());
             }
             (server2, Some(server3))
         };
@@ -371,28 +291,17 @@ impl StunProtocol {
         } else {
             PROBE_ATTEMPTS
         };
-        for (request, feature) in [
-            (Request::change_ip_and_port(), NetFeature::Restricted),
-            (Request::change_port(), NetFeature::PortRestricted),
-        ] {
-            if probe(self, local_addr, filter_server, request, attempts)
-                .await?
-                .is_none()
-            {
+        for (request, feature) in
+            [(Request::change_ip_and_port(), NetFeature::Restricted), (Request::change_port(), NetFeature::PortRestricted)]
+        {
+            if probe(self, local_addr, filter_server, request, attempts).await?.is_none() {
                 features |= feature;
             }
         }
 
         // Contacting server3 earlier would change the filtering test conditions.
         if let Some(server3) = dynamic_server {
-            let response = probe(
-                self,
-                local_addr,
-                server3,
-                Request::default(),
-                PROBE_ATTEMPTS,
-            )
-            .await?;
+            let response = probe(self, local_addr, server3, Request::default(), PROBE_ATTEMPTS).await?;
             match response {
                 Some(response) if response.map_addr()? == outer_addr => {}
                 _ => features |= NetFeature::Dynamic,
@@ -436,18 +345,10 @@ impl StunProtocol {
         socket
     }
 
-    async fn send_request(
-        &self,
-        transaction_id: TransactionId,
-        link: Link,
-        request: Request,
-    ) -> io::Result<()> {
-        let socket = self.find_socket(link.src).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no STUN socket bound to {}", link.src),
-            )
-        })?;
+    async fn send_request(&self, transaction_id: TransactionId, link: Link, request: Request) -> io::Result<()> {
+        let socket = self
+            .find_socket(link.src)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no STUN socket bound to {}", link.src)))?;
         send_datagram(&socket, transaction_id, Message::Request(request), link).await
     }
 
@@ -460,10 +361,7 @@ impl StunProtocol {
     ) -> io::Result<()> {
         match message {
             Message::Response(response) => {
-                let transaction = self
-                    .transactions
-                    .get(&transaction_id)
-                    .map(|entry| entry.clone());
+                let transaction = self.transactions.get(&transaction_id).map(|entry| entry.clone());
                 if let Some(receiving) = transaction {
                     receiving.obtain((link, response));
                 }
@@ -488,11 +386,7 @@ async fn probe(
     use qbase::datagram::stun::{CHANGE_IP, CHANGE_PORT};
 
     if local_addr.ip().is_unspecified() || local_addr.port() == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "STUN detection requires a concrete bound socket address",
-        )
-        .into());
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "STUN detection requires a concrete bound socket address").into());
     }
 
     let mut transaction = protocol.new_transaction();
@@ -515,19 +409,11 @@ async fn probe(
                     source.port() == server.port()
                 };
                 if received.src != local_addr || !valid_ip || !valid_port {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unexpected STUN response link: {received}"),
-                    )
-                    .into());
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected STUN response link: {received}")).into());
                 }
                 response.map_addr()?;
                 if flags != 0 && response.source_addr()? != source {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "STUN SOURCE-ADDRESS does not match the packet source",
-                    )
-                    .into());
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "STUN SOURCE-ADDRESS does not match the packet source").into());
                 }
                 return Ok(Some(response));
             }
@@ -545,36 +431,20 @@ fn encode_datagram(transaction_id: TransactionId, message: &Message) -> io::Resu
     Ok(buffer)
 }
 
-async fn send_datagram(
-    socket: &UdpSocket,
-    transaction_id: TransactionId,
-    message: Message,
-    link: Link,
-) -> io::Result<()> {
+async fn send_datagram(socket: &UdpSocket, transaction_id: TransactionId, message: Message, link: Link) -> io::Result<()> {
     let buffer = encode_datagram(transaction_id, &message)?;
-    let line = Line::new(
-        link,
-        Line::DEFAULT_TTL,
-        None,
-        buffer.len().min(u16::MAX as usize) as u16,
-    );
+    let line = Line::new(link, Line::DEFAULT_TTL, None, buffer.len().min(u16::MAX as usize) as u16);
     let slices = [IoSlice::new(&buffer)];
     if socket.send(&slices, line).await? == 1 {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "STUN socket sent zero datagrams",
-        ))
+        Err(io::Error::new(io::ErrorKind::WriteZero, "STUN socket sent zero datagrams"))
     }
 }
 
 fn resolve_stun_servers(resolver: Arc<dyn Resolve>) -> StunLookup {
     async move {
-        let mut records = resolver
-            .lookup(STUN_SERVER, STUN_PORT, None)
-            .await
-            .map_err(Arc::new)?;
+        let mut records = resolver.lookup(STUN_SERVER, STUN_PORT, None).await.map_err(Arc::new)?;
         let mut servers = Vec::new();
         while let Some((_, endpoint)) = records.next().await {
             if let EndpointAddr::Direct { addr } = endpoint

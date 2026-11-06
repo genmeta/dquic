@@ -15,11 +15,7 @@ use crate::varint::be_varint;
 ///
 /// - For long packets, the payload is a [`nom::multi::length_data`].
 /// - For 1-RTT packet, the payload is the remaining content of the datagram.
-fn be_payload(
-    pkty: Type,
-    datagram: &mut BytesMut,
-    remain_len: usize,
-) -> Result<(BytesMut, usize), Error> {
+fn be_payload(pkty: Type, datagram: &mut BytesMut, remain_len: usize) -> Result<(BytesMut, usize), Error> {
     let offset = datagram.len() - remain_len;
     let input = &datagram[offset..];
     let (remain, payload) = length_data(be_varint).parse(input).map_err(|e| match e {
@@ -60,27 +56,15 @@ pub fn be_packet(datagram: &mut BytesMut, dcid_len: usize) -> Result<Packet, Err
         }
         Header::Initial(header) => {
             let (bytes, offset) = be_payload(pkty, datagram, remain.len())?;
-            Ok(Packet::Data(DataPacket {
-                header: DataHeader::Long(long::DataHeader::Initial(header)),
-                bytes,
-                offset,
-            }))
+            Ok(Packet::Data(DataPacket { header: DataHeader::Long(long::DataHeader::Initial(header)), bytes, offset }))
         }
         Header::ZeroRtt(header) => {
             let (bytes, offset) = be_payload(pkty, datagram, remain.len())?;
-            Ok(Packet::Data(DataPacket {
-                header: DataHeader::Long(long::DataHeader::ZeroRtt(header)),
-                bytes,
-                offset,
-            }))
+            Ok(Packet::Data(DataPacket { header: DataHeader::Long(long::DataHeader::ZeroRtt(header)), bytes, offset }))
         }
         Header::Handshake(header) => {
             let (bytes, offset) = be_payload(pkty, datagram, remain.len())?;
-            Ok(Packet::Data(DataPacket {
-                header: DataHeader::Long(long::DataHeader::Handshake(header)),
-                bytes,
-                offset,
-            }))
+            Ok(Packet::Data(DataPacket { header: DataHeader::Long(long::DataHeader::Handshake(header)), bytes, offset }))
         }
         Header::OneRtt(header) => {
             if remain.len() < 20 {
@@ -91,11 +75,7 @@ pub fn be_packet(datagram: &mut BytesMut, dcid_len: usize) -> Result<Packet, Err
             let bytes = mem::replace(datagram, BytesMut::new());
             let offset = bytes.len() - remain_len;
             datagram.clear();
-            Ok(Packet::Data(DataPacket {
-                header: DataHeader::Short(header),
-                bytes,
-                offset,
-            }))
+            Ok(Packet::Data(DataPacket { header: DataHeader::Short(header), bytes, offset }))
         }
     }
 }

@@ -41,9 +41,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let server_addr = server_socket.local_addr().unwrap();
     let client_addr = client_socket.local_addr().unwrap();
     let local = EndpointAddr::direct(server_addr);
-    QuicProtocol::global()
-        .register(local, &server_socket)
-        .unwrap();
+    QuicProtocol::global().register(local, &server_socket).unwrap();
 
     let client = common::anonymous_client();
     let (parameters, _) = common::parameters();
@@ -51,32 +49,22 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let (_, hello) = tls.read_msg().await.unwrap();
     let odcid = ConnectionId::random_gen(8);
     let scid = ConnectionId::from_slice(b"client00");
-    let keys = client
-        .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-        .unwrap();
+    let keys = client.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap();
     let pathway = Pathway::new(EndpointAddr::direct(client_addr), local);
     let path = Path::new(
         pathway,
         Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         Default::default(),
-        qconnection::ArcRemoteCids::client(
-            Default::default(),
-            qconnection::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qconnection::ArcRemoteCids::client(Default::default(), qconnection::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     path.validation.exempt().unwrap();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.
     let data = [hello.slice(..4)];
     let mut crypto = (CryptoFrame::new(0u32.into(), 4u32.into()), data.as_slice());
-    let packet = common::seal(
-        LongHeaderBuilder::with_cid(odcid, scid).initial(vec![]),
-        &keys.sealing,
-        &ArcSentJournal::default(),
-        [&mut crypto],
-    )
-    .unwrap();
+    let packet =
+        common::seal(LongHeaderBuilder::with_cid(odcid, scid).initial(vec![]), &keys.sealing, &ArcSentJournal::default(), [&mut crypto])
+            .unwrap();
     QuicRouter::global().receive(
         BytesMut::from(packet.as_ref()),
         Pathway::new(local, EndpointAddr::direct(client_addr)),
@@ -94,27 +82,18 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     .expect("server must ACK an incomplete ClientHello")
     .unwrap();
     assert_eq!(count, 1);
-    let Packet::Data(reply) =
-        PacketReader::new(BytesMut::from(&buffer[..lines[0].seg_size as usize]), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-    else {
+    let Packet::Data(reply) = PacketReader::new(BytesMut::from(&buffer[..lines[0].seg_size as usize]), 8).next().unwrap().unwrap() else {
         panic!("expected Initial")
     };
     assert_eq!(*reply.dcid(), scid);
     let DataHeader::Long(long::DataHeader::Initial(header)) = reply.header else {
         panic!("expected Initial")
     };
-    let opened = CipherPacket::new(header, reply.bytes, reply.offset)
-        .decrypt_long_packet(&keys.opening, |_| Ok(0))
-        .unwrap()
-        .unwrap();
+    let opened = CipherPacket::new(header, reply.bytes, reply.offset).decrypt_long_packet(&keys.opening, |_| Ok(0)).unwrap().unwrap();
     let mut acks = 0;
-    for frame in FrameReader::new(
-        opened.body(),
-        qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(odcid, scid).initial(vec![])),
-    ) {
+    for frame in
+        FrameReader::new(opened.body(), qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(odcid, scid).initial(vec![])))
+    {
         match frame.unwrap().0 {
             Frame::Ack(ack) => {
                 assert_eq!(ack.largest(), 0);
@@ -138,10 +117,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         Link::new(server_addr, client_addr),
         8,
     );
-    assert!(
-        !incoming.load(Ordering::Relaxed),
-        "a repeated Initial must keep routing to the existing connection"
-    );
+    assert!(!incoming.load(Ordering::Relaxed), "a repeated Initial must keep routing to the existing connection");
     QuicProtocol::global().unregister(server_socket.local_addr().unwrap());
     ServerRegistry::global().remove("localhost");
 }

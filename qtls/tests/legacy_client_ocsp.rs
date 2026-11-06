@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, Epoch, LocalAuthority, PrivateKeyDer, QuicVersion, RootCerts,
-    ServerResumptionConfig, ServerTlsConfig, TlsEvent, TlsLimits, TlsServer,
+    CertificateDer, Epoch, LocalAuthority, PrivateKeyDer, QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig, TlsEvent,
+    TlsLimits, TlsServer,
 };
 use rustls::pki_types::pem::PemObject;
 
@@ -24,10 +24,7 @@ fn connect_without_client_ocsp() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
-        .with_client_auth_cert(
-            vec![CertificateDer::from_pem_slice(CLIENT_CERT)?],
-            PrivateKeyDer::from_pem_slice(CLIENT_KEY)?,
-        )?;
+        .with_client_auth_cert(vec![CertificateDer::from_pem_slice(CLIENT_CERT)?], PrivateKeyDer::from_pem_slice(CLIENT_KEY)?)?;
     config.alpn_protocols = vec![b"h3".to_vec()];
     let mut client = rustls::quic::ClientConnection::new(
         Arc::new(config),

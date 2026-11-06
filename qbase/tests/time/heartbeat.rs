@@ -35,10 +35,8 @@ fn poll(
     let limits_length = 1;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-    let result = heartbeat.poll_dump(
-        &mut Context::from_waker(waker),
-        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-    );
+    let result =
+        heartbeat.poll_dump(&mut Context::from_waker(waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
     if matches!(result, Poll::Ready(Ok(1))) {
         assert_eq!(&bytes[..], &[0x01]);
         assert!(frames.is_empty());
@@ -52,9 +50,7 @@ fn poll(
 #[tokio::test(start_paused = true)]
 async fn background_rechecks_activity_and_wakes_only_the_current_sender() {
     let mut heartbeat = ArcHeartbeat::new(Duration::from_secs(60), Duration::from_secs(10));
-    heartbeat
-        .on_sent_at(PacketContent::EffectivePayload, Instant::now())
-        .unwrap();
+    heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now()).unwrap();
     let old = Arc::new(WakeCount::default());
     let current = Arc::new(WakeCount::default());
     let old_waker = Waker::from(old.clone());
@@ -63,12 +59,8 @@ async fn background_rechecks_activity_and_wakes_only_the_current_sender() {
     assert!(poll(&mut heartbeat, 1, &current_waker).is_pending());
     tokio::task::yield_now().await;
     tokio::time::advance(DEFAULT_HEARTBEAT_INTERVAL / 2).await;
-    heartbeat
-        .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
-        .unwrap();
-    heartbeat
-        .on_sent_at(PacketContent::EffectivePayload, Instant::now())
-        .unwrap();
+    heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now()).unwrap();
+    heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now()).unwrap();
     assert_eq!(current.0.load(Ordering::Relaxed), 0);
     tokio::time::advance(DEFAULT_HEARTBEAT_INTERVAL / 2).await;
     tokio::task::yield_now().await;
@@ -161,23 +153,13 @@ async fn zero_durations_disable_heartbeats() {
 #[tokio::test(start_paused = true)]
 async fn cancellation_is_permanent_and_the_task_stops_after_its_sleep() {
     let mut heartbeat = ArcHeartbeat::new(Duration::from_secs(30), Duration::from_secs(10));
-    heartbeat
-        .on_sent_at(PacketContent::EffectivePayload, Instant::now())
-        .unwrap();
+    heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now()).unwrap();
     let metrics = tokio::runtime::Handle::current().metrics();
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
     heartbeat.stop();
-    assert!(
-        heartbeat
-            .on_sent_at(PacketContent::EffectivePayload, Instant::now())
-            .is_err()
-    );
-    assert!(
-        heartbeat
-            .on_rcvd_at(PacketContent::EffectivePayload, Instant::now())
-            .is_err()
-    );
+    assert!(heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now()).is_err());
+    assert!(heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now()).is_err());
     assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());
     tokio::task::yield_now().await;
     drop(heartbeat);

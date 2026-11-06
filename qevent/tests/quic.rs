@@ -4,13 +4,7 @@ use qevent::quic::QuicFrame;
 #[test]
 fn ack() {
     // 123 56 9
-    let frame = AckFrame::new(
-        9u32.into(),
-        1000u32.into(),
-        0u32.into(),
-        vec![(1u32.into(), 1u32.into()), (0u32.into(), 2u32.into())],
-        None,
-    );
+    let frame = AckFrame::new(9u32.into(), 1000u32.into(), 0u32.into(), vec![(1u32.into(), 1u32.into()), (0u32.into(), 2u32.into())], None);
 
     let encoding_size = frame.encoding_size();
 

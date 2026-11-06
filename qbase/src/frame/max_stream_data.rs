@@ -25,10 +25,7 @@ pub struct MaxStreamDataFrame {
 impl MaxStreamDataFrame {
     /// Create a new [`MaxStreamDataFrame`].
     pub fn new(stream_id: StreamId, max_stream_data: VarInt) -> Self {
-        Self {
-            stream_id,
-            max_stream_data,
-        }
+        Self { stream_id, max_stream_data }
     }
 
     /// Return the stream ID of the frame.
@@ -62,14 +59,7 @@ impl super::EncodeSize for MaxStreamDataFrame {
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub fn be_max_stream_data_frame(input: &[u8]) -> nom::IResult<&[u8], MaxStreamDataFrame> {
     use nom::{Parser, combinator::map, sequence::pair};
-    map(
-        pair(be_streamid, be_varint),
-        |(stream_id, max_stream_data)| MaxStreamDataFrame {
-            stream_id,
-            max_stream_data,
-        },
-    )
-    .parse(input)
+    map(pair(be_streamid, be_varint), |(stream_id, max_stream_data)| MaxStreamDataFrame { stream_id, max_stream_data }).parse(input)
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamDataFrame> for T {

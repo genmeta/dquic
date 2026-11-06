@@ -29,12 +29,7 @@ impl Io for UdpSocket {
                     nix::sys::socket::setsockopt(&io, sockopt::IpDontFrag, &OPTION_ON)?;
                     nix::sys::socket::setsockopt(&io, sockopt::Ipv4RecvDstAddr, &OPTION_ON)?;
                 }
-                #[cfg(any(
-                    target_os = "android",
-                    target_os = "linux",
-                    target_os = "freebsd",
-                    target_os = "netbsd"
-                ))]
+                #[cfg(any(target_os = "android", target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv4Ttl, &(Line::DEFAULT_TTL as i32))?;
                 nix::sys::socket::setsockopt(&io, sockopt::Ipv4PacketInfo, &OPTION_ON)?;
             }
@@ -49,11 +44,7 @@ impl Io for UdpSocket {
         socket.bind(&addr.into())
     }
 
-    fn bind_device_to_socket(
-        socket: &socket2::SockRef<'_>,
-        addr: SocketAddr,
-        device: &BoundDevice,
-    ) -> io::Result<()> {
+    fn bind_device_to_socket(socket: &socket2::SockRef<'_>, addr: SocketAddr, device: &BoundDevice) -> io::Result<()> {
         let _ = addr;
         #[cfg(any(target_os = "android", target_os = "linux"))]
         {
@@ -74,13 +65,7 @@ impl Io for UdpSocket {
             return socket.bind_device(Some(device.name().as_bytes()));
         }
 
-        #[cfg(any(
-            target_os = "ios",
-            target_os = "visionos",
-            target_os = "macos",
-            target_os = "tvos",
-            target_os = "watchos",
-        ))]
+        #[cfg(any(target_os = "ios", target_os = "visionos", target_os = "macos", target_os = "tvos", target_os = "watchos",))]
         {
             return match addr {
                 SocketAddr::V4(..) => socket.bind_device_by_index_v4(Some(device.index())),
@@ -91,19 +76,11 @@ impl Io for UdpSocket {
         #[allow(unreachable_code)]
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!(
-                "binding UDP socket to interface {} is unsupported on this platform",
-                device.name()
-            ),
+            format!("binding UDP socket to interface {} is unsupported on this platform", device.name()),
         ))
     }
 
-    #[cfg(any(
-        target_os = "android",
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "netbsd"
-    ))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
     fn sendmsg(&self, buffers: &[IoSlice<'_>], line: &Line) -> io::Result<usize> {
         use nix::{
             errno::Errno,
@@ -111,11 +88,7 @@ impl Io for UdpSocket {
         };
 
         use super::BATCH_SIZE;
-        let slices: Vec<_> = buffers
-            .iter()
-            .take(BATCH_SIZE)
-            .map(std::slice::from_ref)
-            .collect();
+        let slices: Vec<_> = buffers.iter().take(BATCH_SIZE).map(std::slice::from_ref).collect();
 
         let batch_size = slices.len();
         if batch_size == 0 {
@@ -127,9 +100,7 @@ impl Io for UdpSocket {
         #[cfg(not(feature = "gso"))]
         let has_gso = false;
         #[cfg(feature = "gso")]
-        cmsgs.push(nix::sys::socket::ControlMessage::UdpGsoSegments(
-            &line.seg_size,
-        ));
+        cmsgs.push(nix::sys::socket::ControlMessage::UdpGsoSegments(&line.seg_size));
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
         #[derive(Clone, Copy)]
@@ -155,26 +126,16 @@ impl Io for UdpSocket {
                 IpAddr::V4(src) => {
                     v4_pktinfo = libc::in_pktinfo {
                         ipi_ifindex: device.index().get() as _,
-                        ipi_spec_dst: libc::in_addr {
-                            s_addr: u32::from_ne_bytes(src.octets()),
-                        },
+                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
                         ipi_addr: libc::in_addr { s_addr: 0 },
                     };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(
-                        &v4_pktinfo,
-                    ));
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
                     packet_info_kind = Some(PacketInfoKind::V4);
                 }
                 IpAddr::V6(src) => {
-                    v6_pktinfo = libc::in6_pktinfo {
-                        ipi6_addr: libc::in6_addr {
-                            s6_addr: src.octets(),
-                        },
-                        ipi6_ifindex: device.index().get() as _,
-                    };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(
-                        &v6_pktinfo,
-                    ));
+                    v6_pktinfo =
+                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: device.index().get() as _ };
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
                     packet_info_kind = Some(PacketInfoKind::V6);
                 }
             }
@@ -197,18 +158,9 @@ impl Io for UdpSocket {
                 let sock_addr = <$ty>::from($addr);
                 let addrs = vec![Some(sock_addr); BATCH_SIZE];
                 let mut data = MultiHeaders::<$ty>::preallocate(BATCH_SIZE, space);
-                match sendmmsg(
-                    self.io.as_raw_fd(),
-                    &mut data,
-                    &slices,
-                    &addrs,
-                    &cmsgs,
-                    MsgFlags::empty(),
-                ) {
+                match sendmmsg(self.io.as_raw_fd(), &mut data, &slices, &addrs, &cmsgs, MsgFlags::empty()) {
                     Ok(ret) => Ok(ret.count()),
-                    Err(e @ (Errno::EINTR | Errno::EAGAIN | Errno::ENOBUFS)) => {
-                        Err(io::Error::new(io::ErrorKind::WouldBlock, e))
-                    }
+                    Err(e @ (Errno::EINTR | Errno::EAGAIN | Errno::ENOBUFS)) => Err(io::Error::new(io::ErrorKind::WouldBlock, e)),
                     Err(e) => Err(e.into()),
                 }
             }};
@@ -220,12 +172,7 @@ impl Io for UdpSocket {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "tvos"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
     fn sendmsg(&self, slices: &[IoSlice<'_>], send_line: &Line) -> io::Result<usize> {
         use nix::{
             errno::Errno,
@@ -237,13 +184,7 @@ impl Io for UdpSocket {
                 ($ty:ty, $addr:expr) => {{
                     let sock_addr = <$ty>::from($addr);
                     loop {
-                        match sendmsg(
-                            self.io.as_raw_fd(),
-                            &[*slice],
-                            &[],
-                            MsgFlags::empty(),
-                            Some(&sock_addr),
-                        ) {
+                        match sendmsg(self.io.as_raw_fd(), &[*slice], &[], MsgFlags::empty(), Some(&sock_addr)) {
                             Ok(_send_bytes) => {
                                 sent_packet += 1;
                                 break;
@@ -269,38 +210,17 @@ impl Io for UdpSocket {
         Ok(sent_packet)
     }
 
-    #[cfg(any(
-        target_os = "android",
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "netbsd"
-    ))]
-    fn recvmsg(
-        &self,
-        bufs: &mut [std::io::IoSliceMut<'_>],
-        recv_lines: &mut [Line],
-    ) -> io::Result<usize> {
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+    fn recvmsg(&self, bufs: &mut [std::io::IoSliceMut<'_>], recv_lines: &mut [Line]) -> io::Result<usize> {
         use nix::sys::socket::{MsgFlags, recvmmsg};
 
         use super::BATCH_SIZE;
-        let mut msgs: Vec<_> = bufs
-            .iter_mut()
-            .map(|buf| [std::io::IoSliceMut::new(&mut buf[..])])
-            .collect();
+        let mut msgs: Vec<_> = bufs.iter_mut().map(|buf| [std::io::IoSliceMut::new(&mut buf[..])]).collect();
 
         let cmsg_buffer = cmsg_space!(libc::in_pktinfo, libc::in6_pktinfo, libc::c_int);
-        let mut data = nix::sys::socket::MultiHeaders::<SockaddrStorage>::preallocate(
-            BATCH_SIZE,
-            Some(cmsg_buffer),
-        );
+        let mut data = nix::sys::socket::MultiHeaders::<SockaddrStorage>::preallocate(BATCH_SIZE, Some(cmsg_buffer));
 
-        let res = match recvmmsg(
-            self.io.as_raw_fd(),
-            &mut data,
-            &mut msgs,
-            MsgFlags::MSG_DONTWAIT,
-            None,
-        ) {
+        let res = match recvmmsg(self.io.as_raw_fd(), &mut data, &mut msgs, MsgFlags::MSG_DONTWAIT, None) {
             Ok(results) => results.collect::<Vec<_>>(),
             Err(e) => {
                 if matches!(e, nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) {
@@ -316,12 +236,7 @@ impl Io for UdpSocket {
         for recv_msg in res {
             let src_addr = recv_msg.address.unwrap().to_socketaddr();
             let link = qbase::net::route::Link::new(src_addr, recv_lines[count].dst);
-            let mut recv_line = Line {
-                link,
-                ttl: 0,
-                ecn: None,
-                seg_size: recv_msg.bytes as u16,
-            };
+            let mut recv_line = Line { link, ttl: 0, ecn: None, seg_size: recv_msg.bytes as u16 };
             for cmsg in recv_msg.cmsgs().unwrap() {
                 parse_cmsg(cmsg, &mut recv_line);
             }
@@ -333,25 +248,11 @@ impl Io for UdpSocket {
         Ok(count)
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "tvos"
-    ))]
-    fn recvmsg(
-        &self,
-        bufs: &mut [std::io::IoSliceMut<'_>],
-        recv_lines: &mut [Line],
-    ) -> io::Result<usize> {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
+    fn recvmsg(&self, bufs: &mut [std::io::IoSliceMut<'_>], recv_lines: &mut [Line]) -> io::Result<usize> {
         use nix::sys::socket::{MsgFlags, recvmsg};
         let mut cmsg_space = cmsg_space!(libc::in_pktinfo, libc::in6_pktinfo, libc::c_int);
-        let result = recvmsg::<SockaddrStorage>(
-            self.io.as_raw_fd(),
-            bufs,
-            Some(&mut cmsg_space),
-            MsgFlags::empty(),
-        );
+        let result = recvmsg::<SockaddrStorage>(self.io.as_raw_fd(), bufs, Some(&mut cmsg_space), MsgFlags::empty());
 
         match result {
             Ok(recv_msg) => {
@@ -449,12 +350,7 @@ impl ToSocketAddr for SockaddrStorage {
             }
             Some(nix::sys::socket::AddressFamily::Inet6) => {
                 let sockaddr_in6 = self.as_sockaddr_in6().unwrap();
-                let v6_addr = SocketAddrV6::new(
-                    sockaddr_in6.ip(),
-                    sockaddr_in6.port(),
-                    sockaddr_in6.flowinfo(),
-                    sockaddr_in6.scope_id(),
-                );
+                let v6_addr = SocketAddrV6::new(sockaddr_in6.ip(), sockaddr_in6.port(), sockaddr_in6.flowinfo(), sockaddr_in6.scope_id());
                 SocketAddr::V6(v6_addr)
             }
             _ => panic!("Unsupported address family"),
@@ -470,12 +366,7 @@ mod tests {
     fn ipv6_link_local_packet_info_preserves_the_interface_scope() {
         let mut line = Line::default();
         let address = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        let packet_info = libc::in6_pktinfo {
-            ipi6_addr: libc::in6_addr {
-                s6_addr: address.octets(),
-            },
-            ipi6_ifindex: 7,
-        };
+        let packet_info = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: address.octets() }, ipi6_ifindex: 7 };
 
         parse_cmsg(ControlMessageOwned::Ipv6PacketInfo(packet_info), &mut line);
 

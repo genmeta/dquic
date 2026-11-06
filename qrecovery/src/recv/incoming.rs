@@ -26,11 +26,7 @@ where
     ///
     /// [`RecvBuf`]: crate::recv::RecvBuf
     /// [`Reader`]: crate::recv::Reader
-    pub fn recv_data(
-        &self,
-        stream_frame: StreamFrame,
-        body: Bytes,
-    ) -> Result<(bool, usize), QuicError> {
+    pub fn recv_data(&self, stream_frame: StreamFrame, body: Bytes) -> Result<(bool, usize), QuicError> {
         let mut recver = self.0.recver();
         let inner = recver.deref_mut();
         let mut is_into_rcvd = false;

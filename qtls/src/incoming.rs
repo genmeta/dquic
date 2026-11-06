@@ -45,9 +45,7 @@ pub fn client_hello(bytes: &[u8], max_bytes: usize) -> Result<Option<ClientHello
         return Ok(None);
     }
     if bytes[0] != CLIENT_HELLO {
-        return Err(protocol_error(
-            "first TLS handshake message is not ClientHello",
-        ));
+        return Err(protocol_error("first TLS handshake message is not ClientHello"));
     }
     let body_len = usize::from(bytes[1]) << 16 | usize::from(bytes[2]) << 8 | usize::from(bytes[3]);
     let encoded_len = HANDSHAKE_HEADER_LEN + body_len;
@@ -58,9 +56,7 @@ pub fn client_hello(bytes: &[u8], max_bytes: usize) -> Result<Option<ClientHello
         return Ok(None);
     }
     if bytes.len() != encoded_len {
-        return Err(protocol_error(
-            "unexpected Initial CRYPTO data after ClientHello",
-        ));
+        return Err(protocol_error("unexpected Initial CRYPTO data after ClientHello"));
     }
 
     parse(Bytes::copy_from_slice(bytes)).map(Some)
@@ -76,9 +72,7 @@ fn parse(encoded: Bytes) -> Result<ClientHello, TlsError> {
         return Err(protocol_error("invalid ClientHello cipher suites"));
     }
     if hello.vector_u8("legacy compression methods")?.is_empty() {
-        return Err(protocol_error(
-            "ClientHello has no legacy compression method",
-        ));
+        return Err(protocol_error("ClientHello has no legacy compression method"));
     }
     let extensions = hello.vector_u16("extensions")?;
     hello.finish("trailing ClientHello bytes")?;
@@ -93,18 +87,14 @@ fn parse(encoded: Bytes) -> Result<ClientHello, TlsError> {
         match extension_type {
             SERVER_NAME => {
                 if saw_server_name {
-                    return Err(protocol_error(
-                        "duplicate ClientHello server_name extension",
-                    ));
+                    return Err(protocol_error("duplicate ClientHello server_name extension"));
                 }
                 saw_server_name = true;
                 server_name = parse_server_name(extension)?;
             }
             QUIC_TRANSPORT_PARAMETERS => {
                 if transport_parameters.is_some() {
-                    return Err(protocol_error(
-                        "duplicate QUIC transport parameters extension",
-                    ));
+                    return Err(protocol_error("duplicate QUIC transport parameters extension"));
                 }
                 transport_parameters = Some(Bytes::copy_from_slice(extension));
             }
@@ -112,16 +102,10 @@ fn parse(encoded: Bytes) -> Result<ClientHello, TlsError> {
         }
     }
     let Some(transport_parameters) = transport_parameters else {
-        return Err(protocol_error(
-            "ClientHello is missing QUIC transport parameters",
-        ));
+        return Err(protocol_error("ClientHello is missing QUIC transport parameters"));
     };
 
-    Ok(ClientHello {
-        server_name,
-        transport_parameters,
-        encoded,
-    })
+    Ok(ClientHello { server_name, transport_parameters, encoded })
 }
 
 fn parse_server_name(extension: &[u8]) -> Result<Option<Arc<str>>, TlsError> {
@@ -143,10 +127,8 @@ fn parse_server_name(extension: &[u8]) -> Result<Option<Arc<str>>, TlsError> {
         if server_name.is_some() {
             return Err(protocol_error("duplicate ClientHello host_name"));
         }
-        let name = std::str::from_utf8(name)
-            .map_err(|_| protocol_error("ClientHello host_name is not UTF-8"))?;
-        let name = ServerName::try_from(name.to_owned())
-            .map_err(|_| protocol_error("ClientHello host_name is not a valid DNS name"))?;
+        let name = std::str::from_utf8(name).map_err(|_| protocol_error("ClientHello host_name is not UTF-8"))?;
+        let name = ServerName::try_from(name.to_owned()).map_err(|_| protocol_error("ClientHello host_name is not a valid DNS name"))?;
         let ServerName::DnsName(name) = name else {
             return Err(protocol_error("ClientHello host_name is not a DNS name"));
         };
@@ -171,9 +153,7 @@ impl<'a> Reader<'a> {
 
     fn take(&mut self, len: usize, field: &'static str) -> Result<&'a [u8], TlsError> {
         let Some(end) = self.offset.checked_add(len) else {
-            return Err(protocol_error(format!(
-                "invalid ClientHello {field} length"
-            )));
+            return Err(protocol_error(format!("invalid ClientHello {field} length")));
         };
         let Some(value) = self.bytes.get(self.offset..end) else {
             return Err(protocol_error(format!("truncated ClientHello {field}")));
@@ -215,9 +195,5 @@ fn protocol_error(reason: impl Into<String>) -> TlsError {
 }
 
 fn resource_limit(limit: usize) -> TlsError {
-    PeerTlsError::ResourceLimit {
-        resource: "ClientHello bytes",
-        limit,
-    }
-    .into()
+    PeerTlsError::ResourceLimit { resource: "ClientHello bytes", limit }.into()
 }

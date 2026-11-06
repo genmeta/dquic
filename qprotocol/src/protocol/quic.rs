@@ -42,17 +42,10 @@ impl QuicProtocol {
     }
 
     pub fn new() -> Self {
-        Self {
-            sockets: DashMap::new(),
-            receiver: RwLock::new(Arc::new(|_, _, _| {})),
-        }
+        Self { sockets: DashMap::new(), receiver: RwLock::new(Arc::new(|_, _, _| {})) }
     }
 
-    pub fn register(
-        &self,
-        endpoint: EndpointAddr,
-        socket: &Arc<UdpSocket>,
-    ) -> Result<(), EndpointInUse> {
+    pub fn register(&self, endpoint: EndpointAddr, socket: &Arc<UdpSocket>) -> Result<(), EndpointInUse> {
         match self.sockets.entry(endpoint) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 if entry.get().upgrade().is_some() {
@@ -70,11 +63,7 @@ impl QuicProtocol {
     /// Revoke every endpoint for a local binding and discard expired registrations.
     pub fn unregister(&self, bound: SocketAddr) {
         self.sockets.retain(|_, registered| {
-            registered.upgrade().is_some_and(|socket| {
-                socket
-                    .local_addr()
-                    .is_ok_and(|registered| registered != bound)
-            })
+            registered.upgrade().is_some_and(|socket| socket.local_addr().is_ok_and(|registered| registered != bound))
         });
     }
 
@@ -82,9 +71,7 @@ impl QuicProtocol {
         let registered = self.sockets.get(&endpoint_addr)?.clone();
         let socket = registered.upgrade();
         if socket.is_none() {
-            self.sockets.remove_if(&endpoint_addr, |_, socket| {
-                Weak::ptr_eq(socket, &registered)
-            });
+            self.sockets.remove_if(&endpoint_addr, |_, socket| Weak::ptr_eq(socket, &registered));
         }
         socket
     }
@@ -102,12 +89,7 @@ impl QuicProtocol {
     }
 
     /// Pending submits nothing. A partial success is returned immediately for accounting.
-    pub fn poll_send(
-        &self,
-        cx: &mut Context<'_>,
-        pathway: Pathway,
-        packets: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
+    pub fn poll_send(&self, cx: &mut Context<'_>, pathway: Pathway, packets: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
         if packets.is_empty() {
             return Poll::Ready(Ok(0));
         }
@@ -121,31 +103,21 @@ impl QuicProtocol {
             let mut bytes = BytesMut::zeroed(overhead + packet.len());
             bytes[overhead..].copy_from_slice(packet);
             payloads.push(
-                ForwardPayload::from_raw(&pathway, bytes, overhead)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+                ForwardPayload::from_raw(&pathway, bytes, overhead).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
             );
         }
-        let packets = payloads
-            .iter()
-            .map(|packet| IoSlice::new(packet.as_ref()))
-            .collect::<Vec<_>>();
+        let packets = payloads.iter().map(|packet| IoSlice::new(packet.as_ref())).collect::<Vec<_>>();
         self.poll_send_datagrams(cx, pathway, &packets)
     }
 
     /// Submit complete datagrams, including the Forward header for a mediated Pathway.
-    pub fn poll_send_datagrams(
-        &self,
-        cx: &mut Context<'_>,
-        pathway: Pathway,
-        packets: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
+    pub fn poll_send_datagrams(&self, cx: &mut Context<'_>, pathway: Pathway, packets: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
         if packets.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let packets = &packets[..packets.len().min(Self::MAX_DATAGRAMS)];
-        let socket = self.find_socket(pathway.local()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "local endpoint unavailable")
-        })?;
+        let socket =
+            self.find_socket(pathway.local()).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "local endpoint unavailable"))?;
         let destination = match pathway.remote() {
             EndpointAddr::Direct { addr } => addr,
             EndpointAddr::Mediate { agent, .. } => agent,
@@ -157,9 +129,7 @@ impl QuicProtocol {
 
     /// Bytes added by qprotocol outside the QUIC packet.
     pub fn packet_overhead(pathway: Pathway) -> usize {
-        if matches!(pathway.local(), EndpointAddr::Direct { .. })
-            && matches!(pathway.remote(), EndpointAddr::Direct { .. })
-        {
+        if matches!(pathway.local(), EndpointAddr::Direct { .. }) && matches!(pathway.remote(), EndpointAddr::Direct { .. }) {
             0
         } else {
             2 + pathway.local().encoding_size() + pathway.remote().encoding_size()
@@ -177,10 +147,5 @@ impl QuicProtocol {
 }
 
 fn line(link: Link, segment_size: usize) -> Line {
-    Line::new(
-        link,
-        Line::DEFAULT_TTL,
-        None,
-        segment_size.min(u16::MAX as usize) as u16,
-    )
+    Line::new(link, Line::DEFAULT_TTL, None, segment_size.min(u16::MAX as usize) as u16)
 }

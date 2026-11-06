@@ -39,9 +39,7 @@ impl Encoder {
 
 pub(super) fn decode(mut bytes: BytesMut) -> Vec<Frame<bytes::Bytes>> {
     assert!(bytes.starts_with(PROBE));
-    FrameReader::new(bytes.split_off(PROBE.len()).freeze(), Type::Short(0.into()))
-        .map(|frame| frame.unwrap().0)
-        .collect()
+    FrameReader::new(bytes.split_off(PROBE.len()).freeze(), Type::Short(0.into())).map(|frame| frame.unwrap().0).collect()
 }
 
 impl PunchPacketEncoder for Encoder {
@@ -53,19 +51,9 @@ impl PunchPacketEncoder for Encoder {
         bytes[..PROBE.len()].copy_from_slice(PROBE);
         let mut output = &mut bytes[PROBE.len()..];
         let mut frames = Vec::new();
-        let mut buffer = PacketBuffer::new(
-            &mut output,
-            128 - PROBE.len(),
-            &mut frames,
-            Type::Short(0.into()),
-            0,
-            0,
-        );
+        let mut buffer = PacketBuffer::new(&mut output, 128 - PROBE.len(), &mut frames, Type::Short(0.into()), 0, 0);
         let result = frame.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer);
-        assert!(
-            matches!(result, Poll::Ready(Ok(1))),
-            "encode probe: {result:?}"
-        );
+        assert!(matches!(result, Poll::Ready(Ok(1))), "encode probe: {result:?}");
         let size = buffer.written() + PROBE.len();
         bytes.truncate(size);
         for frame in decode(bytes.clone()) {

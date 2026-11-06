@@ -20,10 +20,7 @@ impl Wake for WakeCounter {
     }
 }
 
-fn poll<T: Unpin>(
-    future: &mut ArcReceiving<T>,
-    waker: &Waker,
-) -> Poll<Result<Option<T>, qbase::Cancelled>> {
+fn poll<T: Unpin>(future: &mut ArcReceiving<T>, waker: &Waker) -> Poll<Result<Option<T>, qbase::Cancelled>> {
     Future::poll(Pin::new(future), &mut Context::from_waker(waker))
 }
 
@@ -37,10 +34,7 @@ fn received_frame_wakes_waiter() {
     receiving.obtain(7);
 
     assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
-    assert!(matches!(
-        poll(&mut receiving, &waker),
-        Poll::Ready(Ok(Some(7)))
-    ));
+    assert!(matches!(poll(&mut receiving, &waker), Poll::Ready(Ok(Some(7)))));
 }
 
 #[test]
@@ -67,10 +61,7 @@ fn duplicate_frame_does_not_discard_first_frame() {
     receiving.obtain(7);
     receiving.obtain(9);
 
-    assert!(matches!(
-        poll(&mut receiving, waker),
-        Poll::Ready(Ok(Some(7)))
-    ));
+    assert!(matches!(poll(&mut receiving, waker), Poll::Ready(Ok(Some(7)))));
 }
 
 #[test]
@@ -87,10 +78,7 @@ fn assignment_wakes_waiter_only_when_guard_is_dropped() {
     drop(guard);
 
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-    assert!(matches!(
-        poll(&mut reader, &waker),
-        Poll::Ready(Ok(Some(7)))
-    ));
+    assert!(matches!(poll(&mut reader, &waker), Poll::Ready(Ok(Some(7)))));
     receiving.set(9);
     assert!(matches!(poll(&mut reader, &waker), Poll::Ready(Ok(None))));
 }
@@ -108,10 +96,7 @@ fn empty_assignment_keeps_waiting() {
 
     receiving.set(7);
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-    assert!(matches!(
-        poll(&mut receiving, &waker),
-        Poll::Ready(Ok(Some(7)))
-    ));
+    assert!(matches!(poll(&mut receiving, &waker), Poll::Ready(Ok(Some(7)))));
 }
 
 #[test]

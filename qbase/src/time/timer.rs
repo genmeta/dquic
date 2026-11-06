@@ -16,9 +16,7 @@ pub struct IdleMetric {
 
 impl IdleMetric {
     pub fn new() -> Self {
-        Self {
-            last_active: IdleSince::new(),
-        }
+        Self { last_active: IdleSince::new() }
     }
 
     pub fn on_sent_at(&mut self, now: Instant) -> bool {
@@ -40,10 +38,7 @@ pub struct IdleTimer {
 
 impl IdleTimer {
     pub fn new(max_idle_timeout: Duration) -> Self {
-        Self {
-            metric: IdleMetric::new(),
-            max_idle_timeout,
-        }
+        Self { metric: IdleMetric::new(), max_idle_timeout }
     }
 
     pub fn update_max_idle_timeout(&mut self, max_idle_timeout: Duration) {
@@ -69,17 +64,11 @@ impl IdleTimer {
     }
 
     fn timeout_after(&self, now: Instant) -> bool {
-        self.max_idle_timeout != Duration::ZERO
-            && self
-                .metric
-                .last_active
-                .timeout_after(now, self.max_idle_timeout)
+        self.max_idle_timeout != Duration::ZERO && self.metric.last_active.timeout_after(now, self.max_idle_timeout)
     }
 
     fn time_to_live(&self, now: Instant) -> Duration {
-        self.metric
-            .last_active
-            .expires_in(now, self.max_idle_timeout)
+        self.metric.last_active.expires_in(now, self.max_idle_timeout)
     }
 }
 

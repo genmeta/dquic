@@ -46,15 +46,12 @@ impl<H> CipherPacket<H> {
 
     fn remove_header_protection(&mut self, key: &qtls::HeaderProtectionKey) -> bool {
         let sample_offset = self.payload_offset.saturating_add(4);
-        if self.payload_offset == 0
-            || sample_offset.saturating_add(key.sample_len()) > self.payload.len()
-        {
+        if self.payload_offset == 0 || sample_offset.saturating_add(key.sample_len()) > self.payload.len() {
             return false;
         }
         let (header, sample) = self.payload.split_at_mut(sample_offset);
         let (prefix, packet_number) = header.split_at_mut(self.payload_offset);
-        key.unprotect(&sample[..key.sample_len()], &mut prefix[0], packet_number)
-            .is_ok()
+        key.unprotect(&sample[..key.sample_len()], &mut prefix[0], packet_number).is_ok()
     }
 }
 
@@ -63,11 +60,7 @@ where
     H: LogPacketHeader,
 {
     pub fn new(header: H, payload: BytesMut, payload_offset: usize) -> Self {
-        Self {
-            header,
-            payload,
-            payload_offset,
-        }
+        Self { header, payload, payload_offset }
     }
 
     pub fn header(&self) -> &H {
@@ -88,14 +81,8 @@ where
 
     fn drop_on_remove_header_protection_failure(self) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.payload.freeze(),
-                trigger: PacketDroppedTrigger::DecryptionFailure
-            },
-            details = Map {
-                reason: "remove header protection failure"
-            }
+            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::DecryptionFailure },
+            details = Map { reason: "remove header protection failure" }
         );
     }
 
@@ -106,38 +93,21 @@ where
                 raw: self.payload.freeze(),
                 trigger: PacketDroppedTrigger::DecryptionFailure
             },
-            details = Map {
-                reason: "decryption failure",
-                error: error.to_string(),
-            },
+            details = Map { reason: "decryption failure", error: error.to_string() },
         )
     }
 
     fn drop_on_reverse_bit_error(self, error: &qbase::packet::error::Error) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.payload.freeze(),
-                trigger: PacketDroppedTrigger::Invalid,
-            },
-            details = Map {
-                reason: "reverse bit error",
-                error: error.to_string()
-            },
+            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::Invalid },
+            details = Map { reason: "reverse bit error", error: error.to_string() },
         )
     }
 
     fn drop_on_invalid_pn(self, invalid_pn: InvalidPacketNumber) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.payload.freeze(),
-                trigger: PacketDroppedTrigger::Invalid,
-            },
-            details = Map {
-                reason: "invalid packet number",
-                invalid_pn: invalid_pn.to_string()
-            },
+            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::Invalid },
+            details = Map { reason: "invalid packet number", invalid_pn: invalid_pn.to_string() },
         )
     }
 
@@ -197,9 +167,7 @@ where
         let first = self.payload[0];
         let specific_bits = ShortSpecificBits::from(first);
         let pn_len = (first & 3) + 1;
-        let Some((_, undecoded_pn)) =
-            take_pn_len(pn_len)(&self.payload[self.payload_offset..]).ok()
-        else {
+        let Some((_, undecoded_pn)) = take_pn_len(pn_len)(&self.payload[self.payload_offset..]).ok() else {
             self.drop_on_remove_header_protection_failure();
             return Ok(None);
         };
@@ -212,8 +180,7 @@ where
         };
         let body_offset = self.payload_offset + undecoded_pn.size();
         let (header, body) = self.payload.split_at_mut(body_offset);
-        let Some(body_length) = decrypt(decoded_pn, specific_bits.key_phase(), header, body)?
-        else {
+        let Some(body_length) = decrypt(decoded_pn, specific_bits.key_phase(), header, body)? else {
             self.drop_on_decryption_failure("packet authentication failed", decoded_pn);
             return Ok(None);
         };
@@ -236,14 +203,8 @@ where
 impl CipherPacket<InitialHeader> {
     pub fn drop_on_scid_unmatch(self) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.payload.freeze(),
-                trigger: PacketDroppedTrigger::Rejected
-            },
-            details = Map {
-                reason: "different scid with first initial packet"
-            },
+            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::Rejected },
+            details = Map { reason: "different scid with first initial packet" },
         )
     }
 }
@@ -274,16 +235,11 @@ impl<H> PlainPacket<H> {
 
     pub fn body(&self) -> Bytes {
         let packet_offset = self.payload_offset + self.undecoded_pn.size();
-        self.plain
-            .slice(packet_offset..packet_offset + self.body_len)
+        self.plain.slice(packet_offset..packet_offset + self.body_len)
     }
 
     pub fn raw_info(&self) -> qevent::RawInfo {
-        qevent::build!(qevent::RawInfo {
-            length: self.plain.len() as u64,
-            payload_length: self.payload_len() as u64,
-            data: &self.plain,
-        })
+        qevent::build!(qevent::RawInfo { length: self.plain.len() as u64, payload_length: self.payload_len() as u64, data: &self.plain })
     }
 }
 
@@ -297,35 +253,19 @@ where
 
     pub fn drop_on_interface_not_found(self) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.raw_info(),
-                trigger: PacketDroppedTrigger::Genera
-            },
-            details = Map {
-                reason: "interface not found"
-            }
+            PacketDropped { header: self.qlog_header(), raw: self.raw_info(), trigger: PacketDroppedTrigger::Genera },
+            details = Map { reason: "interface not found" }
         )
     }
 
     pub fn drop_on_conenction_closed(self) {
         qevent::event!(
-            PacketDropped {
-                header: self.qlog_header(),
-                raw: self.raw_info(),
-                trigger: PacketDroppedTrigger::Genera
-            },
-            details = Map {
-                reason: "connection closed"
-            }
+            PacketDropped { header: self.qlog_header(), raw: self.raw_info(), trigger: PacketDroppedTrigger::Genera },
+            details = Map { reason: "connection closed" }
         )
     }
 
     pub fn log_received(&self, frames: impl Into<Vec<QuicFrame>>) {
-        qevent::event!(PacketReceived {
-            header: self.qlog_header(),
-            frames,
-            raw: self.raw_info(),
-        })
+        qevent::event!(PacketReceived { header: self.qlog_header(), frames, raw: self.raw_info() })
     }
 }

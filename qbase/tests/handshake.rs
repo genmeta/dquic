@@ -43,27 +43,17 @@ fn client_confirmation_wakes_the_latest_waiter_once() {
     let second = Arc::new(WakeCounter::default());
     let first_waker = Waker::from(first.clone());
     let second_waker = Waker::from(second.clone());
-    assert!(
-        Pin::new(&mut handshake)
-            .poll(&mut Context::from_waker(&first_waker))
-            .is_pending()
-    );
+    assert!(Pin::new(&mut handshake).poll(&mut Context::from_waker(&first_waker)).is_pending());
     let mut cx = Context::from_waker(&second_waker);
     assert!(Pin::new(&mut handshake).poll(&mut cx).is_pending());
     assert!(receiver.recv_frame(HandshakeDoneFrame).unwrap());
     assert_eq!(first.0.load(Ordering::Relaxed), 0);
     assert_eq!(second.0.load(Ordering::Relaxed), 1);
     assert!(handshake.is_handshake_done());
-    assert!(matches!(
-        Pin::new(&mut handshake).poll(&mut cx),
-        Poll::Ready(())
-    ));
+    assert!(matches!(Pin::new(&mut handshake).poll(&mut cx), Poll::Ready(())));
     assert!(!receiver.recv_frame(HandshakeDoneFrame).unwrap());
     assert_eq!(second.0.load(Ordering::Relaxed), 1);
-    assert!(matches!(
-        Pin::new(&mut handshake).poll(&mut cx),
-        Poll::Ready(())
-    ));
+    assert!(matches!(Pin::new(&mut handshake).poll(&mut cx), Poll::Ready(())));
 }
 
 #[tokio::test]
@@ -142,14 +132,7 @@ fn test_server_recv_handshake_done_frame() {
     assert!(!handshake.is_handshake_done());
 
     let ret = handshake.recv_frame(HandshakeDoneFrame);
-    assert_eq!(
-        ret,
-        Err(QuicError::with_default_fty(
-            ErrorKind::ProtocolViolation,
-            "Server received a HANDSHAKE_DONE frame",
-        )
-        .into())
-    );
+    assert_eq!(ret, Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "Server received a HANDSHAKE_DONE frame",).into()));
 }
 
 #[test]

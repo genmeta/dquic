@@ -27,15 +27,9 @@ fn expires_in_saturates_at_zero_after_the_deadline() {
     let duration = Duration::from_secs(10);
     let idle = IdleSince::with_instant(start);
     assert_eq!(idle.expires_in(start, duration), duration);
-    assert_eq!(
-        idle.expires_in(start + duration / 2, duration),
-        duration / 2
-    );
+    assert_eq!(idle.expires_in(start + duration / 2, duration), duration / 2);
     assert_eq!(idle.expires_in(start + duration, duration), Duration::ZERO);
-    assert_eq!(
-        idle.expires_in(start + duration * 2, duration),
-        Duration::ZERO
-    );
+    assert_eq!(idle.expires_in(start + duration * 2, duration), Duration::ZERO);
 }
 
 #[test]
@@ -43,10 +37,7 @@ fn expires_in_handles_unrepresentable_deadlines() {
     let start = Instant::now();
     let idle = IdleSince::with_instant(start);
     assert_eq!(idle.expires_in(start, Duration::MAX), Duration::MAX);
-    assert_eq!(
-        idle.expires_in(start + Duration::from_secs(1), Duration::MAX),
-        Duration::MAX - Duration::from_secs(1)
-    );
+    assert_eq!(idle.expires_in(start + Duration::from_secs(1), Duration::MAX), Duration::MAX - Duration::from_secs(1));
 }
 
 #[tokio::test(start_paused = true)]
@@ -159,15 +150,9 @@ async fn shared_activity_distinguishes_updates_expiry_and_cancellation() {
     let start = Instant::now();
     assert!(matches!(timer.on_sent_at(start), Ok(Ok(true))));
     assert!(matches!(timer.on_sent_at(start), Ok(Ok(false))));
-    assert!(matches!(
-        timer.on_rcvd_at(start + Duration::from_secs(10)),
-        Ok(Err(Timeout))
-    ));
+    assert!(matches!(timer.on_rcvd_at(start + Duration::from_secs(10)), Ok(Err(Timeout))));
     timer.cancel();
-    assert!(matches!(
-        timer.on_rcvd_at(start + Duration::from_secs(11)),
-        Err(Cancelled)
-    ));
+    assert!(matches!(timer.on_rcvd_at(start + Duration::from_secs(11)), Err(Cancelled)));
 }
 
 #[tokio::test]
@@ -216,10 +201,7 @@ async fn activity_cannot_revive_an_expired_timer_without_waiting() {
             assert!(matches!(update(&timer, now()), Ok(Err(Timeout))));
             let waiter = timer.timeout();
             tokio::pin!(waiter);
-            assert!(matches!(
-                futures::poll!(&mut waiter),
-                std::task::Poll::Ready(Ok(Timeout))
-            ));
+            assert!(matches!(futures::poll!(&mut waiter), std::task::Poll::Ready(Ok(Timeout))));
         }
     }
 }

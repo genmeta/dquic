@@ -60,12 +60,7 @@ impl<K> AsRef<Space<K>> for Space<K> {
 
 impl<K> Space<K> {
     /// Create a packet-number space with ready keys.
-    pub fn new(
-        epoch: Epoch,
-        initial_scid: ConnectionId,
-        keys: K,
-        facts: Arc<HandshakeFacts>,
-    ) -> Self {
+    pub fn new(epoch: Epoch, initial_scid: ConnectionId, keys: K, facts: Arc<HandshakeFacts>) -> Self {
         Self {
             initial_scid,
             epoch,
@@ -78,21 +73,12 @@ impl<K> Space<K> {
 
     /// Reserve a packet number before assembly.
     pub fn next_pn(&self) -> (u64, PacketNumber) {
-        self.sent_journal
-            .next_pn()
-            .expect("packet number space is impossible to be exhausted")
+        self.sent_journal.next_pn().expect("packet number space is impossible to be exhausted")
     }
 
     /// Start recovery timers after successful submission, under the path's CC lock.
-    pub fn on_sent(
-        &self,
-        pn: u64,
-        in_flight: bool,
-        retransmit_after: Duration,
-        retention: Duration,
-    ) {
-        self.sent_journal
-            .on_sent(pn, in_flight, retransmit_after, retention);
+    pub fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        self.sent_journal.on_sent(pn, in_flight, retransmit_after, retention);
     }
 
     /// Release acknowledged CRYPTO data and report whether any bytes were acknowledged.
@@ -260,8 +246,7 @@ pub trait Transmit: Allocate + Recover + UnregisterWaker + Any + Send + Sync {
         meta: Metadata,
         frames: &mut dyn Iterator<Item = GuaranteedFrame>,
     ) {
-        self.sent_journal()
-            .on_sealed(pn, generation, pktlen, meta, frames);
+        self.sent_journal().on_sealed(pn, generation, pktlen, meta, frames);
     }
 }
 
@@ -287,8 +272,7 @@ where
     }
 
     fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
-        self.deref()
-            .on_sent(pn, in_flight, retransmit_after, retention)
+        self.deref().on_sent(pn, in_flight, retransmit_after, retention)
     }
 }
 
@@ -312,13 +296,11 @@ pub trait Encapsulate: Transmit {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
         }
-        let quota = cc
-            .send_quota()
-            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
-                1200
-            } else {
-                0
-            });
+        let quota = cc.send_quota().max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
+            1200
+        } else {
+            0
+        });
         if self.epoch() == Epoch::Initial && (datagram.get_ref().len() < 1200 || quota < 1200) {
             return Poll::Ready((None, 0));
         }
@@ -328,10 +310,8 @@ pub trait Encapsulate: Transmit {
         let start = frames.len();
         let offset = datagram.position() as usize;
         let mut crypto = self.crypto().outgoing();
-        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
-            .iter_mut()
-            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
-            .collect();
+        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
+            external.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
         sources.push(&mut crypto);
         let result = packet.assemble(cx, datagram, quota, packet_content, frames, &mut sources);
         drop(sources);

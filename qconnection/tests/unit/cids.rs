@@ -54,15 +54,8 @@ async fn first_initial_wakes_only_the_selected_paths_cid_waiter() {
     let other_counter = Arc::new(Counter::default());
     let selected_waker = Waker::from(selected_counter.clone());
     selected.send_waker.register(&selected_waker);
-    other
-        .send_waker
-        .register(&Waker::from(other_counter.clone()));
-    assert!(
-        selected
-            .dcid
-            .poll_borrow(&mut Context::from_waker(&selected_waker))
-            .is_pending()
-    );
+    other.send_waker.register(&Waker::from(other_counter.clone()));
+    assert!(selected.dcid.poll_borrow(&mut Context::from_waker(&selected_waker)).is_pending());
     let peer = ConnectionId::from_slice(b"peer0000");
     assert!(!paths.progress.facts().has_received_initial());
     assert!(paths.progress.on_initial_received(peer));
@@ -70,11 +63,7 @@ async fn first_initial_wakes_only_the_selected_paths_cid_waiter() {
     assert_eq!(selected_counter.0.load(Ordering::Relaxed), 1);
     assert_eq!(other_counter.0.load(Ordering::Relaxed), 0);
     assert_eq!(ready(&selected), peer);
-    assert!(
-        !paths
-            .progress
-            .on_initial_received(ConnectionId::from_slice(b"ignored0"))
-    );
+    assert!(!paths.progress.on_initial_received(ConnectionId::from_slice(b"ignored0")));
     assert_eq!(selected_counter.0.load(Ordering::Relaxed), 1);
     assert_eq!(other_counter.0.load(Ordering::Relaxed), 0);
     assert_eq!(ready(&selected), peer);
@@ -98,11 +87,7 @@ async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
         a.send_waker.register(&waker);
         assert!(paths.progress.on_initial_received(peer));
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        assert!(
-            !paths
-                .progress
-                .on_initial_received(ConnectionId::from_slice(b"ignored0"))
-        );
+        assert!(!paths.progress.on_initial_received(ConnectionId::from_slice(b"ignored0")));
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         assert_ne!(original, peer);
         assert_eq!(ready(&a), peer);
@@ -113,8 +98,7 @@ async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do_not_open_handshaking_paths()
- {
+async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do_not_open_handshaking_paths() {
     for data_first in [false, true] {
         let (paths, mature) = negotiated(Role::Server);
         let initial = mature.peer_cid();
@@ -123,9 +107,7 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
         let other = path(&paths, 4001);
         let selected = path(&paths, 4002);
         let remote = &paths.cid_registry.remote;
-        remote
-            .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-            .unwrap();
+        remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
         if data_first {
             super::install_data(&paths, &mature);
         }
@@ -137,12 +119,7 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
         // Only the selected path is bound before confirmation, even when CID 1 is available.
         assert!(selected.dcid.is_allocated());
         assert!(!other.dcid.is_allocated());
-        assert_eq!(
-            other
-                .dcid
-                .poll_borrow(&mut Context::from_waker(Waker::noop())),
-            Poll::Ready(Some(initial))
-        );
+        assert_eq!(other.dcid.poll_borrow(&mut Context::from_waker(Waker::noop())), Poll::Ready(Some(initial)));
         other.dcid.refresh();
         assert!(super::borrow(&other).is_pending());
         super::confirm_handshake(&paths);
@@ -152,9 +129,7 @@ async fn selected_path_keeps_cell_zero_in_either_install_order_and_extra_cids_do
         let later = path(&paths, 4003);
         assert!(super::borrow(&later).is_pending());
         let last = ConnectionId::from_slice(b"peer0002");
-        remote
-            .recv_frame(NewConnectionIdFrame::new(last, 2u32.into(), 0u32.into()))
-            .unwrap();
+        remote.recv_frame(NewConnectionIdFrame::new(last, 2u32.into(), 0u32.into())).unwrap();
         assert_eq!(ready(&later), last);
         paths.retire_all();
     }
@@ -167,9 +142,7 @@ async fn concurrent_selection_data_installation_and_path_creation_preserve_cell_
     let initial = mature.peer_cid();
     let next = ConnectionId::from_slice(b"peer0001");
     let remote = &paths.cid_registry.remote;
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let selection = tokio::spawn({
         let paths = paths.clone();
@@ -234,9 +207,7 @@ async fn removal_before_data_installation_still_reserves_zero_for_the_old_handsh
     let remote = &paths.cid_registry.remote;
     super::install_data(&paths, &mature);
     let next = ConnectionId::from_slice(b"peer0001");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     super::confirm_handshake(&paths);
     assert_eq!(ready(&other), next);
     paths.del_path(&other.pathway);
@@ -256,13 +227,9 @@ async fn the_handshake_cell_rotates_before_confirmation_after_refresh() {
     paths.progress.on_path_selected(&paths, &selected);
     let remote = &paths.cid_registry.remote;
     assert!(!paths.progress.facts().has_handshake_key());
-    let pinned = selected
-        .dcid
-        .poll_borrow(&mut Context::from_waker(Waker::noop()));
+    let pinned = selected.dcid.poll_borrow(&mut Context::from_waker(Waker::noop()));
     let next = ConnectionId::from_slice(b"peer0001");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into())).unwrap();
     assert_eq!(pinned, Poll::Ready(Some(initial)));
     selected.dcid.refresh();
     assert_eq!(ready(&selected), next);
@@ -299,24 +266,14 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     super::confirm_handshake(&paths);
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     assert!(other.dcid.poll_borrow(&mut cx).is_pending());
-    remote
-        .recv_frame(NewConnectionIdFrame::new(
-            ConnectionId::from_slice(b"peer0001"),
-            1u32.into(),
-            0u32.into(),
-        ))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(ConnectionId::from_slice(b"peer0001"), 1u32.into(), 0u32.into())).unwrap();
     assert_eq!(counter.0.load(Ordering::Relaxed), 2);
     let last = path(&paths, 4003);
     last.send_waker.register(cx.waker());
     assert!(last.dcid.poll_borrow(&mut cx).is_pending());
     last.close();
     assert!(counter.0.load(Ordering::Relaxed) >= 3);
-    assert_eq!(
-        last.dcid
-            .poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(None)
-    );
+    assert_eq!(last.dcid.poll_borrow(&mut Context::from_waker(Waker::noop())), Poll::Ready(None));
     assert_eq!(ready(&selected), mature.peer_cid());
     paths.retire_all();
 }
@@ -349,14 +306,7 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
         selected.validation.enter_validated().unwrap();
         take_retired(&mature);
         if finish != "pending" {
-            mature
-                .spaces
-                .data
-                .crypto
-                .writer()
-                .write_all(b"batch snapshot")
-                .await
-                .unwrap();
+            mature.spaces.data.crypto.writer().write_all(b"batch snapshot").await.unwrap();
         }
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
@@ -371,18 +321,11 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
             assert_eq!(burst.dcid, Some(mature.peer_cid()));
         }
         let next = ConnectionId::from_slice(b"client01");
-        paths
-            .cid_registry
-            .remote
-            .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
-            .unwrap();
+        paths.cid_registry.remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into())).unwrap();
         if finish == "pending" {
             assert_eq!(take_retired(&mature), [0]);
         } else {
-            assert!(
-                take_retired(&mature).is_empty(),
-                "a sealed batch still uses CID 0"
-            );
+            assert!(take_retired(&mature).is_empty(), "a sealed batch still uses CID 0");
         }
         if finish == "cancel" {
             burst.cancel();
@@ -419,11 +362,7 @@ async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_send
     assert!(close.notified().is_none());
     assert!(paths.entries.lock().unwrap().contains_key(&live.pathway));
     let next = ConnectionId::from_slice(b"client01");
-    paths
-        .cid_registry
-        .remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
+    paths.cid_registry.remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     assert_eq!(ready(&live), next);
     assert_eq!(super::borrow(&removed), Poll::Ready(None));
     paths.retire_all();

@@ -65,12 +65,7 @@ pub mod io {
             let (remain, version) = be_u32(input)?;
             match version {
                 0 => Ok((remain, Type::VersionNegotiation)),
-                1 => Ok((
-                    remain,
-                    Type::V1(Version::<1, v1::Type>(
-                        ty.try_into().map_err(nom::Err::Error)?,
-                    )),
-                )),
+                1 => Ok((remain, Type::V1(Version::<1, v1::Type>(ty.try_into().map_err(nom::Err::Error)?)))),
                 v => Err(nom::Err::Error(Error::UnsupportedVersion(v))),
             }
         }

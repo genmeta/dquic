@@ -29,29 +29,15 @@ pub struct AddAddressFrame {
     nat_type: NatType,
 }
 
-pub(crate) fn be_add_address_frame(
-    family: Family,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], AddAddressFrame> {
+pub(crate) fn be_add_address_frame(family: Family) -> impl Fn(&[u8]) -> nom::IResult<&[u8], AddAddressFrame> {
     move |input| {
         let (remain, seq_num) = be_varint(input)?;
         let (remain, addr) = be_socket_addr(remain, family)?;
         let (remain, tire) = be_varint(remain)?;
         let (remain, nat_type) = be_varint(remain)?;
-        let nat_type = NatType::try_from(nat_type).map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(
-                remain,
-                nom::error::ErrorKind::Verify,
-            ))
-        })?;
-        Ok((
-            remain,
-            AddAddressFrame {
-                seq_num,
-                address: addr,
-                tire,
-                nat_type,
-            },
-        ))
+        let nat_type =
+            NatType::try_from(nat_type).map_err(|_| nom::Err::Error(nom::error::Error::new(remain, nom::error::ErrorKind::Verify)))?;
+        Ok((remain, AddAddressFrame { seq_num, address: addr, tire, nat_type }))
     }
 }
 
@@ -86,12 +72,7 @@ impl EncodeSize for AddAddressFrame {
 
 impl AddAddressFrame {
     pub fn new(seq_num: u32, address: SocketAddr, tire: u32, nat_type: NatType) -> Self {
-        Self {
-            seq_num: VarInt::from_u32(seq_num),
-            address,
-            tire: VarInt::from_u32(tire),
-            nat_type,
-        }
+        Self { seq_num: VarInt::from_u32(seq_num), address, tire: VarInt::from_u32(tire), nat_type }
     }
 
     pub fn seq_num(&self) -> u32 {

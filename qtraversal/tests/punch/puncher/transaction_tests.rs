@@ -7,10 +7,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    frame::{
-        AddAddressFrame, Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame,
-        io::SendFrame,
-    },
+    frame::{AddAddressFrame, Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame, io::SendFrame},
     net::{
         NatType,
         route::{Line, Link, Pathway},
@@ -53,10 +50,7 @@ impl Binding {
                 }
                 let bytes = packets[0].split_to(lines[0].seg_size as usize);
                 packets[0].resize(128, 0);
-                if decode(bytes)
-                    .into_iter()
-                    .any(|frame| matches!(frame, Frame::PunchHello(hello) if hello == expected))
-                {
+                if decode(bytes).into_iter().any(|frame| matches!(frame, Frame::PunchHello(hello) if hello == expected)) {
                     return lines[0].link.src;
                 }
             }
@@ -83,13 +77,8 @@ impl SendFrame<ReliableFrame> for Frames {
     }
 }
 
-async fn next_now(
-    frames: &mut mpsc::UnboundedReceiver<(ReliableFrame, Option<Id>)>,
-) -> (PunchMeNowFrame, Id) {
-    let (frame, task) = tokio::time::timeout(Duration::from_secs(2), frames.recv())
-        .await
-        .unwrap()
-        .unwrap();
+async fn next_now(frames: &mut mpsc::UnboundedReceiver<(ReliableFrame, Option<Id>)>) -> (PunchMeNowFrame, Id) {
+    let (frame, task) = tokio::time::timeout(Duration::from_secs(2), frames.recv()).await.unwrap().unwrap();
     let ReliableFrame::PunchMeNow(frame) = frame else {
         panic!("both active strategies must send NOW first");
     };
@@ -98,19 +87,14 @@ async fn next_now(
 
 #[tokio::test]
 async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer()
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).with_test_writer().try_init();
     for (low_nat, high_nat) in [
         (NatType::RestrictedPort, NatType::RestrictedPort),
         (NatType::RestrictedPort, NatType::Symmetric),
         (NatType::Symmetric, NatType::RestrictedPort),
     ] {
         for deliver_to_larger_first in [false, true] {
-            println!(
-                "arbitration {low_nat:?}/{high_nat:?}, larger first: {deliver_to_larger_first}"
-            );
+            println!("arbitration {low_nat:?}/{high_nat:?}, larger first: {deliver_to_larger_first}");
             let first = Binding::new();
             let second = Binding::new();
             let (low_socket, high_socket) = if first.bound() < second.bound() {
@@ -128,12 +112,10 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
             for (puncher, bound, nat) in [(&low, lower, low_nat), (&high, higher, high_nat)] {
                 puncher.on_local_added(bound, bound.into(), bound, 0, nat);
             }
-            let ReliableFrame::AddAddress(low_address) = low_received.recv().await.unwrap().0
-            else {
+            let ReliableFrame::AddAddress(low_address) = low_received.recv().await.unwrap().0 else {
                 panic!("expected ADD_ADDRESS");
             };
-            let ReliableFrame::AddAddress(high_address) = high_received.recv().await.unwrap().0
-            else {
+            let ReliableFrame::AddAddress(high_address) = high_received.recv().await.unwrap().0 else {
                 panic!("expected ADD_ADDRESS");
             };
             low.recv_add_address(high_address);
@@ -141,8 +123,7 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
 
             // Observe the calling task at the public SendFrame / encoder boundaries.
             // The smaller peer must switch owners; the larger must keep its owner.
-            let ((low_now, low_active), (high_now, high_active)) =
-                tokio::join!(next_now(&mut low_received), next_now(&mut high_received),);
+            let ((low_now, low_active), (high_now, high_active)) = tokio::join!(next_now(&mut low_received), next_now(&mut high_received),);
             let low_path = Pathway::new(lower.into(), higher.into());
             let high_path = low_path.flip();
             if deliver_to_larger_first {
@@ -154,32 +135,10 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
             }
 
             for (puncher, encoder, frames, peer_socket, path, link, active, replaced, nat) in [
-                (
-                    &low,
-                    &low_encoder,
-                    &mut low_received,
-                    high_socket,
-                    low_path,
-                    Link::new(lower, higher),
-                    low_active,
-                    true,
-                    low_nat,
-                ),
-                (
-                    &high,
-                    &high_encoder,
-                    &mut high_received,
-                    low_socket,
-                    high_path,
-                    Link::new(higher, lower),
-                    high_active,
-                    false,
-                    high_nat,
-                ),
+                (&low, &low_encoder, &mut low_received, high_socket, low_path, Link::new(lower, higher), low_active, true, low_nat),
+                (&high, &high_encoder, &mut high_received, low_socket, high_path, Link::new(higher, lower), high_active, false, high_nat),
             ] {
-                let hello = encoder
-                    .wait_for_hello(|task| (task != active) == replaced)
-                    .await;
+                let hello = encoder.wait_for_hello(|task| (task != active) == replaced).await;
                 let temporary = if nat == NatType::Symmetric {
                     let source = peer_socket.receive_hello(hello).await;
                     assert_ne!(source, link.src);
@@ -207,21 +166,11 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 puncher.abort_transactions();
                 let before = encoder.hellos().len();
-                puncher.recv_punch_me_now(
-                    path,
-                    PunchMeNowFrame::new(0, 0, link.dst, 0, NatType::FullCone),
-                );
+                puncher.recv_punch_me_now(path, PunchMeNowFrame::new(0, 0, link.dst, 0, NatType::FullCone));
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                assert_eq!(
-                    encoder.hellos().len(),
-                    before,
-                    "completed pair must not restart"
-                );
+                assert_eq!(encoder.hellos().len(), before, "completed pair must not restart");
                 if let Some(source) = temporary {
-                    assert!(
-                        Dock::global().find_socket(source).is_some(),
-                        "winning socket is retained after completion"
-                    );
+                    assert!(Dock::global().find_socket(source).is_some(), "winning socket is retained after completion");
                 }
                 puncher.release_temporary_sockets();
                 if let Some(source) = temporary {
@@ -269,25 +218,14 @@ async fn stale_active_completion_preserves_passive_transaction_and_done_delivery
     let (sender, mut received) = mpsc::unbounded_channel();
     let on_done = DoneCallback::default();
     let encoder = Encoder::default();
-    let puncher = ArcPuncher::new(
-        CallbackFrames {
-            frames: Frames(sender),
-            on_done: on_done.clone(),
-        },
-        encoder.clone(),
-    );
+    let puncher = ArcPuncher::new(CallbackFrames { frames: Frames(sender), on_done: on_done.clone() }, encoder.clone());
     puncher.on_local_added(local, local.into(), local, 0, NatType::FullCone);
     let ReliableFrame::AddAddress(address) = received.recv().await.unwrap().0 else {
         panic!("expected ADD_ADDRESS");
     };
     let local_seq = address.seq_num();
     let remote_seq = 7;
-    puncher.recv_add_address(AddAddressFrame::new(
-        remote_seq,
-        remote,
-        0,
-        NatType::RestrictedPort,
-    ));
+    puncher.recv_add_address(AddAddressFrame::new(remote_seq, remote, 0, NatType::RestrictedPort));
     let (_, active) = next_now(&mut received).await;
     encoder.wait_for_hello(|task| task == active).await;
 
@@ -301,13 +239,8 @@ async fn stale_active_completion_preserves_passive_transaction_and_done_delivery
     // abort cannot interrupt the old task's remaining synchronous cleanup.
     let hello = PunchHelloFrame::new(remote_seq, local_seq, 19);
     puncher.recv_punch_hello(path, link, hello);
-    let (frame, owner) = tokio::time::timeout(Duration::from_secs(2), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&hello))
-    );
+    let (frame, owner) = tokio::time::timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+    assert!(matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&hello)));
     assert_eq!(owner, Some(active));
     assert!(on_done.lock().unwrap().is_none());
 
@@ -315,28 +248,16 @@ async fn stale_active_completion_preserves_passive_transaction_and_done_delivery
     puncher.recv_punch_done(link, PunchDoneFrame::respond_to(&passive_hello));
     let sent = encoder.hellos().len();
     tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(
-        encoder.hellos().len(),
-        sent,
-        "DONE must reach the passive owner and stop its retries"
-    );
+    assert_eq!(encoder.hellos().len(), sent, "DONE must reach the passive owner and stop its retries");
 
     // Completion retires the selected owner and suppresses another request.
     puncher.recv_punch_me_now(path, replacement);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        encoder.hellos().len(),
-        sent,
-        "completed replacement must not restart"
-    );
+    assert_eq!(encoder.hellos().len(), sent, "completed replacement must not restart");
     let late_hello = PunchHelloFrame::new(remote_seq, local_seq, 23);
     puncher.recv_punch_hello(path, link, late_hello);
-    let (frame, owner) = received
-        .try_recv()
-        .expect("completed pair answers HELLO immediately");
-    assert!(
-        matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&late_hello))
-    );
+    let (frame, owner) = received.try_recv().expect("completed pair answers HELLO immediately");
+    assert!(matches!(frame, ReliableFrame::PunchDone(done) if done == PunchDoneFrame::respond_to(&late_hello)));
     assert_eq!(owner, tokio::task::try_id());
     puncher.abort_transactions();
 }

@@ -54,10 +54,7 @@ impl Network {
     fn binding(&self, server: usize, mapped: SocketAddr) -> Step {
         Step {
             source: self.servers[server],
-            response: Some(Response::with(vec![
-                Attr::MappedAddress(mapped),
-                Attr::ChangedAddress(self.servers[(server + 1) % 3]),
-            ])),
+            response: Some(Response::with(vec![Attr::MappedAddress(mapped), Attr::ChangedAddress(self.servers[(server + 1) % 3])])),
             attempts: 1,
         }
     }
@@ -66,19 +63,9 @@ impl Network {
         let source = if change_ip {
             self.servers[(server + 1) % 3]
         } else {
-            SocketAddr::new(
-                self.servers[server].ip(),
-                self.servers[(server + 1) % 3].port(),
-            )
+            SocketAddr::new(self.servers[server].ip(), self.servers[(server + 1) % 3].port())
         };
-        Step {
-            source,
-            response: Some(Response::with(vec![
-                Attr::MappedAddress(mapped),
-                Attr::SourceAddress(source),
-            ])),
-            attempts: 1,
-        }
+        Step { source, response: Some(Response::with(vec![Attr::MappedAddress(mapped), Attr::SourceAddress(source)])), attempts: 1 }
     }
 
     async fn run<T: std::fmt::Debug>(&self, task: impl Future<Output = T>, steps: Vec<Step>) -> T {
@@ -90,10 +77,7 @@ impl Network {
             for _ in 0..step.attempts {
                 poll_fn(|cx| {
                     let state = detection.as_mut().poll(cx);
-                    assert!(
-                        state.is_pending(),
-                        "unexpected detection completion: {state:?}"
-                    );
+                    assert!(state.is_pending(), "unexpected detection completion: {state:?}");
                     Poll::Ready(())
                 })
                 .await;
@@ -107,12 +91,7 @@ impl Network {
                 }
                 if let Some(response) = &step.response {
                     self.protocol
-                        .on_datagram(
-                            &self.client,
-                            id,
-                            Message::Response(response.clone()),
-                            Link::new(self.local, step.source),
-                        )
+                        .on_datagram(&self.client, id, Message::Response(response.clone()), Link::new(self.local, step.source))
                         .await
                         .unwrap();
                 } else {
@@ -132,11 +111,7 @@ impl Network {
 
 #[tokio::test(start_paused = true)]
 async fn detects_cone_types_and_probes_third_server_last() {
-    for nat in [
-        NatType::FullCone,
-        NatType::RestrictedCone,
-        NatType::RestrictedPort,
-    ] {
+    for nat in [NatType::FullCone, NatType::RestrictedCone, NatType::RestrictedPort] {
         let network = Network::new();
         let ip_filter = network.filter(1, true, network.outer);
         let port_filter = network.filter(1, false, network.outer);
@@ -155,40 +130,15 @@ async fn detects_cone_types_and_probes_third_server_last() {
             },
             network.binding(2, network.outer),
         ];
-        assert_eq!(
-            network
-                .run(
-                    network
-                        .protocol
-                        .detect_nat(network.local, network.servers[0]),
-                    steps
-                )
-                .await
-                .unwrap(),
-            nat
-        );
+        assert_eq!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), steps).await.unwrap(), nat);
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn symmetric_nat_needs_only_two_mapping_probes() {
     let network = Network::new();
-    let steps = vec![
-        network.binding(0, network.outer),
-        network.binding(1, "203.0.113.1:40001".parse().unwrap()),
-    ];
-    assert_eq!(
-        network
-            .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                steps
-            )
-            .await
-            .unwrap(),
-        NatType::Symmetric
-    );
+    let steps = vec![network.binding(0, network.outer), network.binding(1, "203.0.113.1:40001".parse().unwrap())];
+    assert_eq!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), steps).await.unwrap(), NatType::Symmetric);
 }
 
 #[tokio::test(start_paused = true)]
@@ -199,30 +149,15 @@ async fn detects_dynamic_mapping_and_unanswered_third_probe() {
         let steps = vec![
             network.binding(0, network.outer),
             network.binding(1, network.outer),
-            network
-                .filter(1, true, network.outer)
-                .unanswered(FILTER_ATTEMPTS),
-            network
-                .filter(1, false, network.outer)
-                .unanswered(FILTER_ATTEMPTS),
+            network.filter(1, true, network.outer).unanswered(FILTER_ATTEMPTS),
+            network.filter(1, false, network.outer).unanswered(FILTER_ATTEMPTS),
             if unanswered {
                 last.unanswered(PROBE_ATTEMPTS)
             } else {
                 last
             },
         ];
-        assert_eq!(
-            network
-                .run(
-                    network
-                        .protocol
-                        .detect_nat(network.local, network.servers[0]),
-                    steps
-                )
-                .await
-                .unwrap(),
-            NatType::Dynamic
-        );
+        assert_eq!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), steps).await.unwrap(), NatType::Dynamic);
     }
 }
 
@@ -230,18 +165,10 @@ async fn detects_dynamic_mapping_and_unanswered_third_probe() {
 async fn invalid_third_server_topology_is_an_error() {
     let network = Network::new();
     let mut second = network.binding(1, network.outer);
-    second.response = Some(Response::with(vec![
-        Attr::MappedAddress(network.outer),
-        Attr::ChangedAddress(network.servers[0]),
-    ]));
+    second.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(network.servers[0])]));
     assert!(
         network
-            .run(
-                network
-                    .protocol
-                    .detect_nat(network.local, network.servers[0]),
-                vec![network.binding(0, network.outer), second]
-            )
+            .run(network.protocol.detect_nat(network.local, network.servers[0]), vec![network.binding(0, network.outer), second])
             .await
             .is_err()
     );
@@ -250,26 +177,8 @@ async fn invalid_third_server_topology_is_an_error() {
 #[tokio::test(start_paused = true)]
 async fn cancelling_detection_removes_the_pending_transaction() {
     let network = Network::new();
-    assert!(
-        timeout(
-            Duration::from_millis(20),
-            network
-                .protocol
-                .detect_nat(network.local, network.servers[0])
-        )
-        .await
-        .is_err()
-    );
+    assert!(timeout(Duration::from_millis(20), network.protocol.detect_nat(network.local, network.servers[0])).await.is_err());
     assert!(network.protocol.transactions.is_empty());
-    assert!(
-        timeout(
-            Duration::from_millis(20),
-            network
-                .protocol
-                .detect_outer(network.local, network.servers[0])
-        )
-        .await
-        .is_err()
-    );
+    assert!(timeout(Duration::from_millis(20), network.protocol.detect_outer(network.local, network.servers[0])).await.is_err());
     assert!(network.protocol.transactions.is_empty());
 }

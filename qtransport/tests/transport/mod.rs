@@ -18,10 +18,7 @@ use qbase::{
         addr::EndpointAddr,
         route::{Link, Pathway},
     },
-    packet::{
-        DataHeader, DataPacket, OneRttHeader, Packet, PacketContent, PacketNumber, PacketReader,
-        assemble::Package,
-    },
+    packet::{DataHeader, DataPacket, OneRttHeader, Packet, PacketContent, PacketNumber, PacketReader, assemble::Package},
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
     time::heartbeat::ArcHeartbeat,
@@ -52,9 +49,7 @@ impl Transport {
     }
 }
 
-pub(crate) fn take_frames(
-    source: &mut impl for<'b> qbase::packet::Package<bytes::buf::Limit<&'b mut BytesMut>>,
-) -> Vec<Frame> {
+pub(crate) fn take_frames(source: &mut impl for<'b> qbase::packet::Package<bytes::buf::Limit<&'b mut BytesMut>>) -> Vec<Frame> {
     use qbase::packet::{GetType, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();
@@ -71,10 +66,7 @@ pub(crate) fn take_frames(
 }
 
 fn packet_way() -> (Pathway, Link) {
-    let link = Link::new(
-        "127.0.0.1:4433".parse().unwrap(),
-        "127.0.0.1:9000".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:4433".parse().unwrap(), "127.0.0.1:9000".parse().unwrap());
     (link.into(), link)
 }
 
@@ -142,13 +134,8 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
         for i in 0..2 {
             while let Some(event) = peers[i].next_event() {
                 match event {
-                    qtls::TlsEvent::WriteCrypto {
-                        epoch: level,
-                        bytes,
-                    } => peers[1 - i].receive_crypto(level, &bytes).unwrap(),
-                    qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(key)) => {
-                        keys[i] = Some(key)
-                    }
+                    qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => peers[1 - i].receive_crypto(level, &bytes).unwrap(),
+                    qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(key)) => keys[i] = Some(key),
                     qtls::TlsEvent::HandshakeComplete(summary) => summaries[i] = Some(summary),
                     _ => {}
                 }
@@ -164,26 +151,13 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
 fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Transport> {
     let mut client = ClientParameters::default();
     let mut server = ServerParameters::default();
-    client
-        .set(ParameterId::InitialMaxStreamsBidi, limits)
-        .unwrap();
-    client
-        .set(ParameterId::InitialMaxStreamsUni, limits)
-        .unwrap();
-    server
-        .set(ParameterId::InitialMaxStreamsBidi, limits)
-        .unwrap();
-    server
-        .set(ParameterId::InitialMaxStreamsUni, limits)
-        .unwrap();
+    client.set(ParameterId::InitialMaxStreamsBidi, limits).unwrap();
+    client.set(ParameterId::InitialMaxStreamsUni, limits).unwrap();
+    server.set(ParameterId::InitialMaxStreamsBidi, limits).unwrap();
+    server.set(ParameterId::InitialMaxStreamsUni, limits).unwrap();
     let params = ArcParameters::new(role, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = DataStreams::new(
-        params.clone(),
-        Box::new(DemandConcurrency),
-        reliable.clone(),
-        Default::default(),
-    );
+    let streams = DataStreams::new(params.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
     let data = Arc::new(DataSpace::new(
         Default::default(),
         ArcOneRttKeys::from(keys),
@@ -194,35 +168,25 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         confirmed_handshake(role),
     ));
     data.keys.allow_update();
-    Arc::new(Transport {
-        data,
-        parameters: params,
-    })
+    Arc::new(Transport { data, parameters: params })
 }
 pub(crate) fn pair(limits: u32) -> [(ArcConnection, Arc<Transport>, Arc<Path>); 2] {
     let (keys, summaries) = handshake();
     let [client, server] = keys;
-    [
-        transport(Role::Client, client, limits),
-        transport(Role::Server, server, limits),
-    ]
-    .into_iter()
-    .zip(summaries)
-    .map(|(transport, summary)| {
-        let path = path(&transport, 0);
-        let terminator = qtransport::terminate::ArcTerminator::no_error();
-        terminator.register(Arc::new(transport.data.streams.clone()));
-        let conn = ArcConnection::new(
-            summary.alpn.unwrap(),
-            transport.data.streams.clone(),
-            terminator,
-        );
-        (conn, transport, path)
-    })
-    .collect::<Vec<_>>()
-    .try_into()
-    .ok()
-    .unwrap()
+    [transport(Role::Client, client, limits), transport(Role::Server, server, limits)]
+        .into_iter()
+        .zip(summaries)
+        .map(|(transport, summary)| {
+            let path = path(&transport, 0);
+            let terminator = qtransport::terminate::ArcTerminator::no_error();
+            terminator.register(Arc::new(transport.data.streams.clone()));
+            let conn = ArcConnection::new(summary.alpn.unwrap(), transport.data.streams.clone(), terminator);
+            (conn, transport, path)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()
+        .unwrap()
 }
 pub(crate) fn keys(transport: &Transport) -> ArcOneRttKeys {
     transport.data.keys.clone()
@@ -241,20 +205,13 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
     } else {
         (5500 + index, 4400 + index)
     };
-    let pathway = Pathway::new(
-        EndpointAddr::direct(([127, 0, 0, 1], local).into()),
-        EndpointAddr::direct(([127, 0, 0, 1], remote).into()),
-    );
+    let pathway = Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], local).into()), EndpointAddr::direct(([127, 0, 0, 1], remote).into()));
     let path = Arc::new(Path::new(
         pathway,
         confirmed_handshake(transport.parameters.role()),
         path_heartbeat(),
         data_trackers(transport),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     ));
     path.validation.enter_validated().unwrap();
     path
@@ -264,11 +221,7 @@ fn path_heartbeat() -> ArcHeartbeat {
     ArcHeartbeat::new(Duration::ZERO, Duration::ZERO)
 }
 fn parse(bytes: &[u8]) -> DataPacket {
-    let Packet::Data(packet) = PacketReader::new(BytesMut::from(bytes), 8)
-        .next()
-        .unwrap()
-        .unwrap()
-    else {
+    let Packet::Data(packet) = PacketReader::new(BytesMut::from(bytes), 8).next().unwrap().unwrap() else {
         panic!()
     };
     packet
@@ -276,13 +229,10 @@ fn parse(bytes: &[u8]) -> DataPacket {
 fn emit(sender: &mut Sender) -> BytesMut {
     assert!(sender.prepare().unwrap(), "sender has work");
     let mut wire = BytesMut::new();
-    let result = sender.poll_send_with(
-        &mut Context::from_waker(futures::task::noop_waker_ref()),
-        |_, _, bytes| {
-            wire.extend_from_slice(bytes);
-            Poll::Ready(Ok(bytes.len()))
-        },
-    );
+    let result = sender.poll_send_with(&mut Context::from_waker(futures::task::noop_waker_ref()), |_, _, bytes| {
+        wire.extend_from_slice(bytes);
+        Poll::Ready(Ok(bytes.len()))
+    });
     assert!(matches!(result, Poll::Ready(Ok(true))));
     wire
 }
@@ -297,19 +247,11 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
         Frame::Ack(frame) => acknowledge(transport, &frame, path)?,
         Frame::PathChallenge(frame) => path.validation.recv_frame(frame)?,
         Frame::PathResponse(frame) => path.validation.recv_frame(frame)?,
-        Frame::Crypto(frame, bytes) => transport
-            .data
-            .crypto
-            .incoming()
-            .recv_frame((frame, bytes))?,
+        Frame::Crypto(frame, bytes) => transport.data.crypto.incoming().recv_frame((frame, bytes))?,
         Frame::Close(frame) => transport.close(frame.into()),
         Frame::Padding(_) | Frame::Ping(_) => {}
         _ => {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::ProtocolViolation,
-                "unexpected test frame",
-            )
-            .into());
+            return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "unexpected test frame").into());
         }
     }
     Ok(())
@@ -329,11 +271,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
         transport.data.rcvd_journal.clone(),
         |_, _| Some(path.clone()),
         |keys, packet, _| {
-            let opened = keys.open_packet(
-                packet,
-                |pn| transport.data.rcvd_journal.decode_pn(pn),
-                Duration::from_secs(1),
-            )?;
+            let opened = keys.open_packet(packet, |pn| transport.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1))?;
             received = opened.as_ref().map(|packet| packet.pn());
             Ok(opened)
         },
@@ -347,18 +285,10 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
 }
 fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Result<(), Error> {
     let keys = keys(transport);
-    crate::recv::acknowledge(&transport.data, ack, path, |generation| {
-        keys.on_ack(generation)
-    })
+    crate::recv::acknowledge(&transport.data, ack, path, |generation| keys.on_ack(generation))
 }
 fn ack(pn: u64) -> AckFrame {
-    AckFrame::new(
-        VarInt::from_u64(pn).unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    )
+    AckFrame::new(VarInt::from_u64(pn).unwrap(), 0u32.into(), 0u32.into(), vec![], None)
 }
 // Receive tests encode explicit packet numbers without constructing recovery history.
 fn encode_packet<const N: usize>(
@@ -371,10 +301,7 @@ fn encode_packet<const N: usize>(
 ) -> BytesMut {
     let key = keys.get().unwrap();
     let mut packet = SendingPacket::new(
-        DataHeader::Short(OneRttHeader::new(
-            Default::default(),
-            ConnectionId::from_slice(b"original"),
-        )),
+        DataHeader::Short(OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"))),
         (pn, PacketNumber::encode(pn, 0)),
         key.as_ref(),
     );
@@ -423,10 +350,7 @@ fn short_packet_numbers_round_trip_with_header_protection_padding() {
             .unwrap()
             .unwrap();
         assert_eq!(decoded, pn);
-        assert!(matches!(
-            frames.into_iter().next().unwrap().unwrap().0,
-            Frame::Ping(_)
-        ));
+        assert!(matches!(frames.into_iter().next().unwrap().unwrap().0, Frame::Ping(_)));
     }
 }
 
@@ -437,23 +361,12 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
 
     let [(_client, ct, cp), (_server, st, sp)] = pair(1);
     let material = Arc::new(fixed_keys());
-    let header = LongHeaderBuilder::with_cid(
-        ConnectionId::from_slice(b"original"),
-        ConnectionId::from_slice(b"clientid"),
-    )
-    .zero_rtt();
+    let header = LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"original"), ConnectionId::from_slice(b"clientid")).zero_rtt();
     let pn = ct.data.sent_journal.next_pn().unwrap();
-    let mut packet = SendingPacket::new(
-        DataHeader::Long(header.into()),
-        pn,
-        Keys::Long(material.clone()),
-    );
+    let mut packet = SendingPacket::new(DataHeader::Long(header.into()), pn, Keys::Long(material.clone()));
     let mut bytes = BytesMut::zeroed(1200);
     let mut frames = Vec::new();
-    let mut datagram = (
-        DatagramFrame::new(true, 5u32.into()),
-        Bytes::from_static(b"hello"),
-    );
+    let mut datagram = (DatagramFrame::new(true, 5u32.into()), Bytes::from_static(b"hello"));
 
     assert!(matches!(packet.assemble(
         &mut Context::from_waker(std::task::Waker::noop()), &mut std::io::Cursor::new(bytes.as_mut()), 1200,
@@ -464,36 +377,17 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
     let generation = packet.seal(&mut bytes);
     assert_eq!(generation, None);
     assert_eq!(packet.meta.epoch(), Epoch::Data);
-    let (_, received) = material
-        .sealing
-        .open(parse(&bytes), |_| Ok(pn.0), Duration::ZERO)
-        .unwrap()
-        .unwrap();
+    let (_, received) = material.sealing.open(parse(&bytes), |_| Ok(pn.0), Duration::ZERO).unwrap().unwrap();
     let received: Vec<_> = received.map(|frame| frame.unwrap().0).collect();
-    assert!(
-        matches!(received.as_slice(), [Frame::Datagram(_, body), Frame::Ping(_)] if body.as_ref() == b"hello")
-    );
-    ct.data
-        .sent_journal
-        .on_sealed(pn.0, generation, bytes.len(), packet.meta, frames.drain(..));
-    ct.data.sent_journal.on_sent(
-        pn.0,
-        packet.meta.in_flight,
-        Duration::from_secs(1),
-        Duration::from_secs(3),
-    );
+    assert!(matches!(received.as_slice(), [Frame::Datagram(_, body), Frame::Ping(_)] if body.as_ref() == b"hello"));
+    ct.data.sent_journal.on_sealed(pn.0, generation, bytes.len(), packet.meta, frames.drain(..));
+    ct.data.sent_journal.on_sent(pn.0, packet.meta.in_flight, Duration::from_secs(1), Duration::from_secs(3));
 
     let mut sender = Sender::new(ct.clone(), cp);
     sender.heartbeat();
     assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(1));
-    assert_eq!(
-        ct.data.sent_journal.on_acked(&ack(0), |_| {}).unwrap(),
-        None
-    );
-    assert_eq!(
-        ct.data.sent_journal.on_acked(&ack(1), |_| {}).unwrap(),
-        Some(0)
-    );
+    assert_eq!(ct.data.sent_journal.on_acked(&ack(0), |_| {}).unwrap(), None);
+    assert_eq!(ct.data.sent_journal.on_acked(&ack(1), |_| {}).unwrap(), Some(0));
 }
 
 #[test]
@@ -506,10 +400,7 @@ fn header_protection_padding_obeys_quota_and_the_write_window() {
     for (quota, length) in [(minimum - 1, minimum), (minimum, minimum - 1)] {
         let mut recorded = Vec::new();
         assert!(encode_packet(&keys, 0, quota, length, &mut recorded, [&mut PingFrame]).is_empty());
-        assert_eq!(
-            encode_packet(&keys, 0, minimum, minimum, &mut recorded, [&mut PingFrame]).len(),
-            minimum
-        );
+        assert_eq!(encode_packet(&keys, 0, minimum, minimum, &mut recorded, [&mut PingFrame]).len(), minimum);
     }
 }
 
@@ -519,8 +410,7 @@ fn initial_datagram(cid: ConnectionId, size: usize) -> BytesMut {
         packet::{LongHeaderBuilder, header::io::WriteHeader},
         varint::WriteVarInt,
     };
-    let header =
-        LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"clientid")).initial(vec![]);
+    let header = LongHeaderBuilder::with_cid(cid, ConnectionId::from_slice(b"clientid")).initial(vec![]);
     let mut bytes = BytesMut::new();
     bytes.put_header(&header);
     bytes.put_varint(&VarInt::from_u32((size - bytes.len() - 2) as u32));
@@ -529,18 +419,8 @@ fn initial_datagram(cid: ConnectionId, size: usize) -> BytesMut {
 }
 
 fn close_packet(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
-    let mut close = qbase::frame::ConnectionCloseFrame::from(Error::from(AppError::new(
-        VarInt::from_u32(7),
-        "peer closed",
-    )));
-    encode_packet(
-        keys,
-        pn,
-        1200,
-        1200,
-        &mut Vec::new(),
-        [&mut PingFrame, &mut close],
-    )
+    let mut close = qbase::frame::ConnectionCloseFrame::from(Error::from(AppError::new(VarInt::from_u32(7), "peer closed")));
+    encode_packet(keys, pn, 1200, 1200, &mut Vec::new(), [&mut PingFrame, &mut close])
 }
 
 #[tokio::test]
@@ -554,10 +434,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
     let [(_client, _, _), (_server, _st, path)] = pair(1);
     let cid = ConnectionId::from_slice(b"original");
     let endpoint = tls_server(Arc::new(qtls::default_provider()), vec![b"h3".to_vec()]);
-    for (epoch, pn_len) in [Epoch::Initial, Epoch::Handshake]
-        .into_iter()
-        .flat_map(|epoch| (1..=4).map(move |pn_len| (epoch, pn_len)))
-    {
+    for (epoch, pn_len) in [Epoch::Initial, Epoch::Handshake].into_iter().flat_map(|epoch| (1..=4).map(move |pn_len| (epoch, pn_len))) {
         // Exercise both long-header layouts with deterministic qtls material;
         // TLS's selection of Handshake secrets is tested in qtls itself.
         let material = endpoint.initial_keys(qtls::QuicVersion::V1, &cid).unwrap();
@@ -573,24 +450,10 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         let offset = parse(&bytes).offset;
         bytes[0] |= *qbase::packet::LongSpecificBits::with_pn_len(pn_len);
         bytes[offset + pn_len..offset + pn_len + 4].copy_from_slice(&[0x06, 0, 1, 0xaa]);
-        material
-            .opening
-            .seal(
-                0,
-                &mut bytes,
-                offset,
-                offset + pn_len,
-                material.opening.packet.tag_len(),
-            )
-            .unwrap();
+        material.opening.seal(0, &mut bytes, offset, offset + pn_len, material.opening.packet.tag_len()).unwrap();
         let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Server));
         facts.quit_mp_handshaking();
-        let space = Arc::new(Space::new(
-            epoch,
-            Default::default(),
-            ArcKeys::new(Arc::new(material)),
-            facts,
-        ));
+        let space = Arc::new(Space::new(epoch, Default::default(), ArcKeys::new(Arc::new(material)), facts));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
         let (inbox, rcvd_pkt) = channel::new();
@@ -600,11 +463,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         let delivered = Arc::new(AtomicUsize::new(0));
         let dispatch = {
             let delivered = delivered.clone();
-            move |_: &Arc<qtls::BidirectionalKeys>,
-                  received_epoch,
-                  frame: Frame<Bytes>,
-                  _: &Arc<Path>,
-                  _: Link| {
+            move |_: &Arc<qtls::BidirectionalKeys>, received_epoch, frame: Frame<Bytes>, _: &Arc<Path>, _: Link| {
                 assert_eq!(received_epoch, epoch);
                 let Frame::Crypto(_, body) = frame else {
                     panic!("unexpected frame")
@@ -626,10 +485,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                    packet
-                        .decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn))
-                        .transpose()
-                        .map_err(Into::into)
+                    packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
                 },
                 |_, _| Ok(()),
                 dispatch,
@@ -648,10 +504,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                    packet
-                        .decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn))
-                        .transpose()
-                        .map_err(Into::into)
+                    packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
                 },
                 |_, _| Ok(()),
                 dispatch,
@@ -660,12 +513,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             .await;
         }
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
-        assert!(
-            space
-                .rcvd_journal
-                .decode_pn(PacketNumber::encode(0, 0))
-                .is_err()
-        );
+        assert!(space.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)).is_err());
         space.retire();
         assert!(matches!(space.keys.get(), Err(KeyRetired)));
     }
@@ -676,10 +524,7 @@ async fn router_splits_coalesced_packets_and_does_not_block_on_full_queues() {
     use crate::router::QuicRouter;
     let router = Arc::new(QuicRouter::new());
     let (inbox, mut rcvd_pkt) = channel::new();
-    let link = Link::new(
-        "127.0.0.1:4433".parse().unwrap(),
-        "127.0.0.1:9000".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:4433".parse().unwrap(), "127.0.0.1:9000".parse().unwrap());
     let cid = ConnectionId::from_slice(b"original");
     let alias = ConnectionId::from_slice(b"newalias");
     let original = router.insert(cid.into(), inbox.clone(), ());
@@ -714,21 +559,14 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let [(client, ct, cp), (_old_server, st, sp)] = pair(2);
     let close = qtransport::terminate::ArcTerminator::no_error();
     close.register(Arc::new(st.data.streams.clone()));
-    let server = ArcConnection::new(
-        Bytes::from_static(b"h3"),
-        st.data.streams.clone(),
-        close.clone(),
-    );
+    let server = ArcConnection::new(Bytes::from_static(b"h3"), st.data.streams.clone(), close.clone());
     let close_seen = qbase::ArcReceiving::default();
     let close_sink = close_seen.clone();
     let streams_seen = Arc::new(AtomicUsize::new(0));
     let seen = streams_seen.clone();
     let router = Arc::new(QuicRouter::new());
     let (inbox, rcvd_pkt) = channel::new();
-    let link = Link::new(
-        "127.0.0.1:5500".parse().unwrap(),
-        "127.0.0.1:4400".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:5500".parse().unwrap(), "127.0.0.1:4400".parse().unwrap());
     let cid = ConnectionId::from_slice(b"original");
     let route = router.insert(cid.into(), inbox.clone(), ());
     let journal = st.data.rcvd_journal.clone();
@@ -745,13 +583,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
             let sp = sp.clone();
             move |_, _| Some(sp.clone())
         },
-        move |keys: &ArcOneRttKeys, packet, _| {
-            keys.open_packet(
-                packet,
-                |pn| journal.decode_pn(pn),
-                sp.cc.get_pto(Epoch::Data),
-            )
-        },
+        move |keys: &ArcOneRttKeys, packet, _| keys.open_packet(packet, |pn| journal.decode_pn(pn), sp.cc.get_pto(Epoch::Data)),
         |_, _| Ok(()),
         move |_, epoch, frame, path, _| {
             if matches!(frame, Frame::Stream(_, _)) {
@@ -770,42 +602,22 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let bytes = emit(&mut Sender::new(ct.clone(), cp));
     router.receive(bytes.clone(), link.into(), link, 8);
     router.receive(bytes, link.into(), link, 8);
-    let (_, mut reader) = tokio::time::timeout(Duration::from_secs(2), server.accept_uni_stream())
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, mut reader) = tokio::time::timeout(Duration::from_secs(2), server.accept_uni_stream()).await.unwrap().unwrap();
     let mut body = [0; 12];
     reader.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"wired stream");
     // Application streams stop immediately; the receive engine still reports packets.
     server.close(VarInt::from_u32(0), "done");
-    assert!(matches!(
-        st.data.streams.accept_uni().await,
-        Err(crate::Error::App(_))
-    ));
+    assert!(matches!(st.data.streams.accept_uni().await, Err(crate::Error::App(_))));
     router.receive(ping(&keys(&ct), 1), link.into(), link, 8);
     router.receive(close_packet(&keys(&ct), 2), link.into(), link, 8);
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), close_seen)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_some()
-    );
+    assert!(tokio::time::timeout(Duration::from_secs(2), close_seen).await.unwrap().unwrap().is_some());
     assert_eq!(streams_seen.load(Ordering::Relaxed), 1);
-    assert!(
-        st.data
-            .rcvd_journal
-            .decode_pn(PacketNumber::encode(1, 0))
-            .is_err()
-    );
+    assert!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)).is_err());
     route.retire_cid(cid);
     drop(route);
     drop(inbox);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -814,14 +626,8 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     let (inbox, rcvd_pkt) = channel::new();
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 1)))));
-    assert!(enqueue(
-        &inbox,
-        Packet::Data(parse(&close_packet(&keys(&ct), 2)))
-    ));
-    assert!(enqueue(
-        &inbox,
-        Packet::Data(parse(&close_packet(&keys(&ct), 3)))
-    ));
+    assert!(enqueue(&inbox, Packet::Data(parse(&close_packet(&keys(&ct), 2)))));
+    assert!(enqueue(&inbox, Packet::Data(parse(&close_packet(&keys(&ct), 3)))));
     drop(inbox);
     let mut errors = 0;
     let mut ordinary = 0;
@@ -836,13 +642,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
-        |keys: &ArcOneRttKeys, packet, _| {
-            keys.open_packet(
-                packet,
-                |pn| st.data.rcvd_journal.decode_pn(pn),
-                sp.cc.get_pto(Epoch::Data),
-            )
-        },
+        |keys: &ArcOneRttKeys, packet, _| keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), sp.cc.get_pto(Epoch::Data)),
         |_, _| {
             processed += 1;
             Ok(())
@@ -864,10 +664,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     .await;
     assert_eq!((errors, ordinary, closes, processed), (2, 2, 2, 4));
     assert!(server.accept_uni_stream().await.is_err());
-    assert_eq!(
-        st.data.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)),
-        Ok(0)
-    );
+    assert_eq!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(0, 0)), Ok(0));
 }
 
 #[tokio::test]
@@ -882,16 +679,7 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
     }
     let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
-    let (_, frames) = st
-        .data
-        .keys
-        .open(
-            parse(&bytes),
-            |pn| st.data.rcvd_journal.decode_pn(pn),
-            Duration::from_secs(1),
-        )
-        .unwrap()
-        .unwrap();
+    let (_, frames) = st.data.keys.open(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
     let lengths: Vec<_> = frames
         .map(Result::unwrap)
         .filter_map(|(frame, _)| match frame {
@@ -915,21 +703,8 @@ fn a_large_frame_that_fits_is_assembled_before_later_sources() {
     let keys = ArcOneRttKeys::from(client);
     let mut recorded = Vec::new();
     let bytes = [Bytes::from(vec![1; 800])];
-    let mut crypto = (
-        qbase::frame::CryptoFrame::new(0u32.into(), 800u32.into()),
-        bytes.as_slice(),
-    );
-    assert!(
-        !encode_packet(
-            &keys,
-            0,
-            1200,
-            1200,
-            &mut recorded,
-            [&mut crypto, &mut PingFrame]
-        )
-        .is_empty()
-    );
+    let mut crypto = (qbase::frame::CryptoFrame::new(0u32.into(), 800u32.into()), bytes.as_slice());
+    assert!(!encode_packet(&keys, 0, 1200, 1200, &mut recorded, [&mut crypto, &mut PingFrame]).is_empty());
     assert!(matches!(recorded.as_slice(), [GuaranteedFrame::Crypto(frame)] if frame.len() == 800));
 }
 
@@ -938,47 +713,23 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
     use qbase::frame::{MaxDataFrame, ReliableFrame, io::SendFrame};
 
     let mut reliable = ArcReliableFrames::with_capacity(600);
-    reliable.send_frame((0..600).map(|i| {
-        ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
-            VarInt::from_u32(1000 + i),
-        )))
-    }));
+    reliable.send_frame((0..600).map(|i| ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(VarInt::from_u32(1000 + i))))));
     let bytes = [Bytes::from_static(b"later")];
-    let mut crypto = (
-        qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()),
-        bytes.as_slice(),
-    );
+    let mut crypto = (qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()), bytes.as_slice());
     let ([client, _], _) = handshake();
     let keys = ArcOneRttKeys::from(client);
     let mut sent = Vec::new();
     for pn in 0..2 {
         let mut recorded = Vec::new();
-        encode_packet(
-            &keys,
-            pn,
-            1200,
-            1200,
-            &mut recorded,
-            [&mut reliable, &mut crypto],
-        );
+        encode_packet(&keys, pn, 1200, 1200, &mut recorded, [&mut reliable, &mut crypto]);
         for frame in recorded.as_slice() {
-            if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
-                StreamCtlFrame::MaxData(frame),
-            )) = frame
-            {
+            if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(frame))) = frame {
                 sent.push(frame.max_data());
             }
         }
         if pn == 0 {
-            assert!(
-                sent.len() > 300,
-                "the earlier queue must not stop at 512 bytes"
-            );
-            assert!(
-                !recorded
-                    .iter()
-                    .any(|frame| matches!(frame, GuaranteedFrame::Crypto(..)))
-            );
+            assert!(sent.len() > 300, "the earlier queue must not stop at 512 bytes");
+            assert!(!recorded.iter().any(|frame| matches!(frame, GuaranteedFrame::Crypto(..))));
         } else {
             assert!(matches!(recorded.last(), Some(GuaranteedFrame::Crypto(..))));
         }
@@ -995,39 +746,17 @@ async fn sender_assembles_ack_path_crypto_reliable_then_streams() {
     receive(&ct, &cp, &ping(&keys(&st), 0)).unwrap();
     tokio::time::advance(Duration::from_millis(100)).await;
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
-    cp.validation
-        .recv_frame(PathChallengeFrame::random())
-        .unwrap();
-    ct.data
-        .reliable_frames
-        .send_frame([ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(
-            MaxDataFrame::new(4096u32.into()),
-        ))]);
+    cp.validation.recv_frame(PathChallengeFrame::random()).unwrap();
+    ct.data.reliable_frames.send_frame([ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(4096u32.into())))]);
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write_all(b"stream").await.unwrap();
     let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
-    let (_, frames) = keys(&st)
-        .open(
-            parse(&bytes),
-            |pn| st.data.rcvd_journal.decode_pn(pn),
-            Duration::from_secs(1),
-        )
-        .unwrap()
-        .unwrap();
-    let frames: Vec<_> = frames
-        .map(|frame| frame.unwrap().0)
-        .filter(|frame| !matches!(frame, Frame::Padding(_)))
-        .collect();
+    let (_, frames) = keys(&st).open(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
+    let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).filter(|frame| !matches!(frame, Frame::Padding(_))).collect();
     assert!(matches!(
         frames.as_slice(),
-        [
-            Frame::Ack(_),
-            Frame::PathResponse(_),
-            Frame::Crypto(..),
-            Frame::StreamCtl(StreamCtlFrame::MaxData(_)),
-            Frame::Stream(..),
-        ]
+        [Frame::Ack(_), Frame::PathResponse(_), Frame::Crypto(..), Frame::StreamCtl(StreamCtlFrame::MaxData(_)), Frame::Stream(..),]
     ));
 }
 
@@ -1077,12 +806,7 @@ async fn close_wakes_both_accepts_and_blocked_opens_without_changing_parameters(
     assert!(matches!(uni.await, Err(error) if error == expected));
     assert!(open_bi.await.is_err());
     assert!(open_uni.await.is_err());
-    assert_eq!(
-        transport
-            .parameters
-            .remote::<u64>(ParameterId::InitialMaxStreamsUni),
-        0
-    );
+    assert_eq!(transport.parameters.remote::<u64>(ParameterId::InitialMaxStreamsUni), 0);
     assert_eq!(client.alpn(), b"ssh");
     client.clone().close(VarInt::from_u32(99), "later");
     assert!(matches!(client.accept_uni_stream().await, Err(error) if error == expected));
@@ -1094,13 +818,7 @@ async fn cancelling_open_and_accept_does_not_consume_streams() {
     let mut opening = Box::pin(client.open_uni_stream());
     assert!(futures::poll!(&mut opening).is_pending());
     drop(opening);
-    transport
-        .data
-        .streams
-        .recv_frame(StreamCtlFrame::MaxStreams(MaxStreamsFrame::Uni(
-            VarInt::from_u32(1),
-        )))
-        .unwrap();
+    transport.data.streams.recv_frame(StreamCtlFrame::MaxStreams(MaxStreamsFrame::Uni(VarInt::from_u32(1)))).unwrap();
     let (sid, _) = client.open_uni_stream().await.unwrap().unwrap();
     assert_eq!(sid, StreamId::new(Role::Client, Dir::Uni, 0));
     let mut accept = Box::pin(client.accept_uni_stream());
@@ -1126,21 +844,8 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
     let mut forged = ping(&keys(&ct), 1);
     let index = forged.len() - 1;
     forged[index] ^= 1;
-    assert!(
-        st.data
-            .keys
-            .open(
-                parse(&forged),
-                |pn| st.data.rcvd_journal.decode_pn(pn),
-                Duration::from_secs(1)
-            )
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)),
-        Ok(1)
-    );
+    assert!(st.data.keys.open(parse(&forged), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().is_none());
+    assert_eq!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)), Ok(1));
 }
 
 #[tokio::test]
@@ -1149,33 +854,13 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     let mut quota = 0;
     let mut length = 1200;
     let mut recorded = Vec::new();
-    let bytes = encode_packet(
-        &keys(&transport),
-        0,
-        quota,
-        length,
-        &mut recorded,
-        [&mut ack(0), &mut PingFrame],
-    );
-    let (_, frames) = keys(&peer)
-        .open(parse(&bytes), |_| Ok(0), Duration::ZERO)
-        .unwrap()
-        .unwrap();
+    let bytes = encode_packet(&keys(&transport), 0, quota, length, &mut recorded, [&mut ack(0), &mut PingFrame]);
+    let (_, frames) = keys(&peer).open(parse(&bytes), |_| Ok(0), Duration::ZERO).unwrap().unwrap();
     let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).collect();
     assert!(matches!(frames.as_slice(), [Frame::Ack(_)]));
     quota = 1200;
     length = 10;
-    assert!(
-        encode_packet(
-            &keys(&transport),
-            1,
-            quota,
-            length,
-            &mut recorded,
-            [&mut ack(0)]
-        )
-        .is_empty()
-    );
+    assert!(encode_packet(&keys(&transport), 1, quota, length, &mut recorded, [&mut ack(0)]).is_empty());
 }
 
 #[tokio::test]
@@ -1186,12 +871,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let [(client, ct, _), (_server, st, _)] = pair(1);
         let crypto_data = vec![0x63; 200];
         let stream_data = vec![0x73; 200];
-        ct.data
-            .crypto
-            .writer()
-            .write_all(&crypto_data)
-            .await
-            .unwrap();
+        ct.data.crypto.writer().write_all(&crypto_data).await.unwrap();
         let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
         writer.write_all(&stream_data).await.unwrap();
         let mut crypto = ct.data.crypto.outgoing();
@@ -1208,14 +888,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             } else {
                 (limit, 1200)
             };
-            let bytes = encode_packet(
-                &sealing,
-                pn,
-                quota,
-                length,
-                &mut recorded,
-                [&mut crypto, &mut streams],
-            );
+            let bytes = encode_packet(&sealing, pn, quota, length, &mut recorded, [&mut crypto, &mut streams]);
             if pn == 0 {
                 assert!(bytes.is_empty());
                 assert!(recorded.is_empty());
@@ -1223,10 +896,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             }
             assert!(!recorded.is_empty());
             assert!(bytes.len() <= 80);
-            let (_, frames) = opening
-                .open(parse(&bytes), |_| Ok(pn), Duration::from_secs(1))
-                .unwrap()
-                .unwrap();
+            let (_, frames) = opening.open(parse(&bytes), |_| Ok(pn), Duration::from_secs(1)).unwrap().unwrap();
             for frame in frames {
                 match frame.unwrap().0 {
                     Frame::Crypto(frame, bytes) => {
@@ -1241,9 +911,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
                     frame => panic!("unexpected frame: {frame:?}"),
                 }
             }
-            if crypto_received.len() == crypto_data.len()
-                && stream_received.len() == stream_data.len()
-            {
+            if crypto_received.len() == crypto_data.len() && stream_received.len() == stream_data.len() {
                 break;
             }
         }
@@ -1260,12 +928,7 @@ async fn empty_assembly_cancels_packet_reservations() {
         assert!(!sender.prepare().unwrap());
     }
     for pn in 0..5 {
-        assert!(
-            ct.data
-                .sent_journal
-                .on_acked(&ack(pn), |_| panic!("empty packet has recovery frames"))
-                .is_err()
-        );
+        assert!(ct.data.sent_journal.on_acked(&ack(pn), |_| panic!("empty packet has recovery frames")).is_err());
     }
     sender.heartbeat();
     assert_eq!(receive(&st, &sp, &emit(&mut sender)), Some(5));
@@ -1278,13 +941,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     writer.write(Bytes::from_static(b"retained")).unwrap();
     let mut slow = Sender::new(ct.clone(), cp.clone());
     assert!(slow.prepare().unwrap());
-    assert!(
-        slow.poll_send_with(
-            &mut Context::from_waker(futures::task::noop_waker_ref()),
-            |_, _, _| Poll::Pending
-        )
-        .is_pending()
-    );
+    assert!(slow.poll_send_with(&mut Context::from_waker(futures::task::noop_waker_ref()), |_, _, _| Poll::Pending).is_pending());
     keys(&ct).update().unwrap();
     let other = path(&ct, 1);
     let mut fast = Sender::new(ct.clone(), other);
@@ -1353,13 +1010,7 @@ async fn receiving_starts_with_ready_keys() {
             let cp = cp.clone();
             move |_, _| Some(cp.clone())
         },
-        move |keys: &ArcOneRttKeys, packet, _| {
-            keys.open_packet(
-                packet,
-                |pn| journal.decode_pn(pn),
-                cp.cc.get_pto(Epoch::Data),
-            )
-        },
+        move |keys: &ArcOneRttKeys, packet, _| keys.open_packet(packet, |pn| journal.decode_pn(pn), cp.cc.get_pto(Epoch::Data)),
         |_, _| Ok(()),
         move |_, _, _, _, _| {
             seen.fetch_add(1, Ordering::Relaxed);
@@ -1378,10 +1029,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     let [(_client, ct, _), (_server, st, sp)] = pair(1);
     let (inbox, packets) = channel::new();
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 0)))));
-    assert!(enqueue(
-        &inbox,
-        Packet::Data(parse(&close_packet(&keys(&ct), 1)))
-    ));
+    assert!(enqueue(&inbox, Packet::Data(parse(&close_packet(&keys(&ct), 1)))));
     assert!(enqueue(&inbox, Packet::Data(parse(&ping(&keys(&ct), 2)))));
     drop(inbox);
     let inspected = std::cell::Cell::new(0);
@@ -1396,13 +1044,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
-        |keys, packet, _| {
-            keys.open_packet(
-                packet,
-                |pn| st.data.rcvd_journal.decode_pn(pn),
-                sp.cc.get_pto(Epoch::Data),
-            )
-        },
+        |keys, packet, _| keys.open_packet(packet, |pn| st.data.rcvd_journal.decode_pn(pn), sp.cc.get_pto(Epoch::Data)),
         |_, _| {
             inspected.set(inspected.get() + 1);
             Ok(())
@@ -1413,9 +1055,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
             match dispatched {
                 1 => {
                     assert!(matches!(frame, Frame::Ping(_)));
-                    return Err(
-                        QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into(),
-                    );
+                    return Err(QuicError::with_default_fty(ErrorKind::Internal, "pipe full").into());
                 }
                 2 => assert!(matches!(frame, Frame::Close(_))),
                 3 => assert!(matches!(frame, Frame::Ping(_))),
@@ -1429,17 +1069,9 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     assert_eq!(dispatched, 3);
     assert_eq!(errors, 1);
     for pn in [0, 1] {
-        assert_eq!(
-            st.data.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)),
-            Ok(pn)
-        );
+        assert_eq!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(pn, 0)), Ok(pn));
     }
-    assert!(
-        st.data
-            .rcvd_journal
-            .decode_pn(PacketNumber::encode(2, 0))
-            .is_err()
-    );
+    assert!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(2, 0)).is_err());
 }
 
 #[tokio::test]
@@ -1451,30 +1083,18 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"stream")).unwrap();
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
-    ct.data
-        .reliable_frames
-        .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
+    ct.data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
     let mut sender = Sender::new(ct.clone(), cp);
     emit(&mut sender);
     drop(sender);
 
-    ct.data.resend(
-        qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
-        &mut [0, 0].into_iter(),
-    );
+    ct.data.resend(qevent::quic::recovery::PacketLostTrigger::TimeThreshold, &mut [0, 0].into_iter());
     // Read the components directly: no Sender or timer may extract journal work first.
     let mut frames = Vec::new();
     let mut crypto = ct.data.crypto.outgoing();
     let mut reliable = ct.data.reliable_frames.clone();
     let mut streams = ct.data.streams.clone();
-    encode_packet(
-        &keys(&ct),
-        1,
-        1200,
-        1200,
-        &mut frames,
-        [&mut crypto, &mut reliable, &mut streams],
-    );
+    encode_packet(&keys(&ct), 1, 1200, 1200, &mut frames, [&mut crypto, &mut reliable, &mut streams]);
     assert!(matches!(frames.as_slice(),
         [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f))), GuaranteedFrame::Stream(_)]
         if f.max_data() == 123));
@@ -1490,10 +1110,7 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
     ct.data.crypto.writer().write_all(b"crypto").await.unwrap();
     let mut sender = Sender::new(ct.clone(), cp.clone());
     emit(&mut sender);
-    ct.data.resend(
-        qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
-        &mut [0].into_iter(),
-    );
+    ct.data.resend(qevent::quic::recovery::PacketLostTrigger::TimeThreshold, &mut [0].into_iter());
     acknowledge(&ct, &ack(0), &cp).unwrap();
     assert!(!sender.prepare().unwrap());
 }
@@ -1505,10 +1122,7 @@ async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() 
     writer.write(Bytes::from_static(b"lost once")).unwrap();
     let mut sender = Sender::new(ct.clone(), cp.clone());
     let dropped = emit(&mut sender);
-    ct.data.resend(
-        qevent::quic::recovery::PacketLostTrigger::TimeThreshold,
-        &mut [0].into_iter(),
-    );
+    ct.data.resend(qevent::quic::recovery::PacketLostTrigger::TimeThreshold, &mut [0].into_iter());
     let retry = emit(&mut sender);
     assert_eq!(receive(&st, &sp, &retry), Some(1));
     acknowledge(&ct, &ack(1), &cp).unwrap();
@@ -1563,10 +1177,7 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     let mut sender = Sender::new(transport.clone(), replacement.clone());
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
     transport.data.on_tick(tokio::time::Instant::now());
-    assert!(
-        !sender.prepare().unwrap(),
-        "a second tick must not duplicate recovery"
-    );
+    assert!(!sender.prepare().unwrap(), "a second tick must not duplicate recovery");
     acknowledge(&transport, &ack(0), &replacement).unwrap();
     acknowledge(&transport, &ack(1), &replacement).unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
@@ -1608,10 +1219,7 @@ async fn connection_close_preserves_completed_streams_and_errors_active_streams(
     assert!(active_writer.flush().await.is_err());
     writer.flush().await.unwrap();
     writer.shutdown().await.unwrap();
-    assert!(matches!(
-        writer.write(Bytes::from_static(b"late")),
-        Err(StreamError::Finished)
-    ));
+    assert!(matches!(writer.write(Bytes::from_static(b"late")), Err(StreamError::Finished)));
 }
 
 #[tokio::test]
@@ -1631,34 +1239,12 @@ async fn close_wakers_are_independent_and_fire_without_repolling() {
     let mut open_bi = std::pin::pin!(client.open_bi_stream());
     let mut open_uni = std::pin::pin!(client.open_uni_stream());
     use std::future::Future;
-    assert!(
-        bi.as_mut()
-            .poll(&mut Context::from_waker(&wakers[0]))
-            .is_pending()
-    );
-    assert!(
-        uni.as_mut()
-            .poll(&mut Context::from_waker(&wakers[1]))
-            .is_pending()
-    );
-    assert!(
-        open_bi
-            .as_mut()
-            .poll(&mut Context::from_waker(&wakers[2]))
-            .is_pending()
-    );
-    assert!(
-        open_uni
-            .as_mut()
-            .poll(&mut Context::from_waker(&wakers[3]))
-            .is_pending()
-    );
+    assert!(bi.as_mut().poll(&mut Context::from_waker(&wakers[0])).is_pending());
+    assert!(uni.as_mut().poll(&mut Context::from_waker(&wakers[1])).is_pending());
+    assert!(open_bi.as_mut().poll(&mut Context::from_waker(&wakers[2])).is_pending());
+    assert!(open_uni.as_mut().poll(&mut Context::from_waker(&wakers[3])).is_pending());
     client.clone().close(0u32.into(), "wake all");
-    assert!(
-        counts
-            .iter()
-            .all(|count| count.0.load(Ordering::Relaxed) != 0)
-    );
+    assert!(counts.iter().all(|count| count.0.load(Ordering::Relaxed) != 0));
 }
 
 #[tokio::test]
@@ -1676,27 +1262,16 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         confirmed_handshake(Role::Client),
         path_heartbeat(),
         data_trackers(&ct),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     ));
     path.validation.enter_validated().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
     let mut sender = Sender::new(ct.clone(), path);
     assert!(sender.prepare().unwrap());
-    assert!(
-        std::future::poll_fn(|cx| sender.poll_send(cx, &protocol))
-            .await
-            .unwrap()
-    );
+    assert!(std::future::poll_fn(|cx| sender.poll_send(cx, &protocol)).await.unwrap());
     let mut bytes = [0; 1200];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(2), remote.recv_from(&mut bytes))
-        .await
-        .unwrap()
-        .unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), remote.recv_from(&mut bytes)).await.unwrap().unwrap();
     receive(&st, &sp, &bytes[..len]);
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     use tokio::io::AsyncReadExt;
@@ -1721,17 +1296,11 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
         })
     };
     assert!(matches!(
-        sender.poll_send_with(
-            &mut Context::from_waker(futures::task::noop_waker_ref()),
-            |_, _, bytes| {
-                barrier.wait();
-                assert!(matches!(
-                    acknowledged.recv_timeout(Duration::from_millis(30)),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                ));
-                Poll::Ready(Ok(bytes.len()))
-            }
-        ),
+        sender.poll_send_with(&mut Context::from_waker(futures::task::noop_waker_ref()), |_, _, bytes| {
+            barrier.wait();
+            assert!(matches!(acknowledged.recv_timeout(Duration::from_millis(30)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            Poll::Ready(Ok(bytes.len()))
+        }),
         Poll::Ready(Ok(true))
     ));
     worker.join().unwrap();
@@ -1747,11 +1316,7 @@ async fn path_validation_replies_on_ingress_and_allows_data_within_credit() {
             confirmed_handshake(transport.parameters.role()),
             path_heartbeat(),
             data_trackers(transport),
-            qbase::cid::ArcRemoteCids::client(
-                Default::default(),
-                qtransport::ArcReliableFrames::with_capacity(0),
-            )
-            .apply_dcid(),
+            qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
         ))
     });
     let [cp, sp] = paths;
@@ -1812,18 +1377,13 @@ async fn resetting_one_stream_does_not_close_the_connection() {
     let mut sender = Sender::new(ct.clone(), cp);
     receive(&st, &sp, &emit(&mut sender));
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
-    assert!(matches!(
-        futures::StreamExt::next(&mut reader).await,
-        Some(Err(StreamError::Reset(_)))
-    ));
+    assert!(matches!(futures::StreamExt::next(&mut reader).await, Some(Err(StreamError::Reset(_)))));
     assert!(client.open_uni_stream().await.unwrap().is_some());
     assert!(server.open_uni_stream().await.unwrap().is_some());
 }
 
 pub(crate) fn fixed_keys() -> qtls::BidirectionalKeys {
-    tls_server(Arc::new(qtls::default_provider()), vec![b"h3".to_vec()])
-        .initial_keys(qtls::QuicVersion::V1, b"original")
-        .unwrap()
+    tls_server(Arc::new(qtls::default_provider()), vec![b"h3".to_vec()]).initial_keys(qtls::QuicVersion::V1, b"original").unwrap()
 }
 
 #[tokio::test]
@@ -1851,16 +1411,9 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     ));
     tokio::task::yield_now().await;
     space.retire();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), &mut task)
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut task).await.is_err());
     drop(retained);
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -1878,14 +1431,11 @@ async fn sealing_does_not_wait_for_socket_submission() {
         sealed.send(()).unwrap();
     });
     assert!(matches!(
-        sender.poll_send_with(
-            &mut Context::from_waker(futures::task::noop_waker_ref()),
-            |_, _, bytes| {
-                start.send(()).unwrap();
-                completed.recv_timeout(Duration::from_secs(1)).unwrap();
-                Poll::Ready(Ok(bytes.len()))
-            },
-        ),
+        sender.poll_send_with(&mut Context::from_waker(futures::task::noop_waker_ref()), |_, _, bytes| {
+            start.send(()).unwrap();
+            completed.recv_timeout(Duration::from_secs(1)).unwrap();
+            Poll::Ready(Ok(bytes.len()))
+        },),
         Poll::Ready(Ok(true))
     ));
     worker.join().unwrap();

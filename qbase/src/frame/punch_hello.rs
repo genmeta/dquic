@@ -19,11 +19,7 @@ pub struct PunchHelloFrame {
 
 impl PunchHelloFrame {
     pub fn new(local_seq: u32, remote_seq: u32, probe_id: u32) -> Self {
-        Self {
-            local_seq: VarInt::from_u32(local_seq),
-            remote_seq: VarInt::from_u32(remote_seq),
-            probe_id: VarInt::from_u32(probe_id),
-        }
+        Self { local_seq: VarInt::from_u32(local_seq), remote_seq: VarInt::from_u32(remote_seq), probe_id: VarInt::from_u32(probe_id) }
     }
 
     pub fn local_seq(&self) -> u32 {
@@ -71,12 +67,5 @@ pub(crate) fn be_punch_hello_frame(input: &[u8]) -> nom::IResult<&[u8], PunchHel
     let (input, local_seq) = be_varint(input)?;
     let (input, remote_seq) = be_varint(input)?;
     let (input, probe_id) = be_varint(input)?;
-    Ok((
-        input,
-        PunchHelloFrame {
-            local_seq,
-            remote_seq,
-            probe_id,
-        },
-    ))
+    Ok((input, PunchHelloFrame { local_seq, remote_seq, probe_id }))
 }

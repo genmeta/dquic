@@ -102,16 +102,10 @@ async fn handshake_ack_on_another_path_cancels_an_armed_anti_deadlock_probe() {
     tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
     waiting.do_tick().unwrap();
     assert_eq!(waiting.need_send_ack_eliciting(Epoch::Handshake), 0);
-    assert_eq!(
-        waiting.get_pto(Epoch::Handshake),
-        waiting.pto_base(Epoch::Handshake)
-    );
+    assert_eq!(waiting.get_pto(Epoch::Handshake), waiting.pto_base(Epoch::Handshake));
     // A later tick must not reveal a rescheduled anti-deadlock timer either.
     tokio::time::advance(waiting.get_pto(Epoch::Handshake) * 2).await;
     waiting.do_tick().unwrap();
     assert_eq!(waiting.need_send_ack_eliciting(Epoch::Handshake), 0);
-    assert_eq!(
-        waiting.get_pto(Epoch::Handshake),
-        waiting.pto_base(Epoch::Handshake)
-    );
+    assert_eq!(waiting.get_pto(Epoch::Handshake), waiting.pto_base(Epoch::Handshake));
 }

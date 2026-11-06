@@ -72,12 +72,5 @@ pub(super) fn be_forward_type(input: &[u8], first: u8) -> IResult<&[u8], Type> {
     if encoded >> 4 != 0 || matches!(encoded & 0b0000_1000, 0) {
         return Err(Err::Error(Error::new(input, ErrorKind::Verify)));
     }
-    Ok((
-        input,
-        Type::Forward(
-            Family::from(encoded & 0b0100),
-            Kind::from(encoded & 0b0010),
-            Kind::from(encoded & 0b0001),
-        ),
-    ))
+    Ok((input, Type::Forward(Family::from(encoded & 0b0100), Kind::from(encoded & 0b0010), Kind::from(encoded & 0b0001))))
 }

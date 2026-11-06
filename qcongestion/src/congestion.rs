@@ -6,10 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use qbase::{
-    Epoch, frame::AckFrame, handshake::HandshakeFacts, net::tx::ArcSendWakers, role::Role,
-    util::ArcIndexDeque,
-};
+use qbase::{Epoch, frame::AckFrame, handshake::HandshakeFacts, net::tx::ArcSendWakers, role::Role, util::ArcIndexDeque};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
@@ -116,13 +113,7 @@ impl CongestionController {
                 PacketSpace::with_epoch(Epoch::Data, max_ack_delay),
             ],
             discarded_epochs: [false; Epoch::count()],
-            pacer: Pacer::new(
-                INITIAL_RTT,
-                INIT_CWND,
-                pmtu.load(Ordering::Relaxed) as usize,
-                now,
-                None,
-            ),
+            pacer: Pacer::new(INITIAL_RTT, INIT_CWND, pmtu.load(Ordering::Relaxed) as usize, now, None),
             pending_burst: false,
             loss_resenders,
             need_send_ack_eliciting_packets: [0; Epoch::count()],
@@ -151,14 +142,7 @@ impl CongestionController {
     ///     OnPacketSentCC(sent_bytes)
     ///     SetLossDetectionTimer()
     /// ```
-    pub fn on_packet_sent(
-        &mut self,
-        packet_number: u64,
-        epoch: Epoch,
-        ack_eliciting: bool,
-        in_flight: bool,
-        sent_bytes: usize,
-    ) {
+    pub fn on_packet_sent(&mut self, packet_number: u64, epoch: Epoch, ack_eliciting: bool, in_flight: bool, sent_bytes: usize) {
         // A sealed batch may finish submission after this epoch's keys were retired.
         if self.discarded_epochs[epoch] {
             return;
@@ -168,8 +152,7 @@ impl CongestionController {
         if in_flight {
             if ack_eliciting {
                 self.packet_spaces[epoch].time_of_last_ack_eliciting_packet = Some(now);
-                self.need_send_ack_eliciting_packets[epoch] =
-                    self.need_send_ack_eliciting_packets[epoch].saturating_sub(1);
+                self.need_send_ack_eliciting_packets[epoch] = self.need_send_ack_eliciting_packets[epoch].saturating_sub(1);
             }
             self.algorithm.on_packet_sent_cc(&sent);
         }
@@ -186,20 +169,10 @@ impl CongestionController {
     }
 
     /// Record a submitted packet and the ACK carried by it under the same guard.
-    pub fn on_pkt_sent(
-        &mut self,
-        epoch: Epoch,
-        pn: u64,
-        is_ack_eliciting: bool,
-        sent_bytes: usize,
-        in_flight: bool,
-        ack: Option<u64>,
-    ) {
+    pub fn on_pkt_sent(&mut self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>) {
         self.on_packet_sent(pn, epoch, is_ack_eliciting, in_flight, sent_bytes);
         if let Some(largest_acked) = ack {
-            self.packet_spaces[epoch]
-                .rcvd_packets
-                .on_ack_sent(pn, largest_acked);
+            self.packet_spaces[epoch].rcvd_packets.on_ack_sent(pn, largest_acked);
         }
     }
 
@@ -259,11 +232,7 @@ impl CongestionController {
                 }
                 let (largest_pn, largest_time_sent) = newly_acked_packets.largest;
                 if largest_pn == ack_frame.largest() && newly_acked_packets.include_ack_eliciting {
-                    self.rtt.update(
-                        now - largest_time_sent,
-                        Duration::from_micros(ack_frame.delay()),
-                        self.hs_facts.is_handshake_done(),
-                    );
+                    self.rtt.update(now - largest_time_sent, Duration::from_micros(ack_frame.delay()), self.hs_facts.is_handshake_done());
                 }
                 // Process ECN information if present.
                 if ack_frame.ecn().is_some() {
@@ -272,9 +241,8 @@ impl CongestionController {
             }
         }
 
-        let mut loss_pns = self.packet_spaces[epoch]
-            .detect_lost_packets(self.rtt.loss_delay(), PACKET_THRESHOLD, &mut self.algorithm)
-            .peekable();
+        let mut loss_pns =
+            self.packet_spaces[epoch].detect_lost_packets(self.rtt.loss_delay(), PACKET_THRESHOLD, &mut self.algorithm).peekable();
 
         if loss_pns.peek().is_some() {
             self.rtt.try_backoff_rtt();
@@ -362,9 +330,8 @@ impl CongestionController {
     ///   SetLossDetectionTimer()
     fn on_loss_detection_timeout(&mut self, peer_validated: bool) -> u32 {
         if let Some((_, epoch)) = self.get_loss_time_and_epoch() {
-            let mut loss_pns = self.packet_spaces[epoch]
-                .detect_lost_packets(self.rtt.loss_delay(), PACKET_THRESHOLD, &mut self.algorithm)
-                .peekable();
+            let mut loss_pns =
+                self.packet_spaces[epoch].detect_lost_packets(self.rtt.loss_delay(), PACKET_THRESHOLD, &mut self.algorithm).peekable();
 
             if loss_pns.peek().is_some() {
                 self.rtt.try_backoff_rtt();
@@ -471,10 +438,7 @@ impl CongestionController {
                 }
                 duration += self.max_ack_delay * (1 << self.pto_count);
             }
-            let t = self.packet_spaces[epoch]
-                .time_of_last_ack_eliciting_packet
-                .unwrap()
-                + duration;
+            let t = self.packet_spaces[epoch].time_of_last_ack_eliciting_packet.unwrap() + duration;
             if pto_time.is_none() || pto_time.is_some_and(|(pto_time, _)| t < pto_time) {
                 pto_time = Some((t, epoch));
             }
@@ -495,9 +459,7 @@ impl CongestionController {
     ///   return has received Handshake ACK ||
     ///        handshake confirmed
     fn peer_completed_address_validation(&self) -> bool {
-        self.hs_facts.role() == Role::Server
-            || self.hs_facts.has_handshake_acked()
-            || self.hs_facts.is_handshake_done()
+        self.hs_facts.role() == Role::Server || self.hs_facts.has_handshake_acked() || self.hs_facts.is_handshake_done()
     }
 
     fn process_ecn(&mut self, ack: &AckFrame, sent_time: &Instant, epoch: Epoch) {
@@ -517,18 +479,10 @@ impl CongestionController {
     #[inline]
     fn send_quota(&mut self) -> usize {
         let now = Instant::now();
-        let pacing_quota = self.pacer.schedule(
-            self.rtt.smoothed_rtt(),
-            self.algorithm.congestion_window(),
-            self.mtu(),
-            now,
-            self.algorithm.pacing_rate(),
-        );
+        let pacing_quota =
+            self.pacer.schedule(self.rtt.smoothed_rtt(), self.algorithm.congestion_window(), self.mtu(), now, self.algorithm.pacing_rate());
         // Pacing tokens do not permit sending past the outstanding-byte limit.
-        let window = self
-            .algorithm
-            .congestion_window()
-            .saturating_sub(self.algorithm.bytes_in_flight());
+        let window = self.algorithm.congestion_window().saturating_sub(self.algorithm.bytes_in_flight());
         pacing_quota.min(window)
     }
 
@@ -571,17 +525,12 @@ impl CongestionController {
         let peer_validated = self.peer_completed_address_validation();
         if self.loss_detection_timer.is_none()
             || self.amplification_blocked
-            || (peer_validated
-                && self.no_ack_eliciting_in_flight()
-                && self.get_loss_time_and_epoch().is_none())
+            || (peer_validated && self.no_ack_eliciting_in_flight() && self.get_loss_time_and_epoch().is_none())
         {
             // Rearm after credit returns, keeping an already running PTO's deadline.
             self.set_loss_detection_timer();
         }
-        if self
-            .loss_detection_timer
-            .is_some_and(|t| t <= Instant::now())
-        {
+        if self.loss_detection_timer.is_some_and(|t| t <= Instant::now()) {
             let count = self.on_loss_detection_timeout(peer_validated);
             if count > MAX_PTO_COUNT {
                 return Err(TooManyPtos(count));
@@ -606,10 +555,7 @@ impl CongestionController {
             if epoch == Epoch::Data && !packet_numbers.is_empty() {
                 let tracker = self.loss_resenders.read_guard().get(epoch as u64).cloned();
                 if let Some(tracker) = tracker {
-                    tracker.resend(
-                        PacketLostTrigger::PtoExpired,
-                        &mut packet_numbers.into_iter(),
-                    );
+                    tracker.resend(PacketLostTrigger::PtoExpired, &mut packet_numbers.into_iter());
                 }
             }
         }
@@ -656,8 +602,7 @@ impl ArcCC {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&cc.0);
             runtime.spawn(async move {
-                let mut ticker =
-                    tokio::time::interval_at(Instant::now() + TICK_INTERVAL, TICK_INTERVAL);
+                let mut ticker = tokio::time::interval_at(Instant::now() + TICK_INTERVAL, TICK_INTERVAL);
                 loop {
                     ticker.tick().await;
                     let Some(cc) = weak.upgrade() else { break };
@@ -687,9 +632,7 @@ impl ArcCC {
         let mut guard = self.0.lock().unwrap();
         guard.max_ack_delay = peer;
         guard.rtt.set_max_ack_delay(peer);
-        guard.packet_spaces[Epoch::Data]
-            .rcvd_packets
-            .set_max_ack_delay(local);
+        guard.packet_spaces[Epoch::Data].rcvd_packets.set_max_ack_delay(local);
     }
 
     /// Borrow the controller across a nonblocking submission and its accounting.
@@ -750,17 +693,8 @@ impl super::Transport for ArcCC {
         guard.packet_spaces[epoch].rcvd_packets.need_ack()
     }
 
-    fn on_pkt_sent(
-        &self,
-        epoch: Epoch,
-        pn: u64,
-        is_ack_eliciting: bool,
-        sent_bytes: usize,
-        in_flight: bool,
-        ack: Option<u64>,
-    ) {
-        self.lock()
-            .on_pkt_sent(epoch, pn, is_ack_eliciting, sent_bytes, in_flight, ack);
+    fn on_pkt_sent(&self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>) {
+        self.lock().on_pkt_sent(epoch, pn, is_ack_eliciting, sent_bytes, in_flight, ack);
     }
 
     fn on_ack_rcvd(&self, epoch: Epoch, ack_frame: &AckFrame) {
@@ -844,10 +778,6 @@ mod tests {
             controller.on_packet_sent(pn, Epoch::Data, false, false, 64);
         }
 
-        assert!(
-            controller.packet_spaces[Epoch::Data]
-                .sent_packets
-                .is_empty()
-        );
+        assert!(controller.packet_spaces[Epoch::Data].sent_packets.is_empty());
     }
 }

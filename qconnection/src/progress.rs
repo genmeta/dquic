@@ -22,13 +22,7 @@ impl ArcProgress {
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self(Arc::new(Mutex::new(Progress::new(
-            facts,
-            cid_registry,
-            spaces,
-            loss_resender,
-            terminator,
-        ))))
+        Self(Arc::new(Mutex::new(Progress::new(facts, cid_registry, spaces, loss_resender, terminator))))
     }
 
     pub fn facts(&self) -> Arc<HandshakeFacts> {
@@ -91,14 +85,7 @@ impl Progress {
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self {
-            role: facts.role(),
-            facts,
-            cid_registry,
-            spaces,
-            loss_resender,
-            terminator,
-        }
+        Self { role: facts.role(), facts, cid_registry, spaces, loss_resender, terminator }
     }
 
     fn on_initial_received(&mut self, peer_scid: ConnectionId) -> bool {
@@ -147,9 +134,7 @@ impl Progress {
 
     fn on_path_selected(&mut self, paths: &Paths, path: &Arc<Path>) -> bool {
         let entries = paths.entries.lock().unwrap();
-        if !entries
-            .get(&path.pathway)
-            .is_some_and(|current| Arc::ptr_eq(current, path))
+        if !entries.get(&path.pathway).is_some_and(|current| Arc::ptr_eq(current, path))
             || path.validation.is_cancelled()
             || self.facts.is_handshake_done()
             || !self.facts.on_path_selected()
@@ -181,10 +166,7 @@ impl Progress {
         {
             let mut spaces = self.spaces.write_guard();
             let mut resender = self.loss_resender.write_guard();
-            while spaces
-                .front()
-                .is_some_and(|(epoch, _)| epoch < Epoch::Data as u64)
-            {
+            while spaces.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
                 let (_, space) = spaces.pop_front().unwrap();
                 space.retire();
                 resender.pop_front();
@@ -218,19 +200,14 @@ impl Progress {
             let mut spaces = self.spaces.write_guard();
             let mut resender = self.loss_resender.write_guard();
             spaces.push_back(space.clone()).expect("next space epoch");
-            resender
-                .push_back(space.clone())
-                .expect("next recovery epoch");
+            resender.push_back(space.clone()).expect("next recovery epoch");
         }
         self.terminator.register(Arc::new(space.crypto().clone()));
     }
 
     fn retire_initial(&self) {
         let mut spaces = self.spaces.write_guard();
-        if spaces
-            .front()
-            .is_some_and(|(epoch, _)| epoch == Epoch::Initial as u64)
-        {
+        if spaces.front().is_some_and(|(epoch, _)| epoch == Epoch::Initial as u64) {
             let mut resender = self.loss_resender.write_guard();
             let (_, initial) = spaces.pop_front().unwrap();
             initial.retire();

@@ -2,8 +2,7 @@ use qbase::net::addr::*;
 
 #[test]
 fn matches_peer_allows_nat_across_non_loopback_scopes() {
-    let endpoints = ["192.168.1.10:4433", "8.8.4.4:50000", "100.64.0.1:4433"]
-        .map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
+    let endpoints = ["192.168.1.10:4433", "8.8.4.4:50000", "100.64.0.1:4433"].map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
     for local in endpoints {
         for peer in endpoints {
             assert_eq!(local.matches_peer(peer), local != peer);
@@ -11,13 +10,7 @@ fn matches_peer_allows_nat_across_non_loopback_scopes() {
     }
     let local = endpoints[0];
     assert!(!local.matches_peer(local));
-    for invalid_peer in [
-        "0.0.0.0:443",
-        "1.1.1.1:0",
-        "224.0.0.1:443",
-        "255.255.255.255:443",
-        "[::1]:443",
-    ] {
+    for invalid_peer in ["0.0.0.0:443", "1.1.1.1:0", "224.0.0.1:443", "255.255.255.255:443", "[::1]:443"] {
         assert!(!local.matches_peer(EndpointAddr::direct(invalid_peer.parse().unwrap())));
     }
 }
@@ -28,11 +21,7 @@ fn loopback_peers_match_in_both_families_including_mapped_ipv4() {
         ("127.0.0.1:4433", "127.0.0.2:443", "1.1.1.1:443"),
         ("127.0.0.1:4433", "127.0.0.2:443", "192.168.1.10:443"),
         ("[::1]:4433", "[::1]:443", "[2001:4860:4860::8888]:443"),
-        (
-            "[::ffff:127.0.0.1]:4433",
-            "[::ffff:127.0.0.2]:443",
-            "[fd00::1]:443",
-        ),
+        ("[::ffff:127.0.0.1]:4433", "[::ffff:127.0.0.2]:443", "[fd00::1]:443"),
     ] {
         let local = EndpointAddr::direct(local.parse().unwrap());
         let peer = EndpointAddr::direct(peer.parse().unwrap());
@@ -45,22 +34,11 @@ fn loopback_peers_match_in_both_families_including_mapped_ipv4() {
 
 #[test]
 fn matches_peer_validates_mediated_addresses() {
-    let local = EndpointAddr::mediate(
-        "127.0.0.1:20002".parse().unwrap(),
-        "8.8.4.4:50000".parse().unwrap(),
-    );
-    let peer = EndpointAddr::mediate(
-        "127.0.0.1:20003".parse().unwrap(),
-        "1.0.0.1:60000".parse().unwrap(),
-    );
+    let local = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), "8.8.4.4:50000".parse().unwrap());
+    let peer = EndpointAddr::mediate("127.0.0.1:20003".parse().unwrap(), "1.0.0.1:60000".parse().unwrap());
     assert!(local.matches_peer(peer));
     assert!(!EndpointAddr::direct(*local).matches_peer(peer));
-    for outer in [
-        "0.0.0.0:50000",
-        "8.8.4.4:0",
-        "224.0.0.1:50000",
-        "[fd00::1]:50000",
-    ] {
+    for outer in ["0.0.0.0:50000", "8.8.4.4:0", "224.0.0.1:50000", "[fd00::1]:50000"] {
         let invalid = EndpointAddr::mediate(*local, outer.parse().unwrap());
         assert!(!invalid.matches_peer(peer));
         assert!(!peer.matches_peer(invalid));
@@ -69,16 +47,8 @@ fn matches_peer_validates_mediated_addresses() {
 
 #[test]
 fn ipv4_public_reachability() {
-    for addr in [
-        "8.8.8.8:443",
-        "192.0.0.9:443",
-        "192.0.0.10:443",
-        "192.31.196.1:443",
-    ] {
-        assert!(
-            EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
-            "{addr} should be publicly reachable"
-        );
+    for addr in ["8.8.8.8:443", "192.0.0.9:443", "192.0.0.10:443", "192.31.196.1:443"] {
+        assert!(EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(), "{addr} should be publicly reachable");
     }
 
     for addr in [
@@ -99,10 +69,7 @@ fn ipv4_public_reachability() {
         "240.0.0.1:443",
         "255.255.255.255:443",
     ] {
-        assert!(
-            !EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
-            "{addr} should not be publicly reachable"
-        );
+        assert!(!EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(), "{addr} should not be publicly reachable");
     }
 }
 
@@ -119,10 +86,7 @@ fn ipv6_public_reachability() {
         "[2001:30::1]:443",
         "[2001:4860:4860::8888]:443",
     ] {
-        assert!(
-            EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
-            "{addr} should be publicly reachable"
-        );
+        assert!(EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(), "{addr} should be publicly reachable");
     }
 
     for addr in [
@@ -147,20 +111,11 @@ fn ipv6_public_reachability() {
         "[fe80::1]:443",
         "[ff02::1]:443",
     ] {
-        assert!(
-            !EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(),
-            "{addr} should not be publicly reachable"
-        );
+        assert!(!EndpointAddr::direct(addr.parse().unwrap()).is_globally_routable(), "{addr} should not be publicly reachable");
     }
 }
 
 #[test]
 fn mediate_endpoint_is_publicly_reachable_through_its_agent() {
-    assert!(
-        EndpointAddr::mediate(
-            "8.8.8.8:3478".parse().unwrap(),
-            "192.168.1.2:50000".parse().unwrap(),
-        )
-        .is_globally_routable()
-    );
+    assert!(EndpointAddr::mediate("8.8.8.8:3478".parse().unwrap(), "192.168.1.2:50000".parse().unwrap(),).is_globally_routable());
 }

@@ -13,24 +13,14 @@ fn certificate(pem: &[u8]) -> CertificateDer<'static> {
 }
 
 fn endpoint(certs: Vec<CertificateDer<'static>>) -> Arc<Endpoint> {
-    Endpoint::new(
-        "a different name",
-        certs,
-        PrivateKeyDer::from_pem_slice(KEY).unwrap(),
-        b"ocsp".to_vec(),
-    )
-    .unwrap()
+    Endpoint::new("a different name", certs, PrivateKeyDer::from_pem_slice(KEY).unwrap(), b"ocsp".to_vec()).unwrap()
 }
 
 #[test]
 fn construction_defers_certificate_checks() {
     // Even invalid names, malformed/empty chains and mismatched keys are
     // preserved for the handshake layer to validate.
-    for certs in [
-        vec![],
-        vec![CertificateDer::from(vec![0])],
-        vec![certificate(OTHER_CERT)],
-    ] {
+    for certs in [vec![], vec![CertificateDer::from(vec![0])], vec![certificate(OTHER_CERT)]] {
         let endpoint = endpoint(certs);
         assert_eq!(endpoint.name(), "a different name");
         assert_eq!(endpoint.ocsp(), b"ocsp");
@@ -39,22 +29,12 @@ fn construction_defers_certificate_checks() {
 
 #[test]
 fn construction_rejects_unloadable_private_key() {
-    let result = Endpoint::new(
-        "localhost",
-        vec![certificate(CERT)],
-        PrivatePkcs8KeyDer::from(vec![0]).into(),
-        b"ocsp".to_vec(),
-    );
+    let result = Endpoint::new("localhost", vec![certificate(CERT)], PrivatePkcs8KeyDer::from(vec![0]).into(), b"ocsp".to_vec());
     assert!(result.is_err());
 }
 
 #[test]
 fn construction_rejects_empty_ocsp() {
-    let result = Endpoint::new(
-        "localhost",
-        vec![certificate(CERT)],
-        PrivateKeyDer::from_pem_slice(KEY).unwrap(),
-        Vec::new(),
-    );
+    let result = Endpoint::new("localhost", vec![certificate(CERT)], PrivateKeyDer::from_pem_slice(KEY).unwrap(), Vec::new());
     assert!(result.is_err());
 }

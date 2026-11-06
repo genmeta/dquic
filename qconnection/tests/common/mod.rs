@@ -19,35 +19,22 @@ const SERVER_OCSP: &[u8] = include_bytes!("../keychain/localhost/server.ocsp");
 const CLIENT_OCSP: &[u8] = include_bytes!("../keychain/localhost/client.ocsp");
 
 /// Construct component-test paths without starting a competing sending task.
-pub fn registered_path(
-    paths: &qconnection::Paths,
-    path: qtransport::path::Path,
-) -> Arc<qtransport::path::Path> {
+pub fn registered_path(paths: &qconnection::Paths, path: qtransport::path::Path) -> Arc<qtransport::path::Path> {
     let path = Arc::new(path);
-    paths
-        .entries
-        .lock()
-        .unwrap()
-        .insert(path.pathway, path.clone());
+    paths.entries.lock().unwrap().insert(path.pathway, path.clone());
     path
 }
 
 pub fn path_credit(path: &qtransport::path::Path) -> usize {
     use std::task::{Context, Poll, Waker};
 
-    match path
-        .validation
-        .poll_credit(&mut Context::from_waker(Waker::noop()))
-    {
+    match path.validation.poll_credit(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(Ok(credit)) => credit.unwrap_or(usize::MAX),
         _ => 0,
     }
 }
 
-pub fn packet_metadata(
-    packets: &[qbase::packet::assemble::Metadata],
-    epoch: qbase::Epoch,
-) -> Option<qbase::packet::assemble::Metadata> {
+pub fn packet_metadata(packets: &[qbase::packet::assemble::Metadata], epoch: qbase::Epoch) -> Option<qbase::packet::assemble::Metadata> {
     packets.iter().find(|meta| meta.epoch() == epoch).copied()
 }
 
@@ -110,14 +97,10 @@ pub fn quic_endpoint() -> qconnection::QuicEndpoint {
     let (client_parameters, server_parameters) = parameters();
     let mut endpoint: qconnection::QuicEndpoint = identity().into();
     for (id, value) in client_parameters.iter() {
-        endpoint
-            .set_parameters(qbase::role::Role::Client, *id, value.clone())
-            .unwrap();
+        endpoint.set_parameters(qbase::role::Role::Client, *id, value.clone()).unwrap();
     }
     for (id, value) in server_parameters.iter() {
-        endpoint
-            .set_parameters(qbase::role::Role::Server, *id, value.clone())
-            .unwrap();
+        endpoint.set_parameters(qbase::role::Role::Server, *id, value.clone()).unwrap();
     }
     endpoint
 }
@@ -146,27 +129,12 @@ pub fn backends(mutual: bool) -> [qtls::TlsHandshake; 2] {
     ]
 }
 
-pub fn parameters() -> (
-    qbase::param::ClientParameters,
-    qbase::param::ServerParameters,
-) {
+pub fn parameters() -> (qbase::param::ClientParameters, qbase::param::ServerParameters) {
     let mut c = ClientParameters::default();
     let mut s = ServerParameters::default();
-    c.set(
-        ParameterId::InitialSourceConnectionId,
-        ConnectionId::from_slice(b"client00"),
-    )
-    .unwrap();
-    s.set(
-        ParameterId::InitialSourceConnectionId,
-        ConnectionId::from_slice(b"server00"),
-    )
-    .unwrap();
-    s.set(
-        ParameterId::OriginalDestinationConnectionId,
-        ConnectionId::from_slice(b"original"),
-    )
-    .unwrap();
+    c.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"client00")).unwrap();
+    s.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"server00")).unwrap();
+    s.set(ParameterId::OriginalDestinationConnectionId, ConnectionId::from_slice(b"original")).unwrap();
     (c, s)
 }
 
@@ -183,8 +151,7 @@ where
     let mut buffer = BytesMut::zeroed(1200);
     let pn = journal.next_pn().unwrap();
     let mut frames = Vec::new();
-    let mut packet =
-        qconnection::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
+    let mut packet = qconnection::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
         matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, PacketContent::EffectivePayload, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), std::task::Poll::Ready((n, _)) if n > 0)
@@ -202,10 +169,7 @@ pub fn use_system_resolver() {
     REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
 }
 
-pub fn handshake_facts(
-    role: qbase::role::Role,
-    multipath: bool,
-) -> Arc<qbase::handshake::HandshakeFacts> {
+pub fn handshake_facts(role: qbase::role::Role, multipath: bool) -> Arc<qbase::handshake::HandshakeFacts> {
     let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(role));
     if !multipath {
         facts.quit_mp_handshaking();
@@ -220,15 +184,7 @@ pub fn initial_paths(
     odcid: ConnectionId,
     keys: qtls::BidirectionalKeys,
 ) -> Arc<qconnection::Paths> {
-    initial_paths_with_timeouts(
-        role,
-        scid,
-        odcid,
-        keys,
-        std::time::Duration::ZERO,
-        std::time::Duration::ZERO,
-        handshake_facts(role, true),
-    )
+    initial_paths_with_timeouts(role, scid, odcid, keys, std::time::Duration::ZERO, std::time::Duration::ZERO, handshake_facts(role, true))
 }
 
 pub fn initial_paths_with_timeouts(
@@ -243,25 +199,12 @@ pub fn initial_paths_with_timeouts(
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
     let router = Arc::new(qtransport::router::QuicRouter::new());
     let (inbox, _) = qtransport::packet::channel::new();
-    let local_cids = qconnection::ArcLocalCids::new(
-        role,
-        odcid,
-        scid,
-        router.registry_on_issuing_scid(inbox, reliable_frames.clone()),
-    );
-    let initial_space = Arc::new(qtransport::space::InitialSpace::new(
-        scid,
-        qtransport::keys::ArcKeys::new(Arc::new(keys)),
-        None,
-        facts.clone(),
-    ));
+    let local_cids = qconnection::ArcLocalCids::new(role, odcid, scid, router.registry_on_issuing_scid(inbox, reliable_frames.clone()));
+    let initial_space =
+        Arc::new(qtransport::space::InitialSpace::new(scid, qtransport::keys::ArcKeys::new(Arc::new(keys)), None, facts.clone()));
     let remote_cids = match role {
-        qbase::role::Role::Client => {
-            qconnection::ArcRemoteCids::client(odcid, reliable_frames.clone())
-        }
-        qbase::role::Role::Server => {
-            qconnection::ArcRemoteCids::server(odcid, reliable_frames.clone())
-        }
+        qbase::role::Role::Client => qconnection::ArcRemoteCids::client(odcid, reliable_frames.clone()),
+        qbase::role::Role::Server => qconnection::ArcRemoteCids::server(odcid, reliable_frames.clone()),
     };
     remote_cids.set_limit(10);
     qconnection::Paths::new(
@@ -276,9 +219,7 @@ pub fn initial_paths_with_timeouts(
 
 /// Read and return one test batch through its already applied CID handle.
 pub fn cid_value(dcid: &qconnection::ArcDcid) -> ConnectionId {
-    let std::task::Poll::Ready(Some(cid)) =
-        dcid.poll_borrow(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-    else {
+    let std::task::Poll::Ready(Some(cid)) = dcid.poll_borrow(&mut std::task::Context::from_waker(std::task::Waker::noop())) else {
         panic!("expected a ready CID");
     };
     dcid.refresh();
@@ -287,8 +228,7 @@ pub fn cid_value(dcid: &qconnection::ArcDcid) -> ConnectionId {
 
 /// A ready CID cell for component tests that do not run the connection lifecycle.
 pub fn dcid(cid: ConnectionId) -> qconnection::ArcDcid {
-    let remote =
-        qconnection::ArcRemoteCids::server(cid, qconnection::ArcReliableFrames::with_capacity(0));
+    let remote = qconnection::ArcRemoteCids::server(cid, qconnection::ArcReliableFrames::with_capacity(0));
     remote.upgrade();
     remote.apply_dcid()
 }
@@ -313,12 +253,7 @@ pub fn initial_keys(server: bool) -> qtls::BidirectionalKeys {
 }
 
 /// An isolated connection with no paths or idle expiry for TLS task tests.
-pub fn paths(
-    role: qbase::role::Role,
-) -> (
-    Arc<qconnection::Paths>,
-    qtransport::terminate::ArcTerminator,
-) {
+pub fn paths(role: qbase::role::Role) -> (Arc<qconnection::Paths>, qtransport::terminate::ArcTerminator) {
     let paths = initial_paths(
         role,
         ConnectionId::from_slice(b"local"),
@@ -352,14 +287,8 @@ pub fn observe_close(terminator: &qtransport::terminate::ArcTerminator) -> Arc<C
 }
 
 /// Hold receiver resources independently of the active sending queue in tests.
-pub fn initial_space(
-    spaces: &qtransport::space::ArcSpaces,
-) -> Arc<qtransport::space::Space<qtransport::keys::ArcKeys>> {
-    let initial = qtransport::space::Spaces::get::<qtransport::space::InitialSpace>(
-        &spaces.read_guard(),
-        qbase::Epoch::Initial,
-    )
-    .unwrap();
+pub fn initial_space(spaces: &qtransport::space::ArcSpaces) -> Arc<qtransport::space::Space<qtransport::keys::ArcKeys>> {
+    let initial = qtransport::space::Spaces::get::<qtransport::space::InitialSpace>(&spaces.read_guard(), qbase::Epoch::Initial).unwrap();
     Arc::new(initial.space.clone())
 }
 
@@ -377,10 +306,11 @@ pub fn take_heartbeat(path: &qtransport::path::Path) -> bool {
     let limits_length = 1;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-    match path.heartbeat.clone().poll_dump(
-        &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-    ) {
+    match path
+        .heartbeat
+        .clone()
+        .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0))
+    {
         Poll::Ready(Ok(1)) => {
             assert!(frames.is_empty());
             assert_eq!(&bytes[..], &[1]);

@@ -33,16 +33,9 @@ pub enum AddressBookError {
 pub enum AddressEvent {
     /// Insert or refresh an endpoint ready for advertisement, including its wire NAT type.
     /// Internal and loopback endpoints use FullCone; external endpoints wait for classification.
-    Added {
-        bound: SocketAddr,
-        endpoint: EndpointAddr,
-        nat: NatType,
-    },
+    Added { bound: SocketAddr, endpoint: EndpointAddr, nat: NatType },
     /// Withdraw an endpoint, including one whose advertisement was waiting for classification.
-    Removed {
-        bound: SocketAddr,
-        endpoint: EndpointAddr,
-    },
+    Removed { bound: SocketAddr, endpoint: EndpointAddr },
     /// The binding and its NAT record have been withdrawn from the directory.
     BoundRemoved { bound: SocketAddr },
 }
@@ -106,31 +99,13 @@ impl AddressBook {
     /// Publish an inner endpoint using the socket's actual binding and interface metadata.
     /// The caller supplies a Direct endpoint.
     /// Only the metadata is copied; the directory does not retain the socket.
-    pub fn insert_inner(
-        &self,
-        socket: &UdpSocket,
-        endpoint: EndpointAddr,
-    ) -> Result<(), AddressBookError> {
-        self.insert(
-            socket.local_addr()?,
-            endpoint,
-            Scope::Internal,
-            socket.bound_device(),
-        )
+    pub fn insert_inner(&self, socket: &UdpSocket, endpoint: EndpointAddr) -> Result<(), AddressBookError> {
+        self.insert(socket.local_addr()?, endpoint, Scope::Internal, socket.bound_device())
     }
 
     /// Publish a Direct or Mediate outer alias, sharing its binding's interface metadata.
-    pub fn insert_outer(
-        &self,
-        socket: &UdpSocket,
-        endpoint: EndpointAddr,
-    ) -> Result<(), AddressBookError> {
-        self.insert(
-            socket.local_addr()?,
-            endpoint,
-            Scope::External,
-            socket.bound_device(),
-        )
+    pub fn insert_outer(&self, socket: &UdpSocket, endpoint: EndpointAddr) -> Result<(), AddressBookError> {
+        self.insert(socket.local_addr()?, endpoint, Scope::External, socket.bound_device())
     }
 
     /// Replace an endpoint in its existing table, retaining its binding and NAT record.
@@ -166,10 +141,8 @@ impl AddressBook {
     /// endpoints for the network owner to clean up communication registrations.
     pub fn remove_bound(&self, bound: SocketAddr) -> Vec<EndpointAddr> {
         let mut state = self.state.lock().unwrap();
-        let mut removed = state
-            .entries()
-            .filter_map(|(endpoint, candidate)| (*candidate == bound).then_some(*endpoint))
-            .collect::<Vec<_>>();
+        let mut removed =
+            state.entries().filter_map(|(endpoint, candidate)| (*candidate == bound).then_some(*endpoint)).collect::<Vec<_>>();
         removed.sort_unstable();
         let inner_changed = state.inner.values().any(|candidate| *candidate == bound);
         let ddns_changed = state.outer.values().any(|candidate| *candidate == bound);
@@ -190,11 +163,7 @@ impl AddressBook {
             if subscriber.sender.is_closed() {
                 return false;
             }
-            !subscriber.bounds.remove(&bound)
-                || subscriber
-                    .sender
-                    .send(AddressEvent::BoundRemoved { bound })
-                    .is_ok()
+            !subscriber.bounds.remove(&bound) || subscriber.sender.send(AddressEvent::BoundRemoved { bound }).is_ok()
         });
         removed
     }
@@ -236,11 +205,7 @@ impl AddressBook {
             return sender.subscribe();
         }
         let snapshot = state.mdns_snapshot(bound);
-        state
-            .mdns
-            .entry(bound)
-            .or_insert_with(|| watch::channel(snapshot).0)
-            .subscribe()
+        state.mdns.entry(bound).or_insert_with(|| watch::channel(snapshot).0).subscribe()
     }
 
     /// Snapshot internal bindings with their actual interface metadata.
@@ -250,18 +215,12 @@ impl AddressBook {
             .inner
             .iter()
             .filter_map(|(endpoint, bound)| {
-                (endpoint.scope() == Some(Scope::Internal)
-                    && endpoint.addr().port() != 0
-                    && bound.port() != 0)
-                    .then_some(*bound)
+                (endpoint.scope() == Some(Scope::Internal) && endpoint.addr().port() != 0 && bound.port() != 0).then_some(*bound)
             })
             .collect::<Vec<_>>();
         bounds.sort_unstable();
         bounds.dedup();
-        bounds
-            .into_iter()
-            .filter_map(|bound| Some((bound, state.interfaces.get(&bound)?.as_ref()?.clone())))
-            .collect()
+        bounds.into_iter().filter_map(|bound| Some((bound, state.interfaces.get(&bound)?.as_ref()?.clone()))).collect()
     }
 
     pub fn ddns_endpoints(&self) -> Arc<[EndpointAddr]> {
@@ -276,22 +235,13 @@ impl AddressBook {
     /// Internal and loopback endpoints use FullCone; external endpoints wait for classification.
     /// Added also refreshes an existing endpoint when its NAT classification changes.
     /// Dropping the receiver ends the subscription; later writes/subscriptions prune it.
-    pub fn subscribe_punch(
-        &self,
-        scopes: impl Into<Scopes>,
-    ) -> mpsc::UnboundedReceiver<AddressEvent> {
+    pub fn subscribe_punch(&self, scopes: impl Into<Scopes>) -> mpsc::UnboundedReceiver<AddressEvent> {
         let mut state = self.state.lock().unwrap();
         let (sender, receiver) = mpsc::unbounded_channel();
-        let mut subscriber = Subscriber {
-            scopes: scopes.into(),
-            sender,
-            bounds: HashSet::new(),
-        };
+        let mut subscriber = Subscriber { scopes: scopes.into(), sender, bounds: HashSet::new() };
         let mut endpoints = state
             .entries()
-            .filter_map(|(&endpoint, &bound)| {
-                in_scope(endpoint, subscriber.scopes).then_some((bound, endpoint))
-            })
+            .filter_map(|(&endpoint, &bound)| in_scope(endpoint, subscriber.scopes).then_some((bound, endpoint)))
             .collect::<Vec<_>>();
         endpoints.sort_unstable();
         for (bound, endpoint) in endpoints {
@@ -300,15 +250,9 @@ impl AddressBook {
                 continue;
             };
             // The receiver is still owned by this function, so it cannot be closed.
-            let _ = subscriber.sender.send(AddressEvent::Added {
-                bound,
-                endpoint,
-                nat,
-            });
+            let _ = subscriber.sender.send(AddressEvent::Added { bound, endpoint, nat });
         }
-        state
-            .punch_subscribers
-            .retain(|subscriber| !subscriber.sender.is_closed());
+        state.punch_subscribers.retain(|subscriber| !subscriber.sender.is_closed());
         state.punch_subscribers.push(subscriber);
         receiver
     }
@@ -326,9 +270,7 @@ impl AddressBook {
             .entries()
             .filter(|&(&endpoint, _)| endpoint.matches_peer(peer))
             .filter(|&(_, &bound)| match source {
-                Source::Mdns { nic, family } => {
-                    peer.addr().family() == *family && state.matches_mdns(bound, nic, *family)
-                }
+                Source::Mdns { nic, family } => peer.addr().family() == *family && state.matches_mdns(bound, nic, *family),
                 _ => true,
             })
             .map(|(&endpoint, _)| Pathway::new(endpoint, peer))
@@ -366,19 +308,13 @@ impl State {
             && device.name() == nic
             && match bound {
                 SocketAddr::V4(_) => true,
-                SocketAddr::V6(addr) => {
-                    addr.scope_id() == 0 || addr.scope_id() == device.index().get()
-                }
+                SocketAddr::V6(addr) => addr.scope_id() == 0 || addr.scope_id() == device.index().get(),
             }
     }
 
     // Metadata is recorded atomically with endpoint publication. All aliases must
     // agree, including an explicitly unscoped socket. remove_bound ends its lifetime.
-    fn set_interface(
-        &mut self,
-        bound: SocketAddr,
-        interface: Option<&qudp::BoundDevice>,
-    ) -> Result<(), AddressBookError> {
+    fn set_interface(&mut self, bound: SocketAddr, interface: Option<&qudp::BoundDevice>) -> Result<(), AddressBookError> {
         if let Some(known) = self.interfaces.get(&bound) {
             if known.as_ref() != interface {
                 return Err(AddressBookError::ConflictingInterface(bound));
@@ -401,11 +337,7 @@ impl State {
         self.inner
             .get(&endpoint)
             .map(|&bound| (Scope::Internal, bound))
-            .or_else(|| {
-                self.outer
-                    .get(&endpoint)
-                    .map(|&bound| (Scope::External, bound))
-            })
+            .or_else(|| self.outer.get(&endpoint).map(|&bound| (Scope::External, bound)))
     }
 
     fn ensure_absent(&self, endpoint: EndpointAddr) -> Result<(), AddressBookError> {
@@ -420,9 +352,7 @@ impl State {
     }
 
     fn bound_endpoints(&self, bound: SocketAddr) -> Vec<EndpointAddr> {
-        self.entries()
-            .filter_map(|(&endpoint, &candidate)| (candidate == bound).then_some(endpoint))
-            .collect()
+        self.entries().filter_map(|(&endpoint, &candidate)| (candidate == bound).then_some(endpoint)).collect()
     }
 
     fn ddns_snapshot(&self) -> Arc<[EndpointAddr]> {
@@ -432,11 +362,8 @@ impl State {
     }
 
     fn mdns_snapshot(&self, bound: SocketAddr) -> Arc<[EndpointAddr]> {
-        let mut endpoints = self
-            .inner
-            .iter()
-            .filter_map(|(&endpoint, &candidate)| (candidate == bound).then_some(endpoint))
-            .collect::<Vec<_>>();
+        let mut endpoints =
+            self.inner.iter().filter_map(|(&endpoint, &candidate)| (candidate == bound).then_some(endpoint)).collect::<Vec<_>>();
         endpoints.sort_unstable();
         endpoints.into()
     }
@@ -474,14 +401,7 @@ impl State {
             let Some(nat) = nat else {
                 return true;
             };
-            subscriber
-                .sender
-                .send(AddressEvent::Added {
-                    bound,
-                    endpoint,
-                    nat,
-                })
-                .is_ok()
+            subscriber.sender.send(AddressEvent::Added { bound, endpoint, nat }).is_ok()
         });
     }
 
@@ -490,11 +410,7 @@ impl State {
             if subscriber.sender.is_closed() {
                 return false;
             }
-            !in_scope(endpoint, subscriber.scopes)
-                || subscriber
-                    .sender
-                    .send(AddressEvent::Removed { bound, endpoint })
-                    .is_ok()
+            !in_scope(endpoint, subscriber.scopes) || subscriber.sender.send(AddressEvent::Removed { bound, endpoint }).is_ok()
         });
     }
 }

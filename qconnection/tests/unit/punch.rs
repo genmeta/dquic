@@ -6,8 +6,8 @@ use qbase::{
     Epoch,
     error::ErrorKind,
     frame::{
-        AddAddressFrame, ConnectionCloseFrame, Frame, FrameReader, HandshakeDoneFrame, PingFrame,
-        PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, RemoveAddressFrame,
+        AddAddressFrame, ConnectionCloseFrame, Frame, FrameReader, HandshakeDoneFrame, PingFrame, PunchDoneFrame, PunchHelloFrame,
+        PunchMeNowFrame, RemoveAddressFrame,
     },
     net::{
         NatType,
@@ -23,10 +23,7 @@ use qtransport::path::Path;
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 pub(super) use crate::common::spaces::pair;
-use crate::{
-    ArcHandshake, Paths, Scopes, common, common::spaces::take_reliable,
-    recv::receive_1rtt_pkt_and_deliver_frames,
-};
+use crate::{ArcHandshake, Paths, Scopes, common, common::spaces::take_reliable, recv::receive_1rtt_pkt_and_deliver_frames};
 
 fn encoder(phase: &super::DataFixture) -> ProbeEncoder {
     let mut spaces = phase.paths.spaces.read_guard().clone();
@@ -52,27 +49,17 @@ async fn early_probe_encoder_uses_published_data_and_the_updated_peer_cid() {
     );
     let encoder = ProbeEncoder::new(paths.spaces.clone(), paths.cid_registry.remote.apply_dcid());
     let frame = PunchHelloFrame::new(1, 2, 3);
-    assert_eq!(
-        encoder.encode_probe(frame).unwrap_err().kind(),
-        std::io::ErrorKind::NotConnected
-    );
+    assert_eq!(encoder.encode_probe(frame).unwrap_err().kind(), std::io::ErrorKind::NotConnected);
     paths.progress.on_initial_received(client.peer_cid());
     super::install_data(&paths, &client);
-    let Packet::Data(packet) = PacketReader::new(encoder.encode_probe(frame).unwrap(), 8)
-        .next()
-        .unwrap()
-        .unwrap()
-    else {
+    let Packet::Data(packet) = PacketReader::new(encoder.encode_probe(frame).unwrap(), 8).next().unwrap().unwrap() else {
         panic!("expected Data packet");
     };
     assert_eq!(*packet.header.dcid(), client.peer_cid());
     paths.retire_all();
 }
 
-fn encode_frame(
-    phase: &super::DataFixture,
-    mut frame: impl for<'b> qbase::packet::Package<&'b mut [u8]>,
-) -> BytesMut {
+fn encode_frame(phase: &super::DataFixture, mut frame: impl for<'b> qbase::packet::Package<&'b mut [u8]>) -> BytesMut {
     encode_frames(phase, [&mut frame])
 }
 
@@ -129,12 +116,7 @@ fn empty_paths(phase: &super::DataFixture) -> Arc<Paths> {
     paths
 }
 
-async fn receive(
-    phase: &Arc<super::DataFixture>,
-    packets: Vec<BytesMut>,
-    pathway: Pathway,
-    link: Link,
-) {
+async fn receive(phase: &Arc<super::DataFixture>, packets: Vec<BytesMut>, pathway: Pathway, link: Link) {
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
     let path = Arc::new(Path::new(
@@ -164,12 +146,7 @@ async fn receive_on_paths(
         let DataHeader::Short(header) = packet.header else {
             panic!("expected 1-RTT packet");
         };
-        tx.try_send((
-            qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
-            pathway,
-            link,
-        ))
-        .unwrap();
+        tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).unwrap();
     }
     drop(tx);
     let closed = paths.terminator.clone();
@@ -185,10 +162,7 @@ async fn receive_on_paths(
         handshake.clone(),
     )
     .await;
-    assert!(
-        notification.notified().is_none(),
-        "received frames must not close the connection"
-    );
+    assert!(notification.notified().is_none(), "received frames must not close the connection");
     handshake
 }
 
@@ -205,49 +179,17 @@ async fn data_reception_delivers_crypto_and_streams_to_the_data_space() {
         let mut crypto = data.crypto.outgoing();
         let mut streams = data.streams.clone();
         let bytes = encode_frames(sender, [&mut crypto, &mut streams]);
-        let link = Link::new(
-            "127.0.0.1:47001".parse().unwrap(),
-            "127.0.0.1:47002".parse().unwrap(),
-        );
+        let link = Link::new("127.0.0.1:47001".parse().unwrap(), "127.0.0.1:47002".parse().unwrap());
         receive(receiver, vec![bytes.clone(), bytes], link.into(), link).await;
 
         let mut body = [0; 6];
-        receiver
-            .spaces
-            .data
-            .crypto
-            .reader()
-            .read_exact(&mut body)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
+        receiver.spaces.data.crypto.reader().read_exact(&mut body).now_or_never().unwrap().unwrap();
         assert_eq!(&body, b"ticket");
-        for space in [
-            receiver.spaces.initial.as_ref(),
-            &receiver.spaces.handshake.0,
-        ] {
-            assert!(
-                space
-                    .crypto
-                    .reader()
-                    .read(&mut body)
-                    .now_or_never()
-                    .is_none()
-            );
+        for space in [receiver.spaces.initial.as_ref(), &receiver.spaces.handshake.0] {
+            assert!(space.crypto.reader().read(&mut body).now_or_never().is_none());
         }
-        let (_, mut reader) = receiver
-            .spaces
-            .data
-            .streams
-            .accept_uni()
-            .now_or_never()
-            .unwrap()
-            .unwrap();
-        reader
-            .read_exact(&mut body)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
+        let (_, mut reader) = receiver.spaces.data.streams.accept_uni().now_or_never().unwrap().unwrap();
+        reader.read_exact(&mut body).now_or_never().unwrap().unwrap();
         assert_eq!(&body, b"stream");
         assert!(reader.read(&mut body).now_or_never().is_none());
     }
@@ -264,10 +206,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
 
     let [sender, receiver] = pair();
     let paths = empty_paths(&receiver);
-    let link = Link::new(
-        "127.0.0.1:47011".parse().unwrap(),
-        "127.0.0.1:47012".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:47011".parse().unwrap(), "127.0.0.1:47012".parse().unwrap());
     let pathway = link.into();
     let path = Arc::new(Path::new(
         pathway,
@@ -278,10 +217,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     let terminator = paths.terminator.clone();
-    terminator.close(
-        crate::CloseReason::App(AppError::new(42u32.into(), "local close")),
-        Duration::from_secs(1),
-    );
+    terminator.close(crate::CloseReason::App(AppError::new(42u32.into(), "local close")), Duration::from_secs(1));
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let task = tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
         (rx, None),
@@ -290,45 +226,26 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         ArcHandshake::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
     ));
-    let peer_error: crate::Error =
-        QuicError::with_default_fty(ErrorKind::None, "peer close").into();
+    let peer_error: crate::Error = QuicError::with_default_fty(ErrorKind::None, "peer close").into();
     let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
-    let mut stream = (
-        StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 1),
-        b"x".as_slice(),
-    );
+    let mut stream = (StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 1), b"x".as_slice());
     stream.0.set_len_bit(Len::Explicit);
-    let limit = receiver
-        .parameters
-        .remote::<u64>(qbase::param::ParameterId::InitialMaxData)
-        + 100;
+    let limit = receiver.parameters.remote::<u64>(qbase::param::ParameterId::InitialMaxData) + 100;
     let mut max_data = MaxDataFrame::new(VarInt::from_u64(limit).unwrap());
     let mut close = ConnectionCloseFrame::from(peer_error.clone());
-    let bytes = encode_frames(
-        &sender,
-        [&mut crypto, &mut stream, &mut max_data, &mut close],
-    );
+    let bytes = encode_frames(&sender, [&mut crypto, &mut stream, &mut max_data, &mut close]);
     let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
         panic!()
     };
     let DataHeader::Short(header) = packet.header else {
         panic!()
     };
-    tx.send((
-        qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
-        pathway,
-        link,
-    ))
-    .await
-    .unwrap();
+    tx.send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).await.unwrap();
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
     assert!(terminator.clone().now_or_never().is_none());
     // Late registration observes Draining's peer reason only if CLOSE was delivered.
-    assert_eq!(
-        crate::common::observe_close(&terminator).notified(),
-        Some(peer_error.clone())
-    );
+    assert_eq!(crate::common::observe_close(&terminator).notified(), Some(peer_error.clone()));
     tokio::time::advance(Duration::from_secs(3)).await;
     task.await.unwrap();
     assert_eq!(terminator.await, peer_error);
@@ -339,17 +256,11 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
 async fn handshake_done_confirms_the_shared_client_handshake() {
     let [receiver, sender] = pair();
     let paths = empty_paths(&receiver);
-    let link = Link::new(
-        "127.0.0.1:45001".parse().unwrap(),
-        "127.0.0.1:45002".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:45001".parse().unwrap(), "127.0.0.1:45002".parse().unwrap());
     let handshake = receive_on_paths(
         &receiver,
         &paths,
-        vec![
-            encode_frame(&sender, HandshakeDoneFrame),
-            encode_frame(&sender, HandshakeDoneFrame),
-        ],
+        vec![encode_frame(&sender, HandshakeDoneFrame), encode_frame(&sender, HandshakeDoneFrame)],
         link.into(),
         link,
         Scopes::ALL,
@@ -365,11 +276,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
     use tokio::io::AsyncReadExt;
 
     let close = ConnectionCloseFrame::new_app(7u32.into(), "peer closed");
-    for (role, bundled_close) in [
-        (Role::Client, true),
-        (Role::Server, true),
-        (Role::Server, false),
-    ] {
+    for (role, bundled_close) in [(Role::Client, true), (Role::Server, true), (Role::Server, false)] {
         let pair = pair();
         let (receiver, sender) = if role == Role::Client {
             (&pair[0], &pair[1])
@@ -384,34 +291,19 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         } else {
             encode_frame(sender, HandshakeDoneFrame)
         };
-        let link = Link::new(
-            "127.0.0.1:46001".parse().unwrap(),
-            "127.0.0.1:46002".parse().unwrap(),
-        );
+        let link = Link::new("127.0.0.1:46001".parse().unwrap(), "127.0.0.1:46002".parse().unwrap());
         let (tx, rx) = tokio::sync::mpsc::channel(3);
-        for bytes in [
-            first,
-            encode_frame(sender, close.clone()),
-            encode_frame(sender, PingFrame),
-        ] {
+        for bytes in [first, encode_frame(sender, close.clone()), encode_frame(sender, PingFrame)] {
             let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
                 panic!("expected Data packet");
             };
             let DataHeader::Short(header) = packet.header else {
                 panic!("expected 1-RTT packet");
             };
-            tx.try_send((
-                qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
-                link.into(),
-                link,
-            ))
-            .unwrap();
+            tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
         }
         drop(tx);
-        let handshake = ArcHandshake::new(
-            receiver.parameters.role(),
-            receiver.spaces.data.reliable_frames.clone(),
-        );
+        let handshake = ArcHandshake::new(receiver.parameters.role(), receiver.spaces.data.reliable_frames.clone());
         receive_1rtt_pkt_and_deliver_frames(
             (rx, Some(Scopes::ALL)),
             receiver.spaces.data.clone(),
@@ -431,25 +323,12 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         assert_eq!(handshake.is_handshake_done(), role == Role::Client);
         assert!(receiver.spaces.data.streams.accept_uni().await.is_err());
         assert!(receiver.spaces.data.streams.accept_bi().await.is_err());
-        assert!(
-            receiver
-                .spaces
-                .data
-                .crypto
-                .reader()
-                .read(&mut [0; 1])
-                .now_or_never()
-                .unwrap()
-                .is_err()
-        );
+        assert!(receiver.spaces.data.crypto.reader().read(&mut [0; 1]).now_or_never().unwrap().is_err());
         let journal = &receiver.spaces.data.rcvd_journal;
         for pn in [0, 1] {
             assert_eq!(journal.decode_pn(PacketNumber::encode(pn, 0)), Ok(pn));
         }
-        assert_eq!(
-            journal.decode_pn(PacketNumber::encode(2, 0)),
-            Err(qbase::packet::InvalidPacketNumber::Duplicate)
-        );
+        assert_eq!(journal.decode_pn(PacketNumber::encode(2, 0)), Err(qbase::packet::InvalidPacketNumber::Duplicate));
         paths.retire_all();
         assert_eq!(closed.await, close.clone().into());
     }
@@ -461,51 +340,18 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         let pair = pair();
         let (receiver, sender) = (&pair[receiving], &pair[1 - receiving]);
         let paths = empty_paths(receiver);
-        let link = Link::new(
-            "127.0.0.1:43001".parse().unwrap(),
-            "127.0.0.1:43002".parse().unwrap(),
-        );
-        let packet = encoder(sender)
-            .encode_probe(PunchDoneFrame::new(1, 2, 3))
-            .unwrap();
+        let link = Link::new("127.0.0.1:43001".parse().unwrap(), "127.0.0.1:43002".parse().unwrap());
+        let packet = encoder(sender).encode_probe(PunchDoneFrame::new(1, 2, 3)).unwrap();
         let mut forged = packet.clone();
         *forged.last_mut().unwrap() ^= 1;
-        assert_eq!(
-            paths.pto_for(&link.into(), Epoch::Data),
-            Duration::from_secs(1)
-        );
+        assert_eq!(paths.pto_for(&link.into(), Epoch::Data), Duration::from_secs(1));
         assert!(paths.entries.lock().unwrap().is_empty());
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![forged.clone()],
-            link.into(),
-            link,
-            Scopes::ALL,
-        )
-        .await;
-        assert!(
-            paths.entries.lock().unwrap().is_empty(),
-            "forged 1-RTT must not start a path sender"
-        );
+        receive_on_paths(receiver, &paths, vec![forged.clone()], link.into(), link, Scopes::ALL).await;
+        assert!(paths.entries.lock().unwrap().is_empty(), "forged 1-RTT must not start a path sender");
 
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![packet.clone()],
-            link.into(),
-            link,
-            Scopes::ALL,
-        )
-        .await;
+        receive_on_paths(receiver, &paths, vec![packet.clone()], link.into(), link, Scopes::ALL).await;
         assert_eq!(paths.entries.lock().unwrap().len(), 1);
-        let path = &paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&link.into())
-            .cloned()
-            .unwrap();
+        let path = &paths.entries.lock().unwrap().get(&link.into()).cloned().unwrap();
         assert_eq!(path.pathway, link.into());
         let expected = if receiver.parameters.role() == Role::Client {
             usize::MAX
@@ -515,38 +361,13 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         assert_eq!(crate::common::path_credit(path), expected);
 
         // Neither failed authentication nor duplicate packets credit an existing path.
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![forged, packet.clone()],
-            link.into(),
-            link,
-            Scopes::ALL,
-        )
-        .await;
-        assert!(Arc::ptr_eq(
-            &paths
-                .entries
-                .lock()
-                .unwrap()
-                .get(&link.into())
-                .cloned()
-                .unwrap(),
-            path
-        ));
+        receive_on_paths(receiver, &paths, vec![forged, packet.clone()], link.into(), link, Scopes::ALL).await;
+        assert!(Arc::ptr_eq(&paths.entries.lock().unwrap().get(&link.into()).cloned().unwrap(), path));
         assert_eq!(crate::common::path_credit(path), expected);
 
         // A replay with a new source address must not create a second path.
         let replay_link = Link::new(link.src, "127.0.0.1:43003".parse().unwrap());
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![packet],
-            replay_link.into(),
-            replay_link,
-            Scopes::ALL,
-        )
-        .await;
+        receive_on_paths(receiver, &paths, vec![packet], replay_link.into(), replay_link, Scopes::ALL).await;
         assert_eq!(paths.entries.lock().unwrap().len(), 1);
         paths.retire_all();
     }
@@ -559,26 +380,10 @@ async fn server_rejects_out_of_scope_sources_before_path_admission() {
     let [sender, receiver] = pair();
     let paths = empty_paths(&receiver);
     let scopes = Scope::Loopback.into();
-    let link = Link::new(
-        "127.0.0.1:44001".parse().unwrap(),
-        "127.0.0.1:44002".parse().unwrap(),
-    );
-    let outside = Pathway::new(
-        link.src.into(),
-        EndpointAddr::direct("192.0.2.1:44002".parse().unwrap()),
-    );
-    let packet = encoder(&sender)
-        .encode_probe(PunchDoneFrame::new(1, 2, 3))
-        .unwrap();
-    receive_on_paths(
-        &receiver,
-        &paths,
-        vec![packet.clone()],
-        outside,
-        link,
-        scopes,
-    )
-    .await;
+    let link = Link::new("127.0.0.1:44001".parse().unwrap(), "127.0.0.1:44002".parse().unwrap());
+    let outside = Pathway::new(link.src.into(), EndpointAddr::direct("192.0.2.1:44002".parse().unwrap()));
+    let packet = encoder(&sender).encode_probe(PunchDoneFrame::new(1, 2, 3)).unwrap();
+    receive_on_paths(&receiver, &paths, vec![packet.clone()], outside, link, scopes).await;
     assert!(paths.entries.lock().unwrap().is_empty());
     receive_on_paths(&receiver, &paths, vec![packet], link.into(), link, scopes).await;
     assert_eq!(paths.entries.lock().unwrap().len(), 1);
@@ -594,58 +399,26 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         paths.progress.on_initial_received(receiver.peer_cid());
         let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
-        qprotocol::QuicProtocol::global()
-            .register(local, &socket)
-            .unwrap();
+        qprotocol::QuicProtocol::global().register(local, &socket).unwrap();
         let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
         paths.progress.on_path_selected(&paths, &original);
         super::install_data(&paths, receiver);
         super::confirm_handshake(&paths);
         let link = Link::new(local.addr(), "127.0.0.1:44503".parse().unwrap());
-        let packet = encoder(sender)
-            .encode_probe(PunchDoneFrame::new(1, 2, 3))
-            .unwrap();
+        let packet = encoder(sender).encode_probe(PunchDoneFrame::new(1, 2, 3)).unwrap();
         let mut forged = packet.clone();
         *forged.last_mut().unwrap() ^= 1;
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![forged],
-            link.into(),
-            link,
-            Scopes::ALL,
-        )
-        .await;
-        assert!(
-            !paths.entries.lock().unwrap().contains_key(&link.into()),
-            "forged packet admitted a path"
-        );
-        receive_on_paths(
-            receiver,
-            &paths,
-            vec![packet],
-            link.into(),
-            link,
-            Scopes::ALL,
-        )
-        .await;
+        receive_on_paths(receiver, &paths, vec![forged], link.into(), link, Scopes::ALL).await;
+        assert!(!paths.entries.lock().unwrap().contains_key(&link.into()), "forged packet admitted a path");
+        receive_on_paths(receiver, &paths, vec![packet], link.into(), link, Scopes::ALL).await;
         tokio::task::yield_now().await;
-        let path = paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&link.into())
-            .cloned()
-            .unwrap();
+        let path = paths.entries.lock().unwrap().get(&link.into()).cloned().unwrap();
         assert_eq!(super::selection(&paths, &path), 2);
         if receiver.parameters.role() == Role::Client {
             assert!(path.validation.is_validated());
             assert!(super::take_validation_frames(&path).is_empty());
         } else {
-            assert!(matches!(
-                super::take_validation_frames(&path).as_slice(),
-                [Frame::PathChallenge(_)]
-            ));
+            assert!(matches!(super::take_validation_frames(&path).as_slice(), [Frame::PathChallenge(_)]));
             assert!(!path.validation.is_validated());
         }
         assert!(original.validation.is_validated());
@@ -661,42 +434,16 @@ async fn both_roles_dispatch_all_five_authenticated_punch_frames() {
         let encoder = encoder(sender);
         let hello = PunchHelloFrame::new(11, 22, 33);
         let packets = vec![
-            encoder
-                .encode_probe(AddAddressFrame::new(
-                    11,
-                    "127.0.0.1:41002".parse().unwrap(),
-                    0,
-                    NatType::FullCone,
-                ))
-                .unwrap(),
-            encoder
-                .encode_probe(PunchMeNowFrame::new(
-                    11,
-                    22,
-                    "127.0.0.1:41002".parse().unwrap(),
-                    0,
-                    NatType::FullCone,
-                ))
-                .unwrap(),
+            encoder.encode_probe(AddAddressFrame::new(11, "127.0.0.1:41002".parse().unwrap(), 0, NatType::FullCone)).unwrap(),
+            encoder.encode_probe(PunchMeNowFrame::new(11, 22, "127.0.0.1:41002".parse().unwrap(), 0, NatType::FullCone)).unwrap(),
             encoder.encode_probe(hello).unwrap(),
-            encoder
-                .encode_probe(PunchDoneFrame::new(11, 22, 33))
-                .unwrap(),
-            encoder
-                .encode_probe(RemoveAddressFrame {
-                    seq_num: 11u32.into(),
-                })
-                .unwrap(),
+            encoder.encode_probe(PunchDoneFrame::new(11, 22, 33)).unwrap(),
+            encoder.encode_probe(RemoveAddressFrame { seq_num: 11u32.into() }).unwrap(),
         ];
-        let link = Link::new(
-            "127.0.0.1:41001".parse().unwrap(),
-            "127.0.0.1:41002".parse().unwrap(),
-        );
+        let link = Link::new("127.0.0.1:41001".parse().unwrap(), "127.0.0.1:41002".parse().unwrap());
         receive(receiver, packets, link.into(), link).await;
-        assert!(
-            matches!(take_reliable(receiver).as_slice(), [Frame::PunchDone(done)]
-            if *done == PunchDoneFrame::respond_to(&hello))
-        );
+        assert!(matches!(take_reliable(receiver).as_slice(), [Frame::PunchDone(done)]
+            if *done == PunchDoneFrame::respond_to(&hello)));
     }
 }
 
@@ -708,17 +455,12 @@ async fn unauthenticated_hello_does_not_reach_puncher() {
         let packet = encoder(sender).encode_probe(hello).unwrap();
         let mut corrupted = packet.clone();
         *corrupted.last_mut().unwrap() ^= 1;
-        let link = Link::new(
-            "127.0.0.1:42001".parse().unwrap(),
-            "127.0.0.1:42002".parse().unwrap(),
-        );
+        let link = Link::new("127.0.0.1:42001".parse().unwrap(), "127.0.0.1:42002".parse().unwrap());
         receive(receiver, vec![corrupted], link.into(), link).await;
         assert!(take_reliable(receiver).is_empty());
         receive(receiver, vec![packet], link.into(), link).await;
-        assert!(
-            matches!(take_reliable(receiver).as_slice(), [Frame::PunchDone(done)]
-            if *done == PunchDoneFrame::respond_to(&hello))
-        );
+        assert!(matches!(take_reliable(receiver).as_slice(), [Frame::PunchDone(done)]
+            if *done == PunchDoneFrame::respond_to(&hello)));
     }
 }
 
@@ -727,45 +469,19 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
     let [receiver, sender] = pair();
     let local = qprotocol::EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let peer = qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let link = Link::new(
-        local.udp_socket().local_addr().unwrap(),
-        peer.local_addr().unwrap(),
-    );
+    let link = Link::new(local.udp_socket().local_addr().unwrap(), peer.local_addr().unwrap());
     // The advertised peer differs from the datagram source. Replies must use Link.
-    let pathway = Pathway::new(
-        link.src.into(),
-        EndpointAddr::direct("192.0.2.1:9".parse().unwrap()),
-    );
+    let pathway = Pathway::new(link.src.into(), EndpointAddr::direct("192.0.2.1:9".parse().unwrap()));
     let hello = PunchHelloFrame::new(1, 2, 3);
     let prior = receiver.spaces.data.next_pn().0;
-    qtransport::space::Recover::cancel(
-        receiver.spaces.data.as_ref(),
-        prior,
-        &mut std::iter::empty(),
-    );
-    receive(
-        &receiver,
-        vec![encoder(&sender).encode_probe(hello).unwrap()],
-        pathway,
-        link,
-    )
-    .await;
+    qtransport::space::Recover::cancel(receiver.spaces.data.as_ref(), prior, &mut std::iter::empty());
+    receive(&receiver, vec![encoder(&sender).encode_probe(hello).unwrap()], pathway, link).await;
     let mut buffers = [BytesMut::with_capacity(1500)];
     buffers[0].resize(1500, 0);
     let mut lines = [Line::new(link.flip(), 64, None, 1500)];
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        peer.receive(&mut buffers, &mut lines),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut buffers, &mut lines)).await.unwrap().unwrap();
     buffers[0].truncate(lines[0].seg_size as usize);
-    let Packet::Data(packet) = PacketReader::new(buffers[0].clone(), 8)
-        .next()
-        .unwrap()
-        .unwrap()
-    else {
+    let Packet::Data(packet) = PacketReader::new(buffers[0].clone(), 8).next().unwrap().unwrap() else {
         panic!()
     };
     let DataHeader::Short(header) = packet.header else {
@@ -784,9 +500,10 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
         .unwrap();
     assert_eq!(opened.pn(), prior + 1);
     use qbase::packet::GetType;
-    assert!(FrameReader::new(opened.body(), opened.get_type()).any(|frame|
-        matches!(frame.unwrap().0, Frame::PunchDone(done) if done == PunchDoneFrame::respond_to(&hello))
-    ));
+    assert!(
+        FrameReader::new(opened.body(), opened.get_type())
+            .any(|frame| matches!(frame.unwrap().0, Frame::PunchDone(done) if done == PunchDoneFrame::respond_to(&hello)))
+    );
     // Let the finite direct-confirmation task finish before releasing its socket.
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
@@ -800,10 +517,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         let [sender, receiver] = pair();
         let paths = empty_paths(&receiver);
         paths.update_max_idle_timeout(Duration::from_secs(5));
-        let link = Link::new(
-            "127.0.0.1:47001".parse().unwrap(),
-            "127.0.0.1:47002".parse().unwrap(),
-        );
+        let link = Link::new("127.0.0.1:47001".parse().unwrap(), "127.0.0.1:47002".parse().unwrap());
         let path = Arc::new(Path::new(
             link.into(),
             paths.progress.facts(),
@@ -811,11 +525,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             paths.loss_resender.clone(),
             paths.cid_registry.remote.apply_dcid(),
         ));
-        paths
-            .entries
-            .lock()
-            .unwrap()
-            .insert(path.pathway, path.clone());
+        paths.entries.lock().unwrap().insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;
         let pn = data.next_pn().0;
         qtransport::space::Transmit::on_sealed(
@@ -823,42 +533,24 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             pn,
             Some(0),
             0,
-            qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(
-                &OneRttHeader::new(Default::default(), Default::default()),
-            )),
+            qbase::packet::assemble::Metadata::new(qbase::packet::GetType::get_type(&OneRttHeader::new(
+                Default::default(),
+                Default::default(),
+            ))),
             &mut std::iter::empty(),
         );
         data.on_sent(pn, false, Duration::from_secs(1), Duration::from_secs(3));
         let bytes = match kind {
-            0 => encode_frame(
-                &sender,
-                AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None),
-            ),
+            0 => encode_frame(&sender, AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None)),
             1 => encode_frame(&sender, PingFrame),
-            _ => encode_frame(
-                &sender,
-                (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice()),
-            ),
+            _ => encode_frame(&sender, (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice())),
         };
         let start = Instant::now();
-        receive_on_paths(
-            &receiver,
-            &paths,
-            vec![bytes],
-            path.pathway,
-            link,
-            Scopes::ALL,
-        )
-        .await;
+        receive_on_paths(&receiver, &paths, vec![bytes], path.pathway, link, Scopes::ALL).await;
         let closing_duration = path.cc.pto_base(Epoch::Data) * 3;
         let reason = paths.terminator.clone().await;
-        assert!(
-            matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout")
-        );
-        assert_eq!(
-            Instant::now() - start,
-            Duration::from_secs(5) + closing_duration
-        );
+        assert!(matches!(reason, crate::Error::Quic(error) if error.reason() == "connection idle timeout"));
+        assert_eq!(Instant::now() - start, Duration::from_secs(5) + closing_duration);
         tokio::time::advance(Duration::from_secs(15)).await;
         assert_eq!(super::take_heartbeat(&path), kind == 2);
         paths.retire_all();

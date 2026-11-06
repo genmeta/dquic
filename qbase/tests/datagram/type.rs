@@ -17,14 +17,8 @@ fn round_trip_long(ty: Type, expected: &[u8]) {
 
 #[test]
 fn stun_uses_the_low_two_long_header_bits() {
-    round_trip_long(
-        Type::V0(v0::Type::Stun(stun::Type::BindingRequest)),
-        &[0b1100_0010, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
-    round_trip_long(
-        Type::V0(v0::Type::Stun(stun::Type::BindingResponse)),
-        &[0b1100_0011, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
+    round_trip_long(Type::V0(v0::Type::Stun(stun::Type::BindingRequest)), &[0b1100_0010, 0, 0, 0, 0, 0, 0, 0, 0]);
+    round_trip_long(Type::V0(v0::Type::Stun(stun::Type::BindingResponse)), &[0b1100_0011, 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 #[test]
@@ -93,12 +87,6 @@ fn invalid_long_v0_suffix_is_rejected() {
 
 #[test]
 fn truncated_type_is_incomplete() {
-    assert!(matches!(
-        be_datagram_type(&[0xe0, 0, 0, 0]),
-        Err(nom::Err::Incomplete(_))
-    ));
-    assert!(matches!(
-        be_datagram_type(&[0b0110_0000]),
-        Err(nom::Err::Incomplete(_))
-    ));
+    assert!(matches!(be_datagram_type(&[0xe0, 0, 0, 0]), Err(nom::Err::Incomplete(_))));
+    assert!(matches!(be_datagram_type(&[0b0110_0000]), Err(nom::Err::Incomplete(_))));
 }

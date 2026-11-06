@@ -18,9 +18,7 @@ use qbase::{
         route::Pathway,
         validate::{ArcValidation, ArcValidations, Validation},
     },
-    packet::{
-        Assemble, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer, PacketContent,
-    },
+    packet::{Assemble, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer, PacketContent},
 };
 
 #[derive(Default)]
@@ -70,18 +68,13 @@ fn dump(
         assert_eq!(n, written);
     }
     assert!(frames.is_empty());
-    let decoded = FrameReader::new(bytes.freeze(), ty)
-        .map(|frame| frame.unwrap().0)
-        .collect::<Vec<_>>();
+    let decoded = FrameReader::new(bytes.freeze(), ty).map(|frame| frame.unwrap().0).collect::<Vec<_>>();
     assert_eq!(decoded.len(), written);
     (result, decoded)
 }
 
 fn pathway(port: u16) -> Pathway {
-    Pathway::new(
-        "127.0.0.1:4433".parse().unwrap(),
-        format!("127.0.0.1:{port}").parse().unwrap(),
-    )
+    Pathway::new("127.0.0.1:4433".parse().unwrap(), format!("127.0.0.1:{port}").parse().unwrap())
 }
 
 #[test]
@@ -89,11 +82,7 @@ fn credit_snapshots_preserve_the_sending_tasks_waiter() {
     for cancel in [false, true] {
         let validation = ArcValidation::new();
         let (wakes, waker) = waiter();
-        assert!(
-            validation
-                .poll_credit(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        assert!(validation.poll_credit(&mut Context::from_waker(&waker)).is_pending());
         for _ in 0..3 {
             assert_eq!(validation.credit().unwrap(), Some(0));
         }
@@ -149,13 +138,7 @@ fn shared_validation_send_frame_wakes_sender_and_packages_both_frame_types() {
     frames.enter_validated().unwrap();
     sender.send_frame([challenge(5)]);
     sender.send_frame([PathResponseFrame::from(challenge(6))]);
-    assert_eq!(
-        dump(&mut frames, 64, &waker).1,
-        vec![
-            Frame::PathResponse(challenge(4).into()),
-            Frame::PathResponse(challenge(6).into()),
-        ]
-    );
+    assert_eq!(dump(&mut frames, 64, &waker).1, vec![Frame::PathResponse(challenge(4).into()), Frame::PathResponse(challenge(6).into()),]);
     assert!(dump(&mut frames, 64, &waker).0.is_pending());
     frames.cancel();
     assert_eq!(count(&wakes), 3);
@@ -171,10 +154,7 @@ async fn raw_validation_receives_both_frame_types_without_internal_locking() {
     validation.recv_path_challenge_frame(challenge(1));
     assert_eq!(
         dump(&mut validation, 64, Waker::noop()).1,
-        vec![
-            Frame::PathResponse(challenge(1).into()),
-            Frame::PathResponse(challenge(1).into()),
-        ]
+        vec![Frame::PathResponse(challenge(1).into()), Frame::PathResponse(challenge(1).into()),]
     );
 
     let incoming = PathResponseFrame::from(challenge(2));
@@ -187,10 +167,7 @@ async fn raw_validation_receives_both_frame_types_without_internal_locking() {
     validation.recv_path_challenge_frame(challenge(3));
     validation.recv_path_response_frame(incoming);
     assert!(matches!(validation.respond().await, Err(Cancelled)));
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).0,
-        Poll::Ready(Ok(0))
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(0)));
 }
 
 #[test]
@@ -212,10 +189,7 @@ fn credit_arithmetic_does_not_wrap() {
     let validation = ArcValidation::new();
     validation.on_received(usize::MAX);
     validation.on_received(1);
-    assert!(matches!(
-        credit(&validation),
-        Poll::Ready(Ok(Some(usize::MAX)))
-    ));
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(usize::MAX)))));
     validation.on_sent(usize::MAX);
     validation.on_sent(1);
     assert!(credit(&validation).is_pending());
@@ -226,11 +200,7 @@ fn credit_and_frame_waiters_are_independent() {
     let mut validation = ArcValidation::new();
     let (credit_count, credit_waker) = waiter();
     let (send_count, send_waker) = waiter();
-    assert!(
-        validation
-            .poll_credit(&mut Context::from_waker(&credit_waker))
-            .is_pending()
-    );
+    assert!(validation.poll_credit(&mut Context::from_waker(&credit_waker)).is_pending());
     assert!(dump(&mut validation, 64, &send_waker).0.is_pending());
 
     validation.on_received(0);
@@ -251,16 +221,8 @@ fn each_waiter_slot_keeps_only_its_latest_waker() {
     let (new_credit, new_credit_waker) = waiter();
     let (old_send, old_send_waker) = waiter();
     let (new_send, new_send_waker) = waiter();
-    assert!(
-        validation
-            .poll_credit(&mut Context::from_waker(&old_credit_waker))
-            .is_pending()
-    );
-    assert!(
-        validation
-            .poll_credit(&mut Context::from_waker(&new_credit_waker))
-            .is_pending()
-    );
+    assert!(validation.poll_credit(&mut Context::from_waker(&old_credit_waker)).is_pending());
+    assert!(validation.poll_credit(&mut Context::from_waker(&new_credit_waker)).is_pending());
     assert!(dump(&mut validation, 64, &old_send_waker).0.is_pending());
     assert!(dump(&mut validation, 64, &new_send_waker).0.is_pending());
     validation.on_received(1);
@@ -285,10 +247,7 @@ fn exemption_grants_unlimited_credit_and_revalidation_revokes_it() {
     validation.revalidate().unwrap();
     assert!(!validation.is_validated());
     assert!(credit(&validation).is_pending());
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(7).into())]
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(7).into())]);
 }
 
 #[test]
@@ -301,11 +260,7 @@ fn both_directions_share_the_frame_buffer_and_one_dump_writes_multiple_frames() 
     assert_eq!(result, Poll::Ready(Ok(3)));
     assert_eq!(
         frames,
-        vec![
-            Frame::PathResponse(challenge(1).into()),
-            Frame::PathResponse(challenge(2).into()),
-            Frame::PathChallenge(challenge(3)),
-        ]
+        vec![Frame::PathResponse(challenge(1).into()), Frame::PathResponse(challenge(2).into()), Frame::PathChallenge(challenge(3)),]
     );
     assert!(dump(&mut validation, 64, Waker::noop()).0.is_pending());
 }
@@ -316,23 +271,11 @@ fn insufficient_space_preserves_unsent_frames_for_the_next_packet() {
     validation.challenge(challenge(3)).unwrap();
     validation.recv_frame(challenge(1)).unwrap();
     validation.recv_frame(challenge(2)).unwrap();
-    assert_eq!(
-        dump(&mut validation, 8, Waker::noop()).0,
-        Poll::Ready(Ok(0))
-    );
-    assert_eq!(
-        dump(&mut validation, 9, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(1).into())]
-    );
+    assert_eq!(dump(&mut validation, 8, Waker::noop()).0, Poll::Ready(Ok(0)));
+    assert_eq!(dump(&mut validation, 9, Waker::noop()).1, vec![Frame::PathResponse(challenge(1).into())]);
     let (result, frames) = dump(&mut validation, 18, Waker::noop());
     assert_eq!(result, Poll::Ready(Ok(2)));
-    assert_eq!(
-        frames,
-        vec![
-            Frame::PathResponse(challenge(2).into()),
-            Frame::PathChallenge(challenge(3))
-        ]
-    );
+    assert_eq!(frames, vec![Frame::PathResponse(challenge(2).into()), Frame::PathChallenge(challenge(3))]);
 }
 
 #[tokio::test]
@@ -376,12 +319,7 @@ async fn validated_state_keeps_the_response_waiter_until_cancellation() {
     let response = validation.respond();
     tokio::pin!(response);
     let (wakes, waker) = waiter();
-    assert!(
-        response
-            .as_mut()
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
+    assert!(response.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
 
     validation.enter_validated().unwrap();
     assert_eq!(count(&wakes), 0);
@@ -400,30 +338,15 @@ async fn explicit_validation_wakes_credit_and_preserves_replies_to_the_peer() {
     tokio::pin!(response);
     assert!(futures::poll!(&mut response).is_pending());
     let (wakes, waker) = waiter();
-    assert!(
-        validation
-            .poll_credit(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    validation
-        .recv_frame(PathResponseFrame::from(challenge(1)))
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap(),
-        Some(PathResponseFrame::from(challenge(1)))
-    );
+    assert!(validation.poll_credit(&mut Context::from_waker(&waker)).is_pending());
+    validation.recv_frame(PathResponseFrame::from(challenge(1))).unwrap();
+    assert_eq!(response.await.unwrap(), Some(PathResponseFrame::from(challenge(1))));
     assert_eq!(count(&wakes), 0);
     validation.enter_validated().unwrap();
     assert_eq!(count(&wakes), 1);
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(2).into())]
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(2).into())]);
     validation.recv_frame(challenge(3)).unwrap();
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(3).into())]
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(3).into())]);
 }
 
 #[tokio::test]
@@ -434,27 +357,14 @@ async fn retransmitting_the_challenge_preserves_the_receiver_and_credit() {
     let response = validation.respond();
     tokio::pin!(response);
     let (wakes, waker) = waiter();
-    assert!(
-        response
-            .as_mut()
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
+    assert!(response.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
 
     for _ in 0..4 {
         validation.challenge(challenge(1)).unwrap();
         assert_eq!(count(&wakes), 0);
-        assert!(
-            response
-                .as_mut()
-                .poll(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        assert!(response.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
         assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(290)))));
-        assert_eq!(
-            dump(&mut validation, 64, Waker::noop()).1,
-            vec![Frame::PathChallenge(challenge(1))]
-        );
+        assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathChallenge(challenge(1))]);
     }
 
     let incoming = PathResponseFrame::from(challenge(1));
@@ -477,10 +387,7 @@ async fn revalidate_during_validation_preserves_the_current_attempt() {
     validation.revalidate().unwrap();
     assert!(futures::poll!(&mut response).is_pending());
     assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(290)))));
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).1,
-        vec![Frame::PathChallenge(challenge(1))]
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathChallenge(challenge(1))]);
     let incoming = PathResponseFrame::from(challenge(1));
     validation.recv_frame(incoming).unwrap();
     assert_eq!(response.await.unwrap(), Some(incoming));
@@ -515,9 +422,7 @@ async fn first_response_is_preserved_and_consumed_only_once() {
     let validation = ArcValidation::new();
     let first = PathResponseFrame::from(challenge(1));
     validation.recv_frame(first).unwrap();
-    validation
-        .recv_frame(PathResponseFrame::from(challenge(2)))
-        .unwrap();
+    validation.recv_frame(PathResponseFrame::from(challenge(2))).unwrap();
     assert_eq!(validation.respond().await.unwrap(), Some(first));
     assert_eq!(validation.respond().await.unwrap(), None);
 }
@@ -528,20 +433,11 @@ async fn cancellation_wakes_all_three_waiters_and_cannot_be_reversed() {
     let (credit_count, credit_waker) = waiter();
     let (send_count, send_waker) = waiter();
     let (response_count, response_waker) = waiter();
-    assert!(
-        validation
-            .poll_credit(&mut Context::from_waker(&credit_waker))
-            .is_pending()
-    );
+    assert!(validation.poll_credit(&mut Context::from_waker(&credit_waker)).is_pending());
     assert!(dump(&mut validation, 64, &send_waker).0.is_pending());
     let response = validation.respond();
     tokio::pin!(response);
-    assert!(
-        response
-            .as_mut()
-            .poll(&mut Context::from_waker(&response_waker))
-            .is_pending()
-    );
+    assert!(response.as_mut().poll(&mut Context::from_waker(&response_waker)).is_pending());
     validation.cancel();
     validation.cancel();
     assert_eq!(count(&credit_count), 1);
@@ -555,14 +451,9 @@ async fn cancellation_wakes_all_three_waiters_and_cannot_be_reversed() {
     assert!(validation.challenge(challenge(1)).is_err());
     assert!(matches!(validation.respond().await, Err(Cancelled)));
     validation.recv_frame(challenge(2)).unwrap();
-    validation
-        .recv_frame(PathResponseFrame::from(challenge(1)))
-        .unwrap();
+    validation.recv_frame(PathResponseFrame::from(challenge(1))).unwrap();
     validation.on_received(10);
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).0,
-        Poll::Ready(Ok(0))
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(0)));
 }
 
 #[test]
@@ -590,25 +481,12 @@ fn assembly_filters_validation_out_of_long_header_packets() {
     let mut frames = Vec::new();
     let limits_quota = 64;
     let limits_length = 64;
-    let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
-        .initial(vec![])
-        .get_type();
+    let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]).get_type();
     let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0);
-    assert!(
-        buffer
-            .assemble(
-                &mut Context::from_waker(Waker::noop()),
-                PacketContent::EffectivePayload,
-                &mut [&mut validation]
-            )
-            .is_pending()
-    );
+    assert!(buffer.assemble(&mut Context::from_waker(Waker::noop()), PacketContent::EffectivePayload, &mut [&mut validation]).is_pending());
     assert_eq!(buffer.written(), 0);
-    assert_eq!(
-        dump(&mut validation, 64, Waker::noop()).0,
-        Poll::Ready(Ok(2))
-    );
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(2)));
 }
 
 #[tokio::test]
@@ -622,31 +500,13 @@ async fn registry_clones_dispatch_both_directions_to_the_correct_path() {
     receiver.recv_frame((pathway(1), challenge(1))).unwrap();
     receiver.recv_frame((pathway(2), challenge(2))).unwrap();
     receiver.recv_frame((pathway(3), challenge(3))).unwrap();
-    receiver
-        .recv_frame((pathway(3), PathResponseFrame::from(challenge(3))))
-        .unwrap();
-    assert_eq!(
-        dump(&mut first, 64, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(1).into())]
-    );
-    assert_eq!(
-        dump(&mut second, 64, Waker::noop()).1,
-        vec![Frame::PathResponse(challenge(2).into())]
-    );
-    receiver
-        .recv_frame((pathway(1), PathResponseFrame::from(challenge(11))))
-        .unwrap();
-    receiver
-        .recv_frame((pathway(2), PathResponseFrame::from(challenge(22))))
-        .unwrap();
-    assert_eq!(
-        first.respond().await.unwrap(),
-        Some(PathResponseFrame::from(challenge(11)))
-    );
-    assert_eq!(
-        second.respond().await.unwrap(),
-        Some(PathResponseFrame::from(challenge(22)))
-    );
+    receiver.recv_frame((pathway(3), PathResponseFrame::from(challenge(3)))).unwrap();
+    assert_eq!(dump(&mut first, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(1).into())]);
+    assert_eq!(dump(&mut second, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(2).into())]);
+    receiver.recv_frame((pathway(1), PathResponseFrame::from(challenge(11)))).unwrap();
+    receiver.recv_frame((pathway(2), PathResponseFrame::from(challenge(22)))).unwrap();
+    assert_eq!(first.respond().await.unwrap(), Some(PathResponseFrame::from(challenge(11))));
+    assert_eq!(second.respond().await.unwrap(), Some(PathResponseFrame::from(challenge(22))));
     let shared = receiver.get(&pathway(1)).unwrap();
     shared.enter_validated().unwrap();
     assert!(first.is_validated());

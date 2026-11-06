@@ -4,9 +4,7 @@ use qbase::frame::{
 };
 #[test]
 fn test_path_challenge_frame() {
-    let frame = qbase::frame::PathChallengeFrame::from_slice(&[
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    ]);
+    let frame = qbase::frame::PathChallengeFrame::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     assert_eq!(frame.frame_type(), FrameType::PathChallenge);
     assert_eq!(frame.max_encoding_size(), 1 + 8);
     assert_eq!(frame.encoding_size(), 1 + 8);
@@ -15,9 +13,7 @@ fn test_path_challenge_frame() {
 #[test]
 fn test_write_path_challenge_frame() {
     let mut buf = Vec::new();
-    let frame = qbase::frame::PathChallengeFrame::from_slice(&[
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    ]);
+    let frame = qbase::frame::PathChallengeFrame::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     buf.put_frame(&frame);
     let mut expected = Vec::new();
     expected.put_frame_type(FrameType::PathChallenge);
@@ -29,8 +25,6 @@ fn test_write_path_challenge_frame() {
 fn test_read_path_challenge_frame() {
     assert_eq!(
         super::parse_frame(&[0x1a, 1, 2, 3, 4, 5, 6, 7, 8], FrameType::PathChallenge),
-        qbase::frame::Frame::PathChallenge(qbase::frame::PathChallengeFrame::from_slice(&[
-            1, 2, 3, 4, 5, 6, 7, 8
-        ]))
+        qbase::frame::Frame::PathChallenge(qbase::frame::PathChallengeFrame::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]))
     );
 }

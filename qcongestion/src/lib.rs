@@ -37,15 +37,7 @@ pub trait Transport {
     /// - `sent_bytes`: The number of bytes sent in this packet.
     /// - `in_flight`: A boolean indicating whether the packet is considered in-flight.
     /// - `ack`: An optional `u64` representing the largest acknowledged packet number if an AckFrame was included.
-    fn on_pkt_sent(
-        &self,
-        epoch: Epoch,
-        pn: u64,
-        is_ack_eliciting: bool,
-        sent_bytes: usize,
-        in_flight: bool,
-        ack: Option<u64>,
-    );
+    fn on_pkt_sent(&self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>);
 
     /// Records the receipt of a packet, which may influence future packet transmissions.
     /// # Parameters

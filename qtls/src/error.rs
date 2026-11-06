@@ -14,9 +14,7 @@ impl TlsAlert {
     }
 
     pub(crate) fn new(description: rustls::AlertDescription) -> Self {
-        Self {
-            description: description.into(),
-        }
+        Self { description: description.into() }
     }
 }
 
@@ -59,10 +57,7 @@ pub enum PeerTlsError {
     #[error("received CRYPTO data at {actual:?}; expected {expected:?}")]
     WrongCryptoLevel { expected: Epoch, actual: Epoch },
     #[error("TLS peer exceeded {resource} limit of {limit} bytes")]
-    ResourceLimit {
-        resource: &'static str,
-        limit: usize,
-    },
+    ResourceLimit { resource: &'static str, limit: usize },
     #[error("TLS peer error: {0}")]
     Protocol(String),
 }

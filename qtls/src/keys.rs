@@ -15,26 +15,12 @@ impl HeaderProtectionKey {
         self.0.sample_len()
     }
 
-    pub fn protect(
-        &self,
-        sample: &[u8],
-        first: &mut u8,
-        packet_number: &mut [u8],
-    ) -> Result<(), CryptoError> {
-        self.0
-            .encrypt_in_place(sample, first, packet_number)
-            .map_err(|_| CryptoError::OperationFailed)
+    pub fn protect(&self, sample: &[u8], first: &mut u8, packet_number: &mut [u8]) -> Result<(), CryptoError> {
+        self.0.encrypt_in_place(sample, first, packet_number).map_err(|_| CryptoError::OperationFailed)
     }
 
-    pub fn unprotect(
-        &self,
-        sample: &[u8],
-        first: &mut u8,
-        packet_number: &mut [u8],
-    ) -> Result<(), CryptoError> {
-        self.0
-            .decrypt_in_place(sample, first, packet_number)
-            .map_err(|_| CryptoError::OperationFailed)
+    pub fn unprotect(&self, sample: &[u8], first: &mut u8, packet_number: &mut [u8]) -> Result<(), CryptoError> {
+        self.0.decrypt_in_place(sample, first, packet_number).map_err(|_| CryptoError::OperationFailed)
     }
 }
 
@@ -58,39 +44,19 @@ impl PacketKey {
         self.0.integrity_limit()
     }
 
-    pub fn seal(
-        &self,
-        packet_number: u64,
-        header: &[u8],
-        payload: &mut [u8],
-        tag_out: &mut [u8],
-    ) -> Result<(), CryptoError> {
+    pub fn seal(&self, packet_number: u64, header: &[u8], payload: &mut [u8], tag_out: &mut [u8]) -> Result<(), CryptoError> {
         let expected = self.tag_len();
         if tag_out.len() != expected {
-            return Err(CryptoError::InvalidTagLength {
-                expected,
-                actual: tag_out.len(),
-            });
+            return Err(CryptoError::InvalidTagLength { expected, actual: tag_out.len() });
         }
-        let tag = self
-            .0
-            .encrypt_in_place(packet_number, header, payload)
-            .map_err(|_| CryptoError::OperationFailed)?;
+        let tag = self.0.encrypt_in_place(packet_number, header, payload).map_err(|_| CryptoError::OperationFailed)?;
         tag_out.copy_from_slice(tag.as_ref());
         Ok(())
     }
 
-    pub fn open<'a>(
-        &self,
-        packet_number: u64,
-        header: &[u8],
-        payload_and_tag: &'a mut [u8],
-    ) -> Result<&'a mut [u8], CryptoError> {
-        let plaintext_len = self
-            .0
-            .decrypt_in_place(packet_number, header, payload_and_tag)
-            .map_err(|_| CryptoError::OperationFailed)?
-            .len();
+    pub fn open<'a>(&self, packet_number: u64, header: &[u8], payload_and_tag: &'a mut [u8]) -> Result<&'a mut [u8], CryptoError> {
+        let plaintext_len =
+            self.0.decrypt_in_place(packet_number, header, payload_and_tag).map_err(|_| CryptoError::OperationFailed)?.len();
         Ok(&mut payload_and_tag[..plaintext_len])
     }
 }
@@ -102,10 +68,7 @@ pub struct DirectionalKeys {
 
 impl From<quic::DirectionalKeys> for DirectionalKeys {
     fn from(keys: quic::DirectionalKeys) -> Self {
-        Self {
-            header: HeaderProtectionKey::new(keys.header),
-            packet: PacketKey::new(keys.packet),
-        }
+        Self { header: HeaderProtectionKey::new(keys.header), packet: PacketKey::new(keys.packet) }
     }
 }
 
@@ -116,10 +79,7 @@ pub struct BidirectionalKeys {
 
 impl From<quic::Keys> for BidirectionalKeys {
     fn from(keys: quic::Keys) -> Self {
-        Self {
-            opening: keys.remote.into(),
-            sealing: keys.local.into(),
-        }
+        Self { opening: keys.remote.into(), sealing: keys.local.into() }
     }
 }
 
@@ -136,10 +96,7 @@ pub struct Secrets(Box<quic::Secrets>);
 impl Secrets {
     pub fn next_packet_keys(&mut self) -> PacketKeys {
         let keys = self.0.next_packet_keys();
-        PacketKeys {
-            opening: PacketKey::new(keys.remote),
-            sealing: PacketKey::new(keys.local),
-        }
+        PacketKeys { opening: PacketKey::new(keys.remote), sealing: PacketKey::new(keys.local) }
     }
 }
 
@@ -155,10 +112,7 @@ impl OneRttKeyMaterial {
         Self {
             opening_header: HeaderProtectionKey::new(keys.remote.header),
             sealing_header: HeaderProtectionKey::new(keys.local.header),
-            packet: PacketKeys {
-                opening: PacketKey::new(keys.remote.packet),
-                sealing: PacketKey::new(keys.local.packet),
-            },
+            packet: PacketKeys { opening: PacketKey::new(keys.remote.packet), sealing: PacketKey::new(keys.local.packet) },
             next_secret: Secrets(Box::new(next)),
         }
     }

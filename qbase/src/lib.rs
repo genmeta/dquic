@@ -211,10 +211,7 @@ impl<I> ArcReceiving<I> {
     /// ```
     #[inline]
     pub fn as_mut(&self) -> ReceivingGuard<'_, I> {
-        ReceivingGuard {
-            receiving: self,
-            item: None,
-        }
+        ReceivingGuard { receiving: self, item: None }
     }
 
     /// Submits a value with the same semantics as [`Self::obtain`].

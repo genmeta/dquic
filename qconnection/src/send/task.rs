@@ -8,8 +8,7 @@ use super::{Burst, MAX_BURST_PACKETS, no_viable_path};
 use crate::Paths;
 
 pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
-    let mut datagrams =
-        std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::with_capacity(256);
     let mut packets = std::array::from_fn(|_| Default::default());
     let terminator = paths.terminator.clone();
@@ -32,10 +31,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     // A removed path may already have been replaced while its sender was exiting.
     let no_paths = {
         let mut entries = paths.entries.lock().unwrap();
-        if entries
-            .get(&path.pathway)
-            .is_some_and(|current| Arc::ptr_eq(current, &path))
-        {
+        if entries.get(&path.pathway).is_some_and(|current| Arc::ptr_eq(current, &path)) {
             path.close();
             entries.remove(&path.pathway);
             paths.validations.remove(&path.pathway);
@@ -45,12 +41,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     // An idle upgrade can retain a handshake batch without another collect poll.
     path.dcid.refresh();
     if no_paths {
-        terminator.close(
-            error
-                .unwrap_or_else(|| no_viable_path("all paths retired"))
-                .into(),
-            paths.closing_pto(),
-        );
+        terminator.close(error.unwrap_or_else(|| no_viable_path("all paths retired")).into(), paths.closing_pto());
         terminator.await;
     }
 }

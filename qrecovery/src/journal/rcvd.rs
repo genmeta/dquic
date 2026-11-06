@@ -36,9 +36,7 @@ struct ReceivedPacketRanges {
 impl ReceivedPacketRanges {
     fn contains(&self, pn: u64) -> bool {
         let index = self.ranges.partition_point(|range| range.end <= pn);
-        self.ranges
-            .get(index)
-            .is_some_and(|range| range.start <= pn && pn < range.end)
+        self.ranges.get(index).is_some_and(|range| range.start <= pn && pn < range.end)
     }
 
     fn insert(&mut self, pn: u64, received_at: Instant) -> bool {
@@ -50,9 +48,7 @@ impl ReceivedPacketRanges {
         let inserted_end = pn + 1;
         if index < self.ranges.len() && self.ranges[index].end == pn {
             self.ranges[index].end = inserted_end;
-            if index + 1 < self.ranges.len()
-                && self.ranges[index + 1].start <= self.ranges[index].end
-            {
+            if index + 1 < self.ranges.len() && self.ranges[index + 1].start <= self.ranges[index].end {
                 let next_end = self.ranges[index + 1].end;
                 self.ranges[index].end = self.ranges[index].end.max(next_end);
                 self.ranges.remove(index + 1);
@@ -63,10 +59,7 @@ impl ReceivedPacketRanges {
             self.ranges.insert(index, pn..inserted_end);
         }
 
-        if self
-            .largest_received
-            .is_none_or(|(largest, _)| pn > largest)
-        {
+        if self.largest_received.is_none_or(|(largest, _)| pn > largest) {
             self.largest_received = Some((pn, received_at));
         }
 
@@ -83,10 +76,7 @@ impl ReceivedPacketRanges {
 
     fn range_containing(&self, pn: u64) -> Option<usize> {
         let index = self.ranges.partition_point(|range| range.end <= pn);
-        self.ranges
-            .get(index)
-            .filter(|range| range.start <= pn && pn < range.end)
-            .map(|_| index)
+        self.ranges.get(index).filter(|range| range.start <= pn && pn < range.end).map(|_| index)
     }
 }
 
@@ -101,19 +91,11 @@ struct RcvdJournal {
 
 impl RcvdJournal {
     fn with_capacity(capacity: usize, _max_ack_delay: Option<Duration>) -> Self {
-        Self {
-            packets: ReceivedPacketRanges {
-                ranges: Vec::with_capacity(capacity.min(MAX_TRACKED_ACK_RANGES)),
-                ..Default::default()
-            },
-        }
+        Self { packets: ReceivedPacketRanges { ranges: Vec::with_capacity(capacity.min(MAX_TRACKED_ACK_RANGES)), ..Default::default() } }
     }
 
     fn decode_pn(&self, pkt_number: PacketNumber) -> Result<u64, InvalidPacketNumber> {
-        let expected_pn = self
-            .packets
-            .largest()
-            .map_or(0, |(largest, _)| largest.saturating_add(1));
+        let expected_pn = self.packets.largest().map_or(0, |(largest, _)| largest.saturating_add(1));
         let pn = pkt_number.decode(expected_pn);
         if pn < self.packets.retired_before {
             return Err(InvalidPacketNumber::TooOld);
@@ -129,17 +111,9 @@ impl RcvdJournal {
         self.packets.insert(pn, now);
     }
 
-    fn gen_ack_frame_util(
-        &self,
-        largest: u64,
-        rcvd_time: Instant,
-        mut capacity: usize,
-    ) -> Result<AckFrame, Poll<()>> {
+    fn gen_ack_frame_util(&self, largest: u64, rcvd_time: Instant, mut capacity: usize) -> Result<AckFrame, Poll<()>> {
         let (range_start, previous_ranges) = match self.packets.range_containing(largest) {
-            Some(range_index) => (
-                self.packets.ranges[range_index].start,
-                &self.packets.ranges[..range_index],
-            ),
+            Some(range_index) => (self.packets.ranges[range_index].start, &self.packets.ranges[..range_index]),
             // A path-local ACK trigger is independent of the bounded shared journal. If its range
             // has since been retired, the trigger still proves that this packet was received, so a
             // singleton ACK is valid and lets that path finish its pending ACK cycle.
@@ -147,19 +121,12 @@ impl RcvdJournal {
             None => return Err(Poll::Pending),
         };
         let largest = VarInt::from_u64(largest).map_err(|_| Poll::Pending)?;
-        let delay: u64 = rcvd_time
-            .elapsed()
-            .as_micros()
-            .try_into()
-            .unwrap_or(VARINT_MAX)
-            .min(VARINT_MAX);
+        let delay: u64 = rcvd_time.elapsed().as_micros().try_into().unwrap_or(VARINT_MAX).min(VARINT_MAX);
         let delay = VarInt::from_u64(delay).map_err(|_| Poll::Pending)?;
-        let first_range =
-            VarInt::from_u64(largest.into_u64() - range_start).map_err(|_| Poll::Pending)?;
+        let first_range = VarInt::from_u64(largest.into_u64() - range_start).map_err(|_| Poll::Pending)?;
 
         // Frame type + Largest Acknowledged + ACK Delay + ACK Range Count + First ACK Range.
-        let min_len =
-            1 + largest.encoding_size() + delay.encoding_size() + 1 + first_range.encoding_size();
+        let min_len = 1 + largest.encoding_size() + delay.encoding_size() + 1 + first_range.encoding_size();
         if capacity < min_len {
             return Err(Poll::Ready(()));
         }
@@ -177,15 +144,10 @@ impl RcvdJournal {
         let mut ranges = Vec::new();
         let mut current_start = range_start;
         for previous in previous_ranges.iter().rev() {
-            let gap = current_start
-                .checked_sub(previous.end + 1)
-                .ok_or(Poll::Pending)?;
+            let gap = current_start.checked_sub(previous.end + 1).ok_or(Poll::Pending)?;
             let gap = VarInt::from_u64(gap).map_err(|_| Poll::Pending)?;
-            let ack =
-                VarInt::from_u64(previous.end - previous.start - 1).map_err(|_| Poll::Pending)?;
-            let size = range_count_size_increment(ranges.len())
-                + gap.encoding_size()
-                + ack.encoding_size();
+            let ack = VarInt::from_u64(previous.end - previous.start - 1).map_err(|_| Poll::Pending)?;
+            let size = range_count_size_increment(ranges.len()) + gap.encoding_size() + ack.encoding_size();
             if capacity < size {
                 break;
             }
@@ -215,10 +177,7 @@ impl ArcRcvdJournal {
 
     pub fn with_capacity(capacity: usize, max_ack_delay: Option<Duration>) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(
-                capacity,
-                max_ack_delay,
-            ))),
+            inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(capacity, max_ack_delay))),
             waiters: Default::default(),
             ack_delay_exponent: 0,
         }
@@ -230,12 +189,7 @@ impl ArcRcvdJournal {
         let journal = self.inner.read().unwrap();
         let start = (*range.start()).max(journal.packets.retired_before);
         let end = *range.end();
-        start > end
-            || journal
-                .packets
-                .ranges
-                .iter()
-                .any(|r| r.start <= start && r.end > end)
+        start > end || journal.packets.ranges.iter().any(|r| r.start <= start && r.end > end)
     }
 
     pub fn decode_pn(&self, encoded_pn: PacketNumber) -> Result<u64, InvalidPacketNumber> {
@@ -243,32 +197,17 @@ impl ArcRcvdJournal {
     }
 
     pub fn on_rcvd_pn(&self, pn: u64, is_ack_eliciting: bool, pto: Duration) {
-        self.inner
-            .write()
-            .unwrap()
-            .on_rcvd_pn(pn, is_ack_eliciting, pto);
+        self.inner.write().unwrap().on_rcvd_pn(pn, is_ack_eliciting, pto);
         // TODO: 可不是收到包，马上就唤醒发送Ack
         self.waiters.wake_all();
     }
 
-    pub fn gen_ack_frame_util(
-        &self,
-        largest: u64,
-        rcvd_time: Instant,
-        capacity: usize,
-    ) -> Result<AckFrame, Poll<()>> {
-        self.inner
-            .read()
-            .unwrap()
-            .gen_ack_frame_util(largest, rcvd_time, capacity)
+    pub fn gen_ack_frame_util(&self, largest: u64, rcvd_time: Instant, capacity: usize) -> Result<AckFrame, Poll<()>> {
+        self.inner.read().unwrap().gen_ack_frame_util(largest, rcvd_time, capacity)
     }
 
     pub fn ack_package<'r>(&'r self, need_ack: Option<(u64, Instant)>) -> AckPackege<'r> {
-        AckPackege {
-            journal: self,
-            need_ack,
-            exponent: self.ack_delay_exponent,
-        }
+        AckPackege { journal: self, need_ack, exponent: self.ack_delay_exponent }
     }
 }
 
@@ -283,20 +222,15 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
         PacketContent::NonAckEliciting
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         use std::task::Poll;
         buffer.for_frame(FrameType::Ack(Ecn::None));
         let journal = self.journal.inner.read().unwrap();
         let ack = match self
             .need_ack
             .ok_or(Poll::Pending)
-            .and_then(|(largest, time)| {
-                journal.gen_ack_frame_util(largest, time, buffer.remaining_mut())
-            }) {
+            .and_then(|(largest, time)| journal.gen_ack_frame_util(largest, time, buffer.remaining_mut()))
+        {
             Ok(ack) => ack,
             Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
             Err(Poll::Pending) => {
@@ -330,11 +264,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
         PacketContent::NonAckEliciting
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         let journal = self.inner.read().unwrap();
         let Some(latest) = journal.packets.largest() else {
             self.waiters.register(cx.waker());

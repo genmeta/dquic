@@ -41,30 +41,16 @@ pub fn be_parameter_value(input: &[u8], id: ParameterId) -> nom::IResult<&[u8], 
     match id.value_type() {
         ParameterValueType::VarInt => map(be_varint, ParameterValue::VarInt).parse(input),
         ParameterValueType::Boolean => Ok((input, ParameterValue::True)),
-        ParameterValueType::Bytes => {
-            Ok((&[], ParameterValue::Bytes(Bytes::copy_from_slice(input))))
-        }
-        ParameterValueType::Duration => {
-            map(be_varint, |v| Duration::from_millis(v.into_u64()).into()).parse(input)
-        }
-        ParameterValueType::ResetToken => {
-            map(be_reset_token, ParameterValue::ResetToken).parse(input)
-        }
+        ParameterValueType::Bytes => Ok((&[], ParameterValue::Bytes(Bytes::copy_from_slice(input)))),
+        ParameterValueType::Duration => map(be_varint, |v| Duration::from_millis(v.into_u64()).into()).parse(input),
+        ParameterValueType::ResetToken => map(be_reset_token, ParameterValue::ResetToken).parse(input),
         ParameterValueType::ConnectionId => {
             if input.len() > 20 {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::TooLarge,
-                )));
+                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
             }
-            Ok((
-                &[],
-                ParameterValue::ConnectionId(ConnectionId::from_slice(input)),
-            ))
+            Ok((&[], ParameterValue::ConnectionId(ConnectionId::from_slice(input))))
         }
-        ParameterValueType::PreferredAddress => {
-            map(be_preferred_address, ParameterValue::PreferredAddress).parse(input)
-        }
+        ParameterValueType::PreferredAddress => map(be_preferred_address, ParameterValue::PreferredAddress).parse(input),
     }
 }
 
@@ -94,9 +80,7 @@ pub trait WriteParameter {
             ParameterValue::Duration(dur) => self.put_duration_parameter(id, dur),
             ParameterValue::False => {}
             ParameterValue::True => self.put_bool_parameter(id),
-            ParameterValue::PreferredAddress(addr) => {
-                self.put_preferred_address_parameter(id, addr)
-            }
+            ParameterValue::PreferredAddress(addr) => self.put_preferred_address_parameter(id, addr),
             ParameterValue::ResetToken(token) => self.put_reset_token_parameter(id, token),
             ParameterValue::VarInt(varint) => self.put_varint_parameter(id, varint),
         }
@@ -163,8 +147,7 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
         let mut seen = HashSet::new();
         while !buf.is_empty() {
             let (param_id, param_value);
-            (buf, (param_id, param_value)) =
-                be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
+            (buf, (param_id, param_value)) = be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
 
             if !seen.insert(param_id) {
                 return Err(Error::DuplicateParameter(param_id).into());
@@ -180,12 +163,10 @@ impl<R: IntoRole + RequiredParameters + Default> Parameters<R> {
             };
 
             ParameterId::belong_to(param_id, R::into_role())?;
-            let (remain, param_value) = be_parameter_value(param_value, param_id)
-                .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
+            let (remain, param_value) =
+                be_parameter_value(param_value, param_id).map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
             if !remain.is_empty() {
-                return Err(
-                    Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into(),
-                );
+                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
             }
 
             parameters.set(param_id, param_value)?;
@@ -205,8 +186,7 @@ impl ServerParameters {
         let mut seen = HashSet::new();
         while !buf.is_empty() {
             let (param_id, param_value);
-            (buf, (param_id, param_value)) =
-                be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
+            (buf, (param_id, param_value)) = be_raw_parameter(buf).map_err(|nom_error| handle_nom_error(buf, nom_error))?;
 
             if !seen.insert(param_id) {
                 return Err(Error::DuplicateParameter(param_id).into());
@@ -222,12 +202,10 @@ impl ServerParameters {
             };
 
             ParameterId::belong_to(param_id, Role::Server)?;
-            let (remain, param_value) = be_parameter_value(param_value, param_id)
-                .map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
+            let (remain, param_value) =
+                be_parameter_value(param_value, param_id).map_err(|nom_error| handle_nom_error(param_value, nom_error))?;
             if !remain.is_empty() {
-                return Err(
-                    Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into(),
-                );
+                return Err(Error::IncompleteValue(param_id, "trailing value bytes".to_owned()).into());
             }
 
             parameters.set(param_id, param_value)?;

@@ -18,13 +18,7 @@ mod congestion {
 }
 
 fn ack(pn: u64) -> AckFrame {
-    AckFrame::new(
-        pn.try_into().unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    )
+    AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None)
 }
 
 #[tokio::test(start_paused = true)]
@@ -52,10 +46,7 @@ async fn shared_trackers_follow_append_and_retirement() {
     impl Resend for UnlockedFeedback {
         fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
             let trackers = self.trackers.upgrade().unwrap();
-            assert!(
-                trackers.try_write().is_ok(),
-                "release the read lock before feedback"
-            );
+            assert!(trackers.try_write().is_ok(), "release the read lock before feedback");
             self.recovered.lock().unwrap().extend(pns);
         }
     }
@@ -73,12 +64,7 @@ async fn shared_trackers_follow_append_and_retirement() {
     {
         let mut entries = trackers.write().unwrap();
         entries.push_back(Arc::new(NoopFeedback)).unwrap();
-        entries
-            .push_back(Arc::new(UnlockedFeedback {
-                trackers: Arc::downgrade(&trackers),
-                recovered: recovered.clone(),
-            }))
-            .unwrap();
+        entries.push_back(Arc::new(UnlockedFeedback { trackers: Arc::downgrade(&trackers), recovered: recovered.clone() })).unwrap();
         // Removing both early spaces must preserve Data's epoch index.
         entries.drain_to(Epoch::Data as u64).for_each(drop);
     }
@@ -89,10 +75,7 @@ async fn shared_trackers_follow_append_and_retirement() {
         cc.on_ack_rcvd(Epoch::Data, &ack(3));
     }
     assert_eq!(*recovered.lock().unwrap(), [0, 0]);
-    assert_eq!(
-        trackers.write().unwrap().pop_front().unwrap().0,
-        Epoch::Data as u64
-    );
+    assert_eq!(trackers.write().unwrap().pop_front().unwrap().0, Epoch::Data as u64);
     for cc in &controllers {
         cc.on_path_lost();
     }
@@ -106,10 +89,7 @@ async fn negotiated_ack_delays_separate_local_scheduling_from_peer_pto() {
     let data_pto = cc.pto_base(Epoch::Data);
     cc.set_ack_delays(Duration::from_millis(3), Duration::from_millis(55));
     assert_eq!(cc.pto_base(Epoch::Initial), initial_pto);
-    assert_eq!(
-        cc.pto_base(Epoch::Data),
-        data_pto + Duration::from_millis(30)
-    );
+    assert_eq!(cc.pto_base(Epoch::Data), data_pto + Duration::from_millis(30));
     cc.on_pkt_rcvd(Epoch::Data, 0, true);
     assert!(cc.need_ack(Epoch::Data).is_none());
     tokio::time::advance(Duration::from_millis(4)).await;
@@ -128,10 +108,7 @@ async fn handshake_ack_completes_peer_address_validation_before_handshake_done()
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Handshake), 1);
     assert!(cc.get_pto(Epoch::Handshake) > cc.pto_base(Epoch::Handshake));
     cc.on_pkt_sent(Epoch::Handshake, 1, true, MSS, true, None);
-    cc.on_ack_rcvd(
-        Epoch::Handshake,
-        &AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None),
-    );
+    cc.on_ack_rcvd(Epoch::Handshake, &AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None));
     assert!(!handshake.is_handshake_done());
     assert_eq!(cc.get_pto(Epoch::Handshake), cc.pto_base(Epoch::Handshake));
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Handshake), 0);
@@ -170,10 +147,7 @@ async fn discarded_epochs_ignore_late_sends_and_do_not_reset_data_pto_twice() {
 async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
     let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
-    let cc = controller_with(
-        handshake.clone(),
-        trackers(Arc::new(RecordingFeedback(recovered.clone()))),
-    );
+    let cc = controller_with(handshake.clone(), trackers(Arc::new(RecordingFeedback(recovered.clone()))));
     cc.on_pkt_sent(Epoch::Initial, 0, true, MSS, true, None);
     cc.on_pkt_rcvd(Epoch::Initial, 7, true);
     assert_eq!(cc.need_ack(Epoch::Initial).unwrap().0, 7);
@@ -191,10 +165,7 @@ async fn discarded_handshake_spaces_do_not_leak_probes_or_recovery() {
 #[test]
 fn path_loss_does_not_recover_handshake_spaces_before_confirmation() {
     let recovered = Arc::new(Mutex::new(Vec::new()));
-    let cc = controller_with(
-        Arc::new(HandshakeFacts::with_role(Role::Client)),
-        trackers(Arc::new(RecordingFeedback(recovered.clone()))),
-    );
+    let cc = controller_with(Arc::new(HandshakeFacts::with_role(Role::Client)), trackers(Arc::new(RecordingFeedback(recovered.clone()))));
     cc.on_pkt_sent(Epoch::Initial, 0, true, MSS, true, None);
     cc.on_pkt_sent(Epoch::Handshake, 1, true, MSS, true, None);
     cc.on_pkt_sent(Epoch::Data, 2, true, MSS, true, None);
@@ -216,10 +187,7 @@ async fn sending_without_ack_arms_pto_not_loss_timer() {
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     assert!(cc.get_pto(Epoch::Data) > pto);
-    assert!(
-        recovered.lock().unwrap().is_empty(),
-        "PTO requests a probe without declaring loss"
-    );
+    assert!(recovered.lock().unwrap().is_empty(), "PTO requests a probe without declaring loss");
 }
 
 #[tokio::test(start_paused = true)]
@@ -246,10 +214,7 @@ async fn multipath_packet_threshold_counts_sends_on_this_path() {
         cc.on_pkt_sent(Epoch::Data, pn, true, MSS, true, None);
     }
     cc.on_ack_rcvd(Epoch::Data, &ack(100));
-    assert!(
-        recovered.lock().unwrap().is_empty(),
-        "other paths' PN gaps are not loss evidence"
-    );
+    assert!(recovered.lock().unwrap().is_empty(), "other paths' PN gaps are not loss evidence");
     for pn in [200, 300] {
         cc.on_pkt_sent(Epoch::Data, pn, true, MSS, true, None);
     }
@@ -382,16 +347,7 @@ async fn ack_ranges_keep_healthy_path_alive_while_other_path_times_out() {
     healthy.on_pkt_sent(Epoch::Data, 8, true, MSS, true, None);
     black_holed.on_pkt_sent(Epoch::Data, 9, true, MSS, true, None);
     healthy.on_pkt_sent(Epoch::Data, 10, true, MSS, true, None);
-    healthy.on_ack_rcvd(
-        Epoch::Data,
-        &AckFrame::new(
-            10u32.into(),
-            0u32.into(),
-            0u32.into(),
-            vec![(0u32.into(), 0u32.into())],
-            None,
-        ),
-    );
+    healthy.on_ack_rcvd(Epoch::Data, &AckFrame::new(10u32.into(), 0u32.into(), 0u32.into(), vec![(0u32.into(), 0u32.into())], None));
 
     for timeout_count in 1..=7 {
         let pn = 10 + timeout_count * 2;
@@ -411,8 +367,5 @@ async fn ack_ranges_keep_healthy_path_alive_while_other_path_times_out() {
     }
     assert_eq!(black_holed.need_send_ack_eliciting(Epoch::Data), 7);
     healthy.on_path_lost();
-    assert!(
-        recovered.lock().unwrap().is_empty(),
-        "all ACK ranges must clear the healthy path"
-    );
+    assert!(recovered.lock().unwrap().is_empty(), "all ACK ranges must clear the healthy path");
 }

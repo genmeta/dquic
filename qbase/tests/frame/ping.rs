@@ -21,8 +21,5 @@ fn test_write_ping_frame() {
 
 #[test]
 fn test_read_ping_frame() {
-    assert_eq!(
-        super::parse_frame(&[0x01], FrameType::Ping),
-        qbase::frame::Frame::Ping(PingFrame)
-    );
+    assert_eq!(super::parse_frame(&[0x01], FrameType::Ping), qbase::frame::Frame::Ping(PingFrame));
 }

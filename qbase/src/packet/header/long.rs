@@ -88,10 +88,7 @@ impl Retry {
     /// The token is required to be carried by the Initial packet when the client
     /// reconnects in the future and will be used by the server for address verification.
     pub fn new(token: &[u8], integrity: &[u8]) -> Self {
-        let mut retry = Retry {
-            token: Vec::from(token),
-            integrity: [0; 16],
-        };
+        let mut retry = Retry { token: Vec::from(token), integrity: [0; 16] };
         retry.integrity.copy_from_slice(integrity);
         retry
     }
@@ -126,9 +123,7 @@ impl Initial {
 
     /// Create a new Initial packet from the token slice.
     pub fn from_slice(token: &[u8]) -> Self {
-        Initial {
-            token: Vec::from(token),
-        }
+        Initial { token: Vec::from(token) }
     }
 
     /// Get the token.
@@ -147,10 +142,7 @@ pub struct Handshake;
 
 impl HeaderSize for Initial {
     fn size(&self) -> usize {
-        VarInt::try_from(self.token.len())
-            .expect("token length can not be more than 2^62")
-            .encoding_size()
-            + self.token.len()
+        VarInt::try_from(self.token.len()).expect("token length can not be more than 2^62").encoding_size() + self.token.len()
     }
 }
 
@@ -343,11 +335,7 @@ pub mod io {
         /// Wrap the specific header into the long generic header.
         /// Return the specific long header.
         pub fn wrap<T>(self, specific: T) -> LongHeader<T> {
-            LongHeader {
-                dcid: self.dcid,
-                scid: self.scid,
-                specific,
-            }
+            LongHeader { dcid: self.dcid, scid: self.scid, specific }
         }
 
         /// Parse a long header from the input buffer,
@@ -405,10 +393,7 @@ pub mod io {
 
     impl<T: BufMut> WriteSpecific<Initial> for T {
         fn put_specific(&mut self, specific: &Initial) {
-            self.put_varint(
-                &VarInt::try_from(specific.token.len())
-                    .expect("token length can not be more than 2^62"),
-            );
+            self.put_varint(&VarInt::try_from(specific.token.len()).expect("token length can not be more than 2^62"));
             self.put_slice(&specific.token);
         }
     }

@@ -3,11 +3,7 @@ use crate::{
     *,
 };
 
-fn connect(
-    certificate: CertificateDer<'static>,
-    ocsp: &[u8],
-    name: &str,
-) -> Result<HandshakeSummary, qtls::TlsError> {
+fn connect(certificate: CertificateDer<'static>, ocsp: &[u8], name: &str) -> Result<HandshakeSummary, qtls::TlsError> {
     let client = TlsClient::new(ClientTlsConfig {
         provider: Arc::new(crypto_provider()),
         alpn: vec![b"h3".to_vec()],
@@ -23,11 +19,7 @@ fn connect(
     })
     .unwrap();
     let server = rustls::quic::ServerConnection::new(
-        Arc::new(server_config(
-            certificate,
-            PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(),
-            ocsp.to_vec(),
-        )),
+        Arc::new(server_config(certificate, PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(), ocsp.to_vec())),
         rustls::quic::Version::V1,
         b"server-params".to_vec(),
     )
@@ -39,11 +31,7 @@ fn connect(
 fn server_without_ocsp_is_rejected() {
     let _roots = set_roots();
     assert_rejected(
-        connect(
-            CertificateDer::from_pem_slice(SERVER_CERT).unwrap(),
-            &[],
-            "localhost",
-        ),
+        connect(CertificateDer::from_pem_slice(SERVER_CERT).unwrap(), &[], "localhost"),
         rustls::AlertDescription::BadCertificateStatusResponse,
     );
 }
@@ -55,10 +43,7 @@ fn supplied_server_ocsp_still_requires_matching_good_status() {
     let summary = connect(certificate.clone(), SERVER_OCSP, "localhost").unwrap();
     assert_eq!(summary.remote.unwrap().name(), "localhost");
     for staple in [&[1_u8][..], CLIENT_OCSP, SERVER_REVOKED_OCSP] {
-        assert_rejected(
-            connect(certificate.clone(), staple, "localhost"),
-            rustls::AlertDescription::BadCertificateStatusResponse,
-        );
+        assert_rejected(connect(certificate.clone(), staple, "localhost"), rustls::AlertDescription::BadCertificateStatusResponse);
     }
 }
 
@@ -66,32 +51,14 @@ fn supplied_server_ocsp_still_requires_matching_good_status() {
 fn missing_server_ocsp_preserves_name_chain_signature_and_validity_checks() {
     let _roots = set_roots();
     let certificate = CertificateDer::from_pem_slice(SERVER_CERT).unwrap();
-    assert_rejected(
-        connect(certificate.clone(), &[], "other.example"),
-        rustls::AlertDescription::BadCertificate,
-    );
+    assert_rejected(connect(certificate.clone(), &[], "other.example"), rustls::AlertDescription::BadCertificate);
     let mut damaged = certificate.as_ref().to_vec();
     *damaged.last_mut().unwrap() ^= 1;
+    assert_rejected(connect(CertificateDer::from(damaged), &[], "localhost"), rustls::AlertDescription::DecryptError);
     assert_rejected(
-        connect(CertificateDer::from(damaged), &[], "localhost"),
-        rustls::AlertDescription::DecryptError,
-    );
-    assert_rejected(
-        connect(
-            CertificateDer::from_pem_slice(include_bytes!("../keychain/localhost/expired.cert"))
-                .unwrap(),
-            &[],
-            "localhost",
-        ),
+        connect(CertificateDer::from_pem_slice(include_bytes!("../keychain/localhost/expired.cert")).unwrap(), &[], "localhost"),
         rustls::AlertDescription::CertificateExpired,
     );
-    RootCerts::set([CertificateDer::from_pem_slice(include_bytes!(
-        "../keychain/root/rootCA-ECC.crt"
-    ))
-    .unwrap()])
-    .unwrap();
-    assert_rejected(
-        connect(certificate, &[], "localhost"),
-        rustls::AlertDescription::UnknownCA,
-    );
+    RootCerts::set([CertificateDer::from_pem_slice(include_bytes!("../keychain/root/rootCA-ECC.crt")).unwrap()]).unwrap();
+    assert_rejected(connect(certificate, &[], "localhost"), rustls::AlertDescription::UnknownCA);
 }

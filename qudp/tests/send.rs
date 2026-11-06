@@ -43,51 +43,23 @@ async fn fresh_socket_wakes_ready_poll_and_async_senders_together() {
 
     // The current-thread reactor has not observed this new socket yet. Register
     // distinct task wakers before yielding, reproducing concurrent punch probes.
-    assert!(
-        socket
-            .poll_send_ready(&mut Context::from_waker(&wakers[0]))
-            .is_pending()
-    );
-    assert!(
-        socket
-            .poll_send(&mut Context::from_waker(&wakers[1]), &polled, &line)
-            .is_pending()
-    );
-    assert!(
-        sending
-            .as_mut()
-            .poll(&mut Context::from_waker(&wakers[2]))
-            .is_pending()
-    );
+    assert!(socket.poll_send_ready(&mut Context::from_waker(&wakers[0])).is_pending());
+    assert!(socket.poll_send(&mut Context::from_waker(&wakers[1]), &polled, &line).is_pending());
+    assert!(sending.as_mut().poll(&mut Context::from_waker(&wakers[2])).is_pending());
     all_woken(&waiters).await;
 
-    assert!(matches!(
-        socket.poll_send_ready(&mut Context::from_waker(&wakers[0])),
-        Poll::Ready(Ok(()))
-    ));
-    assert_eq!(
-        poll_fn(|cx| socket.poll_send(cx, &polled, &line))
-            .await
-            .unwrap(),
-        1
-    );
+    assert!(matches!(socket.poll_send_ready(&mut Context::from_waker(&wakers[0])), Poll::Ready(Ok(()))));
+    assert_eq!(poll_fn(|cx| socket.poll_send(cx, &polled, &line)).await.unwrap(), 1);
     assert_eq!(sending.await.unwrap(), 1);
     for expected in [b"poll", b"send"] {
         let mut bytes = [0; 4];
-        let (len, source) = timeout(Duration::from_secs(1), receiver.recv_from(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
+        let (len, source) = timeout(Duration::from_secs(1), receiver.recv_from(&mut bytes)).await.unwrap().unwrap();
         assert_eq!(len, expected.len());
         assert_eq!(&bytes, expected);
         assert_eq!(source, link.src);
     }
     for waiter in &waiters {
-        assert_eq!(
-            Arc::strong_count(waiter),
-            2,
-            "completed polls must release their wakers"
-        );
+        assert_eq!(Arc::strong_count(waiter), 2, "completed polls must release their wakers");
     }
 }
 
@@ -102,24 +74,12 @@ async fn cancelling_the_last_sender_does_not_strand_other_waiters() {
     let mut last = Box::pin(socket.send(&bytes, line));
     let waiters: [_; 2] = std::array::from_fn(|_| Arc::new(SendWake::default()));
     let wakers = waiters.each_ref().map(|waiter| Waker::from(waiter.clone()));
-    assert!(
-        first
-            .as_mut()
-            .poll(&mut Context::from_waker(&wakers[0]))
-            .is_pending()
-    );
-    assert!(
-        last.as_mut()
-            .poll(&mut Context::from_waker(&wakers[1]))
-            .is_pending()
-    );
+    assert!(first.as_mut().poll(&mut Context::from_waker(&wakers[0])).is_pending());
+    assert!(last.as_mut().poll(&mut Context::from_waker(&wakers[1])).is_pending());
     drop(last);
     all_woken(&waiters[..1]).await;
     assert_eq!(first.await.unwrap(), 1);
     let mut received = [0; 4];
-    let (len, _) = timeout(Duration::from_secs(1), receiver.recv_from(&mut received))
-        .await
-        .unwrap()
-        .unwrap();
+    let (len, _) = timeout(Duration::from_secs(1), receiver.recv_from(&mut received)).await.unwrap().unwrap();
     assert_eq!(&received[..len], b"live");
 }

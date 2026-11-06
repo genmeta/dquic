@@ -46,10 +46,7 @@ impl QuicRouter {
     }
 
     pub fn new() -> Self {
-        QuicRouter {
-            table: DashMap::new(),
-            incoming_cb: RwLock::new(Box::new(|_, _, _| {})),
-        }
+        QuicRouter { table: DashMap::new(), incoming_cb: RwLock::new(Box::new(|_, _, _| {})) }
     }
 
     pub fn on_incoming<F>(&self, callback: F)
@@ -60,12 +57,7 @@ impl QuicRouter {
     }
 
     /// Insert a known route and return the registry used to issue and retire its CIDs.
-    pub fn insert<T>(
-        self: &Arc<Self>,
-        signpost: Signpost,
-        inbox: Inbox,
-        issued_cids: T,
-    ) -> QuicRouterRegistry<T> {
+    pub fn insert<T>(self: &Arc<Self>, signpost: Signpost, inbox: Inbox, issued_cids: T) -> QuicRouterRegistry<T> {
         self.table.insert(signpost, inbox.clone());
         self.registry_on_issuing_scid(inbox, issued_cids)
     }
@@ -76,12 +68,7 @@ impl QuicRouter {
 
     /// Atomically claim a route, returning its registry or the existing inbox.
     /// A full or closed inbox remains registered until its owner retires the route.
-    pub fn try_insert<T>(
-        self: &Arc<Self>,
-        signpost: Signpost,
-        inbox: Inbox,
-        issued_cids: T,
-    ) -> Result<QuicRouterRegistry<T>, Inbox> {
+    pub fn try_insert<T>(self: &Arc<Self>, signpost: Signpost, inbox: Inbox, issued_cids: T) -> Result<QuicRouterRegistry<T>, Inbox> {
         match self.table.entry(signpost) {
             dashmap::Entry::Occupied(entry) => return Err(entry.get().clone()),
             dashmap::Entry::Vacant(entry) => {
@@ -106,9 +93,7 @@ impl QuicRouter {
     }
 
     pub fn find_entry(&self, packet: &Packet, link: &Link) -> Option<Inbox> {
-        self.table
-            .get(&Self::signpost(packet, link))
-            .map(|queue| queue.clone())
+        self.table.get(&Self::signpost(packet, link)).map(|queue| queue.clone())
     }
 
     /// Parse a UDP datagram without blocking the protocol's shared receive callback.
@@ -124,30 +109,15 @@ impl QuicRouter {
             inbox.try_send(packet, pathway, link);
             return;
         }
-        if let Packet::Data(qbase::packet::DataPacket {
-            header: DataHeader::Long(long::DataHeader::Initial(header)),
-            bytes,
-            offset,
-        }) = packet
+        if let Packet::Data(qbase::packet::DataPacket { header: DataHeader::Long(long::DataHeader::Initial(header)), bytes, offset }) =
+            packet
         {
-            (self.incoming_cb.read().unwrap())(
-                CipherPacket::new(header, bytes, offset),
-                pathway,
-                link,
-            );
+            (self.incoming_cb.read().unwrap())(CipherPacket::new(header, bytes, offset), pathway, link);
         }
     }
 
-    pub fn registry_on_issuing_scid<T>(
-        self: &Arc<Self>,
-        inbox: Inbox,
-        issued_cids: T,
-    ) -> QuicRouterRegistry<T> {
-        QuicRouterRegistry {
-            router: self.clone(),
-            inbox,
-            issued_cids,
-        }
+    pub fn registry_on_issuing_scid<T>(self: &Arc<Self>, inbox: Inbox, issued_cids: T) -> QuicRouterRegistry<T> {
+        QuicRouterRegistry { router: self.clone(), inbox, issued_cids }
     }
 }
 
@@ -165,19 +135,13 @@ pub struct Signpost {
 
 impl From<ConnectionId> for Signpost {
     fn from(value: ConnectionId) -> Self {
-        Self {
-            cid: value,
-            peer: None,
-        }
+        Self { cid: value, peer: None }
     }
 }
 
 impl From<SocketAddr> for Signpost {
     fn from(value: SocketAddr) -> Self {
-        Self {
-            cid: ConnectionId::default(),
-            peer: Some(value),
-        }
+        Self { cid: ConnectionId::default(), peer: Some(value) }
     }
 }
 
@@ -214,9 +178,7 @@ where
     TX: Send + Sync + 'static,
 {
     fn retire_cid(&self, cid: ConnectionId) {
-        self.router
-            .table
-            .remove_if(&cid.into(), |_, inbox| inbox.same_channel(&self.inbox));
+        self.router.table.remove_if(&cid.into(), |_, inbox| inbox.same_channel(&self.inbox));
     }
 }
 

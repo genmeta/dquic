@@ -94,11 +94,7 @@ pub struct Trace {
 /// it, but rather appended after it in a QlogFileSeq.
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TraceSeq {
     /// The optional "title" fields provide additional free-text information about the trace.
     title: Option<String>,
@@ -217,11 +213,7 @@ pub struct PathID(String);
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 #[serde(try_from = "UncheckedReferenceTime")]
 pub struct ReferenceTime {
     /// The required "clock_type" field represents the type of clock used for time measurements. The value "system"
@@ -258,16 +250,10 @@ impl TryFrom<UncheckedReferenceTime> for ReferenceTime {
     type Error = &'static str;
     fn try_from(value: UncheckedReferenceTime) -> Result<Self, Self::Error> {
         if value.clock_type == TimeClockType::Monotaonic && value.epoch != TimeEpoch::Unknow {
-            return Err(
-                r#"When using the "monotonic" clock type, the epoch field MUST have the value "unknown"."#,
-            );
+            return Err(r#"When using the "monotonic" clock type, the epoch field MUST have the value "unknown"."#);
         }
 
-        Ok(ReferenceTime {
-            clock_type: value.clock_type,
-            epoch: value.epoch,
-            wall_clock_time: value.wall_clock_time,
-        })
+        Ok(ReferenceTime { clock_type: value.clock_type, epoch: value.epoch, wall_clock_time: value.wall_clock_time })
     }
 }
 
@@ -367,11 +353,7 @@ impl From<(SocketAddr, SocketAddr)> for GroupID {
 /// different combinations thereof. Each field is optional to support deployment diversity.
 #[derive(Builder, Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde_with::skip_serializing_none]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct SystemInformation {
     processor_id: Option<u32>,
     process_id: Option<u32>,
@@ -567,11 +549,7 @@ impl Display for HexString {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct RawInfo {
     /// the full byte length of the entity (e.g., packet or frame),
     /// including possible headers and trailers
@@ -596,10 +574,7 @@ impl RawInfoBuilder {
 
 impl<D: Buffer> From<D> for RawInfo {
     fn from(data: D) -> Self {
-        build!(RawInfo {
-            length: data.len() as u64,
-            data: data
-        })
+        build!(RawInfo { length: data.len() as u64, data: data })
     }
 }
 
@@ -710,12 +685,7 @@ mod rollback {
 
     impl From<ProtocolTypeList> for legacy::ProtocolType {
         fn from(value: ProtocolTypeList) -> Self {
-            value
-                .0
-                .into_iter()
-                .map(|x| x.into())
-                .collect::<Vec<_>>()
-                .into()
+            value.0.into_iter().map(|x| x.into()).collect::<Vec<_>>().into()
         }
     }
 

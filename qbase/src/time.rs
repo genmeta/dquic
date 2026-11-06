@@ -17,17 +17,11 @@ pub struct IdleSince {
 
 impl IdleSince {
     pub fn new() -> Self {
-        Self {
-            idle_since: None,
-            can_update: true,
-        }
+        Self { idle_since: None, can_update: true }
     }
 
     pub fn with_instant(now: Instant) -> Self {
-        Self {
-            idle_since: Some(now),
-            can_update: true,
-        }
+        Self { idle_since: Some(now), can_update: true }
     }
 
     pub fn on_sent_at(&mut self, now: Instant) -> bool {
@@ -54,8 +48,6 @@ impl IdleSince {
     }
 
     pub fn timeout_after(&self, now: Instant, duration: Duration) -> bool {
-        self.idle_since
-            .and_then(|since| now.checked_duration_since(since))
-            .is_some_and(|elapsed| elapsed >= duration)
+        self.idle_since.and_then(|since| now.checked_duration_since(since)).is_some_and(|elapsed| elapsed >= duration)
     }
 }

@@ -16,9 +16,7 @@ pub struct Anonymous;
 
 impl fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Endpoint")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
+        f.debug_struct("Endpoint").field("name", &self.name).finish_non_exhaustive()
     }
 }
 
@@ -35,19 +33,10 @@ impl Endpoint {
         ocsp: Vec<u8>,
     ) -> Result<Arc<Self>, qtls::RustlsError> {
         if ocsp.is_empty() {
-            return Err(qtls::RustlsError::General(
-                "endpoint OCSP staple is empty".into(),
-            ));
+            return Err(qtls::RustlsError::General("endpoint OCSP staple is empty".into()));
         }
-        let signing_key = qtls::default_provider()
-            .key_provider
-            .load_private_key(key)?;
-        Ok(Arc::new(Self {
-            name: name.to_owned(),
-            cert: certs,
-            key: signing_key,
-            ocsp,
-        }))
+        let signing_key = qtls::default_provider().key_provider.load_private_key(key)?;
+        Ok(Arc::new(Self { name: name.to_owned(), cert: certs, key: signing_key, ocsp }))
     }
 
     pub fn name(&self) -> &str {

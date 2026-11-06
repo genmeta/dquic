@@ -32,12 +32,7 @@ impl NewConnectionIdFrame {
     /// Create a new [`NewConnectionIdFrame`].
     pub fn new(cid: ConnectionId, sequence: VarInt, retire_prior_to: VarInt) -> Self {
         let reset_token = ResetToken::random_gen();
-        Self {
-            sequence,
-            retire_prior_to,
-            id: cid,
-            reset_token,
-        }
+        Self { sequence, retire_prior_to, id: cid, reset_token }
     }
 
     /// Return the sequence number of the frame.
@@ -73,11 +68,7 @@ impl super::EncodeSize for NewConnectionIdFrame {
     }
 
     fn encoding_size(&self) -> usize {
-        1 + self.sequence.encoding_size()
-            + self.retire_prior_to.encoding_size()
-            + 1
-            + self.id.len as usize
-            + RESET_TOKEN_SIZE
+        1 + self.sequence.encoding_size() + self.retire_prior_to.encoding_size() + 1 + self.id.len as usize + RESET_TOKEN_SIZE
     }
 }
 
@@ -92,30 +83,16 @@ pub fn be_new_connection_id_frame(input: &[u8]) -> nom::IResult<&[u8], NewConnec
     // FRAME_ENCODING_ERROR.
     if retire_prior_to > sequence {
         // TODO: 这里有信息损失
-        return Err(nom::Err::Error(nom::error::make_error(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Verify)));
     }
     let (remain, cid) = be_connection_id(remain)?;
     if cid.is_empty() {
         // TODO: 这里有信息损失
-        return Err(nom::Err::Error(nom::error::make_error(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Verify)));
     }
 
     let (remain, reset_token) = be_reset_token(remain)?;
-    Ok((
-        remain,
-        NewConnectionIdFrame {
-            sequence,
-            retire_prior_to,
-            id: cid,
-            reset_token,
-        },
-    ))
+    Ok((remain, NewConnectionIdFrame { sequence, retire_prior_to, id: cid, reset_token }))
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<NewConnectionIdFrame> for T {

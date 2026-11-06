@@ -184,26 +184,14 @@ pub struct QuicError {
 impl QuicError {
     /// Create a new error with the given kind, frame type, and reason.
     /// The frame type is the one that triggered this error.
-    pub fn new<T: Into<Cow<'static, str>>>(
-        kind: ErrorKind,
-        frame_type: ErrorFrameType,
-        reason: T,
-    ) -> Self {
-        Self {
-            kind,
-            frame_type,
-            reason: reason.into(),
-        }
+    pub fn new<T: Into<Cow<'static, str>>>(kind: ErrorKind, frame_type: ErrorFrameType, reason: T) -> Self {
+        Self { kind, frame_type, reason: reason.into() }
     }
 
     /// Create a new error with unknown frame type, and
     /// the [`FrameType::Padding`] type will be used by default.
     pub fn with_default_fty<T: Into<Cow<'static, str>>>(kind: ErrorKind, reason: T) -> Self {
-        Self {
-            kind,
-            frame_type: FrameType::Padding.into(),
-            reason: reason.into(),
-        }
+        Self { kind, frame_type: FrameType::Padding.into(), reason: reason.into() }
     }
 
     /// Return the error kind.
@@ -248,10 +236,7 @@ pub struct AppError {
 impl AppError {
     /// Create a new app error with the given app error code and reason.
     pub fn new(error_code: VarInt, reason: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            error_code,
-            reason: reason.into(),
-        }
+        Self { error_code, reason: reason.into() }
     }
 
     /// Return the error code.
@@ -315,14 +300,11 @@ impl From<AppError> for ConnectionCloseFrame {
 impl From<ConnectionCloseFrame> for Error {
     fn from(frame: ConnectionCloseFrame) -> Self {
         match frame {
-            ConnectionCloseFrame::Quic(frame) => Self::Quic(QuicError {
-                kind: frame.error_kind(),
-                frame_type: frame.frame_type(),
-                reason: frame.reason().to_owned().into(),
-            }),
+            ConnectionCloseFrame::Quic(frame) => {
+                Self::Quic(QuicError { kind: frame.error_kind(), frame_type: frame.frame_type(), reason: frame.reason().to_owned().into() })
+            }
             ConnectionCloseFrame::App(frame) => Self::App(AppError {
-                error_code: VarInt::from_u64(frame.error_code())
-                    .expect("error code never overflow"),
+                error_code: VarInt::from_u64(frame.error_code()).expect("error code never overflow"),
                 reason: frame.reason().to_owned().into(),
             }),
         }

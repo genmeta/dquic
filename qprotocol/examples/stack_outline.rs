@@ -34,13 +34,7 @@ async fn main() -> Result<(), Error> {
     let (delivered, received) = tokio::sync::oneshot::channel();
     let delivered = Arc::new(Mutex::new(Some(delivered)));
     quic.on_receive(move |packet, pathway, link| {
-        println!(
-            "QUIC datagram: {} bytes, local={}, pathway={}, link={}",
-            packet.len(),
-            pathway.local(),
-            pathway,
-            link,
-        );
+        println!("QUIC datagram: {} bytes, local={}, pathway={}, link={}", packet.len(), pathway.local(), pathway, link,);
         // The future qconnection integration starts at this callback.
         if let Some(delivered) = delivered.lock().unwrap().take() {
             let _ = delivered.send(());
@@ -57,12 +51,7 @@ async fn main() -> Result<(), Error> {
         .into_iter()
         .find(|interface| interface.ipv4.iter().any(|ip| ip.addr().is_loopback()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no loopback interface"))?;
-    let ip = interface
-        .ipv4
-        .iter()
-        .find(|ip| ip.addr().is_loopback())
-        .unwrap()
-        .addr();
+    let ip = interface.ipv4.iter().find(|ip| ip.addr().is_loopback()).unwrap().addr();
     let device = qudp::BoundDevice::new(interface.name, interface.index)?;
     let raw = Arc::new(UdpSocket::bind_to_device((ip, 0).into(), device.clone())?);
     dock.add(raw.clone())?;
@@ -83,17 +72,11 @@ async fn main() -> Result<(), Error> {
     let peer = EndpointAddr::direct(peer_raw.local_addr()?);
 
     let packet = [0x40, 1, 2, 3];
-    quic.send(Pathway::new(inner, peer), &[IoSlice::new(&packet)])
-        .await?;
-    received
-        .await
-        .map_err(|_| io::Error::other("QUIC example receive task stopped"))?;
+    quic.send(Pathway::new(inner, peer), &[IoSlice::new(&packet)]).await?;
+    received.await.map_err(|_| io::Error::other("QUIC example receive task stopped"))?;
 
     let direct_path = Pathway::new(inner, peer);
-    let remote_agent = EndpointAddr::mediate(
-        "198.51.100.2:3478".parse().unwrap(),
-        "192.0.2.20:50000".parse().unwrap(),
-    );
+    let remote_agent = EndpointAddr::mediate("198.51.100.2:3478".parse().unwrap(), "192.0.2.20:50000".parse().unwrap());
     let mixed_path = Pathway::new(outer, remote_agent);
     println!("Direct Path: {direct_path}");
     println!("Direct -> Agent Path: {mixed_path}");

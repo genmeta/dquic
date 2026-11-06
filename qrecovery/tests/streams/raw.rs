@@ -24,10 +24,7 @@ impl<F> SendFrame<F> for MockFrameSender {
     fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
 }
 
-fn packet_frames(
-    streams: &mut DataStreams<MockFrameSender>,
-    waker: &std::task::Waker,
-) -> Vec<GuaranteedFrame> {
+fn packet_frames(streams: &mut DataStreams<MockFrameSender>, waker: &std::task::Waker) -> Vec<GuaranteedFrame> {
     use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
 
     let mut bytes = BytesMut::new();
@@ -55,11 +52,7 @@ fn busy_streams_take_turns_before_either_exhausts_its_window() {
     use qrecovery::send::CancelStream;
 
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
@@ -67,14 +60,10 @@ fn busy_streams_take_turns_before_either_exhausts_its_window() {
     let mut cx = Context::from_waker(std::task::Waker::noop());
     let mut writers = Vec::new();
     for _ in 0..2 {
-        let Poll::Ready(Ok(Some((id, mut writer)))) =
-            std::pin::pin!(streams.open_uni()).poll(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((id, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
             panic!("stream should open");
         };
-        writer
-            .write(bytes::Bytes::from(vec![7; 64 * 1024]))
-            .unwrap();
+        writer.write(bytes::Bytes::from(vec![7; 64 * 1024])).unwrap();
         writers.push((id, writer));
     }
     let mut sent = std::collections::HashMap::new();
@@ -88,10 +77,7 @@ fn busy_streams_take_turns_before_either_exhausts_its_window() {
             }
         }
     }
-    assert_eq!(
-        streams.fresh_bytes(),
-        128 * 1024 - sent.values().sum::<usize>()
-    );
+    assert_eq!(streams.fresh_bytes(), 128 * 1024 - sent.values().sum::<usize>());
     for (_, writer) in &mut writers {
         writer.cancel(0);
     }
@@ -116,11 +102,7 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
         }
     }
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
@@ -130,18 +112,13 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
     let mut cx = Context::from_waker(&waker);
     let mut writers = Vec::new();
     for _ in 0..32 {
-        let Poll::Ready(Ok(Some((_, writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-        else {
+        let Poll::Ready(Ok(Some((_, writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
             panic!("stream should open");
         };
         writers.push(writer);
     }
     // The highest ID is visited first and fills the packet completely.
-    writers
-        .last_mut()
-        .unwrap()
-        .write(bytes::Bytes::from(vec![7; 4096]))
-        .unwrap();
+    writers.last_mut().unwrap().write(bytes::Bytes::from(vec![7; 4096])).unwrap();
     packet_frames(&mut streams, &waker);
     for writer in &mut writers[..31] {
         writer.write(bytes::Bytes::from_static(b"next")).unwrap();
@@ -150,28 +127,20 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
     for writer in &mut writers {
         writer.cancel(0);
     }
-    assert_eq!(
-        wakes, 0,
-        "a full packet must not poll and subscribe idle streams"
-    );
+    assert_eq!(wakes, 0, "a full packet must not poll and subscribe idle streams");
 }
 
 #[test]
 fn idle_stream_resumes_for_writes_retransmission_and_fin() {
     let metrics = qbase::metric::ArcConnectionMetrics::default();
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         metrics.clone(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
         panic!("stream should open")
     };
     writer.write(bytes::Bytes::from_static(b"first")).unwrap();
@@ -185,11 +154,7 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
     assert_eq!(metrics.inflight_bytes(), 5);
 
     streams.may_loss_data(&first);
-    assert_eq!(
-        streams.fresh_bytes(),
-        0,
-        "retransmissions use no new flow credit"
-    );
+    assert_eq!(streams.fresh_bytes(), 0, "retransmissions use no new flow credit");
     let frames = packet_frames(&mut streams, cx.waker());
     let GuaranteedFrame::Stream(resent) = frames[0] else {
         panic!("expected retransmission")
@@ -235,22 +200,15 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
 #[test]
 fn exhausted_connection_credit_keeps_retransmission_available_with_fresh_data_queued() {
     let mut remote = ServerParameters::default();
-    remote
-        .set(qbase::param::ParameterId::InitialMaxData, 5u32)
-        .unwrap();
+    remote.set(qbase::param::ParameterId::InitialMaxData, 5u32).unwrap();
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(remote),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(remote)),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
         panic!("stream should open")
     };
     writer.write(bytes::Bytes::from_static(b"first")).unwrap();
@@ -265,11 +223,7 @@ fn exhausted_connection_credit_keeps_retransmission_available_with_fresh_data_qu
         panic!("expected retransmission")
     };
     assert_eq!(retransmitted.range(), first.range());
-    assert_eq!(
-        streams.fresh_bytes(),
-        4,
-        "fresh data still needs connection credit"
-    );
+    assert_eq!(streams.fresh_bytes(), 4, "fresh data still needs connection credit");
 }
 
 #[test]
@@ -278,11 +232,7 @@ fn receive_limits_follow_the_local_stream_direction() {
     use qrecovery::send::CancelStream;
 
     for role in [Role::Client, Role::Server] {
-        for (local, dir, limit) in [
-            (true, Dir::Bi, 3),
-            (false, Dir::Bi, 5),
-            (false, Dir::Uni, 7),
-        ] {
+        for (local, dir, limit) in [(true, Dir::Bi, 3), (false, Dir::Bi, 5), (false, Dir::Uni, 7)] {
             let mut client = ClientParameters::default();
             let mut server = ServerParameters::default();
             for (id, value) in [
@@ -290,12 +240,8 @@ fn receive_limits_follow_the_local_stream_direction() {
                 (ParameterId::InitialMaxStreamDataBidiRemote, 5),
                 (ParameterId::InitialMaxStreamDataUni, 7),
             ] {
-                client
-                    .set(id, if role == Role::Client { value } else { 100 })
-                    .unwrap();
-                server
-                    .set(id, if role == Role::Server { value } else { 100 })
-                    .unwrap();
+                client.set(id, if role == Role::Client { value } else { 100 }).unwrap();
+                server.set(id, if role == Role::Server { value } else { 100 }).unwrap();
             }
             let streams = DataStreams::new(
                 ArcParameters::new(role, Arc::new(client), Arc::new(server)),
@@ -305,9 +251,7 @@ fn receive_limits_follow_the_local_stream_direction() {
             );
             let sid = if local {
                 let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-                let Poll::Ready(Ok(Some((sid, (_, mut writer))))) =
-                    streams.poll_open_bi_with_limit(&mut cx, 0)
-                else {
+                let Poll::Ready(Ok(Some((sid, (_, mut writer))))) = streams.poll_open_bi_with_limit(&mut cx, 0) else {
                     panic!("peer must allow a bidirectional stream");
                 };
                 writer.cancel(0);
@@ -315,19 +259,8 @@ fn receive_limits_follow_the_local_stream_direction() {
             } else {
                 StreamId::new(!role, dir, 0)
             };
-            assert_eq!(
-                streams.recv_data((
-                    StreamFrame::new(sid, limit - 1, 1),
-                    bytes::Bytes::from_static(b"x"),
-                )),
-                Ok(limit as usize)
-            );
-            let error = streams
-                .recv_data((
-                    StreamFrame::new(sid, limit, 1),
-                    bytes::Bytes::from_static(b"x"),
-                ))
-                .unwrap_err();
+            assert_eq!(streams.recv_data((StreamFrame::new(sid, limit - 1, 1), bytes::Bytes::from_static(b"x"),)), Ok(limit as usize));
+            let error = streams.recv_data((StreamFrame::new(sid, limit, 1), bytes::Bytes::from_static(b"x"))).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::FlowControl);
         }
     }
@@ -339,9 +272,7 @@ fn open_uni_uses_the_remote_unidirectional_limit() {
     use qrecovery::send::CancelStream;
 
     let mut client = ClientParameters::default();
-    client
-        .set(ParameterId::InitialMaxStreamDataUni, 0u32)
-        .unwrap();
+    client.set(ParameterId::InitialMaxStreamDataUni, 0u32).unwrap();
     let server = ServerParameters::default();
     let streams = DataStreams::new(
         ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server)),
@@ -350,8 +281,7 @@ fn open_uni_uses_the_remote_unidirectional_limit() {
         Default::default(),
     );
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
         panic!("ready parameters must allow opening the stream immediately");
     };
     let ready = writer.poll_ready(&mut cx);
@@ -366,21 +296,14 @@ fn ready_streams_use_current_parameters_even_with_remembered_limits() {
     let client = ClientParameters::default();
     let server = ServerParameters::default();
     // Missing remembered limits prohibit writing; current parameters permit it.
-    let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server))
-        .with_remembered(Some(Arc::new(ServerParameters::new())));
-    let streams = DataStreams::new(
-        parameters,
-        Box::new(DemandConcurrency),
-        MockFrameSender,
-        Default::default(),
-    );
+    let parameters =
+        ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server)).with_remembered(Some(Arc::new(ServerParameters::new())));
+    let streams = DataStreams::new(parameters, Box::new(DemandConcurrency), MockFrameSender, Default::default());
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-    let Poll::Ready(Ok(Some((_, (_, mut bi))))) = std::pin::pin!(streams.open_bi()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, (_, mut bi))))) = std::pin::pin!(streams.open_bi()).poll(&mut cx) else {
         panic!("ready parameters must allow opening the bidirectional stream");
     };
-    let Poll::Ready(Ok(Some((_, mut uni)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, mut uni)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
         panic!("ready parameters must allow opening the unidirectional stream");
     };
     let bi_ready = bi.poll_ready(&mut cx);
@@ -406,11 +329,7 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
         }
     }
     let streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
@@ -441,9 +360,7 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
     };
     assert!(poll(&wa).is_pending());
     assert!(poll(&wb).is_pending());
-    let Poll::Ready(Ok(Some((_, mut writer)))) =
-        streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100)
-    else {
+    let Poll::Ready(Ok(Some((_, mut writer)))) = streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100) else {
         panic!("stream should open");
     };
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
@@ -462,9 +379,7 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
     let c = Arc::new(Counter(AtomicUsize::new(0)));
     let wc = Waker::from(c.clone());
     assert!(matches!(poll(&wc), Poll::Ready(Ok(n)) if n > 0));
-    let Poll::Ready(Ok(Some((_, mut next)))) =
-        streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100)
-    else {
+    let Poll::Ready(Ok(Some((_, mut next)))) = streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100) else {
         panic!("stream should open");
     };
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
@@ -484,60 +399,41 @@ fn connection_error_preserves_received_but_unread_stream() {
     };
 
     let streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
     );
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    let Poll::Ready(Ok(Some((sid, (mut reader, mut writer))))) =
-        std::pin::pin!(streams.open_bi()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((sid, (mut reader, mut writer))))) = std::pin::pin!(streams.open_bi()).poll(&mut cx) else {
         panic!("stream should open")
     };
     use qrecovery::send::CancelStream;
     writer.cancel(0);
     let mut frame = StreamFrame::new(sid, 0, 4);
     frame.set_eos_flag(true);
-    streams
-        .recv_data((frame, bytes::Bytes::from_static(b"data")))
-        .unwrap();
+    streams.recv_data((frame, bytes::Bytes::from_static(b"data"))).unwrap();
     let error: Error = QuicError::with_default_fty(ErrorKind::Internal, "closed").into();
     streams.on_error(&error);
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     let mut buf = BytesMut::with_capacity(4);
-    assert!(matches!(
-        reader.poll_read(&mut cx, &mut buf),
-        Poll::Ready(Ok(()))
-    ));
+    assert!(matches!(reader.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
     assert_eq!(&buf[..], b"data");
     buf.clear();
-    assert!(matches!(
-        reader.poll_read(&mut cx, &mut buf),
-        Poll::Ready(Ok(()))
-    ));
+    assert!(matches!(reader.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
     assert!(buf.is_empty());
 }
 
 #[test]
 fn empty_stream_fin_is_effective_packet_content() {
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
         Default::default(),
     );
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
-    else {
+    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
         panic!("stream should open")
     };
     assert!(Pin::new(&mut writer).poll_shutdown(&mut cx).is_pending());
@@ -558,9 +454,5 @@ fn empty_stream_fin_is_effective_packet_content() {
     );
     assert!(matches!(streams.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(n)) if n > 0));
     assert_eq!(buffer.meta.content, PacketContent::EffectivePayload);
-    assert!(
-        frames
-            .iter()
-            .any(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.is_fin()))
-    );
+    assert!(frames.iter().any(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.is_fin())));
 }

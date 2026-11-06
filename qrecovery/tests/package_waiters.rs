@@ -17,9 +17,7 @@ use qbase::{
     role::Role,
     sid::handy::DemandConcurrency,
 };
-use qrecovery::{
-    crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::DataStreams,
-};
+use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::DataStreams};
 use tokio::io::AsyncWriteExt;
 
 fn handshake_facts(multipath: bool) -> Arc<HandshakeFacts> {
@@ -39,21 +37,14 @@ impl Wake for Counter {
     }
 }
 
-fn poll(
-    source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
-    quota: usize,
-    waker: &Waker,
-) -> Poll<Result<usize, Error>> {
+fn poll(source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, quota: usize, waker: &Waker) -> Poll<Result<usize, Error>> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = quota;
     let limits_length = (128).min(quota);
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-    source.poll_dump(
-        &mut Context::from_waker(waker),
-        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-    )
+    source.poll_dump(&mut Context::from_waker(waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0))
 }
 
 #[tokio::test]
@@ -89,11 +80,7 @@ impl<T> SendFrame<T> for Broker {
 async fn stream_ready_and_blocked_polls_do_not_subscribe() {
     for quota in [0, 128] {
         let mut source = DataStreams::new(
-            ArcParameters::new(
-                Role::Client,
-                Arc::new(ClientParameters::default()),
-                Arc::new(ServerParameters::default()),
-            ),
+            ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
             Box::new(DemandConcurrency),
             Broker,
             Default::default(),
@@ -129,10 +116,7 @@ async fn closed_crypto_sources_are_empty_for_every_close_reason() {
             if !enabled {
                 facts.quit_mp_handshaking();
             }
-            assert_eq!(
-                poll(&mut stream.outgoing(), 128, Waker::noop()),
-                Poll::Ready(Ok(0))
-            );
+            assert_eq!(poll(&mut stream.outgoing(), 128, Waker::noop()), Poll::Ready(Ok(0)));
         }
         assert!(stream.writer().write_all(b"late").await.is_err());
     }
@@ -147,11 +131,7 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
         sid::{Dir, StreamId},
     };
     let mut streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         Broker,
         Default::default(),
@@ -164,18 +144,9 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
         assert_eq!(poll(&mut streams, 128, Waker::noop()), Poll::Ready(Ok(0)));
     }
     // These directions would be protocol errors on an active connection.
+    assert_eq!(streams.recv_frame((StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 4), Bytes::from_static(b"late"),)), Ok(0));
     assert_eq!(
-        streams.recv_frame((
-            StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 4),
-            Bytes::from_static(b"late"),
-        )),
-        Ok(0)
-    );
-    assert_eq!(
-        streams.recv_frame(StreamCtlFrame::StopSending(StopSendingFrame::new(
-            StreamId::new(Role::Server, Dir::Uni, 0),
-            0u32.into(),
-        ))),
+        streams.recv_frame(StreamCtlFrame::StopSending(StopSendingFrame::new(StreamId::new(Role::Server, Dir::Uni, 0), 0u32.into(),))),
         Ok(0)
     );
     assert!(matches!(streams.open_uni().await, Err(e) if e == error));
@@ -195,11 +166,7 @@ fn ack_registers_only_when_pending() {
                 let counter = Arc::new(Counter::default());
                 let waker = Waker::from(counter.clone());
                 let result = if snapshot {
-                    poll(
-                        &mut journal.ack_package(queued.then_some((0, received))),
-                        quota,
-                        &waker,
-                    )
+                    poll(&mut journal.ack_package(queued.then_some((0, received))), quota, &waker)
                 } else {
                     poll(&mut journal, quota, &waker)
                 };

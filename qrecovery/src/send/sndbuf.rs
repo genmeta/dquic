@@ -116,12 +116,7 @@ impl BufMap {
 
     // 挑选Lost/Pending的数据发送。越靠前的数据，越高优先级发送；
     // 丢包重传的数据，相比于Pending数据更靠前，因此具有更高的优先级。
-    fn pick<P>(
-        &mut self,
-        predicate: P,
-        flow_limit: usize,
-        send_window_size: u64,
-    ) -> Result<(Range<u64>, bool), Poll<()>>
+    fn pick<P>(&mut self, predicate: P, flow_limit: usize, send_window_size: u64) -> Result<(Range<u64>, bool), Poll<()>>
     where
         P: Fn(u64) -> Option<usize>,
     {
@@ -169,12 +164,7 @@ impl BufMap {
             .map(|(index, origin_state, allowance)| {
                 // 找到了一个合适的区间来发送，但检查区间长度是否足够，过长的话，还要拆区间一分为二
                 let (start, color) = origin_state.decode();
-                let mut end = self
-                    .0
-                    .get(index + 1)
-                    .map(|s| s.offset())
-                    .unwrap_or(self.size())
-                    .min(send_window_size);
+                let mut end = self.0.get(index + 1).map(|s| s.offset()).unwrap_or(self.size()).min(send_window_size);
 
                 let mut i = self.same_before(index, Color::Flighting);
                 if start + (allowance as u64) < end {
@@ -208,19 +198,9 @@ impl BufMap {
             Ok(idx) => {
                 let s = self.0.get_mut(idx).unwrap();
                 let pre_color = s.color();
-                debug_assert!(
-                    pre_color != Color::Pending,
-                    "Recved Range({:?}) covered Pending part from {}",
-                    range,
-                    s.offset()
-                );
+                debug_assert!(pre_color != Color::Pending, "Recved Range({:?}) covered Pending part from {}", range, s.offset());
                 s.set_color(Color::Recved);
-                (
-                    self.same_before(idx, Color::Recved) + 1,
-                    false,
-                    idx + 1,
-                    pre_color,
-                )
+                (self.same_before(idx, Color::Recved) + 1, false, idx + 1, pre_color)
             }
             Err(idx) => {
                 if idx == 0 {
@@ -228,12 +208,7 @@ impl BufMap {
                 } else {
                     let s = self.0.get(idx - 1).unwrap();
                     let pre_color = s.color();
-                    debug_assert!(
-                        pre_color != Color::Pending,
-                        "Recved Range({:?}) covered Pending part from {}",
-                        range,
-                        s.offset()
-                    );
+                    debug_assert!(pre_color != Color::Pending, "Recved Range({:?}) covered Pending part from {}", range, s.offset());
                     (idx, pre_color != Color::Recved, idx, pre_color)
                 }
             }
@@ -245,21 +220,13 @@ impl BufMap {
             match entry {
                 Some(s) => match s.offset().cmp(&range.end) {
                     Ordering::Less => {
-                        debug_assert!(
-                            s.color() != Color::Pending,
-                            "Recved Range({:?}) covered Pending parts from {}",
-                            range,
-                            s.offset()
-                        );
+                        debug_assert!(s.color() != Color::Pending, "Recved Range({:?}) covered Pending parts from {}", range, s.offset());
                         drain_end += 1;
                         pre_color = s.color();
                     }
                     Ordering::Equal => {
                         // TODO: nightly版本, overflowing_sub 改为unchecked_sub更好
-                        drain_end = self
-                            .same_after(drain_end.overflowing_sub(1).0, Color::Recved)
-                            .overflowing_add(1)
-                            .0;
+                        drain_end = self.same_after(drain_end.overflowing_sub(1).0, Color::Recved).overflowing_add(1).0;
                         break;
                     }
                     Ordering::Greater => {
@@ -268,12 +235,7 @@ impl BufMap {
                     }
                 },
                 None => {
-                    debug_assert!(
-                        range.end <= self.size(),
-                        "Recved Range({:?}) over {}",
-                        range,
-                        self.size()
-                    );
+                    debug_assert!(range.end <= self.size(), "Recved Range({:?}) over {}", range, self.size());
                     need_insert_at_end = range.end < self.size() && pre_color != Color::Recved;
                     break;
                 }
@@ -284,8 +246,7 @@ impl BufMap {
             if drain_start < drain_end {
                 *self.0.get_mut(drain_start).unwrap() = State::encode(range.start, Color::Recved);
             } else {
-                self.0
-                    .insert(drain_start, State::encode(range.start, Color::Recved));
+                self.0.insert(drain_start, State::encode(range.start, Color::Recved));
             }
             drain_start += 1;
         }
@@ -293,8 +254,7 @@ impl BufMap {
             if drain_start < drain_end {
                 *self.0.get_mut(drain_start).unwrap() = State::encode(range.end, pre_color);
             } else {
-                self.0
-                    .insert(drain_start, State::encode(range.end, pre_color));
+                self.0.insert(drain_start, State::encode(range.end, pre_color));
             }
             drain_start += 1;
         }
@@ -325,12 +285,7 @@ impl BufMap {
         let (mut drain_start, need_insert_at_start, mut drain_end, mut pre_color) = match pos {
             Ok(idx) => {
                 let s = self.0.get_mut(idx).unwrap();
-                debug_assert!(
-                    s.color() != Color::Pending,
-                    "Lost Range({:?}) covered Pending parts from {}",
-                    range,
-                    s.offset()
-                );
+                debug_assert!(s.color() != Color::Pending, "Lost Range({:?}) covered Pending parts from {}", range, s.offset());
                 if s.color() == Color::Recved {
                     // 如果是Recved，那就不需要在前面插入了，直接往后探索
                     self.may_lost_from(idx + 1, range.end);
@@ -361,12 +316,7 @@ impl BufMap {
                 } else {
                     let s = self.0.get(idx - 1).unwrap();
                     let pre_color = s.color();
-                    debug_assert!(
-                        pre_color != Color::Pending,
-                        "Lost Range({:?}) covered Pending parts from {}",
-                        range,
-                        s.offset()
-                    );
+                    debug_assert!(pre_color != Color::Pending, "Lost Range({:?}) covered Pending parts from {}", range, s.offset());
                     if pre_color == Color::Recved {
                         // 另有安排，直接调用，lost_from(idx, range.end);
                         self.may_lost_from(idx, range.end);
@@ -385,12 +335,7 @@ impl BufMap {
                 Some(s) => match s.offset().cmp(&range.end) {
                     Ordering::Less => {
                         // 以s.offset开头的区间，仍在Lost的range区间里
-                        debug_assert!(
-                            s.color() != Color::Pending,
-                            "Lost Range({:?}) covered Pending parts from {}",
-                            range,
-                            s.offset()
-                        );
+                        debug_assert!(s.color() != Color::Pending, "Lost Range({:?}) covered Pending parts from {}", range, s.offset());
                         if s.color() == Color::Recved {
                             // s是recved，那就s的下一段到range.end都是丢失的，相当于独立的may_lost区间处理
                             // 接下来只需处理drain_end之前的操作即可
@@ -404,10 +349,7 @@ impl BufMap {
                     }
                     Ordering::Equal => {
                         // s之前的是Lost，从上一个检查后续连续lost状态的有多少个
-                        drain_end = self
-                            .same_after(drain_end.overflowing_sub(1).0, Color::Lost)
-                            .overflowing_add(1)
-                            .0;
+                        drain_end = self.same_after(drain_end.overflowing_sub(1).0, Color::Lost).overflowing_add(1).0;
                         break;
                     }
                     Ordering::Greater => {
@@ -419,12 +361,7 @@ impl BufMap {
                 },
                 None => {
                     // 找不到，说明到最后一段了
-                    debug_assert!(
-                        range.end <= self.size(),
-                        "Lost Range({:?}) over {}",
-                        range,
-                        self.size()
-                    );
+                    debug_assert!(range.end <= self.size(), "Lost Range({:?}) over {}", range, self.size());
                     // 如果上一段的color是Flighting，它要一分为二，到range.end的部分为Lost，后续部分为Flighting
                     need_insert_at_end = range.end < self.size() && pre_color == Color::Flighting;
                     break;
@@ -436,8 +373,7 @@ impl BufMap {
             if drain_start < drain_end {
                 *self.0.get_mut(drain_start).unwrap() = State::encode(range.start, Color::Lost);
             } else {
-                self.0
-                    .insert(drain_start, State::encode(range.start, Color::Lost));
+                self.0.insert(drain_start, State::encode(range.start, Color::Lost));
             }
             drain_start += 1;
         }
@@ -445,8 +381,7 @@ impl BufMap {
             if drain_start < drain_end {
                 *self.0.get_mut(drain_start).unwrap() = State::encode(range.end, pre_color);
             } else {
-                self.0
-                    .insert(drain_start, State::encode(range.end, pre_color));
+                self.0.insert(drain_start, State::encode(range.end, pre_color));
             }
             drain_start += 1;
         }
@@ -504,11 +439,7 @@ impl BufMap {
             match entry {
                 Some(s) => match s.offset().cmp(&end) {
                     Ordering::Less => {
-                        debug_assert!(
-                            s.color() != Color::Pending,
-                            "Lost Range.end({end}) covered Pending parts from {}",
-                            s.offset()
-                        );
+                        debug_assert!(s.color() != Color::Pending, "Lost Range.end({end}) covered Pending parts from {}", s.offset());
                         pre_color = s.color();
                         if s.color() == Color::Recved {
                             // 另有安排，直接调用，lost_from(idx, range.end);
@@ -520,10 +451,7 @@ impl BufMap {
                         }
                     }
                     Ordering::Equal => {
-                        idx = self
-                            .same_after(idx.overflowing_sub(1).0, Color::Lost)
-                            .overflowing_add(1)
-                            .0;
+                        idx = self.same_after(idx.overflowing_sub(1).0, Color::Lost).overflowing_add(1).0;
                         break;
                     }
                     Ordering::Greater => {
@@ -532,11 +460,7 @@ impl BufMap {
                     }
                 },
                 None => {
-                    debug_assert!(
-                        end <= self.size(),
-                        "Lost Range.end({end}) over {}",
-                        self.size()
-                    );
+                    debug_assert!(end <= self.size(), "Lost Range.end({end}) over {}", self.size());
                     need_insert_at_end = end < self.size() && pre_color == Color::Flighting;
                     break;
                 }
@@ -586,12 +510,7 @@ pub struct SendBuf {
 impl SendBuf {
     /// Create a new [`SendBuf`] with the given size.
     pub fn with_capacity(capacity: u64) -> Self {
-        Self {
-            offset: 0,
-            data: VecDeque::new(),
-            max_data: capacity,
-            state: BufMap::default(),
-        }
+        Self { offset: 0, data: VecDeque::new(), max_data: capacity, state: BufMap::default() }
     }
 
     /// Write data to the [`SendBuf`].
@@ -601,8 +520,7 @@ impl SendBuf {
     pub fn write(&mut self, data: Bytes) {
         // debug_assert!(self.remaining_mut() > 0, "Sendbuf buffers excess data");
         if !data.is_empty() {
-            self.state
-                .extend_to((self.written() + data.len() as u64).min(self.max_data));
+            self.state.extend_to((self.written() + data.len() as u64).min(self.max_data));
             self.data.push_back(data);
         }
     }
@@ -697,31 +615,26 @@ impl SendBuf {
     where
         P: Fn(u64) -> Option<usize>,
     {
-        self.state
-            .pick(predicate, flow_limit, self.max_data())
-            .map(|(range, is_fresh)| {
-                let iter = self
-                    .data
-                    .iter()
-                    .scan(self.offset, |offset, data| {
-                        let current_range = *offset..*offset + data.len() as u64;
-                        *offset += data.len() as u64;
-                        Some((current_range, data))
-                    })
-                    .filter(move |(slice, ..)| slice.end > range.start && slice.start < range.end)
-                    .map(move |(slice, data)| {
-                        if slice.start >= range.start && slice.end <= range.end {
-                            data.clone()
-                        } else {
-                            data.slice(
-                                (range.start.saturating_sub(slice.start)) as usize
-                                    ..(range.end.min(slice.end) - slice.start) as usize,
-                            )
-                        }
-                    });
+        self.state.pick(predicate, flow_limit, self.max_data()).map(|(range, is_fresh)| {
+            let iter = self
+                .data
+                .iter()
+                .scan(self.offset, |offset, data| {
+                    let current_range = *offset..*offset + data.len() as u64;
+                    *offset += data.len() as u64;
+                    Some((current_range, data))
+                })
+                .filter(move |(slice, ..)| slice.end > range.start && slice.start < range.end)
+                .map(move |(slice, data)| {
+                    if slice.start >= range.start && slice.end <= range.end {
+                        data.clone()
+                    } else {
+                        data.slice((range.start.saturating_sub(slice.start)) as usize..(range.end.min(slice.end) - slice.start) as usize)
+                    }
+                });
 
-                (range, is_fresh, iter.collect())
-            })
+            (range, is_fresh, iter.collect())
+        })
     }
 
     /// Called when the `range` of data sent is acknowledged by the peer.
@@ -808,38 +721,19 @@ mod tests {
         let (range, is_fresh) = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX).unwrap();
         assert_eq!(range, 0..20);
         assert!(is_fresh);
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(20, Color::Pending)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting), State::encode(20, Color::Pending)]);
 
         let (range, is_fresh) = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX).unwrap();
         assert_eq!(range, 20..40);
         assert!(is_fresh);
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(40, Color::Pending)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting), State::encode(40, Color::Pending)]);
 
         buf_map.0.insert(2, State::encode(50, Color::Lost));
         buf_map.0.insert(3, State::encode(120, Color::Pending));
         let (range, is_fresh) = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX).unwrap();
         assert_eq!(range, 40..50);
         assert!(is_fresh);
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(50, Color::Lost),
-                State::encode(120, Color::Pending)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting), State::encode(50, Color::Lost), State::encode(120, Color::Pending)]);
 
         buf_map.0.get_mut(0).unwrap().set_color(Color::Recved);
         let (range, is_fresh) = buf_map.pick(|_| Some(20), usize::MAX, u64::MAX).unwrap();
@@ -860,33 +754,17 @@ mod tests {
         assert!(!is_fresh);
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(50, Color::Flighting),
-                State::encode(120, Color::Pending)
-            ]
+            vec![State::encode(0, Color::Recved), State::encode(50, Color::Flighting), State::encode(120, Color::Pending)]
         );
 
         let (range, is_fresh) = buf_map.pick(|_| Some(130), usize::MAX, u64::MAX).unwrap();
         assert_eq!(range, 120..200);
         assert!(is_fresh);
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(50, Color::Flighting),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Recved), State::encode(50, Color::Flighting),]);
 
         let result = buf_map.pick(|_| Some(130), usize::MAX, u64::MAX);
         assert!(result.is_err());
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(50, Color::Flighting),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Recved), State::encode(50, Color::Flighting),]);
     }
 
     #[test]
@@ -897,11 +775,7 @@ mod tests {
         buf_map.ack_rcvd(&(0..20));
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(20, Color::Flighting),
-                State::encode(120, Color::Pending)
-            ]
+            vec![State::encode(0, Color::Recved), State::encode(20, Color::Flighting), State::encode(120, Color::Pending)]
         );
 
         buf_map.ack_rcvd(&(30..50));
@@ -931,31 +805,15 @@ mod tests {
         buf_map.ack_rcvd(&(20..25));
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(55, Color::Flighting),
-                State::encode(120, Color::Pending)
-            ]
+            vec![State::encode(0, Color::Recved), State::encode(55, Color::Flighting), State::encode(120, Color::Pending)]
         );
 
         buf_map.0.pop_front();
         buf_map.ack_rcvd(&(20..55));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(55, Color::Flighting),
-                State::encode(120, Color::Pending)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(55, Color::Flighting), State::encode(120, Color::Pending)]);
 
         buf_map.ack_rcvd(&(30..70));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(70, Color::Flighting),
-                State::encode(120, Color::Pending)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(70, Color::Flighting), State::encode(120, Color::Pending)]);
 
         buf_map.ack_rcvd(&(100..119));
         assert_eq!(
@@ -971,30 +829,16 @@ mod tests {
         assert!(buf_map.pick(|_| Some(130), usize::MAX, u64::MAX).is_ok());
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(70, Color::Flighting),
-                State::encode(100, Color::Recved),
-                State::encode(119, Color::Flighting),
-            ]
+            vec![State::encode(70, Color::Flighting), State::encode(100, Color::Recved), State::encode(119, Color::Flighting),]
         );
 
         buf_map.ack_rcvd(&(119..150));
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(70, Color::Flighting),
-                State::encode(100, Color::Recved),
-                State::encode(150, Color::Flighting),
-            ]
+            vec![State::encode(70, Color::Flighting), State::encode(100, Color::Recved), State::encode(150, Color::Flighting),]
         );
         buf_map.ack_rcvd(&(150..200));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(70, Color::Flighting),
-                State::encode(100, Color::Recved),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(70, Color::Flighting), State::encode(100, Color::Recved),]);
     }
 
     #[test]
@@ -1024,22 +868,12 @@ mod tests {
         let mut buf_map = BufMap::default();
         buf_map.extend_to(200);
         assert!(buf_map.pick(|_| Some(120), usize::MAX, u64::MAX).is_ok());
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Flighting),
-                State::encode(120, Color::Pending),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting), State::encode(120, Color::Pending),]);
 
         buf_map.may_loss(&(0..20));
         assert_eq!(
             buf_map.0,
-            vec![
-                State::encode(0, Color::Lost),
-                State::encode(20, Color::Flighting),
-                State::encode(120, Color::Pending),
-            ]
+            vec![State::encode(0, Color::Lost), State::encode(20, Color::Flighting), State::encode(120, Color::Pending),]
         );
 
         buf_map.may_loss(&(30..50));
@@ -1144,44 +978,16 @@ mod tests {
         );
 
         buf_map.ack_rcvd(&(20..120));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(10, Color::Lost),
-                State::encode(20, Color::Recved),
-                State::encode(120, Color::Pending),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(10, Color::Lost), State::encode(20, Color::Recved), State::encode(120, Color::Pending),]);
 
         buf_map.may_loss(&(50..80));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(10, Color::Lost),
-                State::encode(20, Color::Recved),
-                State::encode(120, Color::Pending),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(10, Color::Lost), State::encode(20, Color::Recved), State::encode(120, Color::Pending),]);
 
         buf_map.may_loss(&(2..10));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(10, Color::Lost),
-                State::encode(20, Color::Recved),
-                State::encode(120, Color::Pending),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(10, Color::Lost), State::encode(20, Color::Recved), State::encode(120, Color::Pending),]);
 
         buf_map.may_loss(&(30..50));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(10, Color::Lost),
-                State::encode(20, Color::Recved),
-                State::encode(120, Color::Pending),
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(10, Color::Lost), State::encode(20, Color::Recved), State::encode(120, Color::Pending),]);
     }
 
     #[test]
@@ -1192,21 +998,9 @@ mod tests {
         assert_eq!(buf_map.0, vec![State::encode(0, Color::Flighting)]);
 
         buf_map.ack_rcvd(&(0..2));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(2, Color::Flighting)
-            ]
-        );
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Recved), State::encode(2, Color::Flighting)]);
 
         buf_map.may_loss(&(0..46));
-        assert_eq!(
-            buf_map.0,
-            vec![
-                State::encode(0, Color::Recved),
-                State::encode(2, Color::Lost)
-            ]
-        )
+        assert_eq!(buf_map.0, vec![State::encode(0, Color::Recved), State::encode(2, Color::Lost)])
     }
 }

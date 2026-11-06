@@ -27,10 +27,7 @@ fn initial_keys(server: bool) -> qtls::BidirectionalKeys {
     let suite = provider
         .cipher_suites
         .iter()
-        .find_map(|s| {
-            (s.suite() == tls_backend::CipherSuite::TLS13_AES_128_GCM_SHA256)
-                .then(|| s.tls13().unwrap().quic_suite().unwrap())
-        })
+        .find_map(|s| (s.suite() == tls_backend::CipherSuite::TLS13_AES_128_GCM_SHA256).then(|| s.tls13().unwrap().quic_suite().unwrap()))
         .unwrap();
     suite
         .keys(
@@ -50,14 +47,9 @@ async fn route_exists(router: &QuicRouter, cid: ConnectionId) -> bool {
         net::route::Link,
         packet::{DataHeader, DataPacket, LongHeaderBuilder, Packet, long},
     };
-    let link = Link::new(
-        "127.0.0.1:30001".parse().unwrap(),
-        "127.0.0.1:30002".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:30001".parse().unwrap(), "127.0.0.1:30002".parse().unwrap());
     let packet = Packet::Data(DataPacket {
-        header: DataHeader::Long(long::DataHeader::Initial(
-            LongHeaderBuilder::with_cid(cid, cid).initial(vec![]),
-        )),
+        header: DataHeader::Long(long::DataHeader::Initial(LongHeaderBuilder::with_cid(cid, cid).initial(vec![]))),
         bytes: BytesMut::new(),
         offset: 0,
     });
@@ -100,21 +92,13 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
     let facts = crate::common::handshake_facts(Role::Client, true);
-    let initial_space = Arc::new(InitialSpace::new(
-        cid,
-        ArcKeys::new(Arc::new(initial_keys(false))),
-        None,
-        facts.clone(),
-    ));
+    let initial_space = Arc::new(InitialSpace::new(cid, ArcKeys::new(Arc::new(initial_keys(false))), None, facts.clone()));
     let paths = Paths::new(
         initial_space.clone(),
         facts,
         qconnection::CidRegistry::new(
             local_cids,
-            qconnection::ArcRemoteCids::client(
-                ConnectionId::from_slice(b"original"),
-                reliable_frames.clone(),
-            ),
+            qconnection::ArcRemoteCids::client(ConnectionId::from_slice(b"original"), reliable_frames.clone()),
         ),
         reliable_frames,
         Duration::from_secs(5),
@@ -137,29 +121,13 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let growing = async move { tokio::join!(growing, tick).0 };
     tokio::pin!(growing);
     assert!(growing.as_mut().now_or_never().is_none());
-    assert_eq!(
-        common::cid_value(&paths.cid_registry.remote.apply_dcid()),
-        ConnectionId::from_slice(b"original")
-    );
-    let initial_only = paths
-        .spaces
-        .read_guard()
-        .get(qbase::Epoch::Handshake as u64)
-        .is_none();
-    tls.on_error(
-        qbase::error::QuicError::with_default_fty(
-            qbase::error::ErrorKind::Internal,
-            "stop before server hello",
-        )
-        .into(),
-    );
+    assert_eq!(common::cid_value(&paths.cid_registry.remote.apply_dcid()), ConnectionId::from_slice(b"original"));
+    let initial_only = paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_none();
+    tls.on_error(qbase::error::QuicError::with_default_fty(qbase::error::ErrorKind::Internal, "stop before server hello").into());
     growing.await;
     assert!(!route_exists(QuicRouter::global(), cid).await);
     assert!(tls.read_keys().await.is_err());
-    assert!(
-        initial_only,
-        "Handshake space must wait for TLS Handshake keys"
-    );
+    assert!(initial_only, "Handshake space must wait for TLS Handshake keys");
 }
 
 #[derive(Clone, Copy)]
@@ -181,8 +149,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     };
     use qrecovery::journal::ArcSentJournal;
 
-    let [tls, server_tls] =
-        common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
+    let [tls, server_tls] = common::backends(false).map(|tls| TlsContext::new(tls, 256 * 1024).unwrap());
     let (level, hello) = tls.read_msg().await.unwrap();
     server_tls.write_msg(level, &hello).unwrap();
     let (level, hello) = server_tls.read_msg().await.unwrap();
@@ -203,21 +170,13 @@ async fn close_at_client_stage(wait: ClientWait) {
         router.insert(cid.into(), inbox, reliable_frames.clone()),
     );
     let facts = crate::common::handshake_facts(Role::Client, true);
-    let initial_space = Arc::new(InitialSpace::new(
-        cid,
-        ArcKeys::new(Arc::new(initial_keys(false))),
-        None,
-        facts.clone(),
-    ));
+    let initial_space = Arc::new(InitialSpace::new(cid, ArcKeys::new(Arc::new(initial_keys(false))), None, facts.clone()));
     let paths = Paths::new(
         initial_space.clone(),
         facts,
         qconnection::CidRegistry::new(
             local_cids,
-            qconnection::ArcRemoteCids::client(
-                ConnectionId::from_slice(b"original"),
-                reliable_frames.clone(),
-            ),
+            qconnection::ArcRemoteCids::client(ConnectionId::from_slice(b"original"), reliable_frames.clone()),
         ),
         reliable_frames,
         Duration::from_secs(5),
@@ -227,14 +186,8 @@ async fn close_at_client_stage(wait: ClientWait) {
     let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
-    let link = Link::new(
-        socket.local_addr().unwrap(),
-        "127.0.0.1:30002".parse().unwrap(),
-    );
-    let pathway = Pathway::new(
-        EndpointAddr::direct(link.src),
-        EndpointAddr::direct(link.dst),
-    );
+    let link = Link::new(socket.local_addr().unwrap(), "127.0.0.1:30002".parse().unwrap());
+    let pathway = Pathway::new(EndpointAddr::direct(link.src), EndpointAddr::direct(link.dst));
     paths.add_path(pathway);
     let (delivered, mut delivery) = oneshot::channel();
     let tick = qconnection::recv::tick(paths.clone());
@@ -253,10 +206,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
     let hello_len = hello.len();
     let bytes = [hello];
-    let mut crypto = (
-        CryptoFrame::new(0u32.into(), (hello_len as u32).into()),
-        bytes.as_slice(),
-    );
+    let mut crypto = (CryptoFrame::new(0u32.into(), (hello_len as u32).into()), bytes.as_slice());
     let server_scid = if matches!(wait, ClientWait::ServerCidMismatch) {
         b"wrongcid"
     } else {
@@ -272,12 +222,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     router.receive(BytesMut::from(packet.as_ref()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if paths
-                .spaces
-                .read_guard()
-                .get(qbase::Epoch::Handshake as u64)
-                .is_some()
-            {
+            if paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_some() {
                 break qtransport::space::Spaces::get::<qtransport::space::HandshakeSpace>(
                     &paths.spaces.read_guard(),
                     qbase::Epoch::Handshake,
@@ -290,26 +235,13 @@ async fn close_at_client_stage(wait: ClientWait) {
     .await
     .unwrap();
     assert!(
-        paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&pathway)
-            .unwrap()
-            .dcid
-            .is_allocated(),
+        paths.entries.lock().unwrap().get(&pathway).unwrap().dcid.is_allocated(),
         "the reply path must bind sequence zero before server parameters arrive"
     );
-    assert!(matches!(
-        delivery.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
+    assert!(matches!(delivery.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
     let initial = crate::common::initial_space(&paths.spaces);
     assert!(initial.crypto.writer().write(&[]).await.is_err());
-    assert!(matches!(
-        handshake.crypto.writer().write(&[]).now_or_never(),
-        Some(Ok(0))
-    ));
+    assert!(matches!(handshake.crypto.writer().write(&[]).now_or_never(), Some(Ok(0))));
 
     if !matches!(wait, ClientWait::ServerParameters) {
         let end = if matches!(wait, ClientWait::ServerCidMismatch) {
@@ -317,22 +249,10 @@ async fn close_at_client_stage(wait: ClientWait) {
         } else {
             parameters_end
         };
-        handshake
-            .crypto
-            .incoming()
-            .recv_frame((
-                CryptoFrame::new(0u32.into(), (end as u32).into()),
-                flight.slice(..end),
-            ))
-            .unwrap();
+        handshake.crypto.incoming().recv_frame((CryptoFrame::new(0u32.into(), (end as u32).into()), flight.slice(..end))).unwrap();
         if matches!(wait, ClientWait::ServerCidMismatch) {
-            let result = tokio::time::timeout(Duration::from_secs(1), delivery)
-                .await
-                .unwrap()
-                .unwrap();
-            let error = result
-                .err()
-                .expect("growing must reject a CID different from the Initial header");
+            let result = tokio::time::timeout(Duration::from_secs(1), delivery).await.unwrap().unwrap();
+            let error = result.err().expect("growing must reject a CID different from the Initial header");
             assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
             assert!(matches!(growing.await.unwrap(), Error::Quic(error)
                 if error.kind() == qbase::error::ErrorKind::TransportParameter));
@@ -342,17 +262,8 @@ async fn close_at_client_stage(wait: ClientWait) {
             return;
         }
         tokio::task::yield_now().await;
-        assert!(
-            paths
-                .spaces
-                .read_guard()
-                .get(qbase::Epoch::Handshake as u64)
-                .is_some()
-        );
-        assert!(matches!(
-            delivery.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
+        assert!(paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_some());
+        assert!(matches!(delivery.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
         if matches!(wait, ClientWait::OneRttKeys) {
             use qbase::{
                 frame::{Frame, FrameReader},
@@ -365,11 +276,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             let mut frames = Vec::new();
             let limits_quota = 4096;
             let limits_length = 4096;
-            let ty = OneRttHeader::new(
-                Default::default(),
-                common::cid_value(&paths.cid_registry.remote.apply_dcid()),
-            )
-            .get_type();
+            let ty = OneRttHeader::new(Default::default(), common::cid_value(&paths.cid_registry.remote.apply_dcid())).get_type();
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let _ = paths.reliable_frames.clone().poll_dump(
                 &mut std::task::Context::from_waker(std::task::Waker::noop()),
@@ -381,9 +288,7 @@ async fn close_at_client_stage(wait: ClientWait) {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            let limit = common::parameters()
-                .1
-                .get::<u64>(ParameterId::ActiveConnectionIdLimit);
+            let limit = common::parameters().1.get::<u64>(ParameterId::ActiveConnectionIdLimit);
             assert_eq!(issued, (1..limit).collect::<Vec<_>>());
         }
     }
@@ -393,10 +298,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             .crypto
             .incoming()
             .recv_frame((
-                CryptoFrame::new(
-                    (parameters_end as u32).into(),
-                    ((flight.len() - parameters_end) as u32).into(),
-                ),
+                CryptoFrame::new((parameters_end as u32).into(), ((flight.len() - parameters_end) as u32).into()),
                 flight.slice(parameters_end..),
             ))
             .unwrap();
@@ -404,31 +306,16 @@ async fn close_at_client_stage(wait: ClientWait) {
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
         assert!(
-            qtransport::space::Spaces::get::<qtransport::space::DataSpace>(
-                &paths.spaces.read_guard(),
-                qbase::Epoch::Data,
-            )
-            .unwrap()
-            .keys
-            .get()
-            .is_ok()
+            qtransport::space::Spaces::get::<qtransport::space::DataSpace>(&paths.spaces.read_guard(), qbase::Epoch::Data,)
+                .unwrap()
+                .keys
+                .get()
+                .is_ok()
         );
-        assert!(matches!(
-            handshake.crypto.reader().read(&mut [0; 1]).now_or_never(),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            handshake.crypto.writer().write(&[]).now_or_never(),
-            Some(Ok(0))
-        ));
+        assert!(matches!(handshake.crypto.reader().read(&mut [0; 1]).now_or_never(), Some(Err(_))));
+        assert!(matches!(handshake.crypto.writer().write(&[]).now_or_never(), Some(Ok(0))));
     }
-    tls.on_error(
-        qbase::error::QuicError::with_default_fty(
-            qbase::error::ErrorKind::Internal,
-            "stop at TLS stage",
-        )
-        .into(),
-    );
+    tls.on_error(qbase::error::QuicError::with_default_fty(qbase::error::ErrorKind::Internal, "stop at TLS stage").into());
     assert!(matches!(growing.await.unwrap(), Error::Quic(_)));
     if !matches!(wait, ClientWait::HandshakeDone) {
         assert!(delivery.await.unwrap().is_err());

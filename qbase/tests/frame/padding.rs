@@ -21,8 +21,5 @@ fn test_write_padding_frame() {
 
 #[test]
 fn test_read_padding_frame() {
-    assert_eq!(
-        super::parse_frame(&[0x00], FrameType::Padding),
-        qbase::frame::Frame::Padding(PaddingFrame)
-    );
+    assert_eq!(super::parse_frame(&[0x00], FrameType::Padding), qbase::frame::Frame::Padding(PaddingFrame));
 }

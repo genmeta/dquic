@@ -47,10 +47,7 @@ pub enum ParseError {
 
 fn parse_iface_bind_uri(uri: &http::Uri) -> Result<(Family, &str, u16), ParseError> {
     let authority = uri.authority().expect("BindUri is absolute URI");
-    let (ip_family, interface) = authority
-        .host()
-        .split_once('.')
-        .ok_or(ParseError::NoFamily)?;
+    let (ip_family, interface) = authority.host().split_once('.').ok_or(ParseError::NoFamily)?;
     let port = authority.port_u16().ok_or(ParseError::NoPort)?;
     let ip_family: Family = ip_family.parse().or(Err(ParseError::UnknownFamily))?;
     Ok((ip_family, interface, port))
@@ -76,9 +73,7 @@ impl FromStr for BindUri {
         if let Ok(socket_addr) = s.parse::<SocketAddr>() {
             return Ok(socket_addr.into());
         }
-        s.parse::<http::Uri>()
-            .map_err(ParseError::InvalidUri)?
-            .try_into()
+        s.parse::<http::Uri>().map_err(ParseError::InvalidUri)?.try_into()
     }
 }
 
@@ -86,12 +81,7 @@ impl TryFrom<http::Uri> for BindUri {
     type Error = ParseError;
 
     fn try_from(uri: http::Uri) -> Result<Self, Self::Error> {
-        let scheme = uri
-            .scheme()
-            .ok_or(ParseError::NoScheme)?
-            .as_str()
-            .parse()
-            .map_err(ParseError::Unsupported)?;
+        let scheme = uri.scheme().ok_or(ParseError::NoScheme)?.as_str().parse().map_err(ParseError::Unsupported)?;
         debug_assert!(uri.authority().is_some(), "BindUri should be absolute URI");
 
         if uri.path() != "/" {
@@ -162,12 +152,7 @@ impl BindUri {
     pub const RELAY_PROP: &str = "relay";
 
     pub fn scheme(&self) -> Scheme {
-        self.0
-            .scheme()
-            .expect("Invalid BindUri: Missing scheme")
-            .as_str()
-            .parse()
-            .expect("Invalid BindUri: Invalid scheme")
+        self.0.scheme().expect("Invalid BindUri: Missing scheme").as_str().parse().expect("Invalid BindUri: Invalid scheme")
     }
 
     #[inline]
@@ -177,20 +162,11 @@ impl BindUri {
 
     pub fn family(&self) -> Family {
         match self.scheme() {
-            Scheme::Iface => {
-                self.as_iface_bind_uri()
-                    .expect("Already checked BindUriScheme is iface")
-                    .0
-            }
-            Scheme::Inet => {
-                match self
-                    .as_inet_bind_uri()
-                    .expect("Already checked BindUriScheme is inet")
-                {
-                    SocketAddr::V4(_) => Family::V4,
-                    SocketAddr::V6(_) => Family::V6,
-                }
-            }
+            Scheme::Iface => self.as_iface_bind_uri().expect("Already checked BindUriScheme is iface").0,
+            Scheme::Inet => match self.as_inet_bind_uri().expect("Already checked BindUriScheme is inet") {
+                SocketAddr::V4(_) => Family::V4,
+                SocketAddr::V6(_) => Family::V6,
+            },
         }
     }
 
@@ -215,9 +191,7 @@ impl BindUri {
                 Some(exist_query) => format!("{exist_query}&{key}={value}"),
                 None => format!("{key}={value}"),
             };
-            format!("{}?{}", pq.path(), query)
-                .parse()
-                .expect("Path and query should be valid")
+            format!("{}?{}", pq.path(), query).parse().expect("Path and query should be valid")
         });
         self.0 = http::Uri::from_parts(uri_parts).expect("BindUri should be valid");
     }
@@ -227,15 +201,11 @@ impl BindUri {
     pub fn alloc_port(&self) -> Self {
         match self.scheme() {
             Scheme::Iface => {
-                let (.., port) = self
-                    .as_iface_bind_uri()
-                    .expect("Already checked BindUriScheme is iface");
+                let (.., port) = self.as_iface_bind_uri().expect("Already checked BindUriScheme is iface");
                 assert_eq!(port, 0, "Only port 0 is allocatable");
             }
             Scheme::Inet => {
-                let addr = self
-                    .as_inet_bind_uri()
-                    .expect("Already checked BindUriScheme is inet");
+                let addr = self.as_inet_bind_uri().expect("Already checked BindUriScheme is inet");
                 assert_eq!(addr.port(), 0, "Only port 0 is allocatable");
             }
         }
@@ -252,14 +222,11 @@ impl BindUri {
     #[inline]
     pub fn prop(&self, key: &str) -> Option<Cow<'_, str>> {
         // http://127.0.0.1/fx     ?key=value
-        self.0
-            .query()?
-            .split('&')
-            .find_map(|pair| match pair.split_once('=') {
-                Some((k, v)) if k == key => Some(Cow::Borrowed(v)),
-                None if pair == key => Some(Cow::Borrowed("")),
-                _ => None,
-            })
+        self.0.query()?.split('&').find_map(|pair| match pair.split_once('=') {
+            Some((k, v)) if k == key => Some(Cow::Borrowed(v)),
+            None if pair == key => Some(Cow::Borrowed("")),
+            _ => None,
+        })
     }
 
     pub fn is_temporary(&self) -> bool {
@@ -323,14 +290,9 @@ impl BindUri {
                     .collect::<Vec<_>>();
 
                 if retained.is_empty() {
-                    path_and_query
-                        .path()
-                        .parse()
-                        .expect("path portion should always be valid")
+                    path_and_query.path().parse().expect("path portion should always be valid")
                 } else {
-                    format!("{}?{}", path_and_query.path(), retained.join("&"))
-                        .parse()
-                        .expect("path and retained query should be valid")
+                    format!("{}?{}", path_and_query.path(), retained.join("&")).parse().expect("path and retained query should be valid")
                 }
             });
             http::Uri::from_parts(parts).expect("BindUri without alloc_port_id should be valid")
@@ -342,47 +304,28 @@ impl BindUri {
     pub fn resolve_binding(&self) -> Result<ResolvedBindUri, io::Error> {
         match self.scheme() {
             Scheme::Iface => {
-                let (ip_family, interface, port) = self
-                    .as_iface_bind_uri()
-                    .expect("Already checked BindUriScheme is iface");
+                let (ip_family, interface, port) = self.as_iface_bind_uri().expect("Already checked BindUriScheme is iface");
 
                 let device = netdev::get_interfaces()
                     .into_iter()
-                    .find(|device| {
-                        device.name.trim_start_matches('{').trim_end_matches('}') == interface
-                    })
-                    .ok_or(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "device not found".to_string(),
-                    ))?;
+                    .find(|device| device.name.trim_start_matches('{').trim_end_matches('}') == interface)
+                    .ok_or(io::Error::new(io::ErrorKind::NotFound, "device not found".to_string()))?;
                 let ip_addr = match ip_family {
                     Family::V4 => device.ipv4.first().map(|ipnet| IpAddr::V4(ipnet.addr())),
-                    Family::V6 => device
-                        .ipv6
-                        .iter()
-                        .map(|ipnet| ipnet.addr())
-                        .find(|ip| !matches!(ip.octets(), [0xfe, 0x80, ..]))
-                        .map(IpAddr::V6),
+                    Family::V6 => {
+                        device.ipv6.iter().map(|ipnet| ipnet.addr()).find(|ip| !matches!(ip.octets(), [0xfe, 0x80, ..])).map(IpAddr::V6)
+                    }
                 }
-                .ok_or(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "ip not matched".to_string(),
-                ))?;
+                .ok_or(io::Error::new(io::ErrorKind::NotFound, "ip not matched".to_string()))?;
 
                 Ok(ResolvedBindUri {
                     addr: SocketAddr::new(ip_addr, port),
-                    device: Some(ResolvedBindDevice {
-                        name: device.name,
-                        index: device.index,
-                    }),
+                    device: Some(ResolvedBindDevice { name: device.name, index: device.index }),
                 })
             }
-            Scheme::Inet => Ok(ResolvedBindUri {
-                addr: self
-                    .as_inet_bind_uri()
-                    .expect("Already checked BindUriScheme is inet"),
-                device: None,
-            }),
+            Scheme::Inet => {
+                Ok(ResolvedBindUri { addr: self.as_inet_bind_uri().expect("Already checked BindUriScheme is inet"), device: None })
+            }
         }
     }
 
@@ -424,10 +367,7 @@ impl Scheme {
 
 impl From<Scheme> for http::uri::Scheme {
     fn from(value: Scheme) -> Self {
-        value
-            .to_str()
-            .parse()
-            .expect("BindUriScheme should be valid URI scheme")
+        value.to_str().parse().expect("BindUriScheme should be valid URI scheme")
     }
 }
 

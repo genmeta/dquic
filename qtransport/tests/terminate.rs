@@ -16,10 +16,7 @@ use qtransport::{CloseReason, Error, terminate::ArcTerminator};
 use tokio::time::Instant;
 
 fn close_frame(reason: &'static str) -> ConnectionCloseFrame {
-    ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(
-        ErrorKind::Internal,
-        reason,
-    )))
+    ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(ErrorKind::Internal, reason)))
 }
 
 fn local_reason() -> CloseReason {
@@ -50,13 +47,8 @@ fn dump_close(terminator: &ArcTerminator, packet_type: Type) -> ConnectionCloseF
     let mut frames = Vec::new();
     let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, packet_type, 0, 0);
-    assert_eq!(
-        (&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
-        Poll::Ready(Ok(1))
-    );
-    let decoded = FrameReader::new(bytes.freeze(), packet_type)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    assert_eq!((&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(Ok(1)));
+    let decoded = FrameReader::new(bytes.freeze(), packet_type).collect::<Result<Vec<_>, _>>().unwrap();
     let [(Frame::Close(frame), _)] = decoded.as_slice() else {
         panic!("expected one CONNECTION_CLOSE frame, got {decoded:?}");
     };
@@ -76,20 +68,13 @@ async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
 
     for error in [
         Error::from(AppError::new(42u32.into(), "private application detail")),
-        Error::from(QuicError::new(
-            ErrorKind::ProtocolViolation,
-            FrameType::Crypto.into(),
-            "transport detail",
-        )),
+        Error::from(QuicError::new(ErrorKind::ProtocolViolation, FrameType::Crypto.into(), "transport detail")),
     ] {
         for (packet_type, conceal) in [
             (Type::Long(V1(Ver1::INITIAL)), true),
             (Type::Long(V1(Ver1::HANDSHAKE)), true),
             (Type::Long(V1(Ver1::ZERO_RTT)), false),
-            (
-                OneRttHeader::new(Default::default(), Default::default()).get_type(),
-                false,
-            ),
+            (OneRttHeader::new(Default::default(), Default::default()).get_type(), false),
         ] {
             // Cover Closing, direct Draining, and Closing -> Draining.
             for (closing, peer) in [(true, false), (false, true), (true, true)] {
@@ -102,11 +87,7 @@ async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
                     terminator.recv_conn_close_frame(error.clone().into(), pto);
                 }
                 let expected = if conceal && matches!(error, Error::App(_)) {
-                    ConnectionCloseFrame::new_quic(
-                        ErrorKind::Application,
-                        FrameType::Padding.into(),
-                        "",
-                    )
+                    ConnectionCloseFrame::new_quic(ErrorKind::Application, FrameType::Padding.into(), "")
                 } else {
                     error.clone().into()
                 };
@@ -118,8 +99,7 @@ async fn close_frames_follow_packet_type_without_changing_the_stored_error() {
                     for _ in 0..5 {
                         terminator.on_rcvd_packet(Instant::now());
                     }
-                    let one_rtt =
-                        OneRttHeader::new(Default::default(), Default::default()).get_type();
+                    let one_rtt = OneRttHeader::new(Default::default(), Default::default()).get_type();
                     assert_eq!(dump_close(&terminator, one_rtt), error.clone().into());
                 }
                 terminator.terminate();
@@ -285,21 +265,12 @@ async fn pending_senders_are_woken_in_normal_and_closing() {
             }
             if draining {
                 terminator.recv_conn_close_frame(close_frame("peer"), Duration::from_secs(1));
-                assert_eq!(
-                    poll_close(&terminator, &waker),
-                    Poll::Ready(Ok(usize::from(!closing)))
-                );
+                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(usize::from(!closing))));
                 assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(0)));
             }
             terminator.terminate();
-            assert_eq!(
-                counter.0.load(Ordering::Relaxed),
-                usize::from(!(closing && draining))
-            );
-            assert!(matches!(
-                poll_close(&terminator, &waker),
-                Poll::Ready(Err(_))
-            ));
+            assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!(closing && draining)));
+            assert!(matches!(poll_close(&terminator, &waker), Poll::Ready(Err(_))));
         }
     }
 }
@@ -308,17 +279,11 @@ async fn pending_senders_are_woken_in_normal_and_closing() {
 async fn terminated_returns_its_stored_error() {
     let terminator = ArcTerminator::no_error();
     let error = Error::from(close_frame("terminated"));
-    terminator.close(
-        CloseReason::Peer(close_frame("terminated")),
-        Duration::from_secs(1),
-    );
+    terminator.close(CloseReason::Peer(close_frame("terminated")), Duration::from_secs(1));
     terminator.terminate();
     terminator.close(local_reason(), Duration::from_secs(1));
     terminator.recv_conn_close_frame(close_frame("peer"), Duration::from_secs(1));
-    assert_eq!(
-        poll_close(&terminator, Waker::noop()),
-        Poll::Ready(Err(error))
-    );
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Err(error)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -356,10 +321,7 @@ async fn close_notifies_components_once_and_registration_after_close_is_immediat
     let first = Arc::new(Component(Mutex::new(Vec::new())));
     terminator.register(first.clone());
     terminator.close(local_reason(), Duration::from_secs(1));
-    terminator.close(
-        CloseReason::Peer(close_frame("later")),
-        Duration::from_secs(10),
-    );
+    terminator.close(CloseReason::Peer(close_frame("later")), Duration::from_secs(10));
     let late = Arc::new(Component(Mutex::new(Vec::new())));
     terminator.register(late.clone());
     let expected = Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"));
@@ -402,11 +364,8 @@ async fn forced_termination_wakes_all_waiters() {
         assert!(!second.is_finished());
         let start = Instant::now();
         terminator.terminate();
-        let (first, second) = tokio::time::timeout(Duration::from_millis(1), async {
-            (first.await.unwrap(), second.await.unwrap())
-        })
-        .await
-        .unwrap();
+        let (first, second) =
+            tokio::time::timeout(Duration::from_millis(1), async { (first.await.unwrap(), second.await.unwrap()) }).await.unwrap();
         assert_eq!(first, second);
         assert_eq!(first, terminator.await);
         assert_eq!(Instant::now(), start);
@@ -431,13 +390,7 @@ async fn close_notifies_and_releases_registered_components() {
     assert!(weak.upgrade().is_none());
     terminator.close(local_reason(), Duration::from_secs(1));
     terminator.terminate();
-    assert_eq!(
-        errors.lock().unwrap().as_slice(),
-        &[Error::from(QuicError::with_default_fty(
-            ErrorKind::Internal,
-            "local"
-        ))]
-    );
+    assert_eq!(errors.lock().unwrap().as_slice(), &[Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -462,13 +415,7 @@ async fn registration_racing_close_never_misses_or_duplicates_notification() {
             barrier.wait();
             terminator.close(local_reason(), Duration::from_secs(1));
         });
-        assert_eq!(
-            component.0.lock().unwrap().as_slice(),
-            &[Error::from(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "local"
-            ))]
-        );
+        assert_eq!(component.0.lock().unwrap().as_slice(), &[Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))]);
     }
 }
 
@@ -534,11 +481,8 @@ async fn timer_wakes_all_waiters_after_one_is_cancelled() {
     terminator.close(local_reason(), Duration::from_secs(1));
     assert!(!first.is_finished());
     assert!(!second.is_finished());
-    let (first, second) = tokio::time::timeout(Duration::from_secs(4), async {
-        (first.await.unwrap(), second.await.unwrap())
-    })
-    .await
-    .unwrap();
+    let (first, second) =
+        tokio::time::timeout(Duration::from_secs(4), async { (first.await.unwrap(), second.await.unwrap()) }).await.unwrap();
     assert_eq!(Instant::now() - start, Duration::from_secs(3));
     assert_eq!(first, second);
     assert_eq!(first, terminator.await);

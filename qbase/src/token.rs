@@ -97,12 +97,9 @@ impl ReceiveFrame<NewTokenFrame> for ArcTokenRegistry {
                 client.sink(server_name, frame.token().to_vec());
                 Ok(())
             }
-            TokenRegistry::Server(_) => Err(QuicError::new(
-                ErrorKind::ProtocolViolation,
-                frame.frame_type().into(),
-                "Server received NewTokenFrame",
-            )
-            .into()),
+            TokenRegistry::Server(_) => {
+                Err(QuicError::new(ErrorKind::ProtocolViolation, frame.frame_type().into(), "Server received NewTokenFrame").into())
+            }
         }
     }
 }

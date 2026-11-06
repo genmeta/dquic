@@ -49,23 +49,13 @@ pub use self::{
 /// If not met, it is considered a TransportParameters error.
 #[derive(Debug, Clone, Copy)]
 pub enum Requirements {
-    Server {
-        initial_scid: ConnectionId,
-        retry_scid: Option<ConnectionId>,
-        origin_dcid: ConnectionId,
-    },
-    Client {
-        initial_scid: ConnectionId,
-    },
+    Server { initial_scid: ConnectionId, retry_scid: Option<ConnectionId>, origin_dcid: ConnectionId },
+    Client { initial_scid: ConnectionId },
 }
 
 impl Requirements {
     pub fn require_server(initial_scid: ConnectionId, origin_dcid: ConnectionId) -> Self {
-        Self::Server {
-            initial_scid,
-            retry_scid: None,
-            origin_dcid,
-        }
+        Self::Server { initial_scid, retry_scid: None, origin_dcid }
     }
 
     pub fn require_client(initial_scid: ConnectionId) -> Self {
@@ -91,23 +81,14 @@ pub struct ArcParameters {
 }
 
 fn param_error(reason: &'static str) -> QuicError {
-    QuicError::new(
-        ErrorKind::TransportParameter,
-        FrameType::Crypto.into(),
-        reason,
-    )
+    QuicError::new(ErrorKind::TransportParameter, FrameType::Crypto.into(), reason)
 }
 
 impl ArcParameters {
     /// Both parameter sets are available immediately. Configure packet CID
     /// observations and authenticate them before exposing the connection.
     pub fn new(role: Role, client: Arc<ClientParameters>, server: Arc<ServerParameters>) -> Self {
-        Self {
-            role,
-            client,
-            server,
-            remembered: None,
-        }
+        Self { role, client, server, remembered: None }
     }
 
     /// Retain the client's previous server parameters as historical data.
@@ -152,53 +133,24 @@ impl ArcParameters {
     /// requirements. Growing coroutines record the Initial SCID before calling this.
     pub fn authenticate_cids(&self, requirements: Requirements) -> Result<(), QuicError> {
         match (self.role, requirements) {
-            (
-                Role::Client,
-                Requirements::Server {
-                    initial_scid,
-                    retry_scid,
-                    origin_dcid,
-                },
-            ) => {
-                if self
-                    .server
-                    .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    != Some(initial_scid)
-                {
-                    return Err(param_error(
-                        "Initial Source Connection ID from server mismatch",
-                    ));
+            (Role::Client, Requirements::Server { initial_scid, retry_scid, origin_dcid }) => {
+                if self.server.try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId) != Some(initial_scid) {
+                    return Err(param_error("Initial Source Connection ID from server mismatch"));
                 }
-                if self
-                    .server
-                    .try_get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId)
-                    != Some(origin_dcid)
-                {
+                if self.server.try_get::<ConnectionId>(ParameterId::OriginalDestinationConnectionId) != Some(origin_dcid) {
                     return Err(param_error("Original Destination Connection ID mismatch"));
                 }
-                if self
-                    .server
-                    .try_get::<ConnectionId>(ParameterId::RetrySourceConnectionId)
-                    != retry_scid
-                {
+                if self.server.try_get::<ConnectionId>(ParameterId::RetrySourceConnectionId) != retry_scid {
                     return Err(param_error("Retry Source Connection ID mismatch"));
                 }
             }
             (Role::Server, Requirements::Client { initial_scid }) => {
-                if self
-                    .client
-                    .try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId)
-                    != Some(initial_scid)
-                {
-                    return Err(param_error(
-                        "Initial Source Connection ID from client mismatch",
-                    ));
+                if self.client.try_get::<ConnectionId>(ParameterId::InitialSourceConnectionId) != Some(initial_scid) {
+                    return Err(param_error("Initial Source Connection ID from client mismatch"));
                 }
             }
             _ => {
-                return Err(param_error(
-                    "Connection ID requirements do not match endpoint role",
-                ));
+                return Err(param_error("Connection ID requirements do not match endpoint role"));
             }
         }
         Ok(())
@@ -207,10 +159,7 @@ impl ArcParameters {
     /// The minimum nonzero advertised timeout, or `Duration::MAX` if disabled
     /// by both endpoints (RFC 9000, section 10.1).
     pub fn negotiated_max_idle_timeout(&self) -> Duration {
-        match (
-            self.local(ParameterId::MaxIdleTimeout),
-            self.remote(ParameterId::MaxIdleTimeout),
-        ) {
+        match (self.local(ParameterId::MaxIdleTimeout), self.remote(ParameterId::MaxIdleTimeout)) {
             (Duration::ZERO, Duration::ZERO) => Duration::MAX,
             (Duration::ZERO, d) | (d, Duration::ZERO) => d,
             (d1, d2) => d1.min(d2),

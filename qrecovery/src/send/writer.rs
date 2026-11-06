@@ -91,11 +91,7 @@ pub struct Writer<TX> {
 
 impl<TX> Writer<TX> {
     pub(crate) fn new(inner: ArcSender<TX>) -> Self {
-        Self {
-            inner,
-            qlog_span: qevent::telemetry::Span::current(),
-            tracing_span: tracing::Span::current(),
-        }
+        Self { inner, qlog_span: qevent::telemetry::Span::current(), tracing_span: tracing::Span::current() }
     }
 }
 
@@ -176,11 +172,7 @@ impl<TX> Writer<TX> {
     }
 
     #[inline]
-    pub fn poll_write(
-        &mut self,
-        cx: &mut Context<'_>,
-        data: Bytes,
-    ) -> Poll<Result<(), StreamError>> {
+    pub fn poll_write(&mut self, cx: &mut Context<'_>, data: Bytes) -> Poll<Result<(), StreamError>> {
         let _span = (self.qlog_span.enter(), self.tracing_span.enter());
 
         let mut sender = self.inner.sender();
@@ -237,14 +229,8 @@ impl<TX> Writer<TX> {
 
 impl<TX> AsyncWrite for Writer<TX> {
     #[inline]
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Writer::poll_write(self.get_mut(), cx, Bytes::copy_from_slice(buf))
-            .map_ok(|()| buf.len())
-            .map_err(io::Error::from)
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Writer::poll_write(self.get_mut(), cx, Bytes::copy_from_slice(buf)).map_ok(|()| buf.len()).map_err(io::Error::from)
     }
 
     #[inline]

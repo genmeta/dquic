@@ -45,10 +45,7 @@ pub struct Span {
 
 impl Debug for Span {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Span")
-            .field("exporter", &"..")
-            .field("fields", &self.fields)
-            .finish()
+        f.debug_struct("Span").field("exporter", &"..").field("fields", &self.fields).finish()
     }
 }
 
@@ -71,17 +68,11 @@ impl Span {
     #[inline]
     pub fn load<T: DeserializeOwned>(&self, name: &'static str) -> T {
         let Some(value) = self.fields.get(name) else {
-            panic!(
-                "Failed to load field `{name}` from span fields: {:?}",
-                self.fields
-            );
+            panic!("Failed to load field `{name}` from span fields: {:?}", self.fields);
         };
         match serde_json::from_value(value.clone()) {
             Ok(value) => value,
-            Err(e) => panic!(
-                "Failed to load field `{name}` from span fields: {:?}, error: {:?}",
-                self.fields, e
-            ),
+            Err(e) => panic!("Failed to load field `{name}` from span fields: {:?}, error: {:?}", self.fields, e),
         }
     }
 
@@ -99,10 +90,7 @@ impl PartialEq for Span {
 
 impl Default for Span {
     fn default() -> Self {
-        Self {
-            exporter: Arc::new(NoopExporter),
-            fields: Arc::new(HashMap::new()),
-        }
+        Self { exporter: Arc::new(NoopExporter), fields: Arc::new(HashMap::new()) }
     }
 }
 

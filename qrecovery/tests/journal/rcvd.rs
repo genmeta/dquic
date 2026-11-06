@@ -27,10 +27,8 @@ fn ack_package_at(records: &ArcRcvdJournal, pn: u64, received: Instant) -> AckFr
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     assert!(matches!(
-        package.poll_dump(
-            &mut Context::from_waker(Waker::noop()),
-            &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0)
-        ),
+        package
+            .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0)),
         Poll::Ready(Ok(1))
     ));
     let mut frames = FrameReader::new(bytes.freeze(), ty);
@@ -48,10 +46,7 @@ async fn ack_package_uses_its_configured_delay_exponent() {
         let received = Instant::now();
         records.on_rcvd_pn(0, true, Duration::ZERO);
         tokio::time::advance(Duration::from_micros(1024)).await;
-        assert_eq!(
-            ack_package_at(&records, 0, received).delay(),
-            1024 >> exponent
-        );
+        assert_eq!(ack_package_at(&records, 0, received).delay(), 1024 >> exponent);
     }
 }
 
@@ -61,9 +56,7 @@ fn contiguous_packets_merge_into_one_range() {
     for pn in [10, 12, 11] {
         records.on_rcvd_pn(pn, true, Duration::ZERO);
     }
-    let ack = records
-        .gen_ack_frame_util(12, Instant::now(), 1200)
-        .unwrap();
+    let ack = records.gen_ack_frame_util(12, Instant::now(), 1200).unwrap();
     let mut ranges = ack.iter();
     assert_eq!(ranges.next(), Some(10..=12));
     assert_eq!(ranges.next(), None);
@@ -74,13 +67,8 @@ fn large_packet_number_gap_does_not_allocate_empty_states() {
     let records = ArcRcvdJournal::with_capacity(16, None);
     records.on_rcvd_pn(10, true, Duration::ZERO);
     records.on_rcvd_pn(10_000_000, true, Duration::ZERO);
-    let ack = records
-        .gen_ack_frame_util(10_000_000, Instant::now(), 1200)
-        .unwrap();
-    assert_eq!(
-        ack.iter().collect::<Vec<_>>(),
-        [10_000_000..=10_000_000, 10..=10]
-    );
+    let ack = records.gen_ack_frame_util(10_000_000, Instant::now(), 1200).unwrap();
+    assert_eq!(ack.iter().collect::<Vec<_>>(), [10_000_000..=10_000_000, 10..=10]);
 }
 
 #[test]
@@ -89,21 +77,9 @@ fn range_bound_evicts_oldest_and_retires_it() {
     for pn in (0..=MAX_TRACKED_ACK_RANGES as u64 * 2).step_by(2) {
         records.on_rcvd_pn(pn, true, Duration::ZERO);
     }
-    let ack = records
-        .gen_ack_frame_util(512, Instant::now(), 1200)
-        .unwrap();
-    assert_eq!(
-        ack.iter().collect::<Vec<_>>(),
-        (1..=256u32)
-            .rev()
-            .map(|n| u64::from(n) * 2)
-            .map(|pn| pn..=pn)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        records.decode_pn(PacketNumber::encode(0, 0)),
-        Err(InvalidPacketNumber::TooOld)
-    );
+    let ack = records.gen_ack_frame_util(512, Instant::now(), 1200).unwrap();
+    assert_eq!(ack.iter().collect::<Vec<_>>(), (1..=256u32).rev().map(|n| u64::from(n) * 2).map(|pn| pn..=pn).collect::<Vec<_>>());
+    assert_eq!(records.decode_pn(PacketNumber::encode(0, 0)), Err(InvalidPacketNumber::TooOld));
 }
 
 #[test]
@@ -112,17 +88,12 @@ fn ack_ranges_preserve_holes_and_encode_exactly() {
     for pn in [100, 101, 104, 105, 110] {
         records.on_rcvd_pn(pn, true, Duration::ZERO);
     }
-    let ack = records
-        .gen_ack_frame_util(110, Instant::now(), 1200)
-        .unwrap();
+    let ack = records.gen_ack_frame_util(110, Instant::now(), 1200).unwrap();
     assert_eq!(ack.largest(), 110);
     assert_eq!(ack.first_range(), 0);
     assert_eq!(
         ack.ranges(),
-        &vec![
-            (VarInt::from_u64(3).unwrap(), VarInt::from_u64(1).unwrap()),
-            (VarInt::from_u64(1).unwrap(), VarInt::from_u64(1).unwrap()),
-        ]
+        &vec![(VarInt::from_u64(3).unwrap(), VarInt::from_u64(1).unwrap()), (VarInt::from_u64(1).unwrap(), VarInt::from_u64(1).unwrap()),]
     );
     assert!(ack.iter().any(|range| range == (100..=101)));
     assert!(ack.iter().any(|range| range == (104..=105)));
@@ -148,9 +119,7 @@ fn high_packet_number_does_not_retire_slow_path_range() {
     let records = ArcRcvdJournal::with_capacity(16, None);
     records.on_rcvd_pn(100, true, Duration::ZERO);
     records.on_rcvd_pn(10_000, true, Duration::ZERO);
-    let ack = records
-        .gen_ack_frame_util(10_000, Instant::now(), 1200)
-        .unwrap();
+    let ack = records.gen_ack_frame_util(10_000, Instant::now(), 1200).unwrap();
     assert_eq!(ack.iter().collect::<Vec<_>>(), [10_000..=10_000, 100..=100]);
 }
 
@@ -174,10 +143,7 @@ fn retired_path_trigger_can_still_generate_singleton_ack() {
     for pn in (2..=MAX_TRACKED_ACK_RANGES as u64 * 2).step_by(2) {
         records.on_rcvd_pn(pn, true, Duration::ZERO);
     }
-    assert_eq!(
-        records.decode_pn(PacketNumber::encode(0, 0)),
-        Err(InvalidPacketNumber::TooOld)
-    );
+    assert_eq!(records.decode_pn(PacketNumber::encode(0, 0)), Err(InvalidPacketNumber::TooOld));
 
     let ack = ack_package(&records, 0);
 

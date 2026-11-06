@@ -27,22 +27,13 @@ pub use qbase::{
 pub use qtransport::{ArcConnection, ArcReliableFrames, CloseReason};
 pub use tls::TlsContext;
 pub type DataStreams = qrecovery::streams::DataStreams<ArcReliableFrames>;
-pub type ArcLocalCids =
-    qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
+pub type ArcLocalCids = qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
 pub type ArcRemoteCids = qbase::cid::ArcRemoteCids<ArcReliableFrames>;
 pub type ArcDcid = qbase::cid::ArcDcid<ArcReliableFrames>;
 pub type CidRegistry = qbase::cid::Registry<ArcLocalCids, ArcRemoteCids>;
 pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
 pub type ArcResend = ArcIndexDeque<Arc<dyn qcongestion::Resend>, 2>;
 
-pub type Connected = (
-    Option<qtls::LocalAuthority>,
-    qtls::RemoteAuthority,
-    ArcConnection,
-);
+pub type Connected = (Option<qtls::LocalAuthority>, qtls::RemoteAuthority, ArcConnection);
 
-pub type Accepted = (
-    Option<qtls::RemoteAuthority>,
-    qtls::LocalAuthority,
-    ArcConnection,
-);
+pub type Accepted = (Option<qtls::RemoteAuthority>, qtls::LocalAuthority, ArcConnection);

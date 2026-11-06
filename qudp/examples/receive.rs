@@ -12,9 +12,7 @@ struct Args {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-        .init();
+    tracing_subscriber::fmt().with_max_level(tracing::level_filters::LevelFilter::TRACE).init();
 
     let args = Args::parse();
     let addr = args.bind.parse().unwrap();

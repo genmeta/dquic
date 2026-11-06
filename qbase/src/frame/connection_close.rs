@@ -61,21 +61,13 @@ impl AppCloseFrame {
     /// See [section-10.2.3-3](https://datatracker.ietf.org/doc/html/rfc9000#section-10.2.3-3)
     /// of [QUIC](https://datatracker.ietf.org/doc/html/rfc9000) for more details.
     pub fn conceal(&self) -> QuicCloseFrame {
-        QuicCloseFrame {
-            error_kind: ErrorKind::Application,
-            frame_type: ErrorFrameType::V1(FrameType::Padding),
-            reason: Cow::Borrowed(""),
-        }
+        QuicCloseFrame { error_kind: ErrorKind::Application, frame_type: ErrorFrameType::V1(FrameType::Padding), reason: Cow::Borrowed("") }
     }
 }
 
 impl From<AppCloseFrame> for QuicCloseFrame {
     fn from(_: AppCloseFrame) -> Self {
-        QuicCloseFrame {
-            error_kind: ErrorKind::Application,
-            frame_type: ErrorFrameType::V1(FrameType::Padding),
-            reason: Cow::Borrowed(""),
-        }
+        QuicCloseFrame { error_kind: ErrorKind::Application, frame_type: ErrorFrameType::V1(FrameType::Padding), reason: Cow::Borrowed("") }
     }
 }
 
@@ -161,24 +153,13 @@ impl super::EncodeSize for ConnectionCloseFrame {
 
 impl ConnectionCloseFrame {
     /// Create a new `ConnectionCloseFrame` at QUIC layer.
-    pub fn new_quic(
-        error_kind: ErrorKind,
-        frame_type: ErrorFrameType,
-        reason: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::Quic(QuicCloseFrame {
-            error_kind,
-            frame_type,
-            reason: reason.into(),
-        })
+    pub fn new_quic(error_kind: ErrorKind, frame_type: ErrorFrameType, reason: impl Into<Cow<'static, str>>) -> Self {
+        Self::Quic(QuicCloseFrame { error_kind, frame_type, reason: reason.into() })
     }
 
     /// Create a new `ConnectionCloseFrame` at application layer.
     pub fn new_app(error_code: VarInt, reason: impl Into<Cow<'static, str>>) -> Self {
-        Self::App(AppCloseFrame {
-            error_code,
-            reason: reason.into(),
-        })
+        Self::App(AppCloseFrame { error_code, reason: reason.into() })
     }
 }
 
@@ -187,32 +168,19 @@ fn be_app_close_frame(input: &[u8]) -> nom::IResult<&[u8], AppCloseFrame> {
     let (remain, reason_length) = be_varint(remain)?;
     let (remain, reason) = take(reason_length)(remain)?;
     let cow = String::from_utf8_lossy(reason).into_owned();
-    Ok((
-        remain,
-        AppCloseFrame {
-            error_code,
-            reason: Cow::Owned(cow),
-        },
-    ))
+    Ok((remain, AppCloseFrame { error_code, reason: Cow::Owned(cow) }))
 }
 
 fn be_quic_close_frame(input: &[u8]) -> nom::IResult<&[u8], QuicCloseFrame> {
     let (remain, error_code) = be_varint(input)?;
-    let error_kind = ErrorKind::try_from(error_code)
-        .map_err(|_e| nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Alt)))?;
-    let (remain, frame_type) = be_frame_type(remain)
-        .map_err(|_e| nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Alt)))?;
+    let error_kind =
+        ErrorKind::try_from(error_code).map_err(|_e| nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Alt)))?;
+    let (remain, frame_type) =
+        be_frame_type(remain).map_err(|_e| nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::Alt)))?;
     let (remain, reason_length) = be_varint(remain)?;
     let (remain, reason) = take(reason_length)(remain)?;
     let cow = String::from_utf8_lossy(reason).into_owned();
-    Ok((
-        remain,
-        QuicCloseFrame {
-            error_kind,
-            frame_type: frame_type.into(),
-            reason: Cow::Owned(cow),
-        },
-    ))
+    Ok((remain, QuicCloseFrame { error_kind, frame_type: frame_type.into(), reason: Cow::Owned(cow) }))
 }
 
 /// Return a parser for a CONNECTION_CLOSE frame with the given layer.
@@ -222,15 +190,10 @@ fn be_quic_close_frame(input: &[u8]) -> nom::IResult<&[u8], QuicCloseFrame> {
 /// - `Layer::App`: Parse an application layer CONNECTION_CLOSE frame (0x1d)
 ///
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn connection_close_frame_at_layer(
-    layer: Layer,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], ConnectionCloseFrame> {
+pub fn connection_close_frame_at_layer(layer: Layer) -> impl Fn(&[u8]) -> nom::IResult<&[u8], ConnectionCloseFrame> {
     move |input: &[u8]| match layer {
-        Layer::App => {
-            be_app_close_frame(input).map(|(remain, app)| (remain, ConnectionCloseFrame::App(app)))
-        }
-        Layer::Quic => be_quic_close_frame(input)
-            .map(|(remain, quic)| (remain, ConnectionCloseFrame::Quic(quic))),
+        Layer::App => be_app_close_frame(input).map(|(remain, app)| (remain, ConnectionCloseFrame::App(app))),
+        Layer::Quic => be_quic_close_frame(input).map(|(remain, quic)| (remain, ConnectionCloseFrame::Quic(quic))),
     }
 }
 

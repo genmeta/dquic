@@ -23,42 +23,20 @@ pub struct PunchAddresses {
 }
 
 impl PunchAddresses {
-    pub fn add_local(
-        &mut self,
-        bound: SocketAddr,
-        endpoint: EndpointAddr,
-        outer: SocketAddr,
-        tire: u32,
-        nat: NatType,
-    ) -> AddAddressFrame {
+    pub fn add_local(&mut self, bound: SocketAddr, endpoint: EndpointAddr, outer: SocketAddr, tire: u32, nat: NatType) -> AddAddressFrame {
         let seq = self.next_local_seq;
         self.next_local_seq += 1;
         let frame = AddAddressFrame::new(seq, outer, tire, nat);
-        self.local.insert(
-            seq,
-            LocalAddress {
-                bound,
-                endpoint,
-                frame,
-            },
-        );
+        self.local.insert(seq, LocalAddress { bound, endpoint, frame });
         frame
     }
 
     pub fn remove_local_endpoint(&mut self, endpoint: EndpointAddr) -> Vec<RemoveAddressFrame> {
-        let seqs = self
-            .local
-            .iter()
-            .filter_map(|(&seq, local)| (local.endpoint == endpoint).then_some(seq))
-            .collect::<Vec<_>>();
+        let seqs = self.local.iter().filter_map(|(&seq, local)| (local.endpoint == endpoint).then_some(seq)).collect::<Vec<_>>();
         for seq in &seqs {
             self.local.remove(seq);
         }
-        seqs.into_iter()
-            .map(|seq| RemoveAddressFrame {
-                seq_num: seq.into(),
-            })
-            .collect()
+        seqs.into_iter().map(|seq| RemoveAddressFrame { seq_num: seq.into() }).collect()
     }
 
     pub fn add_remote(&mut self, frame: AddAddressFrame) -> bool {
@@ -86,26 +64,16 @@ impl PunchAddresses {
     }
 
     pub fn pick_local(&self, remote: AddAddressFrame) -> Option<LocalAddress> {
-        const PRIORITY: [NatType; 5] = [
-            NatType::FullCone,
-            NatType::RestrictedCone,
-            NatType::RestrictedPort,
-            NatType::Dynamic,
-            NatType::Symmetric,
-        ];
+        const PRIORITY: [NatType; 5] =
+            [NatType::FullCone, NatType::RestrictedCone, NatType::RestrictedPort, NatType::Dynamic, NatType::Symmetric];
         self.local
             .values()
             .filter(|local| {
-                local.frame.tire() == remote.tire()
-                    && EndpointAddr::direct(*local.frame)
-                        .matches_peer(EndpointAddr::direct(*remote))
+                local.frame.tire() == remote.tire() && EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote))
             })
             .min_by_key(|local| {
                 (
-                    PRIORITY
-                        .iter()
-                        .position(|&nat| nat == local.frame.nat_type())
-                        .unwrap_or(usize::MAX),
+                    PRIORITY.iter().position(|&nat| nat == local.frame.nat_type()).unwrap_or(usize::MAX),
                     std::cmp::Reverse(local.frame.seq_num()),
                 )
             })

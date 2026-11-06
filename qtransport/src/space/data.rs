@@ -26,9 +26,7 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Keys, Recover, Space, Transmit};
-use crate::{
-    ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, packet::encrypt::Packet,
-};
+use crate::{ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, packet::encrypt::Packet};
 
 /// Application-data space and all of its retransmittable frame sources.
 #[derive(Deref)]
@@ -51,15 +49,8 @@ impl DataSpace {
         facts: Arc<HandshakeFacts>,
     ) -> Self {
         let mut space = Space::new(Epoch::Data, initial_scid, keys, facts);
-        space.rcvd_journal = space
-            .rcvd_journal
-            .with_ack_delay_exponent(local_ack_delay_exponent);
-        Self {
-            space,
-            streams,
-            reliable_frames,
-            peer_ack_delay_exponent,
-        }
+        space.rcvd_journal = space.rcvd_journal.with_ack_delay_exponent(local_ack_delay_exponent);
+        Self { space, streams, reliable_frames, peer_ack_delay_exponent }
     }
 }
 
@@ -72,9 +63,7 @@ impl Allocate for DataSpace {
             Err(crate::keys::PacketError::Retired(_)) => return None,
             result => result.expect("不可能达到上限，忽略这种错误就行了"),
         };
-        let pn = journal
-            .next_pn()
-            .expect("不可能达到上限，忽略这种错误就行了");
+        let pn = journal.next_pn().expect("不可能达到上限，忽略这种错误就行了");
         Some((pn, Keys::Short(keys)))
     }
 }
@@ -97,8 +86,7 @@ impl Transmit for DataSpace {
     }
 
     fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
-        self.space
-            .on_sent(pn, in_flight, retransmit_after, retention);
+        self.space.on_sent(pn, in_flight, retransmit_after, retention);
     }
 }
 
@@ -116,9 +104,7 @@ impl Recover for DataSpace {
         self.sent_journal.on_acked(ack, |frame| match frame {
             GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().on_data_acked(frame),
             GuaranteedFrame::Stream(frame) => self.streams.on_data_acked(*frame),
-            GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::ResetStream(
-                frame,
-            ))) => self.streams.on_reset_acked(*frame),
+            GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::ResetStream(frame))) => self.streams.on_reset_acked(*frame),
             _ => {}
         })
     }
@@ -163,11 +149,7 @@ impl Encapsulate for DataSpace {
             return None;
         }
         let header = OneRttHeader::new(Default::default(), dcid);
-        Some(super::probe_size(
-            &header,
-            self.sent_journal.lock_guard().next_pn_len(),
-            self.keys.tag_len(),
-        ))
+        Some(super::probe_size(&header, self.sent_journal.lock_guard().next_pn_len(), self.keys.tag_len()))
     }
 
     fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
@@ -195,20 +177,16 @@ impl Encapsulate for DataSpace {
         };
         let start = frames.len();
         let offset = datagram.position() as usize;
-        let quota = cc
-            .send_quota()
-            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
-                1200
-            } else {
-                0
-            });
+        let quota = cc.send_quota().max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
+            1200
+        } else {
+            0
+        });
         let mut crypto = self.crypto().outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
-        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
-            .iter_mut()
-            .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
-            .collect();
+        let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
+            external.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);

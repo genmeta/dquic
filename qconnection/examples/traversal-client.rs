@@ -33,15 +33,9 @@ impl fmt::Display for MockResolver {
     }
 }
 impl Resolve for MockResolver {
-    fn lookup<'a>(
-        &'a self,
-        name: &'a str,
-        _: &'a str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'a> {
+    fn lookup<'a>(&'a self, name: &'a str, _: &'a str, family: Option<Family>) -> ResolveFuture<'a> {
         async move {
-            let matches = name == "localhost"
-                && family.is_none_or(|f| (f == Family::V4) == self.0.addr().is_ipv4());
+            let matches = name == "localhost" && family.is_none_or(|f| (f == Family::V4) == self.0.addr().is_ipv4());
             Ok(stream::iter(matches.then_some((Source::System, self.0))).boxed())
         }
         .boxed()
@@ -52,22 +46,14 @@ impl Resolve for MockResolver {
 async fn main() -> Result<(), Error> {
     let options = Options::parse();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .with_target(false)
         .init();
-    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../tests/keychain/localhost/ca.cert"
-    ))?])?;
+    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/ca.cert"))?])?;
     let identity = Endpoint::new(
         "client",
-        vec![qtls::CertificateDer::from_pem_slice(include_bytes!(
-            "../tests/keychain/localhost/client.cert"
-        ))?],
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-            "../tests/keychain/localhost/client.key"
-        ))?,
+        vec![qtls::CertificateDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/client.cert"))?],
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/client.key"))?,
         include_bytes!("../tests/keychain/localhost/client.ocsp").to_vec(),
     )?;
     let endpoint = QuicEndpoint::from(identity);
@@ -77,25 +63,15 @@ async fn main() -> Result<(), Error> {
     };
     network::start(Some(agent)).await?;
     Resolver::add(Arc::new(MockResolver(options.server)));
-    let (_, _, connection) = timeout(
-        Duration::from_secs(30),
-        endpoint.connect("localhost".into()),
-    )
-    .await??;
-    println!(
-        "\n[已连接] localhost\n  中转服务器  {agent}\n  服务端映射  {}",
-        options.server.addr()
-    );
+    let (_, _, connection) = timeout(Duration::from_secs(30), endpoint.connect("localhost".into())).await??;
+    println!("\n[已连接] localhost\n  中转服务器  {agent}\n  服务端映射  {}", options.server.addr());
 
     let mut ticks = interval(Duration::from_secs(2));
     let mut last_reply = None;
     let mut last_paths = Vec::new();
     loop {
         ticks.tick().await;
-        let (_, (mut reader, mut writer)) = connection
-            .open_bi_stream()
-            .await?
-            .ok_or("no bidirectional stream available")?;
+        let (_, (mut reader, mut writer)) = connection.open_bi_stream().await?.ok_or("no bidirectional stream available")?;
         writer.write_all(b"hello from client\n").await?;
         writer.shutdown().await?;
         let mut reply = String::new();

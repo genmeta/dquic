@@ -274,12 +274,8 @@ impl FrameFeature for FrameType {
     }
 
     fn specs(&self) -> u8 {
-        let (n, c, p, f) = (
-            Spec::NonAckEliciting as u8,
-            Spec::CongestionControlFree as u8,
-            Spec::ProbeNewPath as u8,
-            Spec::FlowControlled as u8,
-        );
+        let (n, c, p, f) =
+            (Spec::NonAckEliciting as u8, Spec::CongestionControlFree as u8, Spec::ProbeNewPath as u8, Spec::FlowControlled as u8);
         match self {
             FrameType::Padding => n | p,
             FrameType::Ack(_) => n | c,
@@ -391,11 +387,8 @@ impl From<FrameType> for VarInt {
 /// Parse the frame type from the input buffer,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub fn be_frame_type(input: &[u8]) -> nom::IResult<&[u8], FrameType, Error> {
-    let (remain, frame_type) = crate::varint::be_varint(input).map_err(|_| {
-        nom::Err::Error(Error::IncompleteType(format!(
-            "Incomplete frame type from input: {input:?}"
-        )))
-    })?;
+    let (remain, frame_type) = crate::varint::be_varint(input)
+        .map_err(|_| nom::Err::Error(Error::IncompleteType(format!("Incomplete frame type from input: {input:?}"))))?;
     let frame_type = FrameType::try_from(frame_type).map_err(nom::Err::Error)?;
     Ok((remain, frame_type))
 }
@@ -536,19 +529,11 @@ impl<D> From<ReliableFrame> for Frame<D> {
     fn from(frame: ReliableFrame) -> Self {
         match frame {
             ReliableFrame::NewToken(new_token_frame) => Frame::NewToken(new_token_frame),
-            ReliableFrame::NewConnectionId(new_connection_id_frame) => {
-                Frame::NewConnectionId(new_connection_id_frame)
-            }
-            ReliableFrame::RetireConnectionId(retire_connection_id_frame) => {
-                Frame::RetireConnectionId(retire_connection_id_frame)
-            }
-            ReliableFrame::HandshakeDone(handshake_done_frame) => {
-                Frame::HandshakeDone(handshake_done_frame)
-            }
+            ReliableFrame::NewConnectionId(new_connection_id_frame) => Frame::NewConnectionId(new_connection_id_frame),
+            ReliableFrame::RetireConnectionId(retire_connection_id_frame) => Frame::RetireConnectionId(retire_connection_id_frame),
+            ReliableFrame::HandshakeDone(handshake_done_frame) => Frame::HandshakeDone(handshake_done_frame),
             ReliableFrame::AddAddress(add_address_frame) => Frame::AddAddress(add_address_frame),
-            ReliableFrame::RemoveAddress(remove_address_frame) => {
-                Frame::RemoveAddress(remove_address_frame)
-            }
+            ReliableFrame::RemoveAddress(remove_address_frame) => Frame::RemoveAddress(remove_address_frame),
             ReliableFrame::PunchMeNow(punch_me_now_frame) => Frame::PunchMeNow(punch_me_now_frame),
             ReliableFrame::PunchDone(punch_done_frame) => Frame::PunchDone(punch_done_frame),
             ReliableFrame::StreamCtl(stream_frame) => Frame::StreamCtl(stream_frame),
@@ -574,27 +559,13 @@ impl<'f, D> TryFrom<&'f Frame<D>> for ReliableFrame {
     #[inline]
     fn try_from(frame: &'f Frame<D>) -> Result<Self, Self::Error> {
         match frame {
-            Frame::NewToken(new_token_frame) => {
-                Ok(ReliableFrame::NewToken(new_token_frame.clone()))
-            }
-            Frame::NewConnectionId(new_connection_id_frame) => {
-                Ok(ReliableFrame::NewConnectionId(*new_connection_id_frame))
-            }
-            Frame::RetireConnectionId(retire_connection_id_frame) => Ok(
-                ReliableFrame::RetireConnectionId(*retire_connection_id_frame),
-            ),
-            Frame::HandshakeDone(handshake_done_frame) => {
-                Ok(ReliableFrame::HandshakeDone(*handshake_done_frame))
-            }
-            Frame::AddAddress(add_address_frame) => {
-                Ok(ReliableFrame::AddAddress(*add_address_frame))
-            }
-            Frame::RemoveAddress(remove_address_frame) => {
-                Ok(ReliableFrame::RemoveAddress(*remove_address_frame))
-            }
-            Frame::PunchMeNow(punch_me_now_frame) => {
-                Ok(ReliableFrame::PunchMeNow(*punch_me_now_frame))
-            }
+            Frame::NewToken(new_token_frame) => Ok(ReliableFrame::NewToken(new_token_frame.clone())),
+            Frame::NewConnectionId(new_connection_id_frame) => Ok(ReliableFrame::NewConnectionId(*new_connection_id_frame)),
+            Frame::RetireConnectionId(retire_connection_id_frame) => Ok(ReliableFrame::RetireConnectionId(*retire_connection_id_frame)),
+            Frame::HandshakeDone(handshake_done_frame) => Ok(ReliableFrame::HandshakeDone(*handshake_done_frame)),
+            Frame::AddAddress(add_address_frame) => Ok(ReliableFrame::AddAddress(*add_address_frame)),
+            Frame::RemoveAddress(remove_address_frame) => Ok(ReliableFrame::RemoveAddress(*remove_address_frame)),
+            Frame::PunchMeNow(punch_me_now_frame) => Ok(ReliableFrame::PunchMeNow(*punch_me_now_frame)),
             Frame::PunchDone(punch_done_frame) => Ok(ReliableFrame::PunchDone(*punch_done_frame)),
             Frame::StreamCtl(stream_frame) => Ok(ReliableFrame::StreamCtl(*stream_frame)),
             frame => Err(frame),
@@ -703,10 +674,7 @@ pub struct FrameReader {
 impl FrameReader {
     /// Creates a [`FrameReader`] for a packet of type `packet_type`
     pub fn new(payload: Bytes, packet_type: Type) -> Self {
-        Self {
-            payload,
-            packet_type,
-        }
+        Self { payload, packet_type }
     }
 }
 

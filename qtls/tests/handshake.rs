@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch, HandshakeSummary,
-    InstalledKeys, LocalAuthority, MemoryResumptionStore, OneRttKeyMaterial, PrivateKeyDer,
-    QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig, SessionSealKeyRing,
-    SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake, TlsLimits, TlsServer,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch, HandshakeSummary, InstalledKeys, LocalAuthority,
+    MemoryResumptionStore, OneRttKeyMaterial, PrivateKeyDer, QuicVersion, RootCerts, ServerResumptionConfig, ServerTlsConfig,
+    SessionSealKeyRing, SignatureScheme, TicketKeyRing, TlsClient, TlsEvent, TlsHandshake, TlsLimits, TlsServer,
     default_provider as crypto_provider,
 };
 use rustls::pki_types::pem::PemObject;
@@ -44,14 +43,7 @@ struct Observed {
 
 impl Observed {
     fn new() -> Self {
-        Self {
-            summary: None,
-            parameters: None,
-            server_name: None,
-            handshake_keys: false,
-            one_rtt: None,
-            zero_rtt: false,
-        }
+        Self { summary: None, parameters: None, server_name: None, handshake_keys: false, one_rtt: None, zero_rtt: false }
     }
 }
 
@@ -79,21 +71,11 @@ fn mutual_auth_publishes_both_authorities() {
     })
     .unwrap();
 
-    let (client_tls, server_tls, mut client_events, mut server_events) =
-        handshake(&client, &server).unwrap();
+    let (client_tls, server_tls, mut client_events, mut server_events) = handshake(&client, &server).unwrap();
 
-    assert_eq!(
-        client_events.parameters.as_deref(),
-        Some(b"server-params".as_slice())
-    );
-    assert_eq!(
-        server_events.parameters.as_deref(),
-        Some(b"client-params".as_slice())
-    );
-    assert_eq!(
-        server_events.server_name.flatten().as_deref(),
-        Some("localhost")
-    );
+    assert_eq!(client_events.parameters.as_deref(), Some(b"server-params".as_slice()));
+    assert_eq!(server_events.parameters.as_deref(), Some(b"client-params".as_slice()));
+    assert_eq!(server_events.server_name.flatten().as_deref(), Some("localhost"));
     assert!(client_events.handshake_keys && server_events.handshake_keys);
     assert!(!client_events.zero_rtt && !server_events.zero_rtt);
 
@@ -105,21 +87,14 @@ fn mutual_auth_publishes_both_authorities() {
     assert_eq!(server_summary.local.as_ref().unwrap().name(), "localhost");
     assert_eq!(server_summary.remote.as_ref().unwrap().name(), "client");
 
-    test_updated_packet_keys(
-        client_events.one_rtt.take().unwrap(),
-        server_events.one_rtt.take().unwrap(),
-    );
+    test_updated_packet_keys(client_events.one_rtt.take().unwrap(), server_events.one_rtt.take().unwrap());
 
     let client_tls = client_tls.finish().unwrap();
     let server_tls = server_tls.finish().unwrap();
     let mut client_export = [0u8; 32];
     let mut server_export = [0u8; 32];
-    client_tls
-        .export_keying_material(&mut client_export, b"qtls test", Some(b"context"))
-        .unwrap();
-    server_tls
-        .export_keying_material(&mut server_export, b"qtls test", Some(b"context"))
-        .unwrap();
+    client_tls.export_keying_material(&mut client_export, b"qtls test", Some(b"context")).unwrap();
+    server_tls.export_keying_material(&mut server_export, b"qtls test", Some(b"context")).unwrap();
     assert_eq!(client_export, server_export);
 }
 
@@ -187,22 +162,12 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
     }
 
     let mut invalid_signature = SERVER_OCSP.to_vec();
-    let signature = invalid_signature
-        .windows(3)
-        .position(|bytes| bytes == [0x03, 0x48, 0x00])
-        .unwrap()
-        + 3;
+    let signature = invalid_signature.windows(3).position(|bytes| bytes == [0x03, 0x48, 0x00]).unwrap() + 3;
     invalid_signature[signature] ^= 1;
     let server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        authority: authority(
-            &provider,
-            "localhost",
-            SERVER_CERT,
-            SERVER_KEY,
-            &invalid_signature,
-        ),
+        authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, &invalid_signature),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -229,13 +194,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        authority: Some(authority(
-            &provider,
-            "client",
-            CLIENT_CERT,
-            CLIENT_KEY,
-            SERVER_OCSP,
-        )),
+        authority: Some(authority(&provider, "client", CLIENT_CERT, CLIENT_KEY, SERVER_OCSP)),
         resumption: ClientResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -262,13 +221,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        authority: Some(authority(
-            &provider,
-            "client",
-            CLIENT_CERT,
-            CLIENT_KEY,
-            CLIENT_OCSP,
-        )),
+        authority: Some(authority(&provider, "client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP)),
         resumption: ClientResumptionConfig::Enabled {
             namespace: Arc::from("integration-test"),
             store: store.clone(),
@@ -281,33 +234,20 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
         authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
-        resumption: ServerResumptionConfig::Stateful {
-            namespace: Arc::from("integration-test"),
-            store,
-            seal_keys: server_seal_keys,
-        },
+        resumption: ServerResumptionConfig::Stateful { namespace: Arc::from("integration-test"), store, seal_keys: server_seal_keys },
         limits: TlsLimits::default(),
     })
     .unwrap();
 
     let (_, _, first_client, first_server) = handshake(&client, &server).unwrap();
-    assert_eq!(
-        first_client.summary.unwrap().remote.unwrap().name(),
-        "localhost"
-    );
-    assert_eq!(
-        first_server.summary.unwrap().remote.unwrap().name(),
-        "client"
-    );
+    assert_eq!(first_client.summary.unwrap().remote.unwrap().name(), "localhost");
+    assert_eq!(first_server.summary.unwrap().remote.unwrap().name(), "client");
 
     let (_, _, second_client, second_server) = handshake(&client, &server).unwrap();
     let second_client_summary = second_client.summary.unwrap();
     assert_eq!(second_client_summary.local.unwrap().name(), "client");
     assert_eq!(second_client_summary.remote.unwrap().name(), "localhost");
-    assert_eq!(
-        second_server.summary.unwrap().remote.unwrap().name(),
-        "client"
-    );
+    assert_eq!(second_server.summary.unwrap().remote.unwrap().name(), "client");
 
     let fallback_server = TlsServer::new(ServerTlsConfig {
         provider: provider.clone(),
@@ -321,10 +261,7 @@ fn stateful_resumption_restores_authorities_without_revalidating_the_certificate
     let fallback_client = fallback_client.summary.unwrap();
     assert_eq!(fallback_client.local.unwrap().name(), "client");
     assert_eq!(fallback_client.remote.unwrap().name(), "localhost");
-    assert_eq!(
-        fallback_server.summary.unwrap().remote.unwrap().name(),
-        "client"
-    );
+    assert_eq!(fallback_server.summary.unwrap().remote.unwrap().name(), "client");
 }
 
 #[test]
@@ -334,13 +271,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
     let client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
-        authority: Some(authority(
-            &provider,
-            "client",
-            CLIENT_CERT,
-            CLIENT_KEY,
-            CLIENT_OCSP,
-        )),
+        authority: Some(authority(&provider, "client", CLIENT_CERT, CLIENT_KEY, CLIENT_OCSP)),
         resumption: ClientResumptionConfig::Enabled {
             namespace: Arc::from("stateless-test"),
             store: Arc::new(MemoryResumptionStore::new(8)),
@@ -353,9 +284,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
         authority: authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
-        resumption: ServerResumptionConfig::Stateless {
-            ticket_keys: Arc::new(ticket_key_ring()),
-        },
+        resumption: ServerResumptionConfig::Stateless { ticket_keys: Arc::new(ticket_key_ring()) },
         limits: TlsLimits::default(),
     })
     .unwrap();
@@ -366,10 +295,7 @@ fn stateless_resumption_restores_the_verified_client_authority() {
     let client_summary = client_events.summary.unwrap();
     assert_eq!(client_summary.local.unwrap().name(), "client");
     assert_eq!(client_summary.remote.unwrap().name(), "localhost");
-    assert_eq!(
-        server_events.summary.unwrap().remote.unwrap().name(),
-        "client"
-    );
+    assert_eq!(server_events.summary.unwrap().remote.unwrap().name(), "client");
 }
 
 #[test]
@@ -387,13 +313,7 @@ fn initial_keys_interoperate_for_v1_and_v2() {
     let server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
-        authority: authority(
-            &Arc::new(crypto_provider()),
-            "localhost",
-            SERVER_CERT,
-            SERVER_KEY,
-            SERVER_OCSP,
-        ),
+        authority: authority(&Arc::new(crypto_provider()), "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP),
         resumption: ServerResumptionConfig::Disabled,
         limits: TlsLimits::default(),
     })
@@ -409,16 +329,8 @@ fn initial_keys_interoperate_for_v1_and_v2() {
         let original_first = first;
         let mut packet_number = [1, 2, 3];
         let original_packet_number = packet_number;
-        client_keys
-            .sealing
-            .header
-            .protect(&sample, &mut first, &mut packet_number)
-            .unwrap();
-        server_keys
-            .opening
-            .header
-            .unprotect(&sample, &mut first, &mut packet_number)
-            .unwrap();
+        client_keys.sealing.header.protect(&sample, &mut first, &mut packet_number).unwrap();
+        server_keys.opening.header.unprotect(&sample, &mut first, &mut packet_number).unwrap();
         assert_eq!(first, original_first);
         assert_eq!(packet_number, original_packet_number);
     }
@@ -445,9 +357,7 @@ fn wrong_crypto_level_is_rejected_but_empty_input_is_a_noop() {
         .unwrap();
 
     handshake.receive_crypto(Epoch::Handshake, &[]).unwrap();
-    let error = handshake
-        .receive_crypto(Epoch::Handshake, &[1])
-        .unwrap_err();
+    let error = handshake.receive_crypto(Epoch::Handshake, &[1]).unwrap_err();
     assert!(error.to_string().contains("expected Initial"));
     let terminal = handshake.receive_crypto(Epoch::Initial, &[1]).unwrap_err();
     assert!(terminal.to_string().contains("terminal state"));
@@ -461,29 +371,13 @@ fn set_roots() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-fn authority(
-    provider: &rustls::crypto::CryptoProvider,
-    name: &str,
-    certificate_pem: &[u8],
-    key_pem: &[u8],
-    ocsp: &[u8],
-) -> LocalAuthority {
+fn authority(provider: &rustls::crypto::CryptoProvider, name: &str, certificate_pem: &[u8], key_pem: &[u8], ocsp: &[u8]) -> LocalAuthority {
     let certificate = CertificateDer::from_pem_slice(certificate_pem).unwrap();
     let key = PrivateKeyDer::from_pem_slice(key_pem).unwrap();
-    LocalAuthority::new(
-        provider,
-        Arc::from(name),
-        vec![certificate],
-        key,
-        ocsp.to_vec(),
-    )
-    .unwrap()
+    LocalAuthority::new(provider, Arc::from(name), vec![certificate], key, ocsp.to_vec()).unwrap()
 }
 
-fn handshake(
-    client: &TlsClient,
-    server: &TlsServer,
-) -> Result<(TlsHandshake, TlsHandshake, Observed, Observed), qtls::TlsError> {
+fn handshake(client: &TlsClient, server: &TlsServer) -> Result<(TlsHandshake, TlsHandshake, Observed, Observed), qtls::TlsError> {
     let mut client = client.start(ClientStart {
         server_name: "localhost".try_into().unwrap(),
         quic_version: QuicVersion::V1,
@@ -494,8 +388,7 @@ fn handshake(
     let mut server_events = Observed::new();
 
     for _ in 0..16 {
-        let progressed = transfer(&mut client, &mut server, &mut client_events)?
-            | transfer(&mut server, &mut client, &mut server_events)?;
+        let progressed = transfer(&mut client, &mut server, &mut client_events)? | transfer(&mut server, &mut client, &mut server_events)?;
         if client.is_complete() && server.is_complete() {
             transfer(&mut client, &mut server, &mut client_events)?;
             transfer(&mut server, &mut client, &mut server_events)?;
@@ -506,19 +399,12 @@ fn handshake(
     panic!("handshake did not complete");
 }
 
-fn transfer(
-    sender: &mut TlsHandshake,
-    receiver: &mut TlsHandshake,
-    observed: &mut Observed,
-) -> Result<bool, qtls::TlsError> {
+fn transfer(sender: &mut TlsHandshake, receiver: &mut TlsHandshake, observed: &mut Observed) -> Result<bool, qtls::TlsError> {
     let mut progressed = false;
     while let Some(event) = sender.next_event() {
         progressed = true;
         match event {
-            TlsEvent::WriteCrypto {
-                epoch: level,
-                bytes,
-            } => {
+            TlsEvent::WriteCrypto { epoch: level, bytes } => {
                 for chunk in bytes.chunks(7) {
                     receiver.receive_crypto(level, chunk)?;
                 }
@@ -526,16 +412,11 @@ fn transfer(
             TlsEvent::InstallKeys(InstalledKeys::ZeroRtt(_)) => observed.zero_rtt = true,
             TlsEvent::InstallKeys(InstalledKeys::Handshake(_)) => observed.handshake_keys = true,
             TlsEvent::InstallKeys(InstalledKeys::OneRtt(keys)) => observed.one_rtt = Some(keys),
-            TlsEvent::ClientHello {
-                server_name,
-                transport_parameters,
-            } => {
+            TlsEvent::ClientHello { server_name, transport_parameters } => {
                 observed.server_name = Some(server_name);
                 observed.parameters = Some(transport_parameters);
             }
-            TlsEvent::ServerTransportParameters(parameters) => {
-                observed.parameters = Some(parameters)
-            }
+            TlsEvent::ServerTransportParameters(parameters) => observed.parameters = Some(parameters),
             TlsEvent::HandshakeComplete(summary) => observed.summary = Some(summary),
             TlsEvent::Alert(_) => {}
         }
@@ -569,21 +450,12 @@ fn test_direction(sealing: &qtls::PacketKey, opening: &qtls::PacketKey) {
 fn authority_signs_without_exposing_the_signing_key() {
     let provider = crypto_provider();
     let authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
-    let signature = authority
-        .sign(SignatureScheme::ECDSA_NISTP256_SHA256, b"message")
-        .unwrap();
+    let signature = authority.sign(SignatureScheme::ECDSA_NISTP256_SHA256, b"message").unwrap();
     assert!(!signature.is_empty());
-    assert!(
-        authority
-            .sign(SignatureScheme::ED25519, b"message")
-            .is_err()
-    );
+    assert!(authority.sign(SignatureScheme::ED25519, b"message").is_err());
 }
 
-fn assert_rejected(
-    result: Result<HandshakeSummary, qtls::TlsError>,
-    expected: rustls::AlertDescription,
-) {
+fn assert_rejected(result: Result<HandshakeSummary, qtls::TlsError>, expected: rustls::AlertDescription) {
     let error = result.unwrap_err();
     assert!(
         matches!(error, qtls::TlsError::Alert(alert) if alert.description() == u8::from(expected)),

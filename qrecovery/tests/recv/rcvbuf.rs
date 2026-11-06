@@ -92,12 +92,7 @@ fn test_fully_overlap_right() {
     assert_eq!(buf.segment_count(), 4);
     assert_eq!(buf.available(), 12);
     let mut offset = 0;
-    for expected in [
-        b"hello".as_slice(),
-        b" ".as_slice(),
-        b"world".as_slice(),
-        b"!".as_slice(),
-    ] {
+    for expected in [b"hello".as_slice(), b" ".as_slice(), b"world".as_slice(), b"!".as_slice()] {
         assert_eq!(buf.nread(), offset);
         let data = buf.try_next().unwrap();
         assert_eq!(data.as_ref(), expected);

@@ -37,20 +37,14 @@ pub struct ArcReliableFrames<F> {
 
 impl<F> Clone for ArcReliableFrames<F> {
     fn clone(&self) -> Self {
-        Self {
-            frames: self.frames.clone(),
-            tx_wakers: self.tx_wakers.clone(),
-        }
+        Self { frames: self.frames.clone(), tx_wakers: self.tx_wakers.clone() }
     }
 }
 
 impl<F> ArcReliableFrames<F> {
     /// Create a new empty deque with at least the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            frames: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-            tx_wakers: ArcSendWakers::default(),
-        }
+        Self { frames: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), tx_wakers: ArcSendWakers::default() }
     }
 
     fn frames_guard(&self) -> MutexGuard<'_, VecDeque<F>> {
@@ -70,11 +64,7 @@ where
 }
 
 impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         let mut queue = self.frames_guard();
         if queue.is_empty() {
             self.tx_wakers.register(cx.waker());

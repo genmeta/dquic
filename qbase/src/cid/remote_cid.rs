@@ -59,9 +59,7 @@ where
         let source = match source {
             HandshakeDcid::Odcid(cid) => ArcHandshakeDcid::from_odcid(cid),
             HandshakeDcid::PeerScid(cid) => {
-                cid_deque
-                    .push_back(Some((0, cid, ResetToken::default())))
-                    .expect("Initial connection ID has sequence zero");
+                cid_deque.push_back(Some((0, cid, ResetToken::default()))).expect("Initial connection ID has sequence zero");
                 ArcHandshakeDcid::from_peer_scid(cid)
             }
         };
@@ -83,9 +81,7 @@ where
         if !source.on_receive_from(peer_scid) {
             return false;
         }
-        self.cid_deque
-            .insert(0, Some((0, peer_scid, ResetToken::default())))
-            .expect("Initial connection ID has sequence zero");
+        self.cid_deque.insert(0, Some((0, peer_scid, ResetToken::default()))).expect("Initial connection ID has sequence zero");
         self.arrange_idle_cid();
         true
     }
@@ -97,10 +93,7 @@ where
     /// Try to arrange the idle cids to the hungry cid applys if exist.
     ///
     /// Return the reset token of this [`NewConnectionIdFrame`] if it is valid.
-    fn recv_new_cid_frame(
-        &mut self,
-        frame: NewConnectionIdFrame,
-    ) -> Result<Option<ResetToken>, Error> {
+    fn recv_new_cid_frame(&mut self, frame: NewConnectionIdFrame) -> Result<Option<ResetToken>, Error> {
         let seq = frame.sequence();
         let retire_prior_to = frame.retire_prior_to();
         // Discard frames for CIDs already retired by the peer.
@@ -115,17 +108,11 @@ where
             .iter()
             .flatten()
             .filter(|(sequence, _, _)| {
-                *sequence >= retire_prior_to
-                    && self
-                        .ready_cells
-                        .get(*sequence)
-                        .is_none_or(|cell| !cell.is_retired())
+                *sequence >= retire_prior_to && self.ready_cells.get(*sequence).is_none_or(|cell| !cell.is_retired())
             })
             .count() as u64
             + u64::from(self.cid_deque.get(seq).is_none_or(Option::is_none));
-        let active_cid_limit = self
-            .active_cid_limit
-            .expect("local CID limit set before 1-RTT");
+        let active_cid_limit = self.active_cid_limit.expect("local CID limit set before 1-RTT");
         if active_len > active_cid_limit {
             return Err(QuicError::new(
                 ErrorKind::ConnectionIdLimit,
@@ -168,9 +155,7 @@ where
                 drop(guard);
 
                 let apply = self.pending_cells.pop_front().unwrap();
-                self.ready_cells
-                    .push_back(apply)
-                    .expect("Sequence of new connection ID should never exceed the limit");
+                self.ready_cells.push_back(apply).expect("Sequence of new connection ID should never exceed the limit");
                 self.cursor += 1;
             } else {
                 break;
@@ -195,13 +180,9 @@ where
         if self.ready_cells.is_empty() {
             // it is not necessary to resize the deque, because all elements will be drained
             // // self.cid_cells.resize(seq, ArcCidCell::default()).expect("");
-            self.retired_cids
-                .send_frame((self.ready_cells.offset()..tomb_seq).map(|seq| {
-                    RetireConnectionIdFrame::new(
-                        VarInt::from_u64(seq)
-                            .expect("Sequence of connection id is very hard to exceed VARINT_MAX"),
-                    )
-                }));
+            self.retired_cids.send_frame((self.ready_cells.offset()..tomb_seq).map(|seq| {
+                RetireConnectionIdFrame::new(VarInt::from_u64(seq).expect("Sequence of connection id is very hard to exceed VARINT_MAX"))
+            }));
             self.ready_cells.reset_offset(tomb_seq);
         } else {
             let actual_applied = self.ready_cells.largest();
@@ -216,14 +197,11 @@ where
             if actual_applied < tomb_seq {
                 self.ready_cells.reset_offset(tomb_seq);
                 // even the cid that has not been applied is retired right now
-                self.retired_cids
-                    .send_frame((actual_applied..tomb_seq).map(|seq| {
-                        RetireConnectionIdFrame::new(
-                            VarInt::from_u64(seq).expect(
-                                "Sequence of connection id is very hard to exceed VARINT_MAX",
-                            ),
-                        )
-                    }));
+                self.retired_cids.send_frame((actual_applied..tomb_seq).map(|seq| {
+                    RetireConnectionIdFrame::new(
+                        VarInt::from_u64(seq).expect("Sequence of connection id is very hard to exceed VARINT_MAX"),
+                    )
+                }));
             }
         }
     }
@@ -257,18 +235,12 @@ where
 {
     /// Start client handshaking. ODCID is not an issued connection ID.
     pub fn client(odcid: ConnectionId, retired_cids: RETIRED) -> Self {
-        Self(Arc::new(Mutex::new(RemoteCids::new(
-            HandshakeDcid::Odcid(odcid),
-            retired_cids,
-        ))))
+        Self(Arc::new(Mutex::new(RemoteCids::new(HandshakeDcid::Odcid(odcid), retired_cids))))
     }
 
     /// Start server handshaking with the peer's SCID as sequence zero.
     pub fn server(client_scid: ConnectionId, retired_cids: RETIRED) -> Self {
-        Self(Arc::new(Mutex::new(RemoteCids::new(
-            HandshakeDcid::PeerScid(client_scid),
-            retired_cids,
-        ))))
+        Self(Arc::new(Mutex::new(RemoteCids::new(HandshakeDcid::PeerScid(client_scid), retired_cids))))
     }
 
     /// Set this endpoint's advertised limit before receiving NEW_CONNECTION_ID.
@@ -285,10 +257,7 @@ where
     pub fn upgrade(&self) {
         let mut remote = self.0.lock().unwrap();
         if let DcidStage::Handshake(source) = &remote.dcid_stage {
-            assert!(
-                matches!(source.get(), HandshakeDcid::PeerScid(_)),
-                "peer SCID known before handshake confirmation"
-            );
+            assert!(matches!(source.get(), HandshakeDcid::PeerScid(_)), "peer SCID known before handshake confirmation");
             remote.dcid_stage = DcidStage::Allocate;
         }
     }
@@ -373,10 +342,8 @@ where
         let keep = usize::from(!self.is_retired);
         while self.allocated_cids.len() > keep {
             let (seq, _) = self.allocated_cids.pop_back().unwrap();
-            let sequence = VarInt::try_from(seq)
-                .expect("Sequence of connection id is very hard to exceed VARINT_MAX");
-            self.retired_cids
-                .send_frame([RetireConnectionIdFrame::new(sequence)]);
+            let sequence = VarInt::try_from(seq).expect("Sequence of connection id is very hard to exceed VARINT_MAX");
+            self.retired_cids.send_frame([RetireConnectionIdFrame::new(sequence)]);
         }
     }
 

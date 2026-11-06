@@ -30,12 +30,7 @@ struct Listener<TX> {
 
 impl<TX> Listener<TX> {
     fn new() -> Self {
-        Self {
-            bi_streams: VecDeque::with_capacity(4),
-            uni_streams: VecDeque::with_capacity(2),
-            bi_waker: None,
-            uni_waker: None,
-        }
+        Self { bi_streams: VecDeque::with_capacity(4), uni_streams: VecDeque::with_capacity(2), bi_waker: None, uni_waker: None }
     }
 
     fn push_bi_stream(&mut self, sid: StreamId, stream: (ArcRecver<TX>, ArcSender<TX>)) {
@@ -69,10 +64,7 @@ impl<TX> Listener<TX> {
         }
     }
 
-    fn poll_accept_recv_stream(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(StreamId, Reader<TX>), QuicError>> {
+    fn poll_accept_recv_stream(&mut self, cx: &mut Context<'_>) -> Poll<Result<(StreamId, Reader<TX>), QuicError>> {
         if let Some((sid, recver)) = self.uni_streams.pop_front() {
             // recver.update_window(rcv_buf_size);
             Poll::Ready(Ok((sid, Reader::new(recver))))
@@ -100,10 +92,7 @@ impl<TX> ArcListener<TX> {
     }
 
     pub fn accept_bi_stream<'a>(&'a self, params: &'a ArcParameters) -> AcceptBiStream<'a, TX> {
-        AcceptBiStream {
-            listener: self,
-            params,
-        }
+        AcceptBiStream { listener: self, params }
     }
 
     pub fn accept_uni_stream(&self) -> AcceptUniStream<'_, TX> {
@@ -122,10 +111,7 @@ impl<TX> ArcListener<TX> {
         }
     }
 
-    pub fn poll_accept_uni_stream(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(StreamId, Reader<TX>), QuicError>> {
+    pub fn poll_accept_uni_stream(&self, cx: &mut Context<'_>) -> Poll<Result<(StreamId, Reader<TX>), QuicError>> {
         match self.0.lock().unwrap().as_mut() {
             Ok(set) => set.poll_accept_recv_stream(cx),
             Err(e) => Poll::Ready(Err(e.clone())),

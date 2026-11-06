@@ -197,18 +197,13 @@ where
             ),
             // [sid] + rev([..sid]) + rev([sid+1..])
             Some((sid, tokens)) => poll_streams(
-                Option::into_iter(
-                    output
-                        .outgoings
-                        .get(sid)
-                        .map(|outgoing| (*sid, outgoing, *tokens)),
-                )
-                .chain(
-                    (output.outgoings.range(..sid).rev())
-                        .chain(output.outgoings.range((Excluded(sid), Unbounded)).rev())
-                        .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS)),
-                )
-                .filter(|(sid, ..)| stream_allowed(sid)),
+                Option::into_iter(output.outgoings.get(sid).map(|outgoing| (*sid, outgoing, *tokens)))
+                    .chain(
+                        (output.outgoings.range(..sid).rev())
+                            .chain(output.outgoings.range((Excluded(sid), Unbounded)).rev())
+                            .map(|(sid, outgoing)| (*sid, outgoing, DEFAULT_TOKENS)),
+                    )
+                    .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
                 credit,
@@ -269,13 +264,7 @@ where
     ///
     /// Actually calls the [`Outgoing::may_loss_data`] method of the corresponding stream.
     pub fn may_loss_data(&self, stream_frame: &StreamFrame) {
-        if let Some((o, _s)) = self
-            .output
-            .streams()
-            .as_mut()
-            .ok()
-            .and_then(|set| set.get(&stream_frame.stream_id()))
-        {
+        if let Some((o, _s)) = self.output.streams().as_mut().ok().and_then(|set| set.get(&stream_frame.stream_id())) {
             o.may_loss_data(stream_frame);
         }
     }
@@ -290,9 +279,7 @@ where
             o.on_reset_acked(reset_frame.stream_id());
             s.shutdown_send();
             if s.is_terminated() {
-                self.stream_ids
-                    .remote
-                    .on_end_of_stream(reset_frame.stream_id());
+                self.stream_ids.remote.on_end_of_stream(reset_frame.stream_id());
             }
         }
         // 如果流是双向的，接收部分的流独立地管理结束。其实是上层应用决定接收的部分是否同时结束
@@ -303,10 +290,7 @@ where
     /// If the correspoding stream is not exist, `accept` the stream.
     ///
     /// Actually calls the [`Incoming::recv_data`] method of the corresponding stream.
-    pub fn recv_data(
-        &self,
-        (stream_frame, body): (StreamFrame, bytes::Bytes),
-    ) -> Result<usize, Error> {
+    pub fn recv_data(&self, (stream_frame, body): (StreamFrame, bytes::Bytes)) -> Result<usize, Error> {
         if self.input.streams().is_err() {
             return Ok(0);
         }
@@ -315,8 +299,7 @@ where
         // 对方必须是发送端，才能发送此帧
         if sid.role() != self.parameters.role() {
             // 对方的sid，看是否跳跃，把跳跃的流给创建好
-            self.try_accept_sid(sid)
-                .map_err(wrapper_error(stream_frame.frame_type()))?;
+            self.try_accept_sid(sid).map_err(wrapper_error(stream_frame.frame_type()))?;
         } else {
             // 我方的sid，那必须是双向流才能收到对方的数据，否则就是错误
             if sid.dir() == Dir::Uni {
@@ -370,8 +353,7 @@ where
                 let sid = reset.stream_id();
                 // 对方必须是发送端，才能发送此帧
                 if sid.role() != self.parameters.role() {
-                    self.try_accept_sid(sid)
-                        .map_err(wrapper_error(reset.frame_type()))?;
+                    self.try_accept_sid(sid).map_err(wrapper_error(reset.frame_type()))?;
                 } else {
                     // 我方创建的流必须是双向流，对方才能发送ResetStream,否则就是错误
                     if sid.dir() == Dir::Uni {
@@ -406,8 +388,7 @@ where
                         )
                         .into());
                     }
-                    self.try_accept_sid(sid)
-                        .map_err(wrapper_error(stop_sending.frame_type()))?;
+                    self.try_accept_sid(sid).map_err(wrapper_error(stop_sending.frame_type()))?;
                 }
 
                 if let Some(final_size) = self
@@ -418,9 +399,8 @@ where
                     .and_then(|set| set.get(&sid))
                     .and_then(|(outgoing, _s)| outgoing.be_stopped(stop_sending.app_err_code()))
                 {
-                    self.ctrl_frames.send_frame([StreamCtlFrame::ResetStream(
-                        stop_sending.reset_stream(VarInt::from_u64(final_size).unwrap()),
-                    )]);
+                    self.ctrl_frames
+                        .send_frame([StreamCtlFrame::ResetStream(stop_sending.reset_stream(VarInt::from_u64(final_size).unwrap()))]);
                 }
             }
             StreamCtlFrame::MaxStreamData(max_stream_data) => {
@@ -436,16 +416,9 @@ where
                         )
                         .into());
                     }
-                    self.try_accept_sid(sid)
-                        .map_err(wrapper_error(max_stream_data.frame_type()))?;
+                    self.try_accept_sid(sid).map_err(wrapper_error(max_stream_data.frame_type()))?;
                 }
-                if let Some((outgoing, _s)) = self
-                    .output
-                    .streams()
-                    .as_ref()
-                    .ok()
-                    .and_then(|set| set.get(&sid))
-                {
+                if let Some((outgoing, _s)) = self.output.streams().as_ref().ok().and_then(|set| set.get(&sid)) {
                     outgoing.update_window(max_stream_data.max_stream_data());
                 }
             }
@@ -453,8 +426,7 @@ where
                 let sid = stream_data_blocked.stream_id();
                 // 对方必须是发送端，才能发送此帧
                 if sid.role() != self.parameters.role() {
-                    self.try_accept_sid(sid)
-                        .map_err(wrapper_error(stream_data_blocked.frame_type()))?;
+                    self.try_accept_sid(sid).map_err(wrapper_error(stream_data_blocked.frame_type()))?;
                 } else {
                     // 我方创建的，必须是双向流，对方才是发送端，才能发出StreamDataBlocked；否则就是错误
                     if sid.dir() == Dir::Uni {
@@ -477,9 +449,7 @@ where
                 _ = self.stream_ids.remote.recv_frame(streams_blocked);
             }
         }
-        self.flow_ctrl
-            .recver
-            .on_new_rcvd(frame_type, sync_fresh_data)
+        self.flow_ctrl.recver.on_new_rcvd(frame_type, sync_fresh_data)
     }
 
     /// Called when a connection error occured.
@@ -525,12 +495,7 @@ where
                 parameters.local(ParameterId::InitialMaxData),
                 Ext(ctrl_frames.clone()),
             ),
-            stream_ids: StreamIds::new(
-                &parameters,
-                Ext(ctrl_frames.clone()),
-                ctrl,
-                tx_wakers.clone(),
-            ),
+            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl, tx_wakers.clone()),
             parameters,
             output: ArcOutput::new(),
             input: ArcInput::default(),
@@ -549,24 +514,12 @@ where
 
             let opened_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
             let opened_uni = self.stream_ids.local.opened_streams(Dir::Uni);
-            let opened_bidi_snd_wnd_size =
-                remote_params.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
-            let opened_uni_snd_wnd_size =
-                remote_params.get::<u64>(ParameterId::InitialMaxStreamDataUni);
-            output.revise_max_stream_data(
-                zero_rtt_rejected,
-                opened_bidi,
-                opened_uni,
-                opened_bidi_snd_wnd_size,
-                opened_uni_snd_wnd_size,
-            );
+            let opened_bidi_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
+            let opened_uni_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataUni);
+            output.revise_max_stream_data(zero_rtt_rejected, opened_bidi, opened_uni, opened_bidi_snd_wnd_size, opened_uni_snd_wnd_size);
             let max_streams_bidi = remote_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
             let max_streams_uni = remote_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
-            self.stream_ids.local.revise_max_streams(
-                zero_rtt_rejected,
-                max_streams_bidi,
-                max_streams_uni,
-            );
+            self.stream_ids.local.revise_max_streams(zero_rtt_rejected, max_streams_bidi, max_streams_uni);
         }
     }
 
@@ -575,9 +528,7 @@ where
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let snd_buf_size = self
-            .parameters
-            .remote(ParameterId::InitialMaxStreamDataBidiRemote);
+        let snd_buf_size = self.parameters.remote(ParameterId::InitialMaxStreamDataBidiRemote);
         self.poll_open_bi_with_limit(cx, snd_buf_size)
     }
 
@@ -594,26 +545,16 @@ where
         };
 
         let arc_sender = self.create_sender(sid, snd_buf_size);
-        let arc_recver = self.create_recver(
-            sid,
-            self.parameters
-                .local(ParameterId::InitialMaxStreamDataBidiLocal),
-        );
+        let arc_recver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataBidiLocal));
         let io_state = IOState::bidirection();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state.clone());
         input.insert(sid, Incoming::new(arc_recver.clone()), io_state);
         self.tx_wakers.wake_all();
-        Poll::Ready(Ok(Some((
-            sid,
-            (Reader::new(arc_recver), Writer::new(arc_sender)),
-        ))))
+        Poll::Ready(Ok(Some((sid, (Reader::new(arc_recver), Writer::new(arc_sender))))))
     }
 
     #[allow(clippy::type_complexity)]
-    pub(super) fn poll_open_uni_stream(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
+    pub(super) fn poll_open_uni_stream(&self, cx: &mut Context<'_>) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
         let snd_buf_size = self.parameters.remote(ParameterId::InitialMaxStreamDataUni);
         self.poll_open_uni_with_limit(cx, snd_buf_size)
     }
@@ -667,11 +608,7 @@ where
             AcceptSid::Old => Ok(()),
             AcceptSid::New(need_create) => {
                 for sid in need_create {
-                    let arc_recver = self.create_recver(
-                        sid,
-                        self.parameters
-                            .local(ParameterId::InitialMaxStreamDataBidiRemote),
-                    );
+                    let arc_recver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataBidiRemote));
                     // buf_size will be revised by Listener::poll_accept_bi_stream
                     let arc_sender = self.create_sender(sid, 0);
                     let io_state = IOState::bidirection();
@@ -699,10 +636,7 @@ where
             AcceptSid::Old => Ok(()),
             AcceptSid::New(need_create) => {
                 for sid in need_create {
-                    let arc_receiver = self.create_recver(
-                        sid,
-                        self.parameters.local(ParameterId::InitialMaxStreamDataUni),
-                    );
+                    let arc_receiver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataUni));
                     let io_state = IOState::receive_only();
                     input.insert(sid, Incoming::new(arc_receiver.clone()), io_state);
                     listener.push_uni_stream(sid, arc_receiver);
@@ -713,12 +647,7 @@ where
     }
 
     fn create_sender(&self, sid: StreamId, buf_size: u64) -> ArcSender<Ext<TX>> {
-        ArcSender::new(
-            sid,
-            buf_size,
-            Ext(self.ctrl_frames.clone()),
-            self.metrics.clone(),
-        )
+        ArcSender::new(sid, buf_size, Ext(self.ctrl_frames.clone()), self.metrics.clone())
     }
 
     fn create_recver(&self, sid: StreamId, buf_size: u64) -> ArcRecver<Ext<TX>> {
@@ -749,9 +678,7 @@ where
         let uni = self.stream_ids.local.opened_streams(Dir::Uni);
         let mut total = 0usize;
         for (_, (stream, _)) in output.outgoings.iter().filter(|(sid, _)| {
-            sid.role() == remote
-                || (sid.dir() == Dir::Bi && sid.id() < bidi)
-                || (sid.dir() == Dir::Uni && sid.id() < uni)
+            sid.role() == remote || (sid.dir() == Dir::Bi && sid.id() < bidi) || (sid.dir() == Dir::Uni && sid.id() < uni)
         }) {
             total = total.saturating_add(stream.fresh_bytes());
             if total >= limit {
@@ -766,11 +693,7 @@ where
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
-        buffer.for_frame(qbase::frame::FrameType::Stream(
-            Offset::Zero,
-            Len::Explicit,
-            Fin::No,
-        ));
+        buffer.for_frame(qbase::frame::FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let requested = self.fresh_bytes_up_to(buffer.remaining_mut());
         let mut credit = self.flow_ctrl.sender.credit(requested);
         if requested > 0 && credit.available() == 0 {
@@ -802,11 +725,7 @@ where
         let start = buffer.meta.nframes;
         loop {
             // A full packet or a lengthless STREAM cannot accept another frame.
-            buffer.for_frame(FrameType::Stream(
-                qbase::frame::Offset::Zero,
-                qbase::frame::Len::Explicit,
-                qbase::frame::Fin::No,
-            ));
+            buffer.for_frame(FrameType::Stream(qbase::frame::Offset::Zero, qbase::frame::Len::Explicit, qbase::frame::Fin::No));
             if buffer.remaining_mut() < 2 {
                 return Poll::Ready(Ok(buffer.meta.nframes - start));
             }

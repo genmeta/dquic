@@ -38,20 +38,14 @@ impl super::EncodeSize for ResetStreamFrame {
     }
 
     fn encoding_size(&self) -> usize {
-        1 + self.stream_id.encoding_size()
-            + self.app_error_code.encoding_size()
-            + self.final_size.encoding_size()
+        1 + self.stream_id.encoding_size() + self.app_error_code.encoding_size() + self.final_size.encoding_size()
     }
 }
 
 impl ResetStreamFrame {
     /// Create a new [`ResetStreamFrame`].
     pub fn new(stream_id: StreamId, app_error_code: VarInt, final_size: VarInt) -> Self {
-        Self {
-            stream_id,
-            app_error_code,
-            final_size,
-        }
+        Self { stream_id, app_error_code, final_size }
     }
 
     /// Return the stream ID of the frame.
@@ -74,14 +68,11 @@ impl ResetStreamFrame {
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub fn be_reset_stream_frame(input: &[u8]) -> nom::IResult<&[u8], ResetStreamFrame> {
     use nom::{Parser, combinator::map};
-    map(
-        (be_streamid, be_varint, be_varint),
-        |(stream_id, app_error_code, final_size)| ResetStreamFrame {
-            stream_id,
-            app_error_code,
-            final_size,
-        },
-    )
+    map((be_streamid, be_varint, be_varint), |(stream_id, app_error_code, final_size)| ResetStreamFrame {
+        stream_id,
+        app_error_code,
+        final_size,
+    })
     .parse(input)
 }
 
@@ -103,10 +94,7 @@ pub struct ResetStreamError {
 
 impl ResetStreamError {
     pub fn new(app_error_code: VarInt, final_size: VarInt) -> Self {
-        Self {
-            app_error_code,
-            final_size,
-        }
+        Self { app_error_code, final_size }
     }
 
     pub fn error_code(&self) -> u64 {
@@ -114,19 +102,12 @@ impl ResetStreamError {
     }
 
     pub fn combine(self, sid: StreamId) -> ResetStreamFrame {
-        ResetStreamFrame {
-            stream_id: sid,
-            app_error_code: self.app_error_code,
-            final_size: self.final_size,
-        }
+        ResetStreamFrame { stream_id: sid, app_error_code: self.app_error_code, final_size: self.final_size }
     }
 }
 
 impl From<&ResetStreamFrame> for ResetStreamError {
     fn from(frame: &ResetStreamFrame) -> Self {
-        Self {
-            app_error_code: frame.app_error_code,
-            final_size: frame.final_size,
-        }
+        Self { app_error_code: frame.app_error_code, final_size: frame.final_size }
     }
 }

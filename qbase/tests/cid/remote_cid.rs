@@ -36,16 +36,12 @@ fn borrowed_cid_value_is_pinned_until_refresh_after_path_retirement() {
     let cid = ConnectionId::from_slice(b"client00");
     let remote = remote(cid, 2, retired.clone());
     let cell = remote.apply_dcid();
-    let Poll::Ready(Some(borrowed)) = cell.poll_borrow(&mut Context::from_waker(Waker::noop()))
-    else {
+    let Poll::Ready(Some(borrowed)) = cell.poll_borrow(&mut Context::from_waker(Waker::noop())) else {
         panic!("initial CID is ready");
     };
     cell.retire();
     assert!(retired.lock().unwrap().is_empty());
-    assert!(matches!(
-        cell.poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(None)
-    ));
+    assert!(matches!(cell.poll_borrow(&mut Context::from_waker(Waker::noop())), Poll::Ready(None)));
     assert_eq!(borrowed, cid);
     cell.refresh();
     assert_eq!(retired.lock().unwrap().len(), 1);
@@ -53,20 +49,12 @@ fn borrowed_cid_value_is_pinned_until_refresh_after_path_retirement() {
 
 #[test]
 fn initial_cid_can_be_retired_before_any_sender_requests_a_cell() {
-    let remote = remote(
-        ConnectionId::from_slice(b"client00"),
-        2,
-        RetiredCids::default(),
-    );
+    let remote = remote(ConnectionId::from_slice(b"client00"), 2, RetiredCids::default());
     let next = ConnectionId::from_slice(b"client01");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into())).unwrap();
     let selected = remote.apply_dcid();
-    assert!(
-        matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Some(cid)) if cid == next)
-    );
+    assert!(matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == next));
 }
 
 #[test]
@@ -76,11 +64,8 @@ fn selected_server_limit_counts_initial_and_new_cids() {
     let cell = remote.apply_dcid();
 
     for seq in 1..8u32 {
-        let frame = NewConnectionIdFrame::new(
-            ConnectionId::from_slice(&u64::from(seq).to_be_bytes()),
-            VarInt::from_u32(seq),
-            VarInt::from_u32(0),
-        );
+        let frame =
+            NewConnectionIdFrame::new(ConnectionId::from_slice(&u64::from(seq).to_be_bytes()), VarInt::from_u32(seq), VarInt::from_u32(0));
         assert!(remote.recv_frame(frame).is_ok());
     }
     assert!(matches!(
@@ -88,11 +73,7 @@ fn selected_server_limit_counts_initial_and_new_cids() {
         Poll::Ready(Some(cid)) if cid == initial
     ));
 
-    let frame = NewConnectionIdFrame::new(
-        ConnectionId::from_slice(b"client08"),
-        VarInt::from_u32(8),
-        VarInt::from_u32(0),
-    );
+    let frame = NewConnectionIdFrame::new(ConnectionId::from_slice(b"client08"), VarInt::from_u32(8), VarInt::from_u32(0));
     assert!(matches!(remote.recv_frame(frame), Err(Error::Quic(error))
         if error.kind() == ErrorKind::ConnectionIdLimit));
 }
@@ -103,19 +84,13 @@ fn construction_leaves_allocation_to_the_first_sender() {
     let next = ConnectionId::from_slice(b"client01");
     let remote = remote(initial, 4, RetiredCids::default());
 
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     let selected = remote.apply_dcid();
-    assert!(
-        matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Some(cid)) if cid == initial)
-    );
+    assert!(matches!(selected.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == initial));
     let other = remote.apply_dcid();
-    assert!(
-        matches!(other.poll_borrow(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Some(cid)) if cid == next)
-    );
+    assert!(matches!(other.poll_borrow(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Some(cid)) if cid == next));
 }
 
 #[test]
@@ -154,38 +129,17 @@ fn test_remote_cids() {
     cid_apply1.refresh();
 
     // A new path waits for its first CID; the existing path keeps its old CID.
-    remote_cids
-        .recv_frame(NewConnectionIdFrame::new(
-            new_dcid,
-            1u32.into(),
-            1u32.into(),
-        ))
-        .unwrap();
+    remote_cids.recv_frame(NewConnectionIdFrame::new(new_dcid, 1u32.into(), 1u32.into())).unwrap();
     assert!(retired_cids.lock().unwrap().is_empty());
     let cid_apply2 = remote_cids.apply_dcid();
     assert!(cid_apply2.poll_borrow(&mut cx).is_pending());
-    assert_eq!(
-        cid_apply0.poll_borrow(&mut cx),
-        Poll::Ready(Some(initial_dcid))
-    );
+    assert_eq!(cid_apply0.poll_borrow(&mut cx), Poll::Ready(Some(initial_dcid)));
     cid_apply0.refresh();
     let replacement = ConnectionId::random_gen(8);
-    remote_cids
-        .recv_frame(NewConnectionIdFrame::new(
-            replacement,
-            2u32.into(),
-            1u32.into(),
-        ))
-        .unwrap();
-    assert_eq!(
-        cid_apply0.poll_borrow(&mut cx),
-        Poll::Ready(Some(replacement))
-    );
+    remote_cids.recv_frame(NewConnectionIdFrame::new(replacement, 2u32.into(), 1u32.into())).unwrap();
+    assert_eq!(cid_apply0.poll_borrow(&mut cx), Poll::Ready(Some(replacement)));
     cid_apply0.refresh();
-    assert_eq!(
-        &*retired_cids.lock().unwrap(),
-        &[RetireConnectionIdFrame::new(0u32.into())]
-    );
+    assert_eq!(&*retired_cids.lock().unwrap(), &[RetireConnectionIdFrame::new(0u32.into())]);
     assert!(cid_apply2.poll_borrow(&mut cx).is_pending());
 }
 
@@ -196,9 +150,7 @@ fn test_retire_in_remote_cids() {
     let remote_cids = remote(initial_dcid, 8, retired_cids.clone());
     let cid_apply0 = remote_cids.apply_dcid();
 
-    let cids: Vec<_> = std::iter::once(initial_dcid)
-        .chain((1..8).map(|_| ConnectionId::random_gen(8)))
-        .collect();
+    let cids: Vec<_> = std::iter::once(initial_dcid).chain((1..8).map(|_| ConnectionId::random_gen(8))).collect();
     // Leave replacement sequences 4..6 missing until after retirement.
     for seq in (1..4).chain(7..8) {
         let cid = cids[seq as usize];
@@ -216,9 +168,7 @@ fn test_retire_in_remote_cids() {
         panic!("second CID is ready");
     };
 
-    remote_cids
-        .recv_frame(NewConnectionIdFrame::new(cids[7], 7u32.into(), 4u32.into()))
-        .unwrap();
+    remote_cids.recv_frame(NewConnectionIdFrame::new(cids[7], 7u32.into(), 4u32.into())).unwrap();
     // delay retire cid
     assert_eq!(retired_cids.0.lock().unwrap().len(), 2);
 
@@ -230,13 +180,7 @@ fn test_retire_in_remote_cids() {
     assert_eq!(borrowed1, cids[1]);
 
     for seq in 4..7 {
-        remote_cids
-            .recv_frame(NewConnectionIdFrame::new(
-                cids[seq as usize],
-                VarInt::from_u32(seq),
-                4u32.into(),
-            ))
-            .unwrap();
+        remote_cids.recv_frame(NewConnectionIdFrame::new(cids[seq as usize], VarInt::from_u32(seq), 4u32.into())).unwrap();
     }
     assert_eq!(retired_cids.0.lock().unwrap().len(), 2);
     cid_apply0.refresh();
@@ -264,10 +208,7 @@ fn test_retire_in_remote_cids() {
     cid_apply1.refresh();
     cid_apply1.retire();
     assert_eq!(retired_cids.lock().unwrap().len(), 1);
-    assert_eq!(
-        retired_cids.0.lock().unwrap().pop(),
-        Some(RetireConnectionIdFrame::new(VarInt::from_u32(5)))
-    );
+    assert_eq!(retired_cids.0.lock().unwrap().pop(), Some(RetireConnectionIdFrame::new(VarInt::from_u32(5))));
 }
 
 #[test]
@@ -285,9 +226,7 @@ fn test_retire_without_apply() {
         remote_cids.recv_frame(frame).unwrap();
     }
 
-    remote_cids
-        .recv_frame(NewConnectionIdFrame::new(cids[7], 7u32.into(), 4u32.into()))
-        .unwrap();
+    remote_cids.recv_frame(NewConnectionIdFrame::new(cids[7], 7u32.into(), 4u32.into())).unwrap();
     assert_eq!(retired_cids.0.lock().unwrap().len(), 4);
 
     let cid_apply1 = remote_cids.apply_dcid();

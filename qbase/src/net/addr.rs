@@ -27,13 +27,8 @@ impl From<u8> for Kind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EndpointAddr {
-    Direct {
-        addr: SocketAddr,
-    },
-    Mediate {
-        agent: SocketAddr,
-        outer: SocketAddr,
-    },
+    Direct { addr: SocketAddr },
+    Mediate { agent: SocketAddr, outer: SocketAddr },
 }
 
 fn is_globally_routable_ipv4(addr: Ipv4Addr) -> bool {
@@ -67,10 +62,8 @@ fn is_globally_routable_ipv6(addr: Ipv6Addr) -> bool {
 
     match segments {
         [0x2001, second, third, fourth, fifth, sixth, seventh, eighth] if second < 0x0200 => {
-            matches!(
-                (second, third, fourth, fifth, sixth, seventh, eighth),
-                (1, 0, 0, 0, 0, 0, 1..=3)
-            ) || second == 3
+            matches!((second, third, fourth, fifth, sixth, seventh, eighth), (1, 0, 0, 0, 0, 0, 1..=3))
+                || second == 3
                 || second == 4 && third == 0x0112
                 || (0x20..=0x3f).contains(&second)
         }
@@ -118,9 +111,7 @@ impl EndpointAddr {
         };
         match self {
             Self::Direct { addr } => usable_addr(*addr),
-            Self::Mediate { agent, outer } => {
-                usable_addr(*agent) && usable_addr(*outer) && agent.is_ipv4() == outer.is_ipv4()
-            }
+            Self::Mediate { agent, outer } => usable_addr(*agent) && usable_addr(*outer) && agent.is_ipv4() == outer.is_ipv4(),
         }
     }
 
@@ -145,18 +136,11 @@ impl EndpointAddr {
             EndpointAddr::Direct { addr } => match addr.ip() {
                 IpAddr::V4(ip) if ip.is_loopback() => Some(Scope::Loopback),
                 IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Some(Scope::Internal),
-                IpAddr::V6(ip)
-                    if ip.is_loopback()
-                        || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()) =>
-                {
-                    Some(Scope::Loopback)
-                }
+                IpAddr::V6(ip) if ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()) => Some(Scope::Loopback),
                 IpAddr::V6(ip)
                     if ip.is_unique_local()
                         || ip.is_unicast_link_local()
-                        || ip
-                            .to_ipv4_mapped()
-                            .is_some_and(|ip| ip.is_private() || ip.is_link_local()) =>
+                        || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_private() || ip.is_link_local()) =>
                 {
                     Some(Scope::Internal)
                 }
@@ -183,20 +167,10 @@ impl EndpointAddr {
 
     pub fn encoding_size(&self) -> usize {
         match self {
-            EndpointAddr::Direct {
-                addr: SocketAddr::V4(_),
-            } => 2 + 4,
-            EndpointAddr::Direct {
-                addr: SocketAddr::V6(_),
-            } => 2 + 16,
-            EndpointAddr::Mediate {
-                agent: SocketAddr::V4(_),
-                outer: SocketAddr::V4(_),
-            } => 2 + 4 + 2 + 4,
-            EndpointAddr::Mediate {
-                agent: SocketAddr::V6(_),
-                outer: SocketAddr::V6(_),
-            } => 2 + 16 + 2 + 16,
+            EndpointAddr::Direct { addr: SocketAddr::V4(_) } => 2 + 4,
+            EndpointAddr::Direct { addr: SocketAddr::V6(_) } => 2 + 16,
+            EndpointAddr::Mediate { agent: SocketAddr::V4(_), outer: SocketAddr::V4(_) } => 2 + 4 + 2 + 4,
+            EndpointAddr::Mediate { agent: SocketAddr::V6(_), outer: SocketAddr::V6(_) } => 2 + 16 + 2 + 16,
             _ => unimplemented!("Unix socket addresses are not supported"),
         }
     }
@@ -211,10 +185,7 @@ impl<T: BufMut> WriteEndpointAddr for T {
         use crate::net::WriteSocketAddr;
         match endpoint {
             EndpointAddr::Direct { addr } => self.put_socket_addr(&addr),
-            EndpointAddr::Mediate {
-                agent,
-                outer: inner,
-            } => {
+            EndpointAddr::Mediate { agent, outer: inner } => {
                 self.put_socket_addr(&agent);
                 self.put_socket_addr(&inner);
             }
@@ -222,11 +193,7 @@ impl<T: BufMut> WriteEndpointAddr for T {
     }
 }
 
-pub fn be_endpoint_addr(
-    input: &[u8],
-    family: Family,
-    kind: Kind,
-) -> nom::IResult<&[u8], EndpointAddr> {
+pub fn be_endpoint_addr(input: &[u8], family: Family, kind: Kind) -> nom::IResult<&[u8], EndpointAddr> {
     match kind {
         Kind::Direct => {
             let (remain, addr) = be_socket_addr(input, family)?;

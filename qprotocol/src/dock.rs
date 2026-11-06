@@ -35,10 +35,7 @@ impl Dock {
     }
 
     pub fn new(topology: Arc<Topology>) -> Arc<Self> {
-        Arc::new(Self {
-            sockets: DashMap::new(),
-            topology,
-        })
+        Arc::new(Self { sockets: DashMap::new(), topology })
     }
 
     pub fn topology(&self) -> &Arc<Topology> {
@@ -83,10 +80,7 @@ impl Dock {
             }
         });
         let handle = task.abort_handle();
-        let registration = SocketRegistration {
-            socket: registered,
-            task,
-        };
+        let registration = SocketRegistration { socket: registered, task };
         match entry {
             Entry::Occupied(mut entry) => {
                 entry.insert(registration);
@@ -115,11 +109,7 @@ impl Dock {
     }
 
     pub fn remove_bound(&self, bound: SocketAddr) -> bool {
-        let Some(handle) = self
-            .sockets
-            .get(&bound)
-            .map(|registration| registration.task.abort_handle())
-        else {
+        let Some(handle) = self.sockets.get(&bound).map(|registration| registration.task.abort_handle()) else {
             return false;
         };
         self.remove_registration(bound, handle.id())
@@ -141,9 +131,7 @@ impl Dock {
 
     fn cleanup(&self, bound: SocketAddr, registration: &SocketRegistration) {
         self.topology.quic().unregister(bound);
-        self.topology
-            .stun()
-            .unregister_socket(bound, &registration.socket);
+        self.topology.stun().unregister_socket(bound, &registration.socket);
         registration.task.abort();
     }
 
@@ -168,11 +156,7 @@ impl Dock {
     }
 
     pub fn shutdown(&self) {
-        let tasks = self
-            .sockets
-            .iter()
-            .map(|entry| (*entry.key(), entry.task.abort_handle()))
-            .collect::<Vec<_>>();
+        let tasks = self.sockets.iter().map(|entry| (*entry.key(), entry.task.abort_handle())).collect::<Vec<_>>();
         for (bound, handle) in tasks {
             self.remove_registration(bound, handle.id());
         }

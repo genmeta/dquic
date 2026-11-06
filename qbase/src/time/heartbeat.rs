@@ -34,26 +34,14 @@ impl Heartbeat {
         let heartbeat_interval = if max_idle_timeout == Duration::ZERO {
             DEFAULT_HEARTBEAT_INTERVAL
         } else {
-            max_idle_timeout
-                .div_f32(3.0)
-                .min(Duration::from_secs(1))
-                .max(DEFAULT_HEARTBEAT_INTERVAL)
+            max_idle_timeout.div_f32(3.0).min(Duration::from_secs(1)).max(DEFAULT_HEARTBEAT_INTERVAL)
         };
-        Self {
-            metric: IdleSince::new(),
-            counter: 0,
-            defer_idle_timeout,
-            heartbeat_interval,
-            waker: None,
-        }
+        Self { metric: IdleSince::new(), counter: 0, defer_idle_timeout, heartbeat_interval, waker: None }
     }
 
     pub fn adapt_max_idle_timeout(&mut self, max_idle_timeout: Duration) {
         if max_idle_timeout != Duration::ZERO {
-            self.heartbeat_interval = max_idle_timeout
-                .div_f32(3.0)
-                .max(Duration::from_secs(1))
-                .min(self.heartbeat_interval);
+            self.heartbeat_interval = max_idle_timeout.div_f32(3.0).max(Duration::from_secs(1)).min(self.heartbeat_interval);
 
             if let Some(waker) = self.waker.take() {
                 waker.wake();
@@ -75,15 +63,12 @@ impl Heartbeat {
 
     pub fn time_to_heartbeat(&self) -> Duration {
         let now = Instant::now();
-        if self.defer_idle_timeout.is_zero()
-            || self.heartbeat_interval.is_zero()
-            || self.metric.timeout_after(now, self.defer_idle_timeout)
+        if self.defer_idle_timeout.is_zero() || self.heartbeat_interval.is_zero() || self.metric.timeout_after(now, self.defer_idle_timeout)
         {
             return Duration::from_millis(100);
         }
         let next = u32::try_from(self.counter.saturating_add(1)).unwrap_or(u32::MAX);
-        self.metric
-            .expires_in(now, self.heartbeat_interval.saturating_mul(next))
+        self.metric.expires_in(now, self.heartbeat_interval.saturating_mul(next))
     }
 
     pub fn stop(&mut self) {
@@ -99,11 +84,7 @@ impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
         PacketContent::JustPing
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         if !self.time_to_heartbeat().is_zero() {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
@@ -120,10 +101,7 @@ impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
 impl ArcHeartbeat {
     /// Starts a detached heartbeat task. Requires a Tokio runtime with time enabled.
     pub fn new(defer_idle_timeout: Duration, max_idle_timeout: Duration) -> Self {
-        let heartbeat = Self(Arc::new(Mutex::new(Ok(Heartbeat::new(
-            defer_idle_timeout,
-            max_idle_timeout,
-        )))));
+        let heartbeat = Self(Arc::new(Mutex::new(Ok(Heartbeat::new(defer_idle_timeout, max_idle_timeout)))));
         tokio::spawn(heartbeat.clone().run());
         heartbeat
     }
@@ -196,11 +174,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcHeartbeat {
         PacketContent::JustPing
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         let mut guard = self.0.lock().unwrap();
         match guard.as_mut() {
             Ok(heartbeat) => heartbeat.poll_dump(cx, buffer),
@@ -227,10 +201,8 @@ mod tests {
         let limits_length = 1;
         let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
         let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-        let result = heartbeat.poll_dump(
-            &mut Context::from_waker(waker),
-            &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-        );
+        let result = heartbeat
+            .poll_dump(&mut Context::from_waker(waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
         if matches!(result, Poll::Ready(Ok(1))) {
             assert_eq!(&bytes[..], &[0x01]);
             assert!(frames.is_empty());
@@ -244,10 +216,7 @@ mod tests {
     // The public constructor and adaptation clamp the interval above zero.
     #[tokio::test(start_paused = true)]
     async fn zero_interval_disables_heartbeats() {
-        let mut heartbeat = Heartbeat {
-            heartbeat_interval: Duration::ZERO,
-            ..Heartbeat::new(Duration::from_secs(30), Duration::ZERO)
-        };
+        let mut heartbeat = Heartbeat { heartbeat_interval: Duration::ZERO, ..Heartbeat::new(Duration::from_secs(30), Duration::ZERO) };
         heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now());
         tokio::time::advance(Duration::from_secs(100)).await;
         assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());

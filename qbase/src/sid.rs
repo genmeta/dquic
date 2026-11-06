@@ -103,13 +103,7 @@ impl StreamId {
 
 impl fmt::Display for StreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} side {} stream {}",
-            self.role(),
-            self.dir(),
-            self.id()
-        )
+        write!(f, "{} side {} stream {}", self.role(), self.dir(), self.id())
     }
 }
 
@@ -211,11 +205,7 @@ impl<C: ?Sized + ControlStreamsConcurrency> ControlStreamsConcurrency for Box<C>
 }
 
 pub trait ProductStreamsConcurrencyController: Send + Sync {
-    fn init(
-        &self,
-        init_max_bidi_streams: u64,
-        init_max_uni_streams: u64,
-    ) -> Box<dyn ControlStreamsConcurrency>;
+    fn init(&self, init_max_bidi_streams: u64, init_max_uni_streams: u64) -> Box<dyn ControlStreamsConcurrency>;
 }
 
 impl<F, C> ProductStreamsConcurrencyController for F
@@ -224,11 +214,7 @@ where
     C: ControlStreamsConcurrency + 'static,
 {
     #[inline]
-    fn init(
-        &self,
-        init_max_bidi_streams: u64,
-        init_max_uni_streams: u64,
-    ) -> Box<dyn ControlStreamsConcurrency> {
+    fn init(&self, init_max_bidi_streams: u64, init_max_uni_streams: u64) -> Box<dyn ControlStreamsConcurrency> {
         Box::new((self)(init_max_bidi_streams, init_max_uni_streams))
     }
 }
@@ -256,12 +242,7 @@ where
     /// Create a new [`StreamIds`] from the connection's transport parameters.
     ///
     /// Peer parameters limit locally opened streams; local parameters limit peer-opened streams.
-    pub fn new(
-        parameters: &ArcParameters,
-        sid_frames_tx: T,
-        ctrl: Box<dyn ControlStreamsConcurrency>,
-        tx_wakers: ArcSendWakers,
-    ) -> Self {
+    pub fn new(parameters: &ArcParameters, sid_frames_tx: T, ctrl: Box<dyn ControlStreamsConcurrency>, tx_wakers: ArcSendWakers) -> Self {
         let local = ArcLocalStreamIds::new(
             parameters.role(),
             parameters.remote(ParameterId::InitialMaxStreamsBidi),

@@ -23,10 +23,7 @@ struct RawDatagramWriter {
 
 impl RawDatagramWriter {
     fn new() -> Self {
-        Self {
-            datagrams: VecDeque::new(),
-            tx_wakers: ArcSendWakers::default(),
-        }
+        Self { datagrams: VecDeque::new(), tx_wakers: ArcSendWakers::default() }
     }
 }
 
@@ -50,15 +47,9 @@ impl DatagramOutgoing {
         let _writer = guard.as_mut().map_err(|e| e.clone())?;
         if max_datagram_frame_size == 0 {
             tracing::error!("   Cause by: DatagramOutgoing::new_writer");
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Unreliable Datagram Extension was disenabled by peer's parameters",
-            ));
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "Unreliable Datagram Extension was disenabled by peer's parameters"));
         }
-        Ok(DatagramWriter {
-            writer: self.0.clone(),
-            max_datagram_frame_size: max_datagram_frame_size as _,
-        })
+        Ok(DatagramWriter { writer: self.0.clone(), max_datagram_frame_size: max_datagram_frame_size as _ })
     }
 
     // Reference encoder used to check DATAGRAM length and padding decisions.
@@ -153,11 +144,7 @@ impl DatagramWriter {
                     tracing::error!("   Cause by: DatagramWriter::send_bytes");
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!(
-                            "data size {} exceeds the limit {}",
-                            data.len(),
-                            self.max_datagram_frame_size
-                        ),
+                        format!("data size {} exceeds the limit {}", data.len(), self.max_datagram_frame_size),
                     ));
                 }
                 writer.tx_wakers.wake_all();
@@ -276,10 +263,7 @@ mod tests {
 
         let mut buffer = [0; 1024];
         let expected_frame = DatagramFrame::new(true, VarInt::try_from(data.len()).unwrap());
-        assert_eq!(
-            outgoing.try_read_datagram(&mut buffer),
-            Some((expected_frame, 1 + 1 + data.len()))
-        );
+        assert_eq!(outgoing.try_read_datagram(&mut buffer), Some((expected_frame, 1 + 1 + data.len())));
 
         let mut expected_buffer = [0; 1024];
         {
@@ -298,10 +282,7 @@ mod tests {
         writer.send_bytes(data.clone()).unwrap();
 
         let mut buffer = [0; 1024];
-        assert_eq!(
-            outgoing.try_read_datagram(&mut buffer[0..12]),
-            Some((DatagramFrame::new(false, VarInt::from_u32(11)), 12))
-        );
+        assert_eq!(outgoing.try_read_datagram(&mut buffer[0..12]), Some((DatagramFrame::new(false, VarInt::from_u32(11)), 12)));
 
         let mut expected_buffer = [0; 1024];
         {
@@ -337,10 +318,7 @@ mod tests {
         writer.send_bytes(data.clone()).unwrap();
 
         let mut buffer = [0; 1024];
-        assert_eq!(
-            outgoing.try_read_datagram(&mut buffer[..data.len() + 2]),
-            Some((DatagramFrame::new(false, data_len), data.len() + 2))
-        );
+        assert_eq!(outgoing.try_read_datagram(&mut buffer[..data.len() + 2]), Some((DatagramFrame::new(false, data_len), data.len() + 2)));
 
         let mut expected_buffer = [0; 1024];
         {
@@ -360,11 +338,7 @@ mod tests {
         for (length, capacity) in [(11, 12), (64, 66), (64, 100)] {
             let data = Bytes::from(vec![b'a'; length]);
             let expected = DatagramOutgoing::new();
-            expected
-                .new_writer(1024)
-                .unwrap()
-                .send_bytes(data.clone())
-                .unwrap();
+            expected.new_writer(1024).unwrap().send_bytes(data.clone()).unwrap();
             let mut bytes = vec![0; capacity];
             let (_, written) = expected.try_read_datagram(&mut bytes).unwrap();
             let mut source = DatagramOutgoing::new();
@@ -400,14 +374,7 @@ mod tests {
         let outgoing = DatagramOutgoing::new();
         let writer = outgoing.new_writer(1024).unwrap();
 
-        outgoing.on_conn_error(
-            &QuicError::new(
-                ErrorKind::ProtocolViolation,
-                FrameType::Datagram(0).into(),
-                "test",
-            )
-            .into(),
-        );
+        outgoing.on_conn_error(&QuicError::new(ErrorKind::ProtocolViolation, FrameType::Datagram(0).into(), "test").into());
         let writer_guard = writer.writer.lock().unwrap();
         assert!(writer_guard.as_ref().is_err());
     }

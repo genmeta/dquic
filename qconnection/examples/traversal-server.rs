@@ -13,22 +13,14 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .with_target(false)
         .init();
-    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../tests/keychain/localhost/ca.cert"
-    ))?])?;
+    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/ca.cert"))?])?;
     let identity = Endpoint::new(
         "localhost",
-        vec![qtls::CertificateDer::from_pem_slice(include_bytes!(
-            "../tests/keychain/localhost/server.cert"
-        ))?],
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!(
-            "../tests/keychain/localhost/server.key"
-        ))?,
+        vec![qtls::CertificateDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/server.cert"))?],
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("../tests/keychain/localhost/server.key"))?,
         include_bytes!("../tests/keychain/localhost/server.ocsp").to_vec(),
     )?;
     let endpoint = QuicEndpoint::from(identity);

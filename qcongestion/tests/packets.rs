@@ -8,13 +8,7 @@ use tokio::time::Duration;
 mod common;
 
 fn ack(pn: u64) -> AckFrame {
-    AckFrame::new(
-        pn.try_into().unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    )
+    AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None)
 }
 
 #[tokio::test(start_paused = true)]
@@ -27,11 +21,7 @@ async fn does_not_detect_loss_before_any_ack() {
     assert!(recovered.lock().unwrap().is_empty());
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     cc.on_path_lost();
-    assert_eq!(
-        *recovered.lock().unwrap(),
-        [0],
-        "PTO must leave the packet in flight"
-    );
+    assert_eq!(*recovered.lock().unwrap(), [0], "PTO must leave the packet in flight");
 }
 
 #[tokio::test(start_paused = true)]
@@ -49,10 +39,7 @@ async fn only_detects_packets_sent_before_largest_ack() {
     recovered.lock().unwrap().clear();
     tokio::time::advance(Duration::from_secs(3)).await;
     cc.do_tick().unwrap();
-    assert!(
-        recovered.lock().unwrap().is_empty(),
-        "packet 101 is newer than the largest ACK"
-    );
+    assert!(recovered.lock().unwrap().is_empty(), "packet 101 is newer than the largest ACK");
     cc.on_path_lost();
     assert_eq!(*recovered.lock().unwrap(), [101]);
 }
@@ -78,24 +65,12 @@ async fn ack_ranges_match_sparse_sent_packets() {
         cc.on_pkt_sent(Epoch::Data, pn, true, MSS, true, None);
     }
     // The ACK interval contains a million packet numbers but only three local packets.
-    cc.on_ack_rcvd(
-        Epoch::Data,
-        &AckFrame::new(
-            1_000_000u32.into(),
-            0u32.into(),
-            1_000_000u32.into(),
-            vec![],
-            None,
-        ),
-    );
+    cc.on_ack_rcvd(Epoch::Data, &AckFrame::new(1_000_000u32.into(), 0u32.into(), 1_000_000u32.into(), vec![], None));
     tokio::time::advance(cc.get_pto(Epoch::Data) * 2).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
     cc.on_path_lost();
-    assert!(
-        recovered.lock().unwrap().is_empty(),
-        "every sparse packet was acknowledged"
-    );
+    assert!(recovered.lock().unwrap().is_empty(), "every sparse packet was acknowledged");
 }
 
 #[tokio::test(start_paused = true)]

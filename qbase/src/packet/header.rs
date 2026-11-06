@@ -9,8 +9,7 @@ pub mod short;
 
 #[doc(hidden)]
 pub use long::{
-    DataHeader, HandshakeHeader, InitialHeader, LongHeader, RetryHeader, VersionNegotiationHeader,
-    ZeroRttHeader,
+    DataHeader, HandshakeHeader, InitialHeader, LongHeader, RetryHeader, VersionNegotiationHeader, ZeroRttHeader,
     io::{LongHeaderBuilder, WriteSpecific},
 };
 #[doc(hidden)]
@@ -91,11 +90,7 @@ pub mod io {
     /// Parse a packet header from the input buffer,
     /// returns [`Header`] if succeed,
     /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-    pub fn be_header(
-        packet_type: Type,
-        dcid_len: usize,
-        input: &[u8],
-    ) -> nom::IResult<&[u8], Header> {
+    pub fn be_header(packet_type: Type, dcid_len: usize, input: &[u8]) -> nom::IResult<&[u8], Header> {
         match packet_type {
             Type::Long(long_ty) => {
                 let (remain, dcid) = be_connection_id(input)?;
