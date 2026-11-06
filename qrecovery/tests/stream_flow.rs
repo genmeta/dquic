@@ -15,7 +15,7 @@ use qbase::{
         StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer},
     param::{ArcParameters, ClientParameters, ParameterId, ServerParameters},
     role::Role,
     sid::{Dir, StreamId, handy::DemandConcurrency},
@@ -56,17 +56,13 @@ fn collect_with_quota(
 ) -> Vec<GuaranteedFrame> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: usize::MAX,
-        send_quota: quota,
-        credit: 128,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = quota;
+    let limits_length = 128;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = streams.poll_dump(
         &mut Context::from_waker(waker),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     );
     assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
     frames

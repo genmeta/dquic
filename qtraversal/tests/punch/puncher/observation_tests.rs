@@ -78,7 +78,7 @@ struct Encoder;
 impl PunchPacketEncoder for Encoder {
     fn encode_probe<P>(&self, _: P) -> io::Result<BytesMut>
     where
-        P: for<'b> Package<&'b mut BytesMut>,
+        P: for<'b> Package<&'b mut [u8]>,
     {
         Ok(BytesMut::from(&b"probe"[..]))
     }

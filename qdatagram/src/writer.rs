@@ -220,7 +220,7 @@ mod tests {
             task::{Context, Wake, Waker},
         };
 
-        use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
+        use qbase::packet::{GetType, OneRttHeader, Package, PacketBuffer};
         struct Counter(AtomicUsize);
         impl Wake for Counter {
             fn wake(self: Arc<Self>) {
@@ -238,18 +238,13 @@ mod tests {
                 let waker = Waker::from(counter.clone());
                 let mut bytes = bytes::BytesMut::new();
                 let mut frames = Vec::new();
-                let mut limits = Constraints {
-                    flow_ctrl: 0,
-                    send_quota: quota,
-                    credit: 128,
-                    min_size: 0,
-                    max_size: 128,
-                    ..Default::default()
-                };
+                let limits_quota = quota;
+                let limits_length = 128;
                 let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+                let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
                 let result = source.poll_dump(
                     &mut Context::from_waker(&waker),
-                    &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+                    &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
                 );
                 assert_eq!(result.is_pending(), !queued);
                 if queued {
@@ -361,7 +356,7 @@ mod tests {
     fn package_preserves_datagram_length_and_padding_strategy() {
         use std::task::{Context, Poll, Waker};
 
-        use qbase::packet::{Constraints, GetType, OneRttHeader, PacketBuffer};
+        use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
         for (length, capacity) in [(11, 12), (64, 66), (64, 100)] {
             let data = Bytes::from(vec![b'a'; length]);
             let expected = DatagramOutgoing::new();
@@ -375,18 +370,13 @@ mod tests {
             let mut source = DatagramOutgoing::new();
             source.new_writer(1024).unwrap().send_bytes(data).unwrap();
             let mut actual = Vec::new();
-            let mut limits = Constraints {
-                flow_ctrl: 0,
-                send_quota: capacity,
-                credit: capacity,
-                min_size: 0,
-                max_size: capacity,
-                ..Default::default()
-            };
+            let limits_quota = capacity;
+            let limits_length = capacity;
             let mut frames = Vec::new();
+            let mut writer_1 = bytes::BufMut::limit(&mut actual, limits_length);
             let mut buffer = PacketBuffer::new(
-                &mut actual,
-                &mut limits,
+                &mut writer_1,
+                limits_quota,
                 &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,

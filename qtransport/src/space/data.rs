@@ -15,7 +15,7 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{DataHeader, OneRttHeader, PacketNumber, assemble::Package},
 };
-use qcongestion::ArcCC;
+use qcongestion::{ArcCC, Transport as _};
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
@@ -194,8 +194,13 @@ impl Encapsulate for DataSpace {
         };
         let start = frames.len();
         let offset = datagram.position() as usize;
-        let mut packet_limits = super::packet_limits(self.epoch(), cc, datagram);
-        packet_limits.max_size = 1200usize.saturating_sub(offset);
+        let quota = cc
+            .send_quota()
+            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
+                1200
+            } else {
+                0
+            });
         let mut crypto = self.crypto().outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
@@ -206,8 +211,7 @@ impl Encapsulate for DataSpace {
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);
-        let mut writer = &mut datagram.get_mut()[offset..];
-        let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
+        let result = packet.assemble(cx, datagram, quota, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((mut size, min_size)) if size > 0 => {

@@ -12,7 +12,7 @@ use qbase::{
     error::Error,
     frame::io::SendFrame,
     handshake::HandshakeFacts,
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer},
     param::{ArcParameters, ClientParameters, ServerParameters},
     role::Role,
     sid::handy::DemandConcurrency,
@@ -40,24 +40,19 @@ impl Wake for Counter {
 }
 
 fn poll(
-    source: &mut impl Package<BytesMut>,
+    source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
     quota: usize,
     waker: &Waker,
 ) -> Poll<Result<usize, Error>> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 100,
-        send_quota: quota,
-        credit: quota,
-        min_size: 0,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = quota;
+    let limits_length = (128).min(quota);
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     source.poll_dump(
         &mut Context::from_waker(waker),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     )
 }
 

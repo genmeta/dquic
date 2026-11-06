@@ -15,21 +15,18 @@ fn take_validation_frames(path: &qtransport::path::Path) -> Vec<qbase::frame::Fr
     use bytes::BytesMut;
     use qbase::{
         frame::FrameReader,
-        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+        packet::{GetType, OneRttHeader, Package, PacketBuffer},
     };
 
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 256,
-        credit: 256,
-        max_size: 256,
-        ..Default::default()
-    };
+    let limits_quota = 256;
+    let limits_length = 256;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = path.validation.clone().poll_dump(
         &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     );
     assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
     FrameReader::new(bytes.freeze(), ty)

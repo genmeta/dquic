@@ -34,7 +34,7 @@ struct UnusedEncoder;
 impl PunchPacketEncoder for UnusedEncoder {
     fn encode_probe<P>(&self, _: P) -> io::Result<BytesMut>
     where
-        P: for<'b> Package<&'b mut BytesMut>,
+        P: for<'b> Package<&'b mut [u8]>,
     {
         unreachable!("this test only sends reliable address frames")
     }

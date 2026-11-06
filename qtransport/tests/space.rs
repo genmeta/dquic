@@ -336,7 +336,7 @@ async fn data_trait_unregister_removes_all_source_waiters() {
     use bytes::BytesMut;
     use qbase::{
         frame::MaxDataFrame,
-        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+        packet::{GetType, OneRttHeader, Package, PacketBuffer},
     };
 
     #[derive(Default)]
@@ -357,23 +357,26 @@ async fn data_trait_unregister_removes_all_source_waiters() {
         let mut ack = data.rcvd_journal.clone();
         let mut reliable = data.reliable_frames.clone();
         let mut streams = data.streams.clone();
-        let sources: [&mut dyn Package<BytesMut>; 4] =
+        let sources: [&mut dyn for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>; 4] =
             [&mut crypto, &mut ack, &mut reliable, &mut streams];
         for source in sources {
             let mut bytes = BytesMut::new();
-            let mut limits = Constraints {
-                flow_ctrl: 1200,
-                send_quota: 1200,
-                credit: 1200,
-                max_size: 1200,
-                ..Default::default()
-            };
+            let limits_quota = 1200;
+            let limits_length = 1200;
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             assert!(
                 source
                     .poll_dump(
                         &mut Context::from_waker(&waker),
-                        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut Vec::new(), ty, 0, 0),
+                        &mut PacketBuffer::new(
+                            &mut writer_0,
+                            limits_quota,
+                            &mut Vec::new(),
+                            ty,
+                            0,
+                            0
+                        ),
                     )
                     .is_pending()
             );

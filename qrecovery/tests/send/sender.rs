@@ -6,7 +6,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use qbase::{
     frame::{GuaranteedFrame, MaxStreamDataFrame, StreamCtlFrame, io::SendFrame},
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer},
     param::{ArcParameters, ClientParameters, ParameterId, ServerParameters},
     role::Role,
     sid::{Dir, StreamId, handy::DemandConcurrency},
@@ -44,18 +44,14 @@ pub(super) fn stream(window: u64) -> (DataStreams<Broker>, Writer<Ext<Broker>>) 
 fn send(streams: &mut DataStreams<Broker>) -> Vec<GuaranteedFrame> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 1000,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 1200;
+    let limits_length = 1200;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let _ = streams
         .poll_dump(
             &mut Context::from_waker(Waker::noop()),
-            &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+            &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
         )
         .map(Result::unwrap);
     frames

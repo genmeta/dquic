@@ -173,28 +173,20 @@ pub fn seal<H, const N: usize>(
     header: H,
     keys: &qtls::DirectionalKeys,
     journal: &qrecovery::journal::ArcSentJournal,
-    sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
+    sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut [u8]>; N],
 ) -> Result<BytesMut, qbase::error::Error>
 where
     H: qbase::packet::HeaderSize + qbase::packet::GetType + Into<qbase::packet::long::DataHeader>,
     for<'a> &'a mut BytesMut: qbase::packet::header::io::WriteHeader<H>,
 {
-    let mut buffer = BytesMut::with_capacity(1200);
+    let mut buffer = BytesMut::zeroed(1200);
     let pn = journal.next_pn().unwrap();
     let mut frames = Vec::new();
     let mut packet =
         qconnection::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
-    let mut limits = qbase::packet::assemble::Constraints {
-        flow_ctrl: usize::MAX,
-        send_quota: 1200,
-        credit: 1200,
-        min_size: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), std::task::Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
     packet.padding(&mut buffer, 1200 - packet.len());
@@ -376,20 +368,17 @@ pub fn take_heartbeat(path: &qtransport::path::Path) -> bool {
     use std::task::{Context, Poll, Waker};
 
     use bytes::BytesMut;
-    use qbase::packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer};
+    use qbase::packet::{GetType, OneRttHeader, Package, PacketBuffer};
 
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 1,
-        credit: 1,
-        max_size: 1,
-        ..Default::default()
-    };
+    let limits_quota = 1;
+    let limits_length = 1;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     match path.heartbeat.clone().poll_dump(
         &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     ) {
         Poll::Ready(Ok(1)) => {
             assert!(frames.is_empty());

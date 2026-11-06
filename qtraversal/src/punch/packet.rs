@@ -9,10 +9,7 @@ use qbase::{
     Epoch,
     cid::ArcDcid,
     frame::GuaranteedFrame,
-    packet::{
-        DataHeader, OneRttHeader,
-        assemble::{Constraints, Package},
-    },
+    packet::{DataHeader, OneRttHeader, assemble::Package},
 };
 use qtransport::{
     ArcReliableFrames,
@@ -41,7 +38,7 @@ impl ProbeEncoder {
 impl PunchPacketEncoder for ProbeEncoder {
     fn encode_probe<P>(&self, mut frame: P) -> io::Result<BytesMut>
     where
-        P: for<'b> Package<&'b mut BytesMut>,
+        P: for<'b> Package<&'b mut [u8]>,
     {
         let space =
             Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data).ok_or_else(|| {
@@ -63,22 +60,14 @@ impl PunchPacketEncoder for ProbeEncoder {
         else {
             unreachable!("Data space uses 1-RTT keys");
         };
-        let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
+        let mut bytes = BytesMut::zeroed(MAX_PUNCH_PACKET_SIZE);
         let header = OneRttHeader::new(Default::default(), peer_cid);
         let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
         let mut sending = Packet::new(DataHeader::Short(header), pn, key.as_ref());
-        let mut limits = Constraints {
-            flow_ctrl: usize::MAX,
-            send_quota: usize::MAX,
-            credit: usize::MAX,
-            min_size: 0,
-            max_size: MAX_PUNCH_PACKET_SIZE,
-            ..Default::default()
-        };
         match sending.assemble(
             &mut Context::from_waker(Waker::noop()),
-            &mut &mut bytes,
-            &mut limits,
+            &mut std::io::Cursor::new(bytes.as_mut()),
+            usize::MAX,
             &mut frames,
             &mut [&mut frame],
         ) {

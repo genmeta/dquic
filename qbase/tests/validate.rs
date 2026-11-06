@@ -18,9 +18,7 @@ use qbase::{
         route::Pathway,
         validate::{ArcValidation, ArcValidations, Validation},
     },
-    packet::{
-        Assemble, Constraints, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer,
-    },
+    packet::{Assemble, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer},
 };
 
 #[derive(Default)]
@@ -51,21 +49,18 @@ fn credit(validation: &ArcValidation) -> Poll<Result<Option<usize>, Cancelled>> 
 }
 
 fn dump(
-    validation: &mut impl Package<BytesMut>,
+    validation: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
     capacity: usize,
     waker: &Waker,
 ) -> (Poll<Result<usize, Error>>, Vec<Frame<Bytes>>) {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        credit: capacity,
-        send_quota: capacity,
-        max_size: capacity,
-        ..Default::default()
-    };
+    let limits_quota = capacity;
+    let limits_length = capacity;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let (result, written) = {
-        let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+        let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
+        let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
         let result = validation.poll_dump(&mut Context::from_waker(waker), &mut buffer);
         (result, buffer.meta.nframes)
     };
@@ -591,16 +586,13 @@ fn assembly_filters_validation_out_of_long_header_packets() {
     validation.recv_frame(challenge(2)).unwrap();
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        credit: 64,
-        send_quota: 64,
-        max_size: 64,
-        ..Default::default()
-    };
+    let limits_quota = 64;
+    let limits_length = 64;
     let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
         .initial(vec![])
         .get_type();
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+    let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0);
     assert!(
         buffer
             .assemble(

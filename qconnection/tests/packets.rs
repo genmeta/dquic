@@ -356,27 +356,24 @@ async fn close_at_client_stage(wait: ClientWait) {
         if matches!(wait, ClientWait::OneRttKeys) {
             use qbase::{
                 frame::{Frame, FrameReader},
-                packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+                packet::{GetType, OneRttHeader, Package, PacketBuffer},
                 param::ParameterId,
             };
             // EncryptedExtensions supplies the CID limit before 1-RTT keys exist.
             tokio::time::sleep(Duration::from_millis(1)).await;
             let mut bytes = BytesMut::with_capacity(4096);
             let mut frames = Vec::new();
-            let mut limits = Constraints {
-                send_quota: 4096,
-                credit: 4096,
-                max_size: 4096,
-                ..Default::default()
-            };
+            let limits_quota = 4096;
+            let limits_length = 4096;
             let ty = OneRttHeader::new(
                 Default::default(),
                 common::cid_value(&paths.cid_registry.remote.apply_dcid()),
             )
             .get_type();
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let _ = paths.reliable_frames.clone().poll_dump(
                 &mut std::task::Context::from_waker(std::task::Waker::noop()),
-                &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+                &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
             );
             let issued = FrameReader::new(bytes.freeze(), ty)
                 .filter_map(|frame| match frame.unwrap().0 {

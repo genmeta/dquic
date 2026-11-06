@@ -130,21 +130,17 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
 }
 
 pub fn take_reliable(phase: &DataFixture) -> Vec<Frame> {
-    use qbase::packet::{Constraints, GetType, Package, PacketBuffer};
+    use qbase::packet::{GetType, Package, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
-    let mut limits = Constraints {
-        flow_ctrl: usize::MAX,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 1200;
+    let limits_length = 1200;
     let mut frames = Vec::new();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let _ = phase.spaces.data.reliable_frames.clone().poll_dump(
         &mut std::task::Context::from_waker(std::task::Waker::noop()),
         &mut PacketBuffer::new(
-            &mut bytes,
-            &mut limits,
+            &mut writer_0,
+            limits_quota,
             &mut frames,
             OneRttHeader::new(Default::default(), phase.peer_cid()).get_type(),
             0,

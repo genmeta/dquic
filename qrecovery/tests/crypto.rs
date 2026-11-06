@@ -54,22 +54,15 @@ mod tests {
     impl TestPacket {
         fn load(&mut self, source: &mut impl Package<Self>) -> Result<usize, ()> {
             use qbase::packet::{
-                Constraints, PacketBuffer, Type,
+                PacketBuffer, Type,
                 r#type::long::{Type as Long, Ver1},
             };
-            let mut limits = Constraints {
-                flow_ctrl: 0,
-                send_quota: 64,
-                credit: 64,
-                min_size: 0,
-                max_size: 64,
-                ..Default::default()
-            };
+            let limits_quota = 64;
             let written = self.0.len();
             let mut frames = Vec::new();
             let mut buffer = PacketBuffer::new(
                 self,
-                &mut limits,
+                limits_quota,
                 &mut frames,
                 Type::Long(Long::V1(Ver1::INITIAL)),
                 written,
@@ -472,7 +465,7 @@ mod poll_tests {
     use bytes::BytesMut;
     use qbase::{
         handshake::HandshakeFacts,
-        packet::{Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer},
+        packet::{GetType, LongHeaderBuilder, Package, PacketBuffer},
         role::Role,
     };
     use qrecovery::crypto::*;
@@ -491,15 +484,10 @@ mod poll_tests {
         for pass in 0..4 {
             let mut bytes = BytesMut::new();
             let mut frames = Vec::new();
-            let mut limits = Constraints {
-                flow_ctrl: 0,
-                send_quota: 100,
-                credit: 100,
-                min_size: 0,
-                max_size: 100,
-                ..Default::default()
-            };
-            let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+            let limits_quota = 100;
+            let limits_length = 100;
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
+            let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
             if pass == 2 {
                 facts.quit_mp_handshaking();
             }

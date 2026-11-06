@@ -7,7 +7,7 @@ use bytes::BytesMut;
 use qbase::{
     error::{Error, ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, PathChallengeFrame, PingFrame},
-    packet::{Assemble, Constraints, GetType, LongHeaderBuilder, Package, PacketBuffer, Type},
+    packet::{Assemble, GetType, LongHeaderBuilder, Package, PacketBuffer, Type},
 };
 
 enum Output {
@@ -26,7 +26,7 @@ struct Source<'a> {
     calls: &'a RefCell<Vec<u8>>,
 }
 
-impl Package<BytesMut> for Source<'_> {
+impl<B: bytes::BufMut + ?Sized> Package<B> for Source<'_> {
     fn belongs_to(&self, _: Type) -> bool {
         self.allowed
     }
@@ -38,7 +38,7 @@ impl Package<BytesMut> for Source<'_> {
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, BytesMut>,
+        buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         self.calls.borrow_mut().push(self.id);
         match self.output {
@@ -60,19 +60,18 @@ impl Package<BytesMut> for Source<'_> {
     }
 }
 
-fn buffer_test(test: impl FnOnce(&mut PacketBuffer<'_, BytesMut>, &mut Context<'_>)) {
+fn buffer_test(
+    test: impl FnOnce(&mut PacketBuffer<'_, bytes::buf::Limit<&mut BytesMut>>, &mut Context<'_>),
+) {
     let mut bytes = BytesMut::with_capacity(128);
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 128,
-        credit: 128,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = 128;
+    let limits_length = 128;
     let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
         .initial(vec![])
         .get_type();
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
     test(&mut buffer, &mut Context::from_waker(Waker::noop()));
 }
 

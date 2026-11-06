@@ -26,9 +26,10 @@ impl<TX: Clone> Outgoing<TX> {
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
         tokens: usize,
+        credit: &mut usize,
     ) -> Poll<Result<usize, QuicError>> {
         match self.0.sender().as_mut() {
-            Ok(sender) => sender.poll_dump(cx, buffer, tokens),
+            Ok(sender) => sender.poll_dump(cx, buffer, tokens, credit),
             Err(_) => Poll::Ready(Ok(0)),
         }
     }
@@ -40,13 +41,14 @@ impl<TX: Clone> Sender<TX> {
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
         tokens: usize,
+        credit: &mut usize,
     ) -> Poll<Result<usize, QuicError>> {
         let Some((sid, _)) = self.source() else {
             return Poll::Pending;
         };
         buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let capacity = buffer.remaining_mut();
-        let flow_limit = buffer.limits.flow_ctrl();
+        let flow_limit = *credit;
         let predicate = |offset| {
             StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(tokens))
         };
@@ -63,7 +65,7 @@ impl<TX: Clone> Sender<TX> {
             let result = (frame, data.as_slice()).poll_dump(cx, buffer);
             debug_assert!(matches!(result, Poll::Ready(Ok(1))));
             if fresh {
-                buffer.limits.fresh(frame.len());
+                *credit -= frame.len();
             }
         };
         let result = match self {
@@ -301,16 +303,6 @@ impl<TX> Outgoing<TX> {
             Err(_) => return,
         };
         *inner = Err(err.clone());
-    }
-}
-
-impl<TX: Clone, B: BufMut + ?Sized> qbase::packet::Package<B> for Outgoing<TX> {
-    fn poll_dump(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buffer: &mut qbase::packet::PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, qbase::error::Error>> {
-        self.poll_dump_with_tokens(cx, buffer, usize::MAX)
     }
 }
 
