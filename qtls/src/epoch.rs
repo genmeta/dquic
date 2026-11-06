@@ -21,6 +21,19 @@ impl Epoch {
     pub const fn count() -> usize {
         Self::EPOCHS.len()
     }
+
+    /// The next packet-number space in assembly order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is [`Epoch::Data`], the last epoch.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Initial => Self::Handshake,
+            Self::Handshake => Self::Data,
+            Self::Data => panic!("Data is the last epoch"),
+        }
+    }
 }
 
 impl<T> Index<Epoch> for [T]

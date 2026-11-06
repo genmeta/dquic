@@ -113,7 +113,7 @@ async fn clean_stops_idle_expiry_and_releases_paths_spaces_and_recovery() {
     paths.clean();
 
     assert!(paths.entries.lock().unwrap().is_empty());
-    assert!(paths.spaces.read_guard().is_empty());
+    assert!(crate::common::space_epochs(&paths.spaces).is_empty());
     assert!(paths.loss_resender.read_guard().is_empty());
     assert!(initial.keys.get().is_err());
     assert!(paths.idle().timeout().await.is_err());

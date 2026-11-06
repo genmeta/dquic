@@ -38,6 +38,10 @@ pub fn packet_metadata(packets: &[qbase::packet::assemble::Metadata], epoch: qba
     packets.iter().find(|meta| meta.epoch() == epoch).copied()
 }
 
+pub fn space_epochs(spaces: &qtransport::space::ArcSpaces) -> Vec<qbase::Epoch> {
+    qbase::Epoch::EPOCHS.into_iter().filter(|&epoch| spaces.get(epoch).is_some()).collect()
+}
+
 pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     set_roots();
     let provider = Arc::new(qtls::default_provider());
@@ -288,7 +292,7 @@ pub fn observe_close(terminator: &qtransport::terminate::ArcTerminator) -> Arc<C
 
 /// Hold receiver resources independently of the active sending queue in tests.
 pub fn initial_space(spaces: &qtransport::space::ArcSpaces) -> Arc<qtransport::space::Space<qtransport::keys::ArcKeys>> {
-    let initial = qtransport::space::Spaces::get::<qtransport::space::InitialSpace>(&spaces.read_guard(), qbase::Epoch::Initial).unwrap();
+    let initial = spaces.get_as::<qtransport::space::InitialSpace>(qbase::Epoch::Initial).unwrap();
     Arc::new(initial.space.clone())
 }
 

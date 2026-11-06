@@ -1,7 +1,7 @@
 //! One-datagram fixture for receive and recovery tests, using production assembly.
 use qbase::{packet::assemble::Metadata, time::timer::ArcIdleTimer};
 use qprotocol::protocol::quic::QuicProtocol;
-use qtransport::space::{Recover, Spaces, Transmit};
+use qtransport::space::{ArcSpaces, Recover, Transmit};
 
 use super::*;
 
@@ -28,9 +28,9 @@ impl Sender {
         }
         let credit =
             self.path.validation.credit().map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
-        let mut spaces = Spaces(IndexDeque::with_capacity(1));
-        spaces.0.reset_offset(Epoch::Data as u64);
-        spaces.0.push_back(self.transport.data.clone()).unwrap();
+        let spaces = ArcSpaces::default();
+        spaces.retire(Epoch::Handshake);
+        spaces.add(self.transport.data.clone());
         let quota = self.path.cc.send_quota();
         let overhead = QuicProtocol::packet_overhead(self.path.pathway);
         let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead)).min(if quota == 0 {

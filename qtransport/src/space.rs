@@ -35,7 +35,7 @@ pub mod data;
 pub mod handshake;
 pub mod initial;
 
-pub use assemble::{ArcSpaces, Spaces};
+pub use assemble::ArcSpaces;
 pub use data::DataSpace;
 pub use handshake::HandshakeSpace;
 pub use initial::InitialSpace;

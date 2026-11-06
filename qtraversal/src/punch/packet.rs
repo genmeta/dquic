@@ -14,7 +14,7 @@ use qbase::{
 use qtransport::{
     ArcReliableFrames,
     packet::encrypt::Packet,
-    space::{Allocate, ArcSpaces, DataSpace, Keys, Recover, Spaces},
+    space::{Allocate, ArcSpaces, DataSpace, Keys, Recover},
 };
 
 use super::PunchPacketEncoder;
@@ -40,7 +40,9 @@ impl PunchPacketEncoder for ProbeEncoder {
     where
         P: for<'b> Package<&'b mut [u8]>,
     {
-        let space = Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data)
+        let space = self
+            .spaces
+            .get_as::<DataSpace>(Epoch::Data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Data space is not installed"))?;
         let Poll::Ready(Some(peer_cid)) = self.peer_cid.poll_borrow(&mut Context::from_waker(Waker::noop())) else {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "peer CID is unavailable"));

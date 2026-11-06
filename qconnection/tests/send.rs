@@ -78,15 +78,15 @@ fn repeated_assembly_does_not_append_after_close() {
 
 #[tokio::test]
 async fn mixed_packets_record_each_space() {
-    use qtransport::space::{InitialSpace, Spaces};
+    use qtransport::space::{ArcSpaces, InitialSpace};
     let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(false))), None, facts.clone()));
     let handshake = Arc::new(HandshakeSpace::new(Default::default(), initial.keys.clone(), facts.clone()));
     initial.crypto.writer().write_all(b"hello").await.unwrap();
     handshake.crypto.writer().write_all(b"handshake").await.unwrap();
-    let mut spaces = Spaces(qbase::util::IndexDeque::with_capacity(3));
-    spaces.0.push_back(initial.clone()).unwrap();
-    spaces.0.push_back(handshake.clone()).unwrap();
+    let spaces = ArcSpaces::default();
+    spaces.add(initial.clone());
+    spaces.add(handshake.clone());
     let mut bytes = [0; 1200];
     let mut frames = Vec::new();
     let mut cx = Context::from_waker(Waker::noop());
@@ -217,7 +217,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         frame::{CryptoFrame, EncodeSize},
         packet::{GetType, HeaderSize, Package},
     };
-    use qtransport::space::Spaces;
     for (sizes, expected) in [
         ([700, 0, 0], [1200, 0, 0]),
         ([700, 200, 0], [700, 500, 0]),
@@ -228,9 +227,10 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         ([0, 0, 0], [0, 0, 0]),
     ] {
         let [sender, receiver] = common::spaces::pair();
-        let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
-        spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
-        spaces.0.push_back(sender.spaces.data.clone()).unwrap();
+        let spaces = qtransport::space::ArcSpaces::default();
+        spaces.add(sender.paths.spaces.get(Epoch::Initial).unwrap());
+        spaces.add(sender.spaces.handshake.clone());
+        spaces.add(sender.spaces.data.clone());
         let mut sources = Epoch::EPOCHS.map(|epoch| {
             let size = sizes[epoch];
             if size == 0 {
@@ -277,7 +277,8 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         for epoch in Epoch::EPOCHS {
             assert_eq!(packet_metadata(&pns, epoch).is_some(), expected[epoch] != 0);
             if let Some(meta) = packet_metadata(&pns, epoch) {
-                let journal = spaces.0.get(epoch as u64).unwrap().sent_journal().lock_guard();
+                let space = spaces.get(epoch).unwrap();
+                let journal = space.sent_journal().lock_guard();
                 let packet = journal.packet(meta.pn).unwrap();
                 assert_eq!(meta.pktlen, expected[epoch]);
                 assert_eq!(meta.pktlen, packet.size);
@@ -343,13 +344,13 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         frame::{CryptoFrame, PathChallengeFrame},
         packet::Package,
     };
-    use qtransport::space::Spaces;
     for capacity in [1199, 1200] {
         let [sender, _] = common::spaces::pair();
-        let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
-        spaces.0.push_back(sender.spaces.handshake.clone()).unwrap();
-        spaces.0.push_back(sender.spaces.data.clone()).unwrap();
-        spaces.0.pop_front();
+        let spaces = qtransport::space::ArcSpaces::default();
+        spaces.add(sender.paths.spaces.get(Epoch::Initial).unwrap());
+        spaces.add(sender.spaces.handshake.clone());
+        spaces.add(sender.spaces.data.clone());
+        spaces.retire(Epoch::Initial);
         let mut crypto = Some((CryptoFrame::new(0u32.into(), 300u32.into()), bytes::Bytes::from_static(&[1; 300])));
         let mut challenge = Some(PathChallengeFrame::random());
         let mut crypto = (Epoch::Handshake, &mut crypto);
@@ -374,8 +375,8 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         assert_eq!(size == 1200, capacity == 1200);
         assert_eq!(&bytes[capacity..], &vec![0xa5; 1216 - capacity]);
         assert!(frames.is_empty());
-        spaces.0.pop_front();
-        assert_eq!(spaces.0.offset(), 2);
+        spaces.retire(Epoch::Handshake);
+        assert_eq!(common::space_epochs(&spaces), [Epoch::Data]);
         let mut ping = Some(PingFrame);
         let (size, _) = spaces.poll_dump(
             &mut Context::from_waker(Waker::noop()),
@@ -393,14 +394,14 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
 #[test]
 fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     use qbase::packet::{GetDcid, GetScid, GetType, Package};
-    use qtransport::space::{InitialSpace, Spaces};
+    use qtransport::space::{ArcSpaces, InitialSpace};
     let scid = ConnectionId::from_slice(b"local000");
     let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(scid, ArcKeys::new(Arc::new(keys(false))), Some(b"token".to_vec()), facts.clone()));
     let handshake = Arc::new(HandshakeSpace::new(scid, initial.keys.clone(), facts.clone()));
-    let mut spaces = Spaces(qbase::util::IndexDeque::with_capacity(3));
-    spaces.0.push_back(initial.clone()).unwrap();
-    spaces.0.push_back(handshake.clone()).unwrap();
+    let spaces = ArcSpaces::default();
+    spaces.add(initial.clone());
+    spaces.add(handshake.clone());
     let mut bytes = [0; 1200];
     let mut frames = Vec::new();
     let mut cx = Context::from_waker(Waker::noop());
@@ -485,19 +486,16 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
 
 #[test]
 fn ack_only_and_in_flight_packets_keep_metadata_and_empty_attempts_stay_empty() {
-    use qbase::{frame::AckFrame, util::IndexDeque};
-    use qtransport::space::Spaces;
+    use qbase::frame::AckFrame;
+    use qtransport::space::ArcSpaces;
 
-    let mut spaces = Spaces(IndexDeque::with_capacity(1));
-    spaces.0.reset_offset(Epoch::Handshake as u64);
-    spaces
-        .0
-        .push_back(Arc::new(HandshakeSpace::new(
-            Default::default(),
-            ArcKeys::new(Arc::new(keys(false))),
-            crate::common::handshake_facts(Role::Client, false),
-        )))
-        .unwrap();
+    let spaces = ArcSpaces::default();
+    spaces.retire(Epoch::Initial);
+    spaces.add(Arc::new(HandshakeSpace::new(
+        Default::default(),
+        ArcKeys::new(Arc::new(keys(false))),
+        crate::common::handshake_facts(Role::Client, false),
+    )));
     for flight in [false, true] {
         let mut ack = Some(AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None));
         let mut ping = flight.then_some(PingFrame);
@@ -534,13 +532,13 @@ fn ack_only_and_in_flight_packets_keep_metadata_and_empty_attempts_stay_empty() 
 
 #[tokio::test]
 async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
-    use qbase::{frame::AckFrame, util::IndexDeque};
-    use qtransport::space::Spaces;
+    use qbase::frame::AckFrame;
+    use qtransport::space::ArcSpaces;
 
     let [sender, _] = common::spaces::pair();
-    let mut spaces = Spaces(IndexDeque::with_capacity(1));
-    spaces.0.reset_offset(Epoch::Data as u64);
-    spaces.0.push_back(sender.spaces.data.clone()).unwrap();
+    let spaces = ArcSpaces::default();
+    spaces.retire(Epoch::Handshake);
+    spaces.add(sender.spaces.data.clone());
     let (_, mut writer) = sender.spaces.data.streams.open_uni().await.unwrap().unwrap();
     writer.write_all(&[9; 1000]).await.unwrap();
     let mut cx = Context::from_waker(Waker::noop());

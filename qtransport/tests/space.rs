@@ -15,7 +15,7 @@ use qbase::{
 use qevent::quic::recovery::PacketLostTrigger;
 use qtransport::{
     keys::ArcKeys,
-    space::{HandshakeSpace, Space},
+    space::{ArcSpaces, DataSpace, HandshakeSpace, InitialSpace, Space},
 };
 use tokio::{io::AsyncWriteExt, time::Instant};
 
@@ -49,6 +49,58 @@ fn record(space: &Space<ArcKeys<()>>) -> u64 {
     space.sent_journal.on_sealed(pn, None, 0, metadata(space.epoch, &frames), frames.into_iter().map(|frame| frame.try_into().unwrap()));
     space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     pn
+}
+
+#[tokio::test]
+async fn shared_spaces_retire_keys_held_by_existing_handles() {
+    let spaces = ArcSpaces::default();
+    spaces.retire(Epoch::Handshake);
+    let shared = spaces.clone();
+    let data = support::data::data();
+    spaces.add(data.clone());
+    assert!(Arc::ptr_eq(&shared.get_as::<DataSpace>(Epoch::Data).unwrap(), &data));
+    assert!(spaces.get_as::<HandshakeSpace>(Epoch::Data).is_none());
+
+    let held = spaces.get(Epoch::Data).unwrap();
+    shared.retire(Epoch::Data);
+    assert!(spaces.get(Epoch::Data).is_none());
+    assert!(shared.get(Epoch::Data).is_none());
+    assert!(held.pn_and_keys().is_none());
+    assert!(data.keys.get().is_err());
+}
+
+#[tokio::test]
+async fn retiring_early_spaces_preserves_data_and_is_idempotent() {
+    let keys: qtls::BidirectionalKeys = qtls::default_provider()
+        .cipher_suites
+        .iter()
+        .find_map(|suite| suite.tls13().and_then(|suite| suite.quic_suite()))
+        .unwrap()
+        .keys(b"original", tls_backend::Side::Client, tls_backend::quic::Version::V1)
+        .into();
+    let keys = Arc::new(keys);
+    let initial = Arc::new(InitialSpace::new(Default::default(), ArcKeys::new(keys.clone()), None, handshake_facts(false)));
+    let handshake = Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(keys), handshake_facts(false)));
+    let data = support::data::data();
+    let spaces = ArcSpaces::default();
+    spaces.add(initial.clone());
+    spaces.add(handshake.clone());
+    spaces.add(data.clone());
+
+    spaces.retire(Epoch::Handshake);
+    spaces.retire(Epoch::Initial);
+    spaces.retire(Epoch::Handshake);
+    assert!(spaces.get(Epoch::Initial).is_none());
+    assert!(spaces.get(Epoch::Handshake).is_none());
+    assert!(Arc::ptr_eq(&spaces.get_as::<DataSpace>(Epoch::Data).unwrap(), &data));
+    assert!(initial.keys.get().is_err());
+    assert!(handshake.keys.get().is_err());
+    assert!(data.keys.get().is_ok());
+
+    spaces.retire(Epoch::Data);
+    spaces.retire(Epoch::Data);
+    assert!(spaces.get(Epoch::Data).is_none());
+    assert!(data.keys.get().is_err());
 }
 
 #[tokio::test]
