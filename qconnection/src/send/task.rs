@@ -50,9 +50,7 @@ pub(crate) fn cancel_waiters(paths: &Paths, path: &Path) {
     for waker in path.send_waker.drain() {
         let waker = &waker;
         path.cc.cancel(waker);
-        for space in paths.spaces.read_guard().iter() {
-            space.unregister(waker);
-        }
+        paths.spaces.unregister(waker);
         paths.reliable_frames.unregister(waker);
     }
 }

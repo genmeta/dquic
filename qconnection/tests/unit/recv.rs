@@ -511,7 +511,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
 
     // Publish Data only after the server has completed TLS.
     paths.progress.install_data(mature.spaces.data.clone());
-    assert!(paths.spaces.read_guard().get(Epoch::Data as u64).is_some());
+    assert!(paths.spaces.get(Epoch::Data).is_some());
     assert!(super::borrow(&first).is_pending());
     assert!(matches!(super::borrow(&second),
         Poll::Ready(Some(cid)) if cid == mature.peer_cid()));

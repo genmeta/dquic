@@ -18,7 +18,7 @@ use qbase::{
 };
 use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
-use qtransport::{path::Path, space::Spaces};
+use qtransport::{path::Path, space::ArcSpaces};
 use smallvec::SmallVec;
 pub(crate) use task::sending;
 
@@ -36,7 +36,7 @@ pub struct Burst<'a, 'path> {
     frames: &'a mut Vec<GuaranteedFrame>,
     pub(crate) packets: &'a mut BurstPackets,
     pub(crate) dcid: Option<ConnectionId>,
-    spaces: Option<Spaces>,
+    spaces: Option<ArcSpaces>,
 }
 
 impl<'a, 'path> Burst<'a, 'path> {
@@ -54,7 +54,7 @@ impl<'a, 'path> Burst<'a, 'path> {
         if let Some(spaces) = &self.spaces {
             for packets in self.packets.iter_mut() {
                 for meta in packets.drain(..) {
-                    let space = spaces.0.get(meta.epoch() as u64).unwrap();
+                    let space = spaces.get(meta.epoch()).unwrap();
                     space.cancel(meta.pn, &mut std::iter::empty());
                 }
             }
@@ -105,7 +105,7 @@ impl<'a, 'path> Burst<'a, 'path> {
                     let mut packets = [None; 3];
                     for meta in self.packets[index].drain(..) {
                         let epoch = meta.epoch();
-                        let space = spaces.0.get(epoch as u64).unwrap();
+                        let space = spaces.get(epoch).unwrap();
                         space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
                         sent_handshake |= epoch == Epoch::Handshake;
                         packets[epoch] = Some(meta);
@@ -162,7 +162,18 @@ impl Burst<'_, '_> {
 
     fn poll_collect_with_cid(&mut self, cx: &mut Context<'_>, cid: ConnectionId) -> Poll<Result<usize, Error>> {
         let path = self.path;
-        self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
+        // Read later epochs first so concurrent prefix retirement cannot leave a hole.
+        let handles: SmallVec<[_; 3]> = Epoch::EPOCHS.into_iter().rev().filter_map(|epoch| self.paths.spaces.get(epoch)).collect();
+        let spaces = ArcSpaces::default();
+        match handles.last().map(|space| space.epoch()) {
+            Some(Epoch::Handshake) => spaces.retire(Epoch::Initial),
+            Some(Epoch::Data) => spaces.retire(Epoch::Handshake),
+            _ => {}
+        }
+        for space in handles.into_iter().rev() {
+            spaces.add(space);
+        }
+        self.spaces = Some(spaces);
         let credit = match path.validation.poll_credit(cx) {
             Poll::Ready(credit) => credit.map_err(no_viable_path)?.unwrap_or(usize::MAX),
             Poll::Pending => 0,
@@ -191,8 +202,9 @@ impl Burst<'_, '_> {
         } else {
             PacketContent::JustPing
         };
+        let handles = Epoch::EPOCHS.map(|epoch| spaces.get(epoch));
         let mut acks = Epoch::EPOCHS
-            .map(|epoch| (epoch, spaces.0.get(epoch as u64).map(|space| space.rcvd_journal().ack_package(path.cc.need_ack(epoch)))));
+            .map(|epoch| (epoch, handles[epoch].as_ref().map(|space| space.rcvd_journal().ack_package(path.cc.need_ack(epoch)))));
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
         let mut validation = path.validation.clone();
@@ -257,15 +269,14 @@ impl Drop for Burst<'_, '_> {
     }
 }
 
-fn update_amplification_blocked(cc: &mut CongestionController, spaces: &Spaces, dcid: ConnectionId, credit: usize, overhead: usize) {
+fn update_amplification_blocked(cc: &mut CongestionController, spaces: &ArcSpaces, dcid: ConnectionId, credit: usize, overhead: usize) {
     let epoch = cc.pto_epoch();
     let blocked = match credit {
         0 => true,
         usize::MAX => false,
-        _ => epoch
-            .and_then(|epoch| spaces.0.get(epoch as u64))
-            .and_then(|space| space.probe_size(dcid))
-            .is_some_and(|size| credit < size + overhead),
+        _ => {
+            epoch.and_then(|epoch| spaces.get(epoch)).and_then(|space| space.probe_size(dcid)).is_some_and(|size| credit < size + overhead)
+        }
     };
     cc.set_amplification_blocked(blocked);
 }

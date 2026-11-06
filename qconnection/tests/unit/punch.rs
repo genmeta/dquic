@@ -26,14 +26,10 @@ pub(super) use crate::common::spaces::pair;
 use crate::{ArcHandshake, Paths, Scopes, common, common::spaces::take_reliable, recv::receive_1rtt_pkt_and_deliver_frames};
 
 fn encoder(phase: &super::DataFixture) -> ProbeEncoder {
-    let mut spaces = phase.paths.spaces.read_guard().clone();
-    if spaces.get(Epoch::Handshake as u64).is_none() {
-        spaces.push_back(phase.spaces.handshake.clone()).unwrap();
-    }
-    if spaces.get(Epoch::Data as u64).is_none() {
-        spaces.push_back(phase.spaces.data.clone()).unwrap();
-    }
-    ProbeEncoder::new(spaces.into(), phase.paths.cid_registry.remote.apply_dcid())
+    let spaces = qtransport::space::ArcSpaces::default();
+    spaces.retire(Epoch::Handshake);
+    spaces.add(phase.spaces.data.clone());
+    ProbeEncoder::new(spaces, phase.paths.cid_registry.remote.apply_dcid())
 }
 
 #[tokio::test]

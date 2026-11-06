@@ -246,9 +246,7 @@ pub async fn tick(paths: Arc<Paths>) {
     let terminator = paths.terminator.clone();
     loop {
         let now = Instant::now();
-        for space in paths.spaces.read_guard().iter() {
-            space.on_tick(now);
-        }
+        paths.spaces.on_tick(now);
         tokio::select! {
             biased;
             _ = terminator.clone() => break,

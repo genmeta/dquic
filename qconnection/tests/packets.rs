@@ -122,7 +122,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     tokio::pin!(growing);
     assert!(growing.as_mut().now_or_never().is_none());
     assert_eq!(common::cid_value(&paths.cid_registry.remote.apply_dcid()), ConnectionId::from_slice(b"original"));
-    let initial_only = paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_none();
+    let initial_only = paths.spaces.get(qbase::Epoch::Handshake).is_none();
     tls.on_error(qbase::error::QuicError::with_default_fty(qbase::error::ErrorKind::Internal, "stop before server hello").into());
     growing.await;
     assert!(!route_exists(QuicRouter::global(), cid).await);
@@ -222,12 +222,8 @@ async fn close_at_client_stage(wait: ClientWait) {
     router.receive(BytesMut::from(packet.as_ref()), pathway, link, 8);
     let handshake = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_some() {
-                break qtransport::space::Spaces::get::<qtransport::space::HandshakeSpace>(
-                    &paths.spaces.read_guard(),
-                    qbase::Epoch::Handshake,
-                )
-                .unwrap();
+            if paths.spaces.get(qbase::Epoch::Handshake).is_some() {
+                break paths.spaces.get_as::<qtransport::space::HandshakeSpace>(qbase::Epoch::Handshake).unwrap();
             }
             tokio::task::yield_now().await;
         }
@@ -262,7 +258,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             return;
         }
         tokio::task::yield_now().await;
-        assert!(paths.spaces.read_guard().get(qbase::Epoch::Handshake as u64).is_some());
+        assert!(paths.spaces.get(qbase::Epoch::Handshake).is_some());
         assert!(matches!(delivery.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
         if matches!(wait, ClientWait::OneRttKeys) {
             use qbase::{
@@ -305,13 +301,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        assert!(
-            qtransport::space::Spaces::get::<qtransport::space::DataSpace>(&paths.spaces.read_guard(), qbase::Epoch::Data,)
-                .unwrap()
-                .keys
-                .get()
-                .is_ok()
-        );
+        assert!(paths.spaces.get_as::<qtransport::space::DataSpace>(qbase::Epoch::Data).unwrap().keys.get().is_ok());
         assert!(matches!(handshake.crypto.reader().read(&mut [0; 1]).now_or_never(), Some(Err(_))));
         assert!(matches!(handshake.crypto.writer().write(&[]).now_or_never(), Some(Ok(0))));
     }

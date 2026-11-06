@@ -2,29 +2,78 @@
 use std::{
     any::Any,
     io::Cursor,
-    sync::Arc,
-    task::{Context, Poll},
+    sync::{Arc, RwLock},
+    task::{Context, Poll, Waker},
 };
 
 use qbase::{
     Epoch,
     cid::ConnectionId,
     frame::GuaranteedFrame,
+    net::tx::UnregisterWaker,
     packet::{
         PacketContent,
         assemble::{Metadata, Package},
     },
-    util::{ArcIndexDeque, IndexDeque},
+    util::IndexDeque,
 };
 use qcongestion::ArcCC;
 use smallvec::SmallVec;
+use tokio::time::Instant;
 
 use super::Encapsulate;
 
-pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
-pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
+#[derive(Clone)]
+struct Spaces(IndexDeque<Arc<dyn Encapsulate>, 2>);
 
-impl Spaces {
+/// Shared packet-number spaces. Queue membership is accessed through space operations.
+#[derive(Clone)]
+pub struct ArcSpaces(Arc<RwLock<Spaces>>);
+
+impl Default for ArcSpaces {
+    fn default() -> Self {
+        Self(Arc::new(RwLock::new(Spaces(IndexDeque::with_capacity(Epoch::count())))))
+    }
+}
+
+impl ArcSpaces {
+    /// Add the next space in epoch order.
+    pub fn add(&self, space: Arc<dyn Encapsulate>) {
+        self.0.write().unwrap().0.push_back(space).expect("space epoch fits the queue");
+    }
+
+    /// Retire spaces through `epoch` and advance the next installation index.
+    pub fn retire(&self, epoch: Epoch) {
+        let mut spaces = self.0.write().unwrap();
+        let end = (epoch as u64 + 1).max(spaces.0.offset());
+        let drain_end = end.min(spaces.0.largest());
+        spaces.0.drain_to(drain_end).for_each(|space| space.retire());
+        spaces.0.reset_offset(end);
+    }
+
+    /// Obtain a space handle without retaining the collection lock.
+    pub fn get(&self, epoch: Epoch) -> Option<Arc<dyn Encapsulate>> {
+        self.0.read().unwrap().0.get(epoch as u64).cloned()
+    }
+
+    /// Obtain a concrete handle when starting a receiver or encoding a probe.
+    pub fn get_as<T: Encapsulate>(&self, epoch: Epoch) -> Option<Arc<T>> {
+        let space: Arc<dyn Any + Send + Sync> = self.get(epoch)?;
+        space.downcast().ok()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Arc<dyn Encapsulate>> {
+        let spaces: SmallVec<[_; 3]> = self.0.read().unwrap().0.iter().cloned().collect();
+        spaces.into_iter()
+    }
+
+    /// Drive recovery timers for the installed spaces.
+    pub fn on_tick(&self, now: Instant) {
+        for space in self.iter() {
+            space.on_tick(now);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn poll_dump(
         &self,
@@ -36,7 +85,32 @@ impl Spaces {
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
-        self.poll_dump_at(cx, cc, dcid, 0, bytes, packet_content, None, frames, external)
+        let spaces = self.0.read().unwrap().clone();
+        spaces.poll_dump(cx, cc, dcid, bytes, packet_content, frames, external)
+    }
+}
+
+impl UnregisterWaker for ArcSpaces {
+    fn unregister(&self, waker: &Waker) {
+        for space in self.iter() {
+            space.unregister(waker);
+        }
+    }
+}
+
+impl Spaces {
+    #[allow(clippy::too_many_arguments)]
+    fn poll_dump(
+        &self,
+        cx: &mut Context<'_>,
+        cc: &ArcCC,
+        dcid: ConnectionId,
+        bytes: &mut Cursor<&mut [u8]>,
+        packet_content: PacketContent,
+        frames: &mut Vec<GuaranteedFrame>,
+        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+    ) -> (usize, SmallVec<[Metadata; 1]>) {
+        self.poll_dump_at(cx, cc, dcid, Epoch::Initial, bytes, packet_content, None, frames, external)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -45,18 +119,16 @@ impl Spaces {
         cx: &mut Context<'_>,
         cc: &ArcCC,
         dcid: ConnectionId,
-        level: u64,
+        epoch: Epoch,
         datagram: &mut Cursor<&mut [u8]>,
         packet_content: PacketContent,
         min_size: Option<usize>,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
-        if level > Epoch::Data as u64 {
-            return (0, SmallVec::new());
-        }
-        match self.0.get(level) {
-            None => self.poll_dump_at(cx, cc, dcid, level + 1, datagram, packet_content, min_size, frames, external),
+        match self.0.get(epoch as u64) {
+            None if epoch == Epoch::Data => (0, SmallVec::new()),
+            None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external),
             Some(space) => {
                 let start = frames.len();
                 let offset = datagram.position() as usize;
@@ -64,24 +136,18 @@ impl Spaces {
                     Poll::Ready(result) => result,
                     Poll::Pending => (None, 0),
                 };
-                let has_initial_packet = pktlen > 0 && level == Epoch::Initial as u64;
-                let min_size = Self::adjust_min_size(min_size, has_initial_packet);
-                let (n, mut packets) = self.poll_dump_at(
-                    cx,
-                    cc,
-                    dcid,
-                    level + 1,
-                    datagram,
-                    packet_content,
-                    min_size.map(|size| size.saturating_sub(pktlen)),
-                    frames,
-                    external,
-                );
+                let min_size = Self::adjust_min_size(min_size, epoch, pktlen);
                 match packet {
-                    None => (n, packets),
+                    None if epoch == Epoch::Data => (0, SmallVec::new()),
+                    None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external),
                     Some(mut packet) => {
+                        let (n, mut packets) = if epoch == Epoch::Data {
+                            (0, SmallVec::new())
+                        } else {
+                            self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external)
+                        };
                         if n == 0 {
-                            let padlen = min_size.unwrap_or(0).saturating_sub(pktlen);
+                            let padlen = min_size.unwrap_or(0);
                             pktlen += packet.padding(&mut datagram.get_mut()[offset..], padlen);
                             datagram.set_position((offset + pktlen) as u64);
                         }
@@ -95,13 +161,7 @@ impl Spaces {
         }
     }
 
-    fn adjust_min_size(min_size: Option<usize>, has_initial_packet: bool) -> Option<usize> {
-        has_initial_packet.then_some(1200).or(min_size)
-    }
-
-    /// Obtain a concrete handle when starting a receiver or encoding a probe.
-    pub fn get<T: Encapsulate>(spaces: &IndexDeque<Arc<dyn Encapsulate>, 2>, epoch: Epoch) -> Option<Arc<T>> {
-        let space: Arc<dyn Any + Send + Sync> = spaces.get(epoch as u64)?.clone();
-        space.downcast().ok()
+    fn adjust_min_size(min_size: Option<usize>, epoch: Epoch, pktlen: usize) -> Option<usize> {
+        (epoch == Epoch::Initial && pktlen > 0).then_some(1200).or(min_size).map(|size| size.saturating_sub(pktlen))
     }
 }

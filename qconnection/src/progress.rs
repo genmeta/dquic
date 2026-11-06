@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use qbase::{Epoch, cid::ConnectionId, handshake::HandshakeFacts, role::Role};
 use qtransport::{
     path::Path,
-    space::{ArcSpaces, DataSpace, Encapsulate, HandshakeSpace, Spaces},
+    space::{ArcSpaces, DataSpace, Encapsulate, HandshakeSpace},
     terminate::ArcTerminator,
 };
 
@@ -102,7 +102,7 @@ impl Progress {
             return false;
         }
         self.install(space);
-        if let Some(initial) = self.spaces.read_guard().get(Epoch::Initial as u64) {
+        if let Some(initial) = self.spaces.get(Epoch::Initial) {
             initial.crypto().recver.retire();
             if self.role == Role::Client {
                 initial.crypto().sender.retire();
@@ -112,23 +112,23 @@ impl Progress {
     }
 
     fn on_tls_finished(&mut self) {
-        if self.facts.on_tls_finished() && self.role == Role::Client {
-            let spaces = self.spaces.read_guard();
-            if let Some(handshake) = spaces.get(Epoch::Handshake as u64) {
-                handshake.crypto().recver.retire();
-            }
+        if self.facts.on_tls_finished()
+            && self.role == Role::Client
+            && let Some(handshake) = self.spaces.get(Epoch::Handshake)
+        {
+            handshake.crypto().recver.retire();
         }
     }
 
     fn on_handshake_sent(&mut self) {
         if self.facts.on_handshake_sent() && self.role == Role::Client {
-            self.retire_initial();
+            self.retire(Epoch::Initial);
         }
     }
 
     fn on_handshake_received(&mut self) {
         if self.facts.on_handshake_received() && self.role == Role::Server {
-            self.retire_initial();
+            self.retire(Epoch::Initial);
         }
     }
 
@@ -154,7 +154,7 @@ impl Progress {
     }
 
     fn on_handshake_done(&mut self, paths: &Arc<Paths>) {
-        let Some(data) = Spaces::get::<DataSpace>(&self.spaces.read_guard(), Epoch::Data) else {
+        let Some(data) = self.spaces.get_as::<DataSpace>(Epoch::Data) else {
             // Cleanup may have removed Data before this confirmation was handled.
             return;
         };
@@ -163,15 +163,7 @@ impl Progress {
             return;
         }
         data.keys.allow_update();
-        {
-            let mut spaces = self.spaces.write_guard();
-            let mut resender = self.loss_resender.write_guard();
-            while spaces.front().is_some_and(|(epoch, _)| epoch < Epoch::Data as u64) {
-                let (_, space) = spaces.pop_front().unwrap();
-                space.retire();
-                resender.pop_front();
-            }
-        }
+        self.retire(Epoch::Handshake);
         self.cid_registry.remote.upgrade();
         for path in entries.values() {
             if path.dcid.is_allocated() {
@@ -185,33 +177,20 @@ impl Progress {
     }
 
     fn clean(&mut self) {
-        let mut spaces = self.spaces.write_guard();
-        let mut resender = self.loss_resender.write_guard();
-        while let Some((_, space)) = spaces.pop_front() {
-            space.retire();
-        }
-        let end = resender.largest();
-        resender.drain_to(end).for_each(drop);
+        self.retire(Epoch::Data);
     }
 
-    /// Called under the lifecycle lock; queue guards never enclose a CC operation.
+    /// Called under the lifecycle lock; collection locks never enclose a CC operation.
     fn install(&self, space: Arc<impl Encapsulate + qcongestion::Resend>) {
-        {
-            let mut spaces = self.spaces.write_guard();
-            let mut resender = self.loss_resender.write_guard();
-            spaces.push_back(space.clone()).expect("next space epoch");
-            resender.push_back(space.clone()).expect("next recovery epoch");
-        }
+        self.spaces.add(space.clone());
+        self.loss_resender.write_guard().push_back(space.clone()).expect("next recovery epoch");
         self.terminator.register(Arc::new(space.crypto().clone()));
     }
 
-    fn retire_initial(&self) {
-        let mut spaces = self.spaces.write_guard();
-        if spaces.front().is_some_and(|(epoch, _)| epoch == Epoch::Initial as u64) {
-            let mut resender = self.loss_resender.write_guard();
-            let (_, initial) = spaces.pop_front().unwrap();
-            initial.retire();
-            resender.pop_front();
-        }
+    fn retire(&self, epoch: Epoch) {
+        self.spaces.retire(epoch);
+        let mut resender = self.loss_resender.write_guard();
+        let end = (epoch as u64 + 1).clamp(resender.offset(), resender.largest());
+        resender.drain_to(end).for_each(drop);
     }
 }

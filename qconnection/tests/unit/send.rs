@@ -53,7 +53,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         );
         path.validation.enter_validated().unwrap();
         path.disable();
-        let space = paths.spaces.read_guard().get(epoch as u64).unwrap().clone();
+        let space = paths.spaces.get(epoch).unwrap();
         for crypto in [&data.spaces.initial.crypto, &data.spaces.handshake.crypto, &data.spaces.data.crypto] {
             crypto.writer().write_all(b"queued crypto").await.unwrap();
         }
@@ -183,7 +183,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     path.cc.on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
     tokio::time::advance(Duration::from_secs(10)).await;
     paths.progress.on_handshake_sent();
-    assert_eq!(paths.spaces.read_guard().offset(), Epoch::Handshake as u64);
+    assert_eq!(crate::common::space_epochs(&paths.spaces)[0], Epoch::Handshake);
     assert_eq!(trackers.read_guard().offset(), Epoch::Handshake as u64);
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
@@ -993,10 +993,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         drop(collector);
         assert_eq!(pns_for(&pns, epoch).count(), 1);
         let pn = pns_for(&pns, epoch).next().unwrap().1;
-        assert_eq!(
-            paths.spaces.read_guard().get(epoch as u64).unwrap().sent_journal().lock_guard().packet(pn).unwrap().content,
-            PacketContent::JustPing
-        );
+        assert_eq!(paths.spaces.get(epoch).unwrap().sent_journal().lock_guard().packet(pn).unwrap().content, PacketContent::JustPing);
         path.close();
     }
 }

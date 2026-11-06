@@ -43,10 +43,10 @@ pub use crate::common::spaces::{DataFixture, SpaceFixture};
 use crate::common::take_heartbeat;
 
 pub fn install_data(paths: &Paths, data: &DataFixture) {
-    if paths.spaces.read_guard().get(qbase::Epoch::Data as u64).is_some() {
+    if paths.spaces.get(qbase::Epoch::Data).is_some() {
         return;
     }
-    if !paths.progress.facts().has_handshake_key() {
+    if paths.spaces.get(qbase::Epoch::Handshake).is_none() {
         install_handshake(paths, data.spaces.handshake.clone());
     }
     paths.progress.install_data(data.spaces.data.clone());
@@ -55,7 +55,7 @@ pub fn install_data(paths: &Paths, data: &DataFixture) {
 /// Install synthetic spaces without retiring the fixture's Initial CRYPTO source.
 pub fn install_handshake(paths: &Paths, handshake: std::sync::Arc<qtransport::space::HandshakeSpace>) {
     paths.loss_resender.write_guard().push_back(handshake.clone()).unwrap();
-    paths.spaces.write_guard().push_back(handshake).unwrap();
+    paths.spaces.add(handshake);
     paths.progress.facts().install_handshake_key();
     paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
 }

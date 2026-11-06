@@ -59,8 +59,8 @@ impl Paths {
         loss_resender.push_back(initial_space.clone()).expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
         terminator.register(Arc::new(initial_space.crypto.clone()));
-        let spaces = ArcSpaces::from(IndexDeque::with_capacity(3));
-        spaces.write_guard().push_back(initial_space).expect("Initial epoch");
+        let spaces = ArcSpaces::default();
+        spaces.add(initial_space);
         let puncher = ArcPuncher::new(reliable_frames.clone(), ProbeEncoder::new(spaces.clone(), cid_registry.remote.apply_dcid()));
         let loss_resender = ArcResend::from(loss_resender);
         let progress = ArcProgress::new(facts, cid_registry.clone(), spaces.clone(), loss_resender.clone(), terminator.clone());
