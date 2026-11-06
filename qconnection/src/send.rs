@@ -18,10 +18,7 @@ use qbase::{
 };
 use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
-use qtransport::{
-    path::Path,
-    space::{Spaces, assemble::Constraints},
-};
+use qtransport::{path::Path, space::Spaces};
 use smallvec::SmallVec;
 pub(crate) use task::sending;
 
@@ -222,26 +219,15 @@ impl Burst<'_, '_> {
             }
             ready!(cc.poll_send_quota(cx)).map_err(no_viable_path)?
         };
-        let mut limits = Constraints {
-            send_quota,
-            credit,
-            probe_quota: Epoch::EPOCHS.map(|epoch| {
-                if path.cc.need_send_ack_eliciting(epoch) > 0 {
-                    1200
-                } else {
-                    0
-                }
-            }),
-            overhead,
-        };
-        self.collect_spaces(cx, cid, &mut limits).map(Ok)
+        self.collect_spaces(cx, cid, send_quota, credit).map(Ok)
     }
 
     fn collect_spaces(
         &mut self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        limits: &mut Constraints,
+        mut send_quota: usize,
+        mut credit: usize,
     ) -> Poll<usize> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
@@ -257,13 +243,23 @@ impl Burst<'_, '_> {
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
         let mut validation = path.validation.clone();
+        let mut probes = Epoch::EPOCHS.map(|epoch| {
+            (
+                epoch,
+                (path.cc.need_send_ack_eliciting(epoch) > 0).then_some(PingFrame),
+            )
+        });
+        let overhead = QuicProtocol::packet_overhead(path.pathway);
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
-            buffer.resize(1200, 0);
+            let quota = if send_quota == 0 {
+                1200
+            } else {
+                send_quota.saturating_sub(overhead)
+            };
+            let length = 1200.min(credit.saturating_sub(overhead)).min(quota);
+            buffer.resize(length, 0);
             let (size, collected) = if path.is_active() {
-                // A sealed packet consumes its epoch's PTO allowance, even without a PING.
-                let mut probes = Epoch::EPOCHS
-                    .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
                 let [a0, a1, a2] = &mut acks;
                 let [p0, p1, p2] = &mut probes;
                 let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
@@ -282,7 +278,6 @@ impl Burst<'_, '_> {
                     dcid,
                     &path.cc,
                     &mut Cursor::new(buffer.as_mut()),
-                    limits,
                     self.frames,
                     &mut sources,
                 )
@@ -292,7 +287,6 @@ impl Burst<'_, '_> {
                     dcid,
                     &path.cc,
                     &mut Cursor::new(buffer.as_mut()),
-                    limits,
                     self.frames,
                     &mut heartbeat,
                     &mut acks,
@@ -303,7 +297,19 @@ impl Burst<'_, '_> {
             if size == 0 {
                 break;
             }
+            credit -= size + overhead;
+            let in_flight: usize = packets
+                .iter()
+                .filter(|meta| meta.in_flight)
+                .map(|meta| meta.pktlen)
+                .sum();
+            if in_flight > 0 {
+                send_quota = send_quota.saturating_sub(in_flight + overhead);
+            }
             count += 1;
+            if send_quota == 0 {
+                break;
+            }
         }
         if count == 0 {
             Poll::Pending

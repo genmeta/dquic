@@ -1,7 +1,7 @@
 //! One-datagram fixture for receive and recovery tests, using production assembly.
 use qbase::{packet::assemble::Metadata, time::timer::ArcIdleTimer};
 use qprotocol::protocol::quic::QuicProtocol;
-use qtransport::space::{Recover, Spaces, Transmit, assemble::Constraints};
+use qtransport::space::{Recover, Spaces, Transmit};
 
 use super::*;
 
@@ -38,32 +38,29 @@ impl Sender {
         let mut spaces = Spaces(IndexDeque::with_capacity(1));
         spaces.0.reset_offset(Epoch::Data as u64);
         spaces.0.push_back(self.transport.data.clone()).unwrap();
-        let mut limits = Constraints {
-            send_quota: self.path.cc.send_quota(),
-            credit: credit.unwrap_or(usize::MAX),
-            probe_quota: Epoch::EPOCHS.map(|epoch| {
-                if self.path.cc.need_send_ack_eliciting(epoch) > 0 {
-                    1200
-                } else {
-                    0
-                }
-            }),
-            overhead: QuicProtocol::packet_overhead(self.path.pathway),
-        };
+        let quota = self.path.cc.send_quota();
+        let overhead = QuicProtocol::packet_overhead(self.path.pathway);
+        let length = 1200
+            .min(credit.unwrap_or(usize::MAX).saturating_sub(overhead))
+            .min(if quota == 0 {
+                1200
+            } else {
+                quota.saturating_sub(overhead)
+            });
         let mut ack = self
             .transport
             .data
             .rcvd_journal
             .ack_package(self.path.cc.need_ack(Epoch::Data));
         let mut validation = self.path.validation.clone();
-        let mut ping = (self.heartbeat || limits.probe_quota[Epoch::Data] > 0).then_some(PingFrame);
-        self.bytes.resize(1200, 0);
+        let mut ping = (self.heartbeat || self.path.cc.need_send_ack_eliciting(Epoch::Data) > 0)
+            .then_some(PingFrame);
+        self.bytes.resize(length, 0);
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
             ConnectionId::from_slice(b"original"),
             &self.path.cc,
             &mut std::io::Cursor::new(self.bytes.as_mut()),
-            &mut limits,
             &mut Vec::new(),
             &mut [&mut ack, &mut validation, &mut ping],
         );

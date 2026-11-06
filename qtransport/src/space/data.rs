@@ -180,10 +180,9 @@ impl Encapsulate for DataSpace {
     fn poll_dump(
         &self,
         cx: &mut Context<'_>,
-        dcid: ConnectionId,
         cc: &ArcCC,
-        bytes: &mut Cursor<&mut [u8]>,
-        limits: &super::assemble::Constraints,
+        dcid: ConnectionId,
+        datagram: &mut Cursor<&mut [u8]>,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
@@ -194,8 +193,8 @@ impl Encapsulate for DataSpace {
             return Poll::Ready((None, 0));
         };
         let start = frames.len();
-        let offset = bytes.position() as usize;
-        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
+        let offset = datagram.position() as usize;
+        let mut packet_limits = super::packet_limits(self.epoch(), cc, datagram);
         packet_limits.max_size = 1200usize.saturating_sub(offset);
         let mut crypto = self.crypto().outgoing();
         let mut reliable = self.reliable_frames.clone();
@@ -207,14 +206,14 @@ impl Encapsulate for DataSpace {
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);
-        let mut writer = &mut bytes.get_mut()[offset..];
+        let mut writer = &mut datagram.get_mut()[offset..];
         let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((mut size, min_size)) if size > 0 => {
                 let padlen = min_size.saturating_sub(size);
-                size += packet.padding(&mut bytes.get_mut()[offset..], padlen);
-                bytes.set_position((offset + size) as u64);
+                size += packet.padding(&mut datagram.get_mut()[offset..], padlen);
+                datagram.set_position((offset + size) as u64);
                 Poll::Ready((Some(packet), size))
             }
             result => {

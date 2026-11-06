@@ -291,6 +291,9 @@ impl<B: BufMut + ?Sized> Package<B> for Validation {
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
+        if matches!(self.credit(), Ok(Some(credit)) if credit < 1200) {
+            buffer.scope(0);
+        }
         match self {
             Self::Validating { frames, .. } | Self::Validated { frames, .. } => {
                 frames.poll_dump(cx, buffer)

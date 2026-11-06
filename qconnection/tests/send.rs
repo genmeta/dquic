@@ -104,8 +104,8 @@ fn repeated_assembly_does_not_append_after_close() {
 }
 
 #[tokio::test]
-async fn mixed_packets_consume_shared_budget_once() {
-    use qtransport::space::{InitialSpace, Spaces, assemble::Constraints};
+async fn mixed_packets_record_each_space() {
+    use qtransport::space::{InitialSpace, Spaces};
     let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(
         Default::default(),
@@ -128,12 +128,6 @@ async fn mixed_packets_consume_shared_budget_once() {
     let mut spaces = Spaces(qbase::util::IndexDeque::with_capacity(3));
     spaces.0.push_back(initial.clone()).unwrap();
     spaces.0.push_back(handshake.clone()).unwrap();
-    let mut limits = Constraints {
-        credit: 2432,
-        send_quota: 2432,
-        overhead: 32,
-        ..Default::default()
-    };
     let mut bytes = [0; 1200];
     let mut frames = Vec::new();
     let mut cx = Context::from_waker(Waker::noop());
@@ -142,12 +136,10 @@ async fn mixed_packets_consume_shared_budget_once() {
         Default::default(),
         &common::send_cc(),
         &mut Cursor::new(&mut bytes[..]),
-        &mut limits,
         &mut frames,
         &mut [],
     );
     assert_eq!(size, 1200);
-    assert_eq!((limits.send_quota, limits.credit), (1200, 1200));
     let a = initial.sent_journal.lock_guard();
     let b = handshake.sent_journal.lock_guard();
     assert!(
@@ -340,7 +332,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         frame::{CryptoFrame, EncodeSize},
         packet::{GetType, HeaderSize, Package},
     };
-    use qtransport::space::{Spaces, assemble::Constraints};
+    use qtransport::space::Spaces;
     for (sizes, expected) in [
         ([700, 0, 0], [1200, 0, 0]),
         ([700, 200, 0], [700, 500, 0]),
@@ -401,11 +393,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         let [a, b, c] = &mut sources;
         let mut external: [&mut dyn for<'b> Package<&'b mut [u8]>; 3] = [a, b, c];
         let mut bytes = [0xa5; 1216];
-        let mut limits = Constraints {
-            send_quota: 2400,
-            credit: 2400,
-            ..Default::default()
-        };
         let mut frames = Vec::new();
         let mut datagram = Cursor::new(&mut bytes[..1200]);
         let (size, pns) = spaces.poll_dump(
@@ -413,7 +400,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             sender.peer_cid(),
             &common::send_cc(),
             &mut datagram,
-            &mut limits,
             &mut frames,
             &mut external,
         );
@@ -426,8 +412,6 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
                 .filter(|&epoch| expected[epoch] > 0)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(limits.credit, 2400 - size);
-        assert_eq!(limits.send_quota, 2400 - size);
         assert_eq!(&bytes[1200..], &[0xa5; 16]);
         assert!(frames.is_empty());
         let mut recorded = 0;
@@ -530,7 +514,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         frame::{CryptoFrame, PathChallengeFrame},
         packet::Package,
     };
-    use qtransport::space::{Spaces, assemble::Constraints};
+    use qtransport::space::Spaces;
     for capacity in [1199, 1200] {
         let [sender, _] = common::spaces::pair();
         let mut spaces = Spaces(sender.paths.spaces.read_guard().clone());
@@ -546,11 +530,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         let mut external: [&mut dyn for<'b> Package<&'b mut [u8]>; 2] =
             [&mut crypto, &mut challenge];
         let mut bytes = [0xa5; 1216];
-        let mut limits = Constraints {
-            send_quota: 1200,
-            credit: 1200,
-            ..Default::default()
-        };
         let mut frames = Vec::new();
         let mut datagram = Cursor::new(&mut bytes[..capacity]);
         let (size, pns) = spaces.poll_dump(
@@ -558,7 +537,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
             sender.peer_cid(),
             &common::send_cc(),
             &mut datagram,
-            &mut limits,
             &mut frames,
             &mut external,
         );
@@ -571,7 +549,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         );
         assert_eq!(challenge.is_none(), capacity == 1200);
         assert_eq!(size == 1200, capacity == 1200);
-        assert_eq!(limits.credit, 1200 - size);
         assert_eq!(&bytes[capacity..], &vec![0xa5; 1216 - capacity]);
         assert!(frames.is_empty());
         spaces.0.pop_front();
@@ -582,11 +559,6 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
             sender.peer_cid(),
             &common::send_cc(),
             &mut Cursor::new(&mut bytes[..1200]),
-            &mut Constraints {
-                send_quota: 1200,
-                credit: 1200,
-                ..Default::default()
-            },
             &mut frames,
             &mut [&mut (Epoch::Data, &mut ping)],
         );
@@ -597,7 +569,7 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
 #[test]
 fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     use qbase::packet::{GetDcid, GetScid, GetType, Package};
-    use qtransport::space::{InitialSpace, Spaces, assemble::Constraints};
+    use qtransport::space::{InitialSpace, Spaces};
     let scid = ConnectionId::from_slice(b"local000");
     let facts = common::handshake_facts(Role::Client, false);
     let initial = Arc::new(InitialSpace::new(
@@ -625,11 +597,6 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
             dcid,
             &common::send_cc(),
             &mut Cursor::new(&mut bytes[..]),
-            &mut Constraints {
-                send_quota: 1200,
-                credit: 1200,
-                ..Default::default()
-            },
             &mut frames,
             &mut [&mut (Epoch::Initial, &mut ping)],
         );
@@ -687,18 +654,11 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
         .unwrap();
     let mut crypto = handshake.crypto.outgoing();
     let mut ping = Some(PingFrame);
-    let mut limits = Constraints {
-        send_quota: 1232,
-        overhead: 32,
-        credit: 1232,
-        ..Default::default()
-    };
     let (size, pns) = spaces.poll_dump(
         &mut cx,
         Default::default(),
         &common::send_cc(),
         &mut Cursor::new(&mut bytes[..]),
-        &mut limits,
         &mut frames,
         &mut [
             &mut (Epoch::Initial, &mut ping),
@@ -709,17 +669,13 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     assert_eq!(size, 1200);
     assert!(packet_metadata(&pns, Epoch::Handshake).is_none());
     assert!(frames.is_empty());
-    assert_eq!((limits.send_quota, limits.credit), (0, 0));
     assert!(initial.sent_journal.lock_guard().frames(packet_metadata(&pns, Epoch::Initial).unwrap().pn)
         .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5)));
-    limits.credit = 1232;
-    limits.send_quota = 1232;
     let (_, pns) = spaces.poll_dump(
         &mut cx,
         Default::default(),
         &common::send_cc(),
         &mut Cursor::new(&mut bytes[..]),
-        &mut limits,
         &mut frames,
         &mut [],
     );
@@ -729,9 +685,9 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
 }
 
 #[test]
-fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
+fn ack_only_and_in_flight_packets_keep_metadata_and_empty_attempts_stay_empty() {
     use qbase::{frame::AckFrame, util::IndexDeque};
-    use qtransport::space::{Spaces, assemble::Constraints};
+    use qtransport::space::Spaces;
 
     let mut spaces = Spaces(IndexDeque::with_capacity(1));
     spaces.0.reset_offset(Epoch::Handshake as u64);
@@ -744,12 +700,6 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         )))
         .unwrap();
     for flight in [false, true] {
-        let mut limits = Constraints {
-            credit: 2400,
-            send_quota: 2400,
-            probe_quota: [1200; 3],
-            overhead: 32,
-        };
         let mut ack = Some(AckFrame::new(
             0u32.into(),
             0u32.into(),
@@ -768,38 +718,30 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
             Default::default(),
             &common::send_cc(),
             &mut Cursor::new(&mut bytes[..]),
-            &mut limits,
             &mut frames,
             &mut sources,
         );
         assert!(size > 0);
         assert_eq!(pns.len(), 1);
+        assert_eq!(pns[0].in_flight, flight);
         assert_eq!(pns[0].epoch(), Epoch::Handshake);
-        assert_eq!(limits.credit, 2400 - size - 32);
-        assert_eq!(limits.send_quota, 2400 - if flight { size + 32 } else { 0 });
-        assert_eq!(limits.probe_quota, [1200, 0, 1200]);
-        let before = limits.clone();
         let (size, pns) = spaces.poll_dump(
             &mut cx,
             Default::default(),
             &common::send_cc(),
             &mut Cursor::new(&mut bytes[..]),
-            &mut limits,
             &mut frames,
             &mut sources,
         );
         assert_eq!(size, 0);
         assert!(pns.is_empty());
-        assert_eq!(limits.credit, before.credit);
-        assert_eq!(limits.send_quota, before.send_quota);
-        assert_eq!(limits.probe_quota, before.probe_quota);
     }
 }
 
 #[tokio::test]
-async fn datagram_windows_bound_payload_and_keep_ack_and_probe_progress() {
+async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
     use qbase::{frame::AckFrame, util::IndexDeque};
-    use qtransport::space::{Spaces, assemble::Constraints};
+    use qtransport::space::Spaces;
 
     let [sender, _] = common::spaces::pair();
     let mut spaces = Spaces(IndexDeque::with_capacity(1));
@@ -817,73 +759,70 @@ async fn datagram_windows_bound_payload_and_keep_ack_and_probe_progress() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut bytes = [0xa5; 1200];
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 278,
-        credit: 2400,
-        ..Default::default()
-    };
+    let cc = common::send_cc();
     let (size, packets) = spaces.poll_dump(
         &mut cx,
         sender.peer_cid(),
-        &common::send_cc(),
-        &mut Cursor::new(&mut bytes[..]),
-        &mut limits,
+        &cc,
+        &mut Cursor::new(&mut bytes[..278]),
         &mut frames,
         &mut [],
     );
     assert_eq!(size, 278);
     assert_eq!(&bytes[278..], &[0xa5; 922]);
-    assert_eq!(limits.send_quota, 0);
     assert_eq!(packets[0].pktlen, size);
 
-    for quota in [0, 1] {
-        let fresh = sender.spaces.data.streams.fresh_bytes();
-        let mut ack = Some(AckFrame::new(
-            0u32.into(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        ));
-        let mut limits = Constraints {
-            send_quota: quota,
-            credit: 2400,
-            ..Default::default()
-        };
+    let fresh = sender.spaces.data.streams.fresh_bytes();
+    let minimum = qbase::packet::HeaderSize::size(&qbase::packet::OneRttHeader::new(
+        Default::default(),
+        sender.peer_cid(),
+    )) + 20;
+    for length in 0..minimum {
         let (size, packets) = spaces.poll_dump(
             &mut cx,
             sender.peer_cid(),
-            &common::send_cc(),
-            &mut Cursor::new(&mut bytes[..]),
-            &mut limits,
+            &cc,
+            &mut Cursor::new(&mut bytes[..length]),
             &mut frames,
-            &mut [&mut ack],
+            &mut [],
         );
-        assert!(size > 0);
-        assert_eq!(packets[0].ack, Some(0));
-        assert!(!packets[0].in_flight);
-        assert_eq!(limits.send_quota, quota);
+        assert_eq!(size, 0);
+        assert!(packets.is_empty());
         assert_eq!(sender.spaces.data.streams.fresh_bytes(), fresh);
     }
 
-    let mut limits = Constraints {
-        send_quota: 1,
-        credit: 2400,
-        probe_quota: [0, 0, 1200],
-        ..Default::default()
-    };
+    cc.on_pkt_sent(Epoch::Data, 0, true, cc.send_quota(), true, None);
+    assert_eq!(cc.send_quota(), 0);
+    let fresh = sender.spaces.data.streams.fresh_bytes();
+    let mut ack = Some(AckFrame::new(
+        0u32.into(),
+        0u32.into(),
+        0u32.into(),
+        vec![],
+        None,
+    ));
     let (size, packets) = spaces.poll_dump(
         &mut cx,
         sender.peer_cid(),
-        &common::send_cc(),
+        &cc,
         &mut Cursor::new(&mut bytes[..]),
-        &mut limits,
+        &mut frames,
+        &mut [&mut ack],
+    );
+    assert!(size > 0);
+    assert_eq!(packets[0].ack, Some(0));
+    assert!(!packets[0].in_flight);
+    assert_eq!(sender.spaces.data.streams.fresh_bytes(), fresh);
+    let (size, packets) = spaces.poll_dump(
+        &mut cx,
+        sender.peer_cid(),
+        &cc,
+        &mut Cursor::new(&mut bytes[..]),
         &mut frames,
         &mut [],
     );
-    assert!(size > 1 && size <= 1200);
-    assert!(packets[0].in_flight);
-    assert_eq!(limits.probe_quota[Epoch::Data], 0);
+    assert_eq!(size, 0);
+    assert!(packets.is_empty());
 }
 
 #[tokio::test]
@@ -1177,7 +1116,7 @@ async fn collected_burst_cancels_on_deactivation_and_completes_when_cid_source_c
 #[tokio::test]
 async fn data_space_uses_cursor_to_pad_validation_without_touching_the_prefix() {
     use qbase::frame::PathChallengeFrame;
-    use qtransport::space::{Encapsulate, Recover, assemble::Constraints};
+    use qtransport::space::{Encapsulate, Recover};
 
     for probe in [false, true] {
         let [sender, _] = common::spaces::pair();
@@ -1190,14 +1129,9 @@ async fn data_space_uses_cursor_to_pad_validation_without_touching_the_prefix() 
         let mut ping = Some(PingFrame);
         let Poll::Ready((Some(packet), size)) = data.poll_dump(
             &mut Context::from_waker(Waker::noop()),
-            sender.peer_cid(),
             &common::send_cc(),
+            sender.peer_cid(),
             &mut datagram,
-            &Constraints {
-                send_quota: 1200,
-                credit: 1200,
-                ..Default::default()
-            },
             &mut frames,
             &mut [&mut challenge, &mut ping],
         ) else {
