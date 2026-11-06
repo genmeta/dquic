@@ -97,12 +97,10 @@ impl Encapsulate for InitialSpace {
         )
     }
 
-    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error> {
+    fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid)
             .initial(self.token.clone().unwrap_or_default());
-        let Some((pn, keys)) = self.pn_and_keys()? else {
-            return Ok(None);
-        };
-        Ok(Some(Packet::new(DataHeader::Long(header.into()), pn, keys)))
+        let (pn, keys) = self.pn_and_keys()?;
+        Some(Packet::new(DataHeader::Long(header.into()), pn, keys))
     }
 }

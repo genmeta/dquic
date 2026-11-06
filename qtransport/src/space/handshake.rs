@@ -81,11 +81,9 @@ impl Encapsulate for HandshakeSpace<ArcKeys> {
         ))
     }
 
-    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error> {
+    fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
-        let Some((pn, keys)) = self.pn_and_keys()? else {
-            return Ok(None);
-        };
-        Ok(Some(Packet::new(DataHeader::Long(header.into()), pn, keys)))
+        let (pn, keys) = self.pn_and_keys()?;
+        Some(Packet::new(DataHeader::Long(header.into()), pn, keys))
     }
 }

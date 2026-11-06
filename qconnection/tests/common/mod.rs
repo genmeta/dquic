@@ -194,11 +194,11 @@ where
     };
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), std::task::Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
-    packet.padding(&mut buffer, 1200 - packet.len())?;
-    packet.seal(&mut buffer)?;
+    packet.padding(&mut buffer, 1200 - packet.len());
+    packet.seal(&mut buffer);
     journal.on_sealed(pn.0, None, buffer.len(), packet.meta, frames.drain(..));
     Ok(buffer)
 }
@@ -418,3 +418,15 @@ pub fn retire_all(paths: &qconnection::Paths) {
 }
 
 pub mod path_fixtures;
+
+/// Congestion control for standalone space-assembly tests without a path task.
+pub fn send_cc() -> qcongestion::ArcCC {
+    qcongestion::ArcCC::new(
+        qcongestion::Algorithm::NewReno,
+        std::time::Duration::from_millis(25),
+        Default::default(),
+        handshake_facts(qbase::role::Role::Client, true),
+        Arc::new(std::sync::atomic::AtomicU16::new(1200)),
+        Default::default(),
+    )
+}

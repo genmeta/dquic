@@ -55,6 +55,16 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    pub fn epoch(&self) -> crate::Epoch {
+        use super::r#type::long::{Type as Long, Ver1};
+        match self.packet_type {
+            Type::Long(Long::V1(Ver1::INITIAL)) => crate::Epoch::Initial,
+            Type::Long(Long::V1(Ver1::HANDSHAKE)) => crate::Epoch::Handshake,
+            Type::Long(Long::V1(Ver1::ZERO_RTT)) | Type::Short(_) => crate::Epoch::Data,
+            _ => unreachable!("only data packets have assembly metadata"),
+        }
+    }
+
     pub fn new(packet_type: Type) -> Self {
         Self {
             pn: 0,

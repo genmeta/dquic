@@ -59,49 +59,38 @@ impl PunchPacketEncoder for ProbeEncoder {
         self.peer_cid.refresh();
         let (pn, Keys::Short(key)) = space
             .pn_and_keys()
-            .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("keys retired"))?
         else {
             unreachable!("Data space uses 1-RTT keys");
         };
-        let result = (|| {
-            let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
-            let header = OneRttHeader::new(Default::default(), peer_cid);
-            let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
-            let mut sending = Packet::new(DataHeader::Short(header), pn, key.as_ref());
-            let mut limits = Constraints {
-                flow_ctrl: usize::MAX,
-                send_quota: usize::MAX,
-                credit: usize::MAX,
-                min_size: 0,
-                max_size: MAX_PUNCH_PACKET_SIZE,
-                ..Default::default()
-            };
-            let result = sending.assemble(
-                &mut Context::from_waker(Waker::noop()),
-                &mut &mut bytes,
-                &mut limits,
-                &mut frames,
-                &mut [&mut frame],
-            );
-            match result {
-                Poll::Ready(Ok(size)) if size > 0 => {
-                    bytes.resize(sending.len(), 0);
-                    sending.seal(&mut bytes).map_err(io::Error::other)?;
-                    Ok(bytes)
-                }
-                Poll::Ready(Err(error)) => Err(io::Error::other(error)),
-                _ => Err(io::Error::other("punch frame did not fit")),
-            }
-        })();
-        match result {
-            Ok(bytes) => {
+        let mut bytes = BytesMut::with_capacity(MAX_PUNCH_PACKET_SIZE);
+        let header = OneRttHeader::new(Default::default(), peer_cid);
+        let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
+        let mut sending = Packet::new(DataHeader::Short(header), pn, key.as_ref());
+        let mut limits = Constraints {
+            flow_ctrl: usize::MAX,
+            send_quota: usize::MAX,
+            credit: usize::MAX,
+            min_size: 0,
+            max_size: MAX_PUNCH_PACKET_SIZE,
+            ..Default::default()
+        };
+        match sending.assemble(
+            &mut Context::from_waker(Waker::noop()),
+            &mut &mut bytes,
+            &mut limits,
+            &mut frames,
+            &mut [&mut frame],
+        ) {
+            Poll::Ready((size, _)) if size > 0 => {
+                bytes.resize(sending.len(), 0);
+                sending.seal(&mut bytes);
                 space.on_sent(pn.0, false, Duration::ZERO, Duration::ZERO);
                 Ok(bytes)
             }
-            Err(error) => {
+            _ => {
                 space.cancel(pn.0, &mut std::iter::empty());
-                Err(error)
+                Err(io::Error::other("punch frame did not fit"))
             }
         }
     }

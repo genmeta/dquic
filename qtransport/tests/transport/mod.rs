@@ -388,11 +388,11 @@ fn encode_packet(
         sources,
     );
     match result {
-        Poll::Ready(Ok(size)) if size > 0 => {
-            bytes.resize(size, 0);
-            packet.seal(&mut bytes).unwrap();
+        Poll::Ready((size, min_size)) if size > 0 => {
+            bytes.resize(size.max(min_size), 0);
+            packet.padding(&mut bytes, min_size.saturating_sub(size));
+            packet.seal(&mut bytes);
         }
-        Poll::Ready(Err(error)) => panic!("packet assembly failed: {error}"),
         _ => bytes.clear(),
     }
     bytes
@@ -475,9 +475,9 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
     assert!(matches!(packet.assemble(
         &mut Context::from_waker(std::task::Waker::noop()), &mut bytes, &mut limits,
         &mut frames, &mut [&mut datagram, &mut PingFrame],
-    ), Poll::Ready(Ok(n)) if n > 0));
+    ), Poll::Ready((n, _)) if n > 0));
     bytes.resize(packet.len(), 0);
-    let generation = packet.seal(&mut bytes).unwrap();
+    let generation = packet.seal(&mut bytes);
     assert_eq!(generation, None);
     assert_eq!(packet.meta.epoch(), Epoch::Data);
     let (_, received) = material

@@ -1,7 +1,7 @@
 use std::{future::poll_fn, sync::Arc, task::Poll};
 
 use bytes::BytesMut;
-use qbase::{error::ErrorKind, net::tx::UnregisterWaker};
+use qbase::net::tx::UnregisterWaker;
 use qtransport::path::Path;
 
 use super::{Burst, MAX_BURST_PACKETS, no_viable_path};
@@ -23,14 +23,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
         };
         burst.cancel();
         if let Err(error) = result {
-            if error.kind() == ErrorKind::NoViablePath {
-                break Some(error);
-            } else if !terminator.close(error.into(), paths.closing_pto()) {
-                // Closed components are empty sources. A repeated error here means
-                // packet assembly itself still fails; wait without spinning.
-                terminator.clone().await;
-                break None;
-            }
+            break Some(error);
         }
     };
     burst.cancel();

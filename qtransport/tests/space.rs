@@ -45,7 +45,7 @@ fn metadata(epoch: Epoch, frames: &[Frame]) -> qbase::packet::assemble::Metadata
 fn record(space: &Space<ArcKeys<()>>) -> u64 {
     let frames = support::frames::take_frames(&mut space.crypto.outgoing());
     assert_eq!(frames.len(), 1);
-    let (pn, _) = space.next_pn().unwrap();
+    let (pn, _) = space.next_pn();
     space.sent_journal.on_sealed(
         pn,
         None,
@@ -66,7 +66,7 @@ async fn only_crypto_ack_disables_shared_replay_across_spaces() {
         let spaces = Epoch::EPOCHS
             .map(|epoch| Space::new(epoch, Default::default(), ArcKeys::new(()), facts.clone()));
         let space = &spaces[acknowledged];
-        let (ping_pn, _) = space.next_pn().unwrap();
+        let (ping_pn, _) = space.next_pn();
         space.sent_journal.on_sealed(
             ping_pn,
             None,
@@ -176,7 +176,7 @@ async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
         let mut pns = Vec::new();
         for bytes in [b"first".as_slice(), b"second", b"third"] {
             space.crypto.writer().write_all(bytes).await.unwrap();
-            let pn = space.next_pn().unwrap().0;
+            let pn = space.next_pn().0;
             let frames = support::frames::take_frames(&mut space.crypto.outgoing());
             space.sent_journal.on_sealed(
                 pn,
@@ -218,7 +218,7 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
     use qtransport::space::{Recover as _, Transmit};
 
     let data = support::data::data();
-    let pn = data.next_pn().unwrap().0;
+    let pn = data.next_pn().0;
     Transmit::on_sealed(
         data.as_ref(),
         pn,
@@ -260,7 +260,7 @@ async fn retired_data_keys_stop_loss_and_timer_recovery() {
         .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
     let mut frames = support::frames::take_frames(&mut data.reliable_frames.clone());
     assert_eq!(frames.len(), 1);
-    let (pn, _) = data.next_pn().unwrap();
+    let (pn, _) = data.next_pn();
     Transmit::on_sealed(
         data.as_ref(),
         pn,
@@ -299,7 +299,7 @@ async fn data_trait_cancel_recovers_staged_and_sealed_frames() {
         frames.extend(support::frames::take_frames(&mut data.streams.clone()));
         assert_eq!(frames.len(), 4);
         assert_eq!(data.streams.fresh_bytes(), 0);
-        let (pn, _) = space.pn_and_keys().unwrap().unwrap();
+        let (pn, _) = space.pn_and_keys().unwrap();
         let meta = metadata(Epoch::Data, &frames[1..]);
         let mut frames: Vec<GuaranteedFrame> = frames
             .into_iter()

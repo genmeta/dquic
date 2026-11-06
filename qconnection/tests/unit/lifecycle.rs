@@ -155,7 +155,6 @@ async fn packet_events_retire_initial_from_both_queues() {
                 .get(Epoch::Initial as u64)
                 .unwrap()
                 .pn_and_keys()
-                .unwrap()
                 .is_none()
         );
         paths.progress.on_handshake_sent();

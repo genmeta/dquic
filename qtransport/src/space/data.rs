@@ -13,11 +13,9 @@ use qbase::{
     frame::{AckFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
-    packet::{
-        DataHeader, OneRttHeader, PacketNumber,
-        assemble::{Constraints, Package},
-    },
+    packet::{DataHeader, OneRttHeader, PacketNumber, assemble::Package},
 };
+use qcongestion::ArcCC;
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
@@ -66,16 +64,18 @@ impl DataSpace {
 }
 
 impl Allocate for DataSpace {
-    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
         // Serialize generation selection and PN allocation across every sending path.
         let mut journal = self.sent_journal.lock_guard();
         let keys = match self.keys.get() {
             Ok(keys) => keys,
-            Err(crate::keys::PacketError::Retired(_)) => return Ok(None),
-            Err(error) => return Err(super::packet_error(error)),
+            Err(crate::keys::PacketError::Retired(_)) => return None,
+            result => result.expect("不可能达到上限，忽略这种错误就行了"),
         };
-        let pn = journal.next_pn()?;
-        Ok(Some((pn, Keys::Short(keys))))
+        let pn = journal
+            .next_pn()
+            .expect("不可能达到上限，忽略这种错误就行了");
+        Some((pn, Keys::Short(keys)))
     }
 }
 
@@ -170,48 +170,56 @@ impl Encapsulate for DataSpace {
         ))
     }
 
-    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error> {
+    fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
         let header = OneRttHeader::new(Default::default(), dcid);
-        let Some((pn, keys)) = self.pn_and_keys()? else {
-            return Ok(None);
-        };
-        Ok(Some(Packet::new(DataHeader::Short(header), pn, keys)))
+        let (pn, keys) = self.pn_and_keys()?;
+        Some(Packet::new(DataHeader::Short(header), pn, keys))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn poll_dump(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        limits: &Constraints,
+        cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
+        limits: &super::assemble::Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
-        if !self.sent_journal.has_capacity() {
-            return Poll::Ready(Ok((None, 0)));
+    ) -> Poll<(Option<Packet>, usize)> {
+        if !self.sent_journal().has_capacity() {
+            return Poll::Ready((None, 0));
         }
-        let Some(mut packet) = self.packet(dcid)? else {
-            return Poll::Ready(Ok((None, 0)));
+        let Some(mut packet) = self.packet(dcid) else {
+            return Poll::Ready((None, 0));
         };
         let start = frames.len();
-        let mut crypto = self.crypto.outgoing();
+        let offset = bytes.position() as usize;
+        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
+        packet_limits.max_size = 1200usize.saturating_sub(offset);
+        let mut crypto = self.crypto().outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
-        let internal: [&mut dyn Package<&mut [u8]>; 3] = [&mut crypto, &mut reliable, &mut streams];
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
-            .chain(internal)
             .collect();
-        let offset = bytes.position() as usize;
-        let mut limits = limits.clone();
-        limits.max_size = limits.max_size.saturating_sub(offset);
+        sources.push(&mut crypto);
+        sources.push(&mut reliable);
+        sources.push(&mut streams);
         let mut writer = &mut bytes.get_mut()[offset..];
-        match packet.assemble(cx, &mut writer, &mut limits, frames, &mut sources) {
-            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+        let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
+        drop(sources);
+        match result {
+            Poll::Ready((mut size, min_size)) if size > 0 => {
+                let padlen = min_size.saturating_sub(size);
+                size += packet.padding(&mut bytes.get_mut()[offset..], padlen);
+                bytes.set_position((offset + size) as u64);
+                Poll::Ready((Some(packet), size))
+            }
             result => {
                 self.cancel(packet.pn.0, &mut frames.drain(start..));
-                result.map(|result| result.map(|_| (None, 0)))
+                result.map(|_| (None, 0))
             }
         }
     }

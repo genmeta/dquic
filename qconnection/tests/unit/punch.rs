@@ -84,7 +84,7 @@ fn encode_frames<const N: usize>(
 
     let space = &phase.spaces.data;
     use qtransport::space::{Allocate, Keys};
-    let (pn, Keys::Short(key)) = space.pn_and_keys().unwrap().unwrap() else {
+    let (pn, Keys::Short(key)) = space.pn_and_keys().unwrap() else {
         unreachable!();
     };
     let mut bytes = BytesMut::with_capacity(1200);
@@ -107,10 +107,10 @@ fn encode_frames<const N: usize>(
             &mut &mut bytes, &mut limits, &mut recorded,
             &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
         ),
-        std::task::Poll::Ready(Ok(n)) if n > 0
+        std::task::Poll::Ready((n, _)) if n > 0
     ));
     bytes.resize(sending.len(), 0);
-    sending.seal(&mut bytes).unwrap();
+    sending.seal(&mut bytes);
     bytes
 }
 
@@ -746,7 +746,7 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
         EndpointAddr::direct("192.0.2.1:9".parse().unwrap()),
     );
     let hello = PunchHelloFrame::new(1, 2, 3);
-    let prior = receiver.spaces.data.next_pn().unwrap().0;
+    let prior = receiver.spaces.data.next_pn().0;
     qtransport::space::Recover::cancel(
         receiver.spaces.data.as_ref(),
         prior,
@@ -826,7 +826,7 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
             .unwrap()
             .insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;
-        let pn = data.next_pn().unwrap().0;
+        let pn = data.next_pn().0;
         qtransport::space::Transmit::on_sealed(
             data.as_ref(),
             pn,
