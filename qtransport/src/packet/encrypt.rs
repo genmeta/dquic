@@ -44,7 +44,7 @@ impl<K: Seal> Packet<K> {
         &mut self,
         cx: &mut Context<'_>,
         datagram: &'b mut Cursor<&mut [u8]>,
-        quota: usize,
+        credit: usize,
         frames: &mut Vec<GuaranteedFrame>,
         sources: &mut [&mut dyn Package<&'b mut [u8]>],
     ) -> Poll<(usize, usize)> {
@@ -56,7 +56,7 @@ impl<K: Seal> Packet<K> {
         let mut bytes = &mut datagram.get_mut()[offset + self.cursor..];
         let mut buffer = PacketBuffer::new(
             &mut bytes,
-            quota,
+            credit,
             frames,
             self.header.get_type(),
             self.cursor,
@@ -148,7 +148,7 @@ impl<K: Seal> Packet<K> {
                 pn_offset + self.pn.1.size(),
                 self.keys.tag_len(),
             )
-            .expect("不可能达到上限，忽略这种错误就行了");
+            .expect("auto update keys");
         self.meta.pktlen = bytes.len();
         generation
     }

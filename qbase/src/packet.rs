@@ -46,14 +46,6 @@ pub mod number;
 #[doc(hidden)]
 pub use number::{InvalidPacketNumber, PacketNumber, WritePacketNumber, take_pn_len};
 
-/// Include operations such as decrypting QUIC packets, removing header protection,
-/// and parsing the first byte of the packet to get the right packet numbers
-pub mod decrypt;
-
-/// Include operations such as encrypting QUIC packets, adding header protection,
-/// and encoding the first byte of the packet with pn_len and key_phase optionally.
-pub mod encrypt;
-
 /// The sum type of all QUIC packet headers.
 #[derive(Debug, Clone)]
 #[enum_dispatch(GetDcid, GetType)]
