@@ -237,6 +237,46 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
 }
 
 #[test]
+fn exhausted_connection_credit_keeps_retransmission_available_with_fresh_data_queued() {
+    let mut remote = ServerParameters::default();
+    remote
+        .set(qbase::param::ParameterId::InitialMaxData, 5u32)
+        .unwrap();
+    let mut streams = DataStreams::new(
+        ArcParameters::new(
+            Role::Client,
+            Arc::new(ClientParameters::default()),
+            Arc::new(remote),
+        ),
+        Box::new(DemandConcurrency),
+        MockFrameSender,
+        Default::default(),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx)
+    else {
+        panic!("stream should open")
+    };
+    writer.write(bytes::Bytes::from_static(b"first")).unwrap();
+    let first = packet_frames(&mut streams, cx.waker());
+    let GuaranteedFrame::Stream(first) = first[0] else {
+        panic!("expected stream data")
+    };
+    writer.write(bytes::Bytes::from_static(b"next")).unwrap();
+    streams.may_loss_data(&first);
+    let retransmitted = packet_frames(&mut streams, cx.waker());
+    let GuaranteedFrame::Stream(retransmitted) = retransmitted[0] else {
+        panic!("expected retransmission")
+    };
+    assert_eq!(retransmitted.range(), first.range());
+    assert_eq!(
+        streams.fresh_bytes(),
+        4,
+        "fresh data still needs connection credit"
+    );
+}
+
+#[test]
 fn receive_limits_follow_the_local_stream_direction() {
     use qbase::{error::ErrorKind, frame::StreamFrame, param::ParameterId, sid::StreamId};
     use qrecovery::send::CancelStream;

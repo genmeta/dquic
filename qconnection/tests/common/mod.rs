@@ -43,6 +43,13 @@ pub fn path_credit(path: &qtransport::path::Path) -> usize {
     }
 }
 
+pub fn packet_metadata(
+    packets: &[qbase::packet::assemble::Metadata],
+    epoch: qbase::Epoch,
+) -> Option<qbase::packet::assemble::Metadata> {
+    packets.iter().find(|meta| meta.epoch() == epoch).copied()
+}
+
 pub fn endpoints(mutual: bool) -> (qtls::TlsClient, qtls::TlsServer) {
     set_roots();
     let provider = Arc::new(qtls::default_provider());

@@ -19,6 +19,7 @@ qresolve.workspace = true
 qtls.workspace = true
 qtransport.workspace = true
 qtraversal.workspace = true
+smallvec.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "io-util"] }
 tracing.workspace = true
 

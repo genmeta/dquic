@@ -51,7 +51,7 @@ impl<K: Seal> Packet<K> {
         }
         let tag = self.keys.tag_len();
         let max_size = limits.max_size.saturating_sub(limits.overhead);
-        let validation_size = if limits.credit.saturating_sub(limits.overhead) >= max_size {
+        let validation_size = if limits.credit.saturating_sub(limits.overhead) >= 1200 {
             max_size
         } else {
             0
@@ -71,7 +71,12 @@ impl<K: Seal> Packet<K> {
         }
         let result = buffer.assemble(cx, sources);
         if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
-            let padding = (buffer.pn_offset() + 4 + 16).saturating_sub(buffer.written() + tag);
+            let required = if matches!(self.header.get_type(), Type::Short(_)) {
+                buffer.min_size()
+            } else {
+                buffer.pn_offset() + 4 + 16
+            };
+            let padding = required.saturating_sub(buffer.written() + tag);
             if padding > buffer.remaining_mut() {
                 return Poll::Ready(Err(layout_error()));
             }
@@ -83,8 +88,6 @@ impl<K: Seal> Packet<K> {
         self.cursor = buffer.written();
         self.meta = buffer.meta;
         self.finished = buffer.is_finished();
-        let required = buffer.min_size();
-        limits.min_size = required.saturating_add(limits.overhead);
         result.map(|result| result.map(|n| if n > 0 { self.len() } else { 0 }))
     }
 

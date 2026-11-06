@@ -118,7 +118,7 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let mut limits = Constraints {
-        flow_ctrl: 10,
+        flow_ctrl: 0,
         send_quota: 12,
         credit: 12,
         min_size: 0,
@@ -132,10 +132,10 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
         source.poll_dump(&mut cx, &mut buffer),
         Poll::Ready(Ok(1))
     ));
-    assert_eq!(buffer.limits.flow_ctrl(), 0);
     let GuaranteedFrame::Stream(frame) = buffer.frames[0] else {
         panic!()
     };
+    assert_eq!(frame.len(), 10);
     assert!(matches!(
         qbase::frame::GetFrameType::frame_type(&frame),
         FrameType::Stream(_, Len::Omit, _)
@@ -162,7 +162,6 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
         source.poll_dump(&mut cx, &mut buffer),
         Poll::Ready(Ok(1))
     ));
-    assert_eq!(buffer.limits.flow_ctrl(), 0);
     assert_eq!(frames, vec![GuaranteedFrame::Stream(frame)]);
     writer.cancel(0);
 }

@@ -1,5 +1,6 @@
 //! Application-data space and its CRYPTO, reliable-frame and stream sources.
 use std::{
+    io::Cursor,
     sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -181,8 +182,8 @@ impl Encapsulate for DataSpace {
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        limits: &mut Constraints,
-        bytes: &mut [u8],
+        limits: &Constraints,
+        bytes: &mut Cursor<&mut [u8]>,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<Result<(Option<Packet>, usize), Error>> {
@@ -202,8 +203,11 @@ impl Encapsulate for DataSpace {
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .chain(internal)
             .collect();
-        let mut writer = &mut bytes[..];
-        match packet.assemble(cx, &mut writer, limits, frames, &mut sources) {
+        let offset = bytes.position() as usize;
+        let mut limits = limits.clone();
+        limits.max_size = limits.max_size.saturating_sub(offset);
+        let mut writer = &mut bytes.get_mut()[offset..];
+        match packet.assemble(cx, &mut writer, &mut limits, frames, &mut sources) {
             Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
             result => {
                 self.cancel(packet.pn.0, &mut frames.drain(start..));

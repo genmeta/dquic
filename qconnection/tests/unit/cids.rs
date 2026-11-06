@@ -360,7 +360,7 @@ async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retir
         }
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
-        let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut packets = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| Default::default());
         let mut burst = Burst::new(&paths, &selected, &mut datagrams, &mut frames, &mut packets);
         let result = burst.poll_collect(&mut Context::from_waker(Waker::noop()));
         assert_eq!(result.is_pending(), finish == "pending");

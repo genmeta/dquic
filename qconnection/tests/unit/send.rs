@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     Paths,
-    common::initial_keys as keys,
+    common::{initial_keys as keys, packet_metadata},
     send::{Burst, BurstPackets, MAX_BURST_PACKETS, sending, task},
 };
 
@@ -82,7 +82,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         }
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
-        let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut packets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
         let mut cx = Context::from_waker(Waker::noop());
         let result = burst.poll_collect(&mut cx);
@@ -90,7 +90,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
             matches!(result, Poll::Ready(Ok(1))),
             "{epoch:?}: {result:?}"
         );
-        let meta = burst.packets[0][epoch].unwrap();
+        let meta = packet_metadata(&burst.packets[0], epoch).unwrap();
         assert_eq!(meta.ack, Some(42));
         assert_eq!(meta.content, PacketContent::NonAckEliciting);
         assert!(
@@ -105,7 +105,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
             data.spaces.data.streams.fresh_bytes(),
             b"queued stream".len()
         );
-        burst.packets[0][epoch] = None;
+        burst.packets[0].retain(|meta| meta.epoch() != epoch);
         space.on_sent(
             meta.pn,
             false,
@@ -121,14 +121,13 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         tokio::time::advance(Duration::from_secs(20)).await;
         path.cc.do_tick().unwrap();
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))));
-        for meta in burst.packets.iter().flatten().flatten() {
+        for meta in burst.packets.iter().flatten() {
             assert_ne!(meta.content, PacketContent::EffectivePayload);
         }
         assert!(
             burst
                 .packets
                 .iter()
-                .flatten()
                 .flatten()
                 .any(|meta| meta.content == PacketContent::JustPing)
         );
@@ -139,7 +138,6 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
             burst
                 .packets
                 .iter()
-                .flatten()
                 .flatten()
                 .any(|meta| meta.content == PacketContent::EffectivePayload)
         );
@@ -160,7 +158,6 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
             burst
                 .packets
                 .iter()
-                .flatten()
                 .flatten()
                 .all(|meta| meta.content == PacketContent::NonAckEliciting)
         );
@@ -198,14 +195,16 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
     path.validation.exempt().unwrap();
     let mut datagrams = [BytesMut::new()];
     let mut frames = Vec::new();
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     let count = burst.collect().await.unwrap();
-    let pn = burst.packets[0][Epoch::Initial].unwrap().pn;
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
+        .unwrap()
+        .pn;
     path.disable();
     // No socket is registered: successful cancellation must avoid UDP submission.
     burst.submit(count).await.unwrap();
-    assert!(burst.packets.iter().flatten().all(Option::is_none));
+    assert!(burst.packets.iter().all(|packets| packets.is_empty()));
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
     assert!(
         burst
@@ -217,7 +216,9 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
         burst.poll_collect(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(Ok(1))
     ));
-    let pn = burst.packets[0][Epoch::Initial].unwrap().pn;
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
+        .unwrap()
+        .pn;
     assert!(space.sent_journal.lock_guard().frames(pn).any(|frame| {
         matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == b"queued crypto".len() as u64)
     }));
@@ -267,7 +268,7 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
     let mut collect = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
     assert!(
         collect
@@ -345,7 +346,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     path.cc.on_pkt_rcvd(Epoch::Handshake, 7, true);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
     let count = collect(Burst::new(
         &paths,
         &path,
@@ -362,7 +363,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     for (epoch, largest) in [(Epoch::Initial, 3), (Epoch::Handshake, 7)] {
         assert_eq!(
             pns.iter()
-                .filter_map(|slots| slots[epoch].and_then(|meta| meta.ack))
+                .filter_map(|slots| packet_metadata(slots, epoch).and_then(|meta| meta.ack))
                 .collect::<Vec<_>>(),
             [largest],
             "each space sends its ACK only once per burst"
@@ -487,7 +488,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                 }
                 let mut datagrams = [BytesMut::with_capacity(1200)];
                 let mut frames = Vec::new();
-                let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+                let mut pns = std::array::from_fn(|_| Default::default());
                 for attempt in 0..4 {
                     let result = collect(Burst::new(
                         &paths,
@@ -505,14 +506,14 @@ async fn crypto_replays_until_ack_or_path_selection() {
                             "{role:?} {handshaking} {selected} {attempt}"
                         );
                         for slots in &mut pns {
-                            slots[Epoch::Initial] = None;
+                            slots.retain(|meta| meta.epoch() != Epoch::Initial);
                         }
                     } else {
                         assert!(
                             result.is_none(),
                             "{role:?} {handshaking} {selected} {attempt}"
                         );
-                        assert!(pns.iter().flatten().all(Option::is_none));
+                        assert!(pns.iter().all(|packets| packets.is_empty()));
                     }
                     if selected != 0 && attempt == 1 {
                         crate::common::initial_space(&paths.spaces)
@@ -577,7 +578,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         space.crypto.on_error(&error.into());
         let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
         let mut frames = Vec::new();
-        let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+        let mut pns = std::array::from_fn(|_| Default::default());
         let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         let mut cx = Context::from_waker(Waker::noop());
         assert!(matches!(
@@ -627,7 +628,7 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
                 .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
         );
         for slots in &mut pns {
-            slots[epoch] = None;
+            slots.retain(|meta| meta.epoch() != epoch);
         }
         let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         assert!(collector.poll_collect(&mut cx).is_pending());
@@ -860,7 +861,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         let mut cx = Context::from_waker(&waker);
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
-        let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut packets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
         assert!(burst.poll_collect(&mut cx).is_pending());
         let before = counter.0.load(Ordering::Relaxed);
@@ -898,7 +899,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         assert!(counter.0.load(Ordering::Relaxed) > before);
         assert_eq!(other_counter.0.load(Ordering::Relaxed), 0);
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
-        assert!(burst.packets[0][epoch].is_some());
+        assert!(packet_metadata(&burst.packets[0], epoch).is_some());
         burst.cancel();
         paths.retire_all();
     }
@@ -924,7 +925,7 @@ async fn existing_path_recovers_newly_installed_spaces() {
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
 
     for epoch in [Epoch::Handshake, Epoch::Data] {
         let (crypto, journal) = if epoch == Epoch::Handshake {
@@ -958,7 +959,7 @@ async fn existing_path_recovers_newly_installed_spaces() {
                 .on_pkt_sent(epoch, pn, true, datagrams[index].len(), true, None);
             sent.push(pn);
             for entries in &mut pns {
-                entries.fill(None);
+                entries.clear();
             }
         }
         // Three later packets prove the first one lost. CC must call the newly attached space.
@@ -986,7 +987,7 @@ async fn existing_path_recovers_newly_installed_spaces() {
             matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 6)
         }));
         for entries in &mut pns {
-            entries.fill(None);
+            entries.clear();
         }
     }
 }
@@ -1080,7 +1081,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     }
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
     let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
     let mut cx = Context::from_waker(Waker::noop());
     assert!(collector.poll_collect(&mut cx).is_pending());
@@ -1098,7 +1099,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     assert!(
         Epoch::EPOCHS
             .into_iter()
-            .all(|epoch| pns[0][epoch].is_some())
+            .all(|epoch| packet_metadata(&pns[0], epoch).is_some())
     );
     let packets = PacketReader::new(datagrams[0].clone(), 8)
         .collect::<Result<Vec<_>, _>>()
@@ -1125,7 +1126,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
         Poll::Ready(Some(cid)) if cid == replacement));
 
     for slots in &mut pns {
-        slots.fill(None);
+        slots.clear();
     }
     for crypto in [
         &mature.spaces.initial.crypto,
@@ -1147,7 +1148,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     assert!(
         Epoch::EPOCHS
             .into_iter()
-            .all(|epoch| pns[0][epoch].is_some())
+            .all(|epoch| packet_metadata(&pns[0], epoch).is_some())
     );
     let packets = PacketReader::new(datagrams[0].clone(), 8)
         .collect::<Result<Vec<_>, _>>()
@@ -1189,7 +1190,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
     assert_eq!(
         collect(Burst::new(
             &paths,
@@ -1212,7 +1213,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     assert!(frames.is_empty());
     // Consume this burst's packet numbers before collecting the next burst.
     for entries in &mut pns {
-        entries.fill(None);
+        entries.clear();
     }
     mature
         .spaces
@@ -1237,7 +1238,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     ));
     assert_eq!(pns_for(&pns, Epoch::Initial).count(), 1);
     for slots in &mut pns {
-        slots[Epoch::Initial] = None;
+        slots.retain(|meta| meta.epoch() != Epoch::Initial);
     }
     // A path without an available CID must wait before collecting data. Retirement
     // must wake that wait even though the socket has never been polled.
@@ -1365,7 +1366,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         }
         let mut datagrams = [BytesMut::with_capacity(1200)];
         let mut frames = Vec::new();
-        let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+        let mut pns = std::array::from_fn(|_| Default::default());
         let counter = Arc::new(Counter(AtomicUsize::new(0)));
         let waker = Waker::from(counter.clone());
         let mut cx = Context::from_waker(&waker);
@@ -1377,7 +1378,8 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
                 Poll::Ready(Ok(1))
             ));
             for slots in &mut *collector.packets {
-                if let Some(meta) = slots[Epoch::Data].take() {
+                if let Some(meta) = packet_metadata(slots, Epoch::Data) {
+                    slots.retain(|meta| meta.epoch() != Epoch::Data);
                     mature.spaces.data.on_sent(
                         meta.pn,
                         meta.in_flight,
@@ -1488,9 +1490,9 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
 }
 
 fn pns_for(pns: &BurstPackets, epoch: Epoch) -> impl Iterator<Item = (usize, u64)> + '_ {
-    pns.iter()
-        .enumerate()
-        .filter_map(move |(index, slots)| slots[epoch].map(|meta| (index, meta.pn)))
+    pns.iter().enumerate().filter_map(move |(index, slots)| {
+        packet_metadata(slots, epoch).map(|meta| (index, meta.pn))
+    })
 }
 
 #[tokio::test(start_paused = true)]
@@ -1538,7 +1540,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         let base = path.cc.get_pto(epoch);
         let mut datagrams = [BytesMut::with_capacity(1200)];
         let mut frames = Vec::new();
-        let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         let counter = Arc::new(Counter(AtomicUsize::new(0)));
         let waker = Waker::from(counter.clone());
@@ -1575,7 +1577,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
             matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))),
             "{epoch:?} PTO did not resume when its probe fitted"
         );
-        let meta = burst.packets[0][epoch].unwrap();
+        let meta = packet_metadata(&burst.packets[0], epoch).unwrap();
         assert!(meta.content.is_ack_eliciting());
         assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
         assert!(path.cc.get_pto(epoch) > base);
@@ -1628,13 +1630,13 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     let base = path.cc.get_pto(Epoch::Handshake);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
-    let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
     assert!(matches!(
         burst.poll_collect(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(Ok(1))
     ));
-    let meta = burst.packets[0][Epoch::Handshake].unwrap();
+    let meta = packet_metadata(&burst.packets[0], Epoch::Handshake).unwrap();
     assert!(!meta.content.is_ack_eliciting());
     assert!(!meta.in_flight);
     assert!(meta.ack.is_some());
@@ -1691,7 +1693,7 @@ async fn path_validation_respects_small_amplification_credit() {
             let credit = crate::common::path_credit(&path);
             let mut datagrams = [BytesMut::with_capacity(1200)];
             let mut frames = Vec::new();
-            let mut pns: BurstPackets = [[None; 3]; MAX_BURST_PACKETS];
+            let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
             let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
             let result = collector.poll_collect(&mut Context::from_waker(Waker::noop()));
             drop(collector);
@@ -1713,7 +1715,7 @@ async fn path_validation_respects_small_amplification_credit() {
                 let journal = mature.spaces.data.sent_journal.lock_guard();
                 assert!(
                     journal
-                        .packet(pns[0][Epoch::Data].unwrap().pn)
+                        .packet(packet_metadata(&pns[0], Epoch::Data).unwrap().pn)
                         .unwrap()
                         .in_flight
                 );
@@ -1767,7 +1769,7 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
         let waker = Waker::from(counter.clone());
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
-        let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+        let mut packets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
         assert!(
             burst
@@ -1818,7 +1820,7 @@ async fn burst_uses_its_budget_across_multiple_udp_batches() {
     path.validation.exempt().unwrap();
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
     let mut frames = Vec::new();
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     burst.batch().await.unwrap();
     let (next, _) = space.next_pn().unwrap();
@@ -1875,13 +1877,13 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
 
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
     let count = burst.collect().await.unwrap();
     assert!(count > 1);
-    let pending = *burst.packets;
-    let first = pending[0][Epoch::Initial].unwrap().pn;
-    let suffix = pending[1][Epoch::Initial].unwrap().pn;
+    let pending = burst.packets.clone();
+    let first = packet_metadata(&pending[0], Epoch::Initial).unwrap().pn;
+    let suffix = packet_metadata(&pending[1], Epoch::Initial).unwrap().pn;
     let offset = space
         .sent_journal
         .lock_guard()
@@ -1898,34 +1900,34 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     burst.datagrams[1].resize(65536, 0);
     let error = burst.submit(count).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
-    assert!(burst.packets[0].iter().all(Option::is_none));
+    assert!(burst.packets[0].is_empty());
     assert_eq!(
-        burst.packets[1].map(|packet| packet.map(|meta| (
-            meta.pn,
-            meta.pktlen,
-            meta.content,
-            meta.in_flight,
-            meta.ack
-        ))),
-        pending[1].map(|packet| packet.map(|meta| (
-            meta.pn,
-            meta.pktlen,
-            meta.content,
-            meta.in_flight,
-            meta.ack
-        ))),
+        burst.packets[1]
+            .iter()
+            .map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))
+            .collect::<Vec<_>>(),
+        pending[1]
+            .iter()
+            .map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))
+            .collect::<Vec<_>>(),
     );
     burst.cancel();
-    assert!(burst.packets.iter().flatten().all(Option::is_none));
+    assert!(burst.packets.iter().all(|packets| packets.is_empty()));
     {
         let journal = space.sent_journal.lock_guard();
         assert!(journal.packet(first).is_some());
         for slots in &pending[1..count] {
-            assert!(journal.packet(slots[Epoch::Initial].unwrap().pn).is_none());
+            assert!(
+                journal
+                    .packet(packet_metadata(slots, Epoch::Initial).unwrap().pn)
+                    .is_none()
+            );
         }
     }
     let count = burst.collect().await.unwrap();
-    let retransmit = burst.packets[0][Epoch::Initial].unwrap().pn;
+    let retransmit = packet_metadata(&burst.packets[0], Epoch::Initial)
+        .unwrap()
+        .pn;
     assert!(
         space
             .sent_journal
@@ -1936,7 +1938,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
             })
     );
     burst.submit(count).await.unwrap();
-    assert!(burst.packets.iter().flatten().all(Option::is_none));
+    assert!(burst.packets.iter().all(|packets| packets.is_empty()));
     task::cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
@@ -1974,16 +1976,18 @@ async fn retired_path_rejects_a_collected_burst_before_udp_submission() {
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     let count = burst.collect().await.unwrap();
-    let pn = burst.packets[0][Epoch::Initial].unwrap().pn;
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
+        .unwrap()
+        .pn;
     path.close();
 
     let error = burst.submit(count).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(matches!(error, crate::Error::Quic(error) if error.reason() == "Cancelled"));
-    assert!(burst.packets[0][Epoch::Initial].is_some());
+    assert!(packet_metadata(&burst.packets[0], Epoch::Initial).is_some());
     burst.cancel();
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
     task::cancel_waiters(&paths, &path);
@@ -2033,11 +2037,11 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
-    let mut pns = [[None; 3]; MAX_BURST_PACKETS];
+    let mut pns = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
     assert_eq!(burst.collect().await.unwrap(), 1);
-    assert!(burst.packets[0][Epoch::Initial].is_some());
-    assert!(burst.packets[0][Epoch::Handshake].is_some());
+    assert!(packet_metadata(&burst.packets[0], Epoch::Initial).is_some());
+    assert!(packet_metadata(&burst.packets[0], Epoch::Handshake).is_some());
     let journals = [&initial.sent_journal, &handshake.sent_journal];
     tokio::time::advance(Duration::from_secs(10)).await;
     for journal in journals {
@@ -2048,7 +2052,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
     burst.submit(1).await.unwrap();
     let submitted_at = Instant::now();
-    assert!(burst.packets[0].iter().all(Option::is_none));
+    assert!(burst.packets[0].is_empty());
     assert_eq!(crate::common::path_credit(&path), 2400);
     burst.cancel();
     for (journal, delay) in journals.into_iter().zip(delays) {
@@ -2144,7 +2148,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
         .unwrap();
     let mut datagrams = [BytesMut::new()];
     let mut frames = Vec::new();
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &other, &mut datagrams, &mut frames, &mut packets);
     let count = burst
         .collect()

@@ -21,7 +21,11 @@ use qtransport::{
     space::{HandshakeSpace, Space},
 };
 
-use crate::{Paths, common::initial_keys as keys, recv::recv_ih_pkt_and_deliver_frames};
+use crate::{
+    Paths,
+    common::{initial_keys as keys, packet_metadata},
+    recv::recv_ih_pkt_and_deliver_frames,
+};
 
 fn seal<H, const N: usize>(
     header: H,
@@ -800,12 +804,18 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let mut cx = Context::from_waker(Waker::noop());
     let mut burst = Burst::new(&paths, &second, &mut datagrams, &mut frames, &mut packets);
     assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
-    assert!(burst.packets.iter().all(|p| p[Epoch::Data].is_none()));
-    let initial = burst.packets[0][Epoch::Initial].take().unwrap();
+    assert!(
+        burst
+            .packets
+            .iter()
+            .all(|p| packet_metadata(p, Epoch::Data).is_none())
+    );
+    let initial = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap();
+    burst.packets[0].retain(|meta| meta.epoch() != Epoch::Initial);
     mature.spaces.initial.on_sent(
         initial.pn,
         initial.in_flight,
@@ -858,8 +868,18 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0),
         "the selected path must have its CID before Data is published"
     );
-    assert!(burst.packets.iter().any(|p| p[Epoch::Handshake].is_some()));
-    assert!(burst.packets.iter().any(|p| p[Epoch::Data].is_some()));
+    assert!(
+        burst
+            .packets
+            .iter()
+            .any(|p| packet_metadata(p, Epoch::Handshake).is_some())
+    );
+    assert!(
+        burst
+            .packets
+            .iter()
+            .any(|p| packet_metadata(p, Epoch::Data).is_some())
+    );
     burst.cancel();
     paths.retire_all();
 }

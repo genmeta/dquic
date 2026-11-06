@@ -11,7 +11,7 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut datagrams =
         std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::with_capacity(256);
-    let mut packets = [[None; 3]; MAX_BURST_PACKETS];
+    let mut packets = std::array::from_fn(|_| Default::default());
     let terminator = paths.terminator.clone();
     let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
