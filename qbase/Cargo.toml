@@ -32,7 +32,6 @@ qmacro = { workspace = true }
 qtls = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
-rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

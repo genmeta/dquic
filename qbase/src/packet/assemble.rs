@@ -61,10 +61,10 @@ impl Metadata {
 
 pub struct PacketBuffer<'a, B: ?Sized> {
     buffer: &'a mut B,
-    quota: usize,
+    credit: usize,
     pub frames: &'a mut Vec<GuaranteedFrame>,
     tag_len: usize,
-    written: usize,
+    nwrote: usize,
     end: usize,
     pub meta: Metadata,
     min_size: usize,
@@ -144,21 +144,21 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
 impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     pub fn new(
         buffer: &'a mut B,
-        quota: usize,
+        credit: usize,
         frames: &'a mut Vec<GuaranteedFrame>,
         packet_type: Type,
-        written: usize,
+        nwrote: usize,
         tag_len: usize,
     ) -> Self {
-        let end = written
+        let end = nwrote
             .saturating_add(buffer.remaining_mut())
             .saturating_sub(tag_len);
         Self {
             buffer,
-            quota,
+            credit,
             frames,
             tag_len,
-            written,
+            nwrote,
             end,
             meta: Metadata::new(packet_type),
             min_size: 0,
@@ -188,7 +188,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
         self.pn_offset = header.size() + if long { 2 } else { 0 };
         self.min_size = self.pn_offset + 4 + 16;
         if self.pn_offset + pn.size() > self.remaining_mut()
-            || self.written.saturating_add(self.buffer.remaining_mut()) < self.min_size
+            || self.nwrote.saturating_add(self.buffer.remaining_mut()) < self.min_size
         {
             return false;
         }
@@ -208,13 +208,13 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     /// Restrict a candidate frame by its packet's budget and datagram requirements.
     pub fn for_frame(&mut self, frame_type: FrameType) {
         if !frame_type.belongs_to(self.meta.pktype) || self.finished {
-            self.end = self.written;
+            self.end = self.nwrote;
             return;
         }
-        let limit = self.written.saturating_add(self.buffer.remaining_mut());
+        let limit = self.nwrote.saturating_add(self.buffer.remaining_mut());
         let limit =
             if self.meta.in_flight || !frame_type.specs().contain(Spec::CongestionControlFree) {
-                limit.min(self.quota)
+                limit.min(self.credit)
             } else {
                 limit
             };
@@ -226,7 +226,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
             min_size = min_size.max(self.validation_min_size);
         }
         self.end = if limit < min_size {
-            self.written
+            self.nwrote
         } else {
             limit.saturating_sub(self.tag_len)
         };
@@ -264,25 +264,25 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     }
 
     pub fn written(&self) -> usize {
-        self.written
+        self.nwrote
     }
 
     /// Padding needed to reach the minimum size consumes congestion quota too.
     pub fn can_fit(&self, size: usize) -> bool {
         size <= self.remaining_mut()
             && (self
-                .written
+                .nwrote
                 .saturating_add(size)
                 .saturating_add(self.tag_len)
                 >= self.min_size
-                || self.quota >= self.min_size)
+                || self.credit >= self.min_size)
     }
 }
 
 unsafe impl<B: BufMut + ?Sized> BufMut for PacketBuffer<'_, B> {
     fn remaining_mut(&self) -> usize {
         self.end
-            .saturating_sub(self.written)
+            .saturating_sub(self.nwrote)
             .min(self.buffer.remaining_mut())
     }
 
@@ -291,7 +291,7 @@ unsafe impl<B: BufMut + ?Sized> BufMut for PacketBuffer<'_, B> {
         unsafe {
             self.buffer.advance_mut(count);
         }
-        self.written += count;
+        self.nwrote += count;
     }
 
     fn chunk_mut(&mut self) -> &mut UninitSlice {
