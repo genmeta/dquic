@@ -479,6 +479,7 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
     bytes.resize(packet.len(), 0);
     let generation = packet.seal(&mut bytes).unwrap();
     assert_eq!(generation, None);
+    assert_eq!(packet.meta.epoch(), Epoch::Data);
     let (_, received) = material
         .sealing
         .open(parse(&bytes), |_| Ok(pn.0), Duration::ZERO)
@@ -1249,7 +1250,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
         let mut constraints = Constraints {
-            flow_ctrl: usize::MAX,
+            flow_ctrl: 0,
             max_size: 1200,
             send_quota: 1200,
             credit: 1200,

@@ -22,13 +22,14 @@ use qtransport::{
     path::Path,
     space::{Spaces, assemble::Constraints},
 };
+use smallvec::SmallVec;
 pub(crate) use task::sending;
 
 use crate::{Error, Paths};
 
 pub const MAX_BURST_PACKETS: usize = 8;
-/// Sealed packet metadata, indexed by datagram and epoch.
-pub type BurstPackets = [[Option<Metadata>; 3]; MAX_BURST_PACKETS];
+/// Sealed packet metadata for each datagram.
+pub type BurstPackets = [SmallVec<[Metadata; 1]>; MAX_BURST_PACKETS];
 
 /// Owns collection and submission state until every pending packet is sent or cancelled.
 pub struct Burst<'a, 'path> {
@@ -62,11 +63,10 @@ impl<'a, 'path> Burst<'a, 'path> {
 
     pub fn cancel(&mut self) {
         if let Some(spaces) = &self.spaces {
-            for slots in self.packets.iter_mut() {
-                for (epoch, space) in spaces.0.enumerate() {
-                    if let Some(meta) = slots[epoch as usize].take() {
-                        space.cancel(meta.pn, &mut std::iter::empty());
-                    }
+            for packets in self.packets.iter_mut() {
+                for meta in packets.drain(..) {
+                    let space = spaces.0.get(meta.epoch() as u64).unwrap();
+                    space.cancel(meta.pn, &mut std::iter::empty());
                 }
             }
         }
@@ -116,7 +116,6 @@ impl<'a, 'path> Burst<'a, 'path> {
                     && self.packets[first..count]
                         .iter()
                         .flatten()
-                        .flatten()
                         .any(|meta| meta.content == PacketContent::EffectivePayload)
                 {
                     return Poll::Ready(Ok(None));
@@ -127,8 +126,9 @@ impl<'a, 'path> Burst<'a, 'path> {
                     &datagrams[first..count]
                 ))?;
                 for index in first..first + sent {
-                    let packets = Epoch::EPOCHS.map(|epoch| {
-                        let meta = self.packets[index][epoch].take()?;
+                    let mut packets = [None; 3];
+                    for meta in self.packets[index].drain(..) {
+                        let epoch = meta.epoch();
                         let space = spaces.0.get(epoch as u64).unwrap();
                         space.on_sent(
                             meta.pn,
@@ -136,9 +136,9 @@ impl<'a, 'path> Burst<'a, 'path> {
                             deadlines[epoch].0,
                             deadlines[epoch].1,
                         );
-                        Some(meta)
-                    });
-                    sent_handshake |= packets[Epoch::Handshake].is_some();
+                        sent_handshake |= epoch == Epoch::Handshake;
+                        packets[epoch] = Some(meta);
+                    }
                     path.on_sent(&mut cc, self.datagrams[index].len(), packets, &idle);
                 }
                 update_amplification_blocked(
@@ -262,7 +262,7 @@ impl Burst<'_, '_> {
         let mut count = 0;
         for (buffer, packets) in self.datagrams.iter_mut().zip(self.packets.iter_mut()) {
             buffer.resize(1200, 0);
-            let size = if path.is_active() {
+            let (size, collected) = if path.is_active() {
                 // A sealed packet consumes its epoch's PTO allowance, even without a PING.
                 let mut probes = Epoch::EPOCHS
                     .map(|epoch| (epoch, (limits.probe_quota[epoch] > 0).then_some(PingFrame)));
@@ -279,19 +279,19 @@ impl Burst<'_, '_> {
                     p1,
                     p2,
                 ];
-                spaces.poll_dump(cx, dcid, buffer, limits, self.frames, packets, &mut sources)?
+                spaces.poll_dump(cx, dcid, buffer, limits, self.frames, &mut sources)?
             } else {
                 spaces.poll_ping(
                     cx,
                     dcid,
-                    &mut heartbeat,
-                    &mut acks,
                     buffer,
                     limits,
                     self.frames,
-                    packets,
+                    &mut heartbeat,
+                    &mut acks,
                 )?
             };
+            *packets = collected;
             buffer.truncate(size);
             if size == 0 {
                 break;

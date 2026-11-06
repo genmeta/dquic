@@ -767,7 +767,7 @@ where
             Fin::No,
         ));
         let previous = buffer.limits.flow_ctrl();
-        let requested = self.fresh_bytes_up_to(buffer.remaining_mut().min(previous));
+        let requested = self.fresh_bytes_up_to(buffer.remaining_mut());
         let mut credit = self.flow_ctrl.sender.credit(requested);
         if requested > 0 && credit.available() == 0 {
             credit = std::task::ready!(self.flow_ctrl.sender.poll_credit(cx, requested));
@@ -781,7 +781,7 @@ where
         let result = self.poll_dump_streams(cx, buffer);
         let sent = available - buffer.limits.flow_ctrl();
         credit.post_sent(sent);
-        buffer.limits.set_flow_ctrl(previous - sent);
+        buffer.limits.set_flow_ctrl(previous);
         result
     }
 

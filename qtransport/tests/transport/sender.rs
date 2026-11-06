@@ -58,18 +58,16 @@ impl Sender {
         let mut validation = self.path.validation.clone();
         let mut ping = (self.heartbeat || limits.probe_quota[Epoch::Data] > 0).then_some(PingFrame);
         self.bytes.resize(1200, 0);
-        let mut packets = [None; 3];
-        let size = spaces.poll_dump(
+        let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
             ConnectionId::from_slice(b"original"),
             &mut self.bytes,
             &mut limits,
             &mut Vec::new(),
-            &mut packets,
             &mut [&mut ack, &mut validation, &mut ping],
         )?;
         self.bytes.truncate(size);
-        self.pending = packets[Epoch::Data];
+        self.pending = packets.into_iter().next();
         if size > 0 {
             self.heartbeat = false;
         }
