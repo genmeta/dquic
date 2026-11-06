@@ -19,7 +19,6 @@ use qrecovery::journal::AckPackege;
 use smallvec::SmallVec;
 
 use super::Encapsulate;
-pub use super::budget::Constraints;
 
 pub struct Spaces(pub IndexDeque<Arc<dyn Encapsulate>, 2>);
 pub type ArcSpaces = ArcIndexDeque<Arc<dyn Encapsulate>, 2>;
@@ -32,33 +31,10 @@ impl Spaces {
         dcid: ConnectionId,
         cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
-        limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
-        for (window_len, window_limits) in
-            limits.windows(bytes.get_ref().len()).into_iter().flatten()
-        {
-            let mut datagram = Cursor::new(&mut bytes.get_mut()[..window_len]);
-            let (size, packets) = self.poll_dump_at(
-                cx,
-                cc,
-                dcid,
-                0,
-                None,
-                &mut datagram,
-                &window_limits,
-                frames,
-                external,
-            );
-            let end = datagram.position();
-            if size > 0 {
-                bytes.set_position(end);
-                limits.on_assembled(size, &packets);
-                return (size, packets);
-            }
-        }
-        (0, SmallVec::new())
+        self.poll_dump_at(cx, cc, dcid, 0, bytes, None, frames, external)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -68,9 +44,8 @@ impl Spaces {
         cc: &ArcCC,
         dcid: ConnectionId,
         level: u64,
+        datagram: &mut Cursor<&mut [u8]>,
         min_size: Option<usize>,
-        bytes: &mut Cursor<&mut [u8]>,
-        limits: &Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
@@ -83,17 +58,16 @@ impl Spaces {
                 cc,
                 dcid,
                 level + 1,
+                datagram,
                 min_size,
-                bytes,
-                limits,
                 frames,
                 external,
             ),
             Some(space) => {
                 let start = frames.len();
-                let offset = bytes.position() as usize;
+                let offset = datagram.position() as usize;
                 let (packet, mut pktlen) =
-                    match space.poll_dump(cx, dcid, cc, bytes, limits, frames, external) {
+                    match space.poll_dump(cx, cc, dcid, datagram, frames, external) {
                         Poll::Ready(result) => result,
                         Poll::Pending => (None, 0),
                     };
@@ -104,9 +78,8 @@ impl Spaces {
                     cc,
                     dcid,
                     level + 1,
+                    datagram,
                     min_size.map(|size| size.saturating_sub(pktlen)),
-                    bytes,
-                    limits,
                     frames,
                     external,
                 );
@@ -115,10 +88,11 @@ impl Spaces {
                     Some(mut packet) => {
                         if n == 0 {
                             let padlen = min_size.unwrap_or(0).saturating_sub(pktlen);
-                            pktlen += packet.padding(&mut bytes.get_mut()[offset..], padlen);
-                            bytes.set_position((offset + pktlen) as u64);
+                            pktlen += packet.padding(&mut datagram.get_mut()[offset..], padlen);
+                            datagram.set_position((offset + pktlen) as u64);
                         }
-                        let generation = packet.seal(&mut bytes.get_mut()[offset..offset + pktlen]);
+                        let generation =
+                            packet.seal(&mut datagram.get_mut()[offset..offset + pktlen]);
                         space.on_sealed(
                             packet.pn.0,
                             generation,
@@ -141,35 +115,11 @@ impl Spaces {
         dcid: ConnectionId,
         cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
-        limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         heartbeat: &mut ArcHeartbeat,
         acks: &mut [(Epoch, Option<AckPackege<'_>>); 3],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
-        for (window_len, window_limits) in
-            limits.windows(bytes.get_ref().len()).into_iter().flatten()
-        {
-            let mut datagram = Cursor::new(&mut bytes.get_mut()[..window_len]);
-            let (size, packets) = self.poll_ping_at(
-                cx,
-                dcid,
-                cc,
-                0,
-                None,
-                &mut datagram,
-                &window_limits,
-                frames,
-                heartbeat,
-                acks,
-            );
-            let end = datagram.position();
-            if size > 0 {
-                bytes.set_position(end);
-                limits.on_assembled(size, &packets);
-                return (size, packets);
-            }
-        }
-        (0, SmallVec::new())
+        self.poll_ping_at(cx, dcid, cc, 0, None, bytes, frames, heartbeat, acks)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -181,7 +131,6 @@ impl Spaces {
         level: u64,
         min_size: Option<usize>,
         bytes: &mut Cursor<&mut [u8]>,
-        limits: &Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         heartbeat: &mut ArcHeartbeat,
         acks: &mut [(Epoch, Option<AckPackege<'_>>); 3],
@@ -197,7 +146,6 @@ impl Spaces {
                 level + 1,
                 min_size,
                 bytes,
-                limits,
                 frames,
                 heartbeat,
                 acks,
@@ -210,7 +158,6 @@ impl Spaces {
                     dcid,
                     cc,
                     bytes,
-                    limits,
                     frames,
                     heartbeat,
                     &mut acks[level as usize].1,
@@ -227,7 +174,6 @@ impl Spaces {
                     level + 1,
                     min_size.map(|size| size.saturating_sub(pktlen)),
                     bytes,
-                    limits,
                     frames,
                     heartbeat,
                     acks,

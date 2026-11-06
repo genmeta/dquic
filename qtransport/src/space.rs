@@ -16,11 +16,11 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         GetType, HeaderSize, PacketNumber, Type,
-        assemble::{Metadata, Package},
+        assemble::{Constraints, Metadata, Package},
     },
     time::heartbeat::ArcHeartbeat,
 };
-use qcongestion::ArcCC;
+use qcongestion::{ArcCC, Transport as _};
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
@@ -32,7 +32,6 @@ use tokio::time::Instant;
 use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 pub mod assemble;
-mod budget;
 pub mod data;
 pub mod handshake;
 pub mod initial;
@@ -304,10 +303,9 @@ pub trait Encapsulate: Transmit {
     fn poll_dump(
         &self,
         cx: &mut Context<'_>,
-        dcid: ConnectionId,
         cc: &ArcCC,
-        bytes: &mut Cursor<&mut [u8]>,
-        limits: &assemble::Constraints,
+        dcid: ConnectionId,
+        datagram: &mut Cursor<&mut [u8]>,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
@@ -318,20 +316,20 @@ pub trait Encapsulate: Transmit {
             return Poll::Ready((None, 0));
         };
         let start = frames.len();
-        let offset = bytes.position() as usize;
-        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
+        let offset = datagram.position() as usize;
+        let mut packet_limits = packet_limits(self.epoch(), cc, datagram);
         let mut crypto = self.crypto().outgoing();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .collect();
         sources.push(&mut crypto);
-        let mut writer = &mut bytes.get_mut()[offset..];
+        let mut writer = &mut datagram.get_mut()[offset..];
         let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((size, _)) if size > 0 => {
-                bytes.set_position((offset + size) as u64);
+                datagram.set_position((offset + size) as u64);
                 Poll::Ready((Some(packet), size))
             }
             result => {
@@ -348,7 +346,6 @@ pub trait Encapsulate: Transmit {
         dcid: ConnectionId,
         cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
-        limits: &assemble::Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         heartbeat: &mut ArcHeartbeat,
         ack: &mut Option<AckPackege<'_>>,
@@ -361,7 +358,7 @@ pub trait Encapsulate: Transmit {
         };
         let start = frames.len();
         let offset = bytes.position() as usize;
-        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
+        let mut packet_limits = packet_limits(self.epoch(), cc, bytes);
         let mut writer = &mut bytes.get_mut()[offset..];
         match packet.assemble(
             cx,
@@ -386,4 +383,33 @@ fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usiz
     let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
     // A PING occupies one byte. Header protection also needs a full sample.
     (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
+}
+
+fn packet_limits(epoch: Epoch, cc: &ArcCC, datagram: &Cursor<&mut [u8]>) -> Constraints {
+    let send_quota = cc.send_quota();
+    let probe_quota = if cc.need_send_ack_eliciting(epoch) > 0 {
+        1200
+    } else {
+        0
+    };
+    let max_size = if epoch == Epoch::Initial
+        && (datagram.get_ref().len() < 1200 || send_quota.max(probe_quota) < 1200)
+    {
+        0
+    } else {
+        datagram
+            .get_ref()
+            .len()
+            .saturating_sub(datagram.position() as usize)
+    };
+    Constraints {
+        send_quota,
+        probe_quota,
+        credit: datagram
+            .get_ref()
+            .len()
+            .saturating_sub(datagram.position() as usize),
+        max_size,
+        ..Default::default()
+    }
 }

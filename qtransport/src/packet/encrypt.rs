@@ -50,11 +50,6 @@ impl<K: Seal> Packet<K> {
         }
         let tag = self.keys.tag_len();
         let max_size = limits.max_size.saturating_sub(limits.overhead);
-        let validation_size = if limits.credit.saturating_sub(limits.overhead) >= 1200 {
-            max_size
-        } else {
-            0
-        };
         let mut buffer = PacketBuffer::new(
             bytes,
             limits,
@@ -64,7 +59,7 @@ impl<K: Seal> Packet<K> {
             tag,
         );
         buffer.meta = self.meta;
-        buffer.scope(validation_size);
+        buffer.scope(max_size);
         if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1, None) {
             return Poll::Ready((0, 0));
         }

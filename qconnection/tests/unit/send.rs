@@ -1536,9 +1536,22 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         }
         path.validation.on_received(400);
         path.validation.on_sent(1200);
-        path.cc.on_pkt_sent(epoch, 0, true, 1200, true, None);
+        let quota = path.cc.send_quota();
+        path.cc.on_pkt_sent(epoch, 0, true, quota, true, None);
+        assert_eq!(path.cc.send_quota(), 0);
+        if epoch == Epoch::Data {
+            let (_, mut writer) = mature
+                .spaces
+                .data
+                .streams
+                .open_uni()
+                .await
+                .unwrap()
+                .unwrap();
+            writer.write_all(&[7; 4000]).await.unwrap();
+        }
         let base = path.cc.get_pto(epoch);
-        let mut datagrams = [BytesMut::with_capacity(1200)];
+        let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
         let mut frames = Vec::new();
         let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
@@ -1836,6 +1849,85 @@ async fn burst_uses_its_budget_across_multiple_udp_batches() {
     path.close();
     paths.terminator.terminate();
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn burst_bounds_each_datagram_and_charges_envelopes_once() {
+    use qprotocol::QuicProtocol;
+
+    for mediate in [false, true] {
+        for amplification_limited in [false, true] {
+            let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
+            super::install_data(&paths, &mature);
+            let local = EndpointAddr::direct("127.0.0.1:35501".parse().unwrap());
+            let remote = if mediate {
+                EndpointAddr::mediate(
+                    "127.0.0.1:35502".parse().unwrap(),
+                    "127.0.0.1:35503".parse().unwrap(),
+                )
+            } else {
+                EndpointAddr::direct("127.0.0.1:35502".parse().unwrap())
+            };
+            let path = crate::common::registered_path(
+                &paths,
+                Path::new(
+                    Pathway::new(local, remote),
+                    paths.progress.facts(),
+                    ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                    paths.loss_resender.clone(),
+                    paths.cid_registry.remote.apply_dcid(),
+                ),
+            );
+            paths.progress.on_path_selected(&paths, &path);
+            let overhead = QuicProtocol::packet_overhead(path.pathway);
+            crate::common::spaces::take_reliable(&mature);
+            let budget = (1500 + 2 * overhead).div_ceil(3) * 3;
+            if amplification_limited {
+                path.validation.on_received(budget / 3);
+            } else {
+                path.validation.exempt().unwrap();
+                let used = path.cc.send_quota() - budget;
+                path.cc
+                    .on_pkt_sent(Epoch::Data, 999, true, used, true, None);
+                assert_eq!(path.cc.send_quota(), budget);
+            }
+            let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
+            let mut frames = Vec::new();
+            let mut packets = std::array::from_fn(|_| Default::default());
+            let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
+            let mut cx = Context::from_waker(Waker::noop());
+            let result = burst.poll_collect(&mut cx);
+            assert!(result.is_pending(), "{result:?}: {:?}", burst.packets);
+            assert!(burst.packets.iter().all(|packets| packets.is_empty()));
+            let (_, mut writer) = mature
+                .spaces
+                .data
+                .streams
+                .open_uni()
+                .await
+                .unwrap()
+                .unwrap();
+            writer.write_all(&[7; 4000]).await.unwrap();
+            assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(2))));
+            assert_eq!(burst.datagrams[0].len(), 1200);
+            assert_eq!(burst.datagrams[1].len(), budget - 2 * overhead - 1200);
+            let charged: usize = burst.datagrams[..2]
+                .iter()
+                .map(|bytes| bytes.len() + overhead)
+                .sum();
+            assert_eq!(charged, budget);
+            assert!(
+                burst.packets[..2]
+                    .iter()
+                    .flatten()
+                    .all(|meta| meta.in_flight)
+            );
+            burst.cancel();
+            task::cancel_waiters(&paths, &path);
+            path.close();
+            paths.terminator.terminate();
+        }
+    }
 }
 
 #[tokio::test]
