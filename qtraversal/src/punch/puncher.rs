@@ -48,7 +48,7 @@ const PUNCH_DONE_CONFIRM_INTERVAL: Duration = Duration::from_millis(30);
 pub trait PunchPacketEncoder: Clone + Send + Sync + 'static {
     fn encode_probe<P>(&self, frame: P) -> io::Result<BytesMut>
     where
-        P: for<'b> Package<&'b mut BytesMut>;
+        P: for<'b> Package<&'b mut [u8]>;
 }
 
 pub struct ArcPuncher<TX, PE>(Arc<Puncher<TX, PE>>);
@@ -339,7 +339,7 @@ where
         frame: P,
     ) -> io::Result<()>
     where
-        P: for<'b> Package<&'b mut BytesMut>,
+        P: for<'b> Package<&'b mut [u8]>,
     {
         let bytes = self.0.packet_encoder.encode_probe(frame)?;
         socket

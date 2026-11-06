@@ -12,42 +12,13 @@ use crate::{
     packet::Type,
 };
 
-pub trait Limit {
-    fn flow_ctrl(&self) -> usize;
-    /// Set the fresh STREAM allowance for the current frame source.
-    fn set_flow_ctrl(&mut self, amount: usize);
-    fn send_quota(&self) -> usize;
-    fn credit(&self) -> usize;
-    fn min_size(&self) -> usize;
-    fn max_size(&self) -> usize;
-    /// Bound this packet's write window without consuming credit.
-    fn set_max_size(&mut self, size: usize);
-    fn fresh(&mut self, amount: usize);
-    /// Consume encoded packet bytes; the limit also charges any reserved envelope.
-    fn take(&mut self, send_quota: usize, credit: usize);
-}
-
-/// Burst balances and current datagram size limits, including envelope overhead.
-#[derive(Debug, Clone, Default)]
-pub struct Constraints {
-    pub flow_ctrl: usize,
-    pub send_quota: usize,
-    pub credit: usize,
-    pub min_size: usize,
-    pub max_size: usize,
-    /// Datagram envelope bytes reserved outside the encoded QUIC packet.
-    pub overhead: usize,
-    /// Congestion allowance for the current PTO probe; does not replenish the burst.
-    pub probe_quota: usize,
-}
-
 /// Packet metadata collected during assembly and finalized after sealing.
 #[derive(Debug, Clone, Copy)]
 pub struct Metadata {
     pub pn: u64,
     /// Final packet length including padding and the authentication tag; set after sealing.
     pub pktlen: usize,
-    pub packet_type: Type,
+    pub pktype: Type,
     pub nframes: usize,
     pub content: super::PacketContent,
     pub in_flight: bool,
@@ -57,7 +28,7 @@ pub struct Metadata {
 impl Metadata {
     pub fn epoch(&self) -> crate::Epoch {
         use super::r#type::long::{Type as Long, Ver1};
-        match self.packet_type {
+        match self.pktype {
             Type::Long(Long::V1(Ver1::INITIAL)) => crate::Epoch::Initial,
             Type::Long(Long::V1(Ver1::HANDSHAKE)) => crate::Epoch::Handshake,
             Type::Long(Long::V1(Ver1::ZERO_RTT)) | Type::Short(_) => crate::Epoch::Data,
@@ -65,11 +36,11 @@ impl Metadata {
         }
     }
 
-    pub fn new(packet_type: Type) -> Self {
+    pub fn new(pktype: Type) -> Self {
         Self {
             pn: 0,
             pktlen: 0,
-            packet_type,
+            pktype,
             nframes: 0,
             content: Default::default(),
             in_flight: false,
@@ -90,7 +61,7 @@ impl Metadata {
 
 pub struct PacketBuffer<'a, B: ?Sized> {
     buffer: &'a mut B,
-    pub limits: &'a mut dyn Limit,
+    quota: usize,
     pub frames: &'a mut Vec<GuaranteedFrame>,
     tag_len: usize,
     written: usize,
@@ -139,10 +110,10 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
         cx: &mut Context<'_>,
         sources: &mut [&mut dyn Package<B>],
     ) -> Poll<Result<usize, Error>> {
-        if self.finished || self.limits.max_size() == 0 {
+        if self.finished {
             return Poll::Ready(Ok(0));
         }
-        let packet_type = self.meta.packet_type;
+        let packet_type = self.meta.pktype;
         // Keep applicable sources first, preserving input order at equal priority.
         sources.sort_by_key(|source| {
             if source.belongs_to(packet_type) {
@@ -154,7 +125,7 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
         let start = self.meta.nframes;
         let mut result = Poll::Pending;
         for source in sources {
-            if self.finished || self.limits.max_size() == 0 || !source.belongs_to(packet_type) {
+            if self.finished || !source.belongs_to(packet_type) {
                 break;
             }
             if let Poll::Ready(value) = source.poll_dump(cx, self) {
@@ -170,69 +141,21 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
     }
 }
 
-impl Limit for Constraints {
-    fn flow_ctrl(&self) -> usize {
-        self.flow_ctrl
-    }
-
-    fn set_flow_ctrl(&mut self, amount: usize) {
-        self.flow_ctrl = amount;
-    }
-
-    fn send_quota(&self) -> usize {
-        self.send_quota
-            .max(self.probe_quota)
-            .saturating_sub(self.overhead)
-    }
-
-    fn credit(&self) -> usize {
-        self.credit.saturating_sub(self.overhead)
-    }
-
-    fn min_size(&self) -> usize {
-        self.min_size.saturating_sub(self.overhead)
-    }
-
-    fn max_size(&self) -> usize {
-        self.max_size.saturating_sub(self.overhead)
-    }
-
-    fn set_max_size(&mut self, size: usize) {
-        self.max_size = size.saturating_add(self.overhead);
-    }
-
-    fn fresh(&mut self, amount: usize) {
-        self.flow_ctrl -= amount;
-    }
-
-    fn take(&mut self, send_quota: usize, credit: usize) {
-        if send_quota > 0 {
-            let sent = send_quota + self.overhead;
-            self.send_quota = self.send_quota.saturating_sub(sent);
-            self.probe_quota = self.probe_quota.saturating_sub(sent);
-        }
-        if credit > 0 {
-            self.credit -= credit + self.overhead;
-        }
-    }
-}
-
 impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     pub fn new(
         buffer: &'a mut B,
-        limits: &'a mut dyn Limit,
+        quota: usize,
         frames: &'a mut Vec<GuaranteedFrame>,
         packet_type: Type,
         written: usize,
         tag_len: usize,
     ) -> Self {
-        let end = limits
-            .max_size()
-            .min(limits.credit())
+        let end = written
+            .saturating_add(buffer.remaining_mut())
             .saturating_sub(tag_len);
         Self {
             buffer,
-            limits,
+            quota,
             frames,
             tag_len,
             written,
@@ -255,18 +178,17 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
         &mut self,
         header: &H,
         pn: super::PacketNumber,
-        min_size: Option<usize>,
     ) -> bool
     where
         for<'b> &'b mut Self: super::header::io::WriteHeader<H>,
     {
         use super::{WritePacketNumber, header::io::WriteHeader};
-        self.meta.packet_type = header.get_type();
-        let long = matches!(self.meta.packet_type, Type::Long(_));
+        self.meta.pktype = header.get_type();
+        let long = matches!(self.meta.pktype, Type::Long(_));
         self.pn_offset = header.size() + if long { 2 } else { 0 };
-        self.min_size = min_size.unwrap_or(0).max(self.pn_offset + 4 + 16);
+        self.min_size = self.pn_offset + 4 + 16;
         if self.pn_offset + pn.size() > self.remaining_mut()
-            || self.limits.credit().min(self.limits.max_size()) < self.min_size
+            || self.written.saturating_add(self.buffer.remaining_mut()) < self.min_size
         {
             return false;
         }
@@ -285,22 +207,18 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
 
     /// Restrict a candidate frame by its packet's budget and datagram requirements.
     pub fn for_frame(&mut self, frame_type: FrameType) {
-        if !frame_type.belongs_to(self.meta.packet_type) || self.finished {
+        if !frame_type.belongs_to(self.meta.pktype) || self.finished {
             self.end = self.written;
             return;
         }
-        let limit = self
-            .limits
-            .max_size()
-            .min(self.limits.credit())
-            .min(self.written.saturating_add(self.buffer.remaining_mut()));
+        let limit = self.written.saturating_add(self.buffer.remaining_mut());
         let limit =
             if self.meta.in_flight || !frame_type.specs().contain(Spec::CongestionControlFree) {
-                limit.min(self.limits.send_quota())
+                limit.min(self.quota)
             } else {
                 limit
             };
-        let mut min_size = self.min_size.max(self.limits.min_size());
+        let mut min_size = self.min_size;
         if matches!(
             frame_type,
             FrameType::PathChallenge | FrameType::PathResponse
@@ -333,12 +251,16 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
         }
     }
 
+    pub fn finish(&mut self) {
+        self.finished = true;
+    }
+
     pub fn is_finished(&self) -> bool {
         self.finished
     }
 
     pub fn min_size(&self) -> usize {
-        self.min_size.max(self.limits.min_size())
+        self.min_size
     }
 
     pub fn written(&self) -> usize {
@@ -352,8 +274,8 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
                 .written
                 .saturating_add(size)
                 .saturating_add(self.tag_len)
-                >= self.min_size.max(self.limits.min_size())
-                || self.limits.send_quota() >= self.min_size.max(self.limits.min_size()))
+                >= self.min_size
+                || self.quota >= self.min_size)
     }
 }
 
@@ -459,7 +381,7 @@ macro_rules! frame_packages {
                 self.frame_type().belongs_to(packet_type)
             }
             fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
-                if !self.frame_type().belongs_to(buffer.meta.packet_type) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
+                if !self.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
                 buffer.for_frame(self.frame_type());
                 if !buffer.can_fit(self.encoding_size()) { return Poll::Ready(Ok(0)); }
                 let frame: Frame = self.clone().into();
@@ -499,7 +421,7 @@ macro_rules! data_packages {
                 self.0.frame_type().belongs_to(packet_type)
             }
             fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
-                if !self.0.frame_type().belongs_to(buffer.meta.packet_type) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
+                if !self.0.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
                 buffer.for_frame(self.0.frame_type());
                 if !buffer.can_fit(self.0.encoding_size().saturating_add(self.1.len())) { return Poll::Ready(Ok(0)); }
                 buffer.put_frame(&Frame::$variant(self.0, self.1.clone()));

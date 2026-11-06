@@ -1,11 +1,14 @@
-use std::task::{Context, Poll};
+use std::{
+    io::Cursor,
+    task::{Context, Poll},
+};
 
 use bytes::BufMut;
 use qbase::{
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
         DataHeader, GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
-        assemble::{Assemble, Constraints, Metadata, Package, PacketBuffer},
+        assemble::{Assemble, Metadata, Package, PacketBuffer},
     },
 };
 
@@ -37,30 +40,31 @@ impl<K: Seal> Packet<K> {
         }
     }
 
-    pub fn assemble<B: BufMut>(
+    pub fn assemble<'b>(
         &mut self,
         cx: &mut Context<'_>,
-        bytes: &mut B,
-        limits: &mut Constraints,
+        datagram: &'b mut Cursor<&mut [u8]>,
+        quota: usize,
         frames: &mut Vec<GuaranteedFrame>,
-        sources: &mut [&mut dyn Package<B>],
+        sources: &mut [&mut dyn Package<&'b mut [u8]>],
     ) -> Poll<(usize, usize)> {
         if self.finished {
             return Poll::Ready((0, 0));
         }
         let tag = self.keys.tag_len();
-        let max_size = limits.max_size.saturating_sub(limits.overhead);
+        let offset = datagram.position() as usize;
+        let mut bytes = &mut datagram.get_mut()[offset + self.cursor..];
         let mut buffer = PacketBuffer::new(
-            bytes,
-            limits,
+            &mut bytes,
+            quota,
             frames,
             self.header.get_type(),
             self.cursor,
             tag,
         );
         buffer.meta = self.meta;
-        buffer.scope(max_size);
-        if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1, None) {
+        buffer.scope(1200usize.saturating_sub(offset));
+        if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1) {
             return Poll::Ready((0, 0));
         }
         // Source owners handle connection errors; this packet has no content to send.

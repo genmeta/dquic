@@ -7,7 +7,7 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     frame::{Frame, FrameReader, PunchHelloFrame},
-    packet::{Constraints, PacketBuffer, Type, assemble::Package},
+    packet::{PacketBuffer, Type, assemble::Package},
 };
 use qtraversal::punch::PunchPacketEncoder;
 use tokio::{sync::Notify, task::Id};
@@ -47,21 +47,15 @@ pub(super) fn decode(mut bytes: BytesMut) -> Vec<Frame<bytes::Bytes>> {
 impl PunchPacketEncoder for Encoder {
     fn encode_probe<P>(&self, mut frame: P) -> io::Result<BytesMut>
     where
-        P: for<'b> Package<&'b mut BytesMut>,
+        P: for<'b> Package<&'b mut [u8]>,
     {
-        let mut bytes = BytesMut::from(PROBE);
-        let mut limits = Constraints {
-            flow_ctrl: usize::MAX,
-            send_quota: 128,
-            credit: 128,
-            max_size: 128,
-            ..Default::default()
-        };
-        let mut output = &mut bytes;
+        let mut bytes = BytesMut::zeroed(128);
+        bytes[..PROBE.len()].copy_from_slice(PROBE);
+        let mut output = &mut bytes[PROBE.len()..];
         let mut frames = Vec::new();
         let mut buffer = PacketBuffer::new(
             &mut output,
-            &mut limits,
+            128 - PROBE.len(),
             &mut frames,
             Type::Short(0.into()),
             0,
@@ -72,6 +66,8 @@ impl PunchPacketEncoder for Encoder {
             matches!(result, Poll::Ready(Ok(1))),
             "encode probe: {result:?}"
         );
+        let size = buffer.written() + PROBE.len();
+        bytes.truncate(size);
         for frame in decode(bytes.clone()) {
             if let Frame::PunchHello(hello) = frame {
                 self.0.lock().unwrap().push((tokio::task::id(), hello));

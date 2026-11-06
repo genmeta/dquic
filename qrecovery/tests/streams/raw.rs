@@ -28,22 +28,18 @@ fn packet_frames(
     streams: &mut DataStreams<MockFrameSender>,
     waker: &std::task::Waker,
 ) -> Vec<GuaranteedFrame> {
-    use qbase::packet::{Constraints, GetType, OneRttHeader, PacketBuffer};
+    use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
 
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 1200,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 1200;
+    let limits_length = 1200;
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = streams.poll_dump(
         &mut Context::from_waker(waker),
         &mut PacketBuffer::new(
-            &mut bytes,
-            &mut limits,
+            &mut writer_0,
+            limits_quota,
             &mut frames,
             OneRttHeader::new(Default::default(), Default::default()).get_type(),
             0,
@@ -425,22 +421,17 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
     let wb = Waker::from(b.clone());
     let mut source = streams.clone();
     let mut poll = |waker: &Waker| {
-        use qbase::packet::{Constraints, GetType, OneRttHeader};
+        use qbase::packet::{GetType, OneRttHeader};
         let mut bytes = BytesMut::new();
         let mut frames = Vec::new();
-        let mut limits = Constraints {
-            flow_ctrl: 100,
-            send_quota: 128,
-            credit: 128,
-            min_size: 0,
-            max_size: 128,
-            ..Default::default()
-        };
+        let limits_quota = 128;
+        let limits_length = 128;
+        let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
         source.poll_dump(
             &mut Context::from_waker(waker),
             &mut qbase::packet::PacketBuffer::new(
-                &mut bytes,
-                &mut limits,
+                &mut writer_1,
+                limits_quota,
                 &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
@@ -552,19 +543,14 @@ fn empty_stream_fin_is_effective_packet_content() {
     assert!(Pin::new(&mut writer).poll_shutdown(&mut cx).is_pending());
 
     let mut packet = BytesMut::with_capacity(128);
-    let mut limits = qbase::packet::Constraints {
-        flow_ctrl: 0,
-        send_quota: 128,
-        credit: 128,
-        min_size: 0,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = 128;
+    let limits_length = 128;
     use qbase::packet::GetType;
     let mut frames = Vec::new();
+    let mut writer_2 = bytes::BufMut::limit(&mut packet, limits_length);
     let mut buffer = qbase::packet::PacketBuffer::new(
-        &mut packet,
-        &mut limits,
+        &mut writer_2,
+        limits_quota,
         &mut frames,
         qbase::packet::OneRttHeader::new(Default::default(), Default::default()).get_type(),
         0,

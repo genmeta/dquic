@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use qbase::{
     frame::{FrameType, GuaranteedFrame, Len, StreamFrame},
     net::tx::UnregisterWaker,
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer},
     role::Role,
     sid::{Dir, StreamId},
 };
@@ -21,16 +21,12 @@ async fn closed_stream_outgoing_is_empty_but_its_writer_keeps_the_error() {
     outgoing.on_error(&error);
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 100,
-        send_quota: 128,
-        credit: 128,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = 128;
+    let limits_length = 128;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     for _ in 0..2 {
-        let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+        let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
+        let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
         assert_eq!(
             outgoing.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
             Poll::Ready(Ok(0))
@@ -69,18 +65,13 @@ async fn streams_own_waiters_across_states_and_cancel_each_path() {
     let poll = |source: &mut DataStreams<Broker>, waker: &Waker| {
         let mut bytes = BytesMut::new();
         let mut frames = Vec::new();
-        let mut limits = Constraints {
-            flow_ctrl: 100,
-            send_quota: 128,
-            credit: 128,
-            min_size: 0,
-            max_size: 128,
-            ..Default::default()
-        };
+        let limits_quota = 128;
+        let limits_length = 128;
         let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
         source.poll_dump(
             &mut Context::from_waker(waker),
-            &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+            &mut PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0),
         )
     };
     assert!(poll(&mut source, &wa).is_pending());
@@ -117,17 +108,12 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
     assert!(futures::poll!(Box::pin(writer.shutdown())).is_pending());
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 0,
-        send_quota: 12,
-        credit: 12,
-        min_size: 0,
-        max_size: 12,
-        ..Default::default()
-    };
+    let mut limits_quota = 12;
+    let limits_length = 12;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut cx = Context::from_waker(Waker::noop());
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+    let mut writer_2 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_2, limits_quota, &mut frames, ty, 0, 0);
     assert!(matches!(
         source.poll_dump(&mut cx, &mut buffer),
         Poll::Ready(Ok(1))
@@ -149,15 +135,17 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
     source.may_loss_data(&frame);
     bytes.clear();
     frames.clear();
-    limits.send_quota = 0;
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+    limits_quota = 0;
+    let mut writer_3 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_3, limits_quota, &mut frames, ty, 0, 0);
     assert!(matches!(
         source.poll_dump(&mut cx, &mut buffer),
         Poll::Ready(Ok(0))
     ));
     assert!(buffer.frames.is_empty());
-    limits.send_quota = 12;
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0);
+    limits_quota = 12;
+    let mut writer_4 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_4, limits_quota, &mut frames, ty, 0, 0);
     assert!(matches!(
         source.poll_dump(&mut cx, &mut buffer),
         Poll::Ready(Ok(1))

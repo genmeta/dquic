@@ -139,18 +139,20 @@ where
         output: &mut super::io::Output<Ext<TX>>,
         cx: &mut Context<'_>,
         buffer: &mut qbase::packet::PacketBuffer<'_, B>,
+        credit: &mut usize,
     ) -> Poll<Result<usize, Error>> {
         use core::ops::Bound::*;
         fn poll_streams<'s, TX: 's + Clone, B: BufMut + ?Sized>(
             streams: impl Iterator<Item = (StreamId, &'s (Outgoing<TX>, IOState), usize)>,
             cx: &mut Context<'_>,
             buffer: &mut qbase::packet::PacketBuffer<'_, B>,
+            credit: &mut usize,
         ) -> Result<(StreamId, usize, usize), Poll<Result<usize, Error>>> {
             let mut availability = Poll::Pending;
             for (sid, (outgoing, _), tokens) in streams {
                 let start = buffer.frames.len();
-                let credit = buffer.limits.flow_ctrl();
-                match outgoing.poll_dump_with_tokens(cx, buffer, tokens) {
+                let available = *credit;
+                match outgoing.poll_dump_with_tokens(cx, buffer, tokens, credit) {
                     Poll::Ready(Ok(n)) if n > 0 => {
                         let length = buffer.frames[start..]
                             .iter()
@@ -159,7 +161,7 @@ where
                                 _ => None,
                             })
                             .sum::<usize>();
-                        return Ok((sid, tokens - length, credit - buffer.limits.flow_ctrl()));
+                        return Ok((sid, tokens - length, available - *credit));
                     }
                     Poll::Ready(Ok(_)) => availability = Poll::Ready(Ok(0)),
                     Poll::Ready(Err(error)) => return Err(Poll::Ready(Err(error))),
@@ -191,6 +193,7 @@ where
                     .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
+                credit,
             ),
             // [sid] + rev([..sid]) + rev([sid+1..])
             Some((sid, tokens)) => poll_streams(
@@ -208,6 +211,7 @@ where
                 .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
+                credit,
             ),
             // rev([..])
             None => poll_streams(
@@ -216,6 +220,7 @@ where
                     .filter(|(sid, ..)| stream_allowed(sid)),
                 cx,
                 buffer,
+                credit,
             ),
         };
         let (sid, remain_tokens, fresh_bytes) = match result {
@@ -766,7 +771,6 @@ where
             Len::Explicit,
             Fin::No,
         ));
-        let previous = buffer.limits.flow_ctrl();
         let requested = self.fresh_bytes_up_to(buffer.remaining_mut());
         let mut credit = self.flow_ctrl.sender.credit(requested);
         if requested > 0 && credit.available() == 0 {
@@ -777,11 +781,9 @@ where
             self.flow_ctrl.sender.unregister(cx.waker());
         }
         let available = credit.available();
-        buffer.limits.set_flow_ctrl(available);
-        let result = self.poll_dump_streams(cx, buffer);
-        let sent = available - buffer.limits.flow_ctrl();
-        credit.post_sent(sent);
-        buffer.limits.set_flow_ctrl(previous);
+        let mut remaining = available;
+        let result = self.poll_dump_streams(cx, buffer, &mut remaining);
+        credit.post_sent(available - remaining);
         result
     }
 
@@ -789,6 +791,7 @@ where
         &self,
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
+        credit: &mut usize,
     ) -> Poll<Result<usize, Error>> {
         // Keep stream insertion serialized with checking readiness and registering.
         let mut guard = self.output.streams();
@@ -807,7 +810,7 @@ where
             if buffer.remaining_mut() < 2 {
                 return Poll::Ready(Ok(buffer.meta.nframes - start));
             }
-            match self.poll_dump_once(output, cx, buffer) {
+            match self.poll_dump_once(output, cx, buffer, credit) {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(n)) if n > 0 => {}
                 _ if buffer.meta.nframes != start => {

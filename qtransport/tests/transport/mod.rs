@@ -19,8 +19,7 @@ use qbase::{
         route::{Link, Pathway},
     },
     packet::{
-        DataHeader, DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader,
-        assemble::{Constraints, Package},
+        DataHeader, DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader, assemble::Package,
     },
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
@@ -52,21 +51,19 @@ impl Transport {
     }
 }
 
-pub(crate) fn take_frames(source: &mut impl qbase::packet::Package<BytesMut>) -> Vec<Frame> {
-    use qbase::packet::{Constraints, GetType, PacketBuffer};
+pub(crate) fn take_frames(
+    source: &mut impl for<'b> qbase::packet::Package<bytes::buf::Limit<&'b mut BytesMut>>,
+) -> Vec<Frame> {
+    use qbase::packet::{GetType, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        flow_ctrl: 1200,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 1200;
+    let limits_length = 1200;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = source.poll_dump(
         &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     );
     assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
     frames.into_iter().map(Into::into).collect()
@@ -363,12 +360,13 @@ fn ack(pn: u64) -> AckFrame {
     )
 }
 // Receive tests encode explicit packet numbers without constructing recovery history.
-fn encode_packet(
+fn encode_packet<const N: usize>(
     keys: &ArcOneRttKeys,
     pn: u64,
-    limits: &mut Constraints,
+    quota: usize,
+    length: usize,
     frames: &mut Vec<GuaranteedFrame>,
-    sources: &mut [&mut dyn Package<BytesMut>],
+    sources: [&mut dyn for<'b> Package<&'b mut [u8]>; N],
 ) -> BytesMut {
     let key = keys.get().unwrap();
     let mut packet = SendingPacket::new(
@@ -379,13 +377,13 @@ fn encode_packet(
         (pn, PacketNumber::encode(pn, 0)),
         key.as_ref(),
     );
-    let mut bytes = BytesMut::with_capacity(1200);
+    let mut bytes = BytesMut::zeroed(length);
     let result = packet.assemble(
         &mut Context::from_waker(std::task::Waker::noop()),
-        &mut bytes,
-        limits,
+        &mut std::io::Cursor::new(bytes.as_mut()),
+        quota,
         frames,
-        sources,
+        &mut sources.map(|source| source as &mut dyn Package<&mut [u8]>),
     );
     match result {
         Poll::Ready((size, min_size)) if size > 0 => {
@@ -399,19 +397,7 @@ fn encode_packet(
 }
 
 fn ping(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
-    encode_packet(
-        keys,
-        pn,
-        &mut Constraints {
-            flow_ctrl: usize::MAX,
-            send_quota: 1200,
-            credit: 1200,
-            max_size: 1200,
-            ..Default::default()
-        },
-        &mut Vec::new(),
-        &mut [&mut PingFrame],
-    )
+    encode_packet(keys, pn, 1200, 1200, &mut Vec::new(), [&mut PingFrame])
 }
 
 #[test]
@@ -460,20 +446,15 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
         pn,
         Keys::Long(material.clone()),
     );
-    let mut bytes = BytesMut::with_capacity(1200);
+    let mut bytes = BytesMut::zeroed(1200);
     let mut frames = Vec::new();
     let mut datagram = (
         DatagramFrame::new(true, 5u32.into()),
         Bytes::from_static(b"hello"),
     );
-    let mut limits = Constraints {
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+
     assert!(matches!(packet.assemble(
-        &mut Context::from_waker(std::task::Waker::noop()), &mut bytes, &mut limits,
+        &mut Context::from_waker(std::task::Waker::noop()), &mut std::io::Cursor::new(bytes.as_mut()), 1200,
         &mut frames, &mut [&mut datagram, &mut PingFrame],
     ), Poll::Ready((n, _)) if n > 0));
     bytes.resize(packet.len(), 0);
@@ -513,33 +494,17 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
 }
 
 #[test]
-fn header_protection_padding_obeys_every_packet_limit() {
+fn header_protection_padding_obeys_quota_and_the_write_window() {
     use qbase::packet::HeaderSize;
     let ([client, _], _) = handshake();
     let keys = ArcOneRttKeys::from(client);
     let header = OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"));
     let minimum = header.size() + 20;
-    for limited in 0..3 {
+    for (quota, length) in [(minimum - 1, minimum), (minimum, minimum - 1)] {
         let mut recorded = Vec::new();
-        let mut limits = Constraints {
-            max_size: minimum,
-            send_quota: minimum,
-            credit: minimum,
-            ..Default::default()
-        };
-        match limited {
-            0 => limits.max_size -= 1,
-            1 => limits.send_quota -= 1,
-            _ => limits.credit -= 1,
-        }
-        assert!(
-            encode_packet(&keys, 0, &mut limits, &mut recorded, &mut [&mut PingFrame]).is_empty()
-        );
-        limits.max_size = minimum;
-        limits.send_quota = minimum;
-        limits.credit = minimum;
+        assert!(encode_packet(&keys, 0, quota, length, &mut recorded, [&mut PingFrame]).is_empty());
         assert_eq!(
-            encode_packet(&keys, 0, &mut limits, &mut recorded, &mut [&mut PingFrame]).len(),
+            encode_packet(&keys, 0, minimum, minimum, &mut recorded, [&mut PingFrame]).len(),
             minimum
         );
     }
@@ -568,15 +533,10 @@ fn close_packet(keys: &ArcOneRttKeys, pn: u64) -> BytesMut {
     encode_packet(
         keys,
         pn,
-        &mut Constraints {
-            flow_ctrl: usize::MAX,
-            send_quota: 1200,
-            credit: 1200,
-            max_size: 1200,
-            ..Default::default()
-        },
+        1200,
+        1200,
         &mut Vec::new(),
-        &mut [&mut PingFrame, &mut close],
+        [&mut PingFrame, &mut close],
     )
 }
 
@@ -960,15 +920,10 @@ fn a_large_frame_that_fits_is_assembled_before_later_sources() {
         !encode_packet(
             &keys,
             0,
-            &mut Constraints {
-                flow_ctrl: usize::MAX,
-                max_size: 1200,
-                send_quota: 1200,
-                credit: 1200,
-                ..Default::default()
-            },
+            1200,
+            1200,
             &mut recorded,
-            &mut [&mut crypto, &mut PingFrame]
+            [&mut crypto, &mut PingFrame]
         )
         .is_empty()
     );
@@ -998,15 +953,10 @@ fn earlier_sources_fill_the_packet_and_remaining_frames_stay_queued() {
         encode_packet(
             &keys,
             pn,
-            &mut Constraints {
-                flow_ctrl: usize::MAX,
-                max_size: 1200,
-                send_quota: 1200,
-                credit: 1200,
-                ..Default::default()
-            },
+            1200,
+            1200,
             &mut recorded,
-            &mut [&mut reliable, &mut crypto],
+            [&mut reliable, &mut crypto],
         );
         for frame in recorded.as_slice() {
             if let GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(
@@ -1193,20 +1143,16 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
 #[tokio::test]
 async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_budget() {
     let [(_client, transport, _), (_server, peer, _)] = pair(1);
-    let mut limits = Constraints {
-        flow_ctrl: usize::MAX,
-        max_size: 1200,
-        send_quota: 0,
-        credit: 1200,
-        ..Default::default()
-    };
+    let mut quota = 0;
+    let mut length = 1200;
     let mut recorded = Vec::new();
     let bytes = encode_packet(
         &keys(&transport),
         0,
-        &mut limits,
+        quota,
+        length,
         &mut recorded,
-        &mut [&mut ack(0), &mut PingFrame],
+        [&mut ack(0), &mut PingFrame],
     );
     let (_, frames) = keys(&peer)
         .open(parse(&bytes), |_| Ok(0), Duration::ZERO)
@@ -1214,16 +1160,16 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
         .unwrap();
     let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).collect();
     assert!(matches!(frames.as_slice(), [Frame::Ack(_)]));
-    assert_eq!(limits.send_quota, 0);
-    limits.send_quota = 1200;
-    limits.credit = 10;
+    quota = 1200;
+    length = 10;
     assert!(
         encode_packet(
             &keys(&transport),
             1,
-            &mut limits,
+            quota,
+            length,
             &mut recorded,
-            &mut [&mut ack(0)]
+            [&mut ack(0)]
         )
         .is_empty()
     );
@@ -1233,7 +1179,7 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
 async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
     use tokio::io::AsyncWriteExt;
 
-    for limited in 0..3 {
+    for limited in 0..2 {
         let [(client, ct, _), (_server, st, _)] = pair(1);
         let crypto_data = vec![0x63; 200];
         let stream_data = vec![0x73; 200];
@@ -1249,29 +1195,23 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
         let mut streams = ct.data.streams.clone();
         let mut crypto_received = Vec::new();
         let mut stream_received = Vec::new();
-        let mut constraints = Constraints {
-            flow_ctrl: 0,
-            max_size: 1200,
-            send_quota: 1200,
-            credit: 1200,
-            ..Default::default()
-        };
         let sealing = keys(&ct);
         let opening = keys(&st);
         for pn in 0..32 {
             let mut recorded = Vec::new();
-            let limit = match limited {
-                0 => &mut constraints.max_size,
-                1 => &mut constraints.send_quota,
-                _ => &mut constraints.credit,
+            let limit = if pn == 0 { 24 } else { 80 };
+            let (quota, length) = if limited == 0 {
+                (1200, limit)
+            } else {
+                (limit, 1200)
             };
-            *limit = if pn == 0 { 24 } else { 80 };
             let bytes = encode_packet(
                 &sealing,
                 pn,
-                &mut constraints,
+                quota,
+                length,
                 &mut recorded,
-                &mut [&mut crypto, &mut streams],
+                [&mut crypto, &mut streams],
             );
             if pn == 0 {
                 assert!(bytes.is_empty());
@@ -1527,15 +1467,10 @@ async fn loss_returns_frames_to_sources_before_the_sender_runs() {
     encode_packet(
         &keys(&ct),
         1,
-        &mut Constraints {
-            flow_ctrl: usize::MAX,
-            max_size: 1200,
-            send_quota: 1200,
-            credit: 1200,
-            ..Default::default()
-        },
+        1200,
+        1200,
         &mut frames,
-        &mut [&mut crypto, &mut reliable, &mut streams],
+        [&mut crypto, &mut reliable, &mut streams],
     );
     assert!(matches!(frames.as_slice(),
         [GuaranteedFrame::Crypto(_), GuaranteedFrame::Reliable(qbase::frame::ReliableFrame::StreamCtl(StreamCtlFrame::MaxData(f))), GuaranteedFrame::Stream(_)]

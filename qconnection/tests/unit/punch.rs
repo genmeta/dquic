@@ -71,41 +71,32 @@ async fn early_probe_encoder_uses_published_data_and_the_updated_peer_cid() {
 
 fn encode_frame(
     phase: &super::DataFixture,
-    mut frame: impl for<'b> qbase::packet::Package<&'b mut BytesMut>,
+    mut frame: impl for<'b> qbase::packet::Package<&'b mut [u8]>,
 ) -> BytesMut {
     encode_frames(phase, [&mut frame])
 }
 
 fn encode_frames<const N: usize>(
     phase: &super::DataFixture,
-    frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut BytesMut>; N],
+    frames: [&mut dyn for<'b> qbase::packet::Package<&'b mut [u8]>; N],
 ) -> BytesMut {
-    use qbase::packet::Constraints;
-
     let space = &phase.spaces.data;
     use qtransport::space::{Allocate, Keys};
     let (pn, Keys::Short(key)) = space.pn_and_keys().unwrap() else {
         unreachable!();
     };
-    let mut bytes = BytesMut::with_capacity(1200);
+    let mut bytes = BytesMut::zeroed(1200);
     let mut recorded = Vec::new();
     let mut sending = crate::send::Packet::new(
         qbase::packet::DataHeader::Short(OneRttHeader::new(Default::default(), phase.peer_cid())),
         pn,
         key.as_ref(),
     );
-    let mut limits = Constraints {
-        flow_ctrl: usize::MAX,
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
     assert!(matches!(
         sending.assemble(
             &mut std::task::Context::from_waker(std::task::Waker::noop()),
-            &mut &mut bytes, &mut limits, &mut recorded,
-            &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut BytesMut>),
+            &mut std::io::Cursor::new(bytes.as_mut()), 1200, &mut recorded,
+            &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut [u8]>),
         ),
         std::task::Poll::Ready((n, _)) if n > 0
     ));

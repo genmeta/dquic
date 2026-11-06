@@ -123,7 +123,7 @@ impl Terminator {
         buffer: &mut PacketBuffer<'_, B>,
     ) -> Poll<Result<usize, Error>> {
         let mut dump_ccf = |error: &Error, buffer: &mut PacketBuffer<'_, B>| {
-            let mut frame = match (buffer.meta.packet_type, error) {
+            let mut frame = match (buffer.meta.pktype, error) {
                 (Type::Long(V1(Ver1::INITIAL | Ver1::HANDSHAKE)), Error::App(_)) => {
                     // RFC 9000 §10.2.3: conceal application details at these levels.
                     ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(
@@ -153,11 +153,11 @@ impl Terminator {
                         *sync_ccf = false;
                         *sent_ccf = true;
                     } else {
-                        buffer.limits.set_max_size(0);
+                        buffer.finish();
                     }
                     result
                 } else {
-                    buffer.limits.set_max_size(0);
+                    buffer.finish();
                     send_wakers.register(cx.waker());
                     Poll::Pending
                 }
@@ -170,11 +170,11 @@ impl Terminator {
                     if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
                         *sent_ccf = true;
                     } else {
-                        buffer.limits.set_max_size(0);
+                        buffer.finish();
                     }
                     result
                 } else {
-                    buffer.limits.set_max_size(0);
+                    buffer.finish();
                     Poll::Ready(Ok(0))
                 }
             }

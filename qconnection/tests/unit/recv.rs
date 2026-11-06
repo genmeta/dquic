@@ -31,28 +31,20 @@ fn seal<H, const N: usize>(
     header: H,
     keys: &qtls::DirectionalKeys,
     journal: &ArcSentJournal,
-    sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut BytesMut>; N],
+    sources: [&mut dyn for<'b> qbase::packet::assemble::Package<&'b mut [u8]>; N],
 ) -> Result<BytesMut, crate::Error>
 where
     H: qbase::packet::HeaderSize + qbase::packet::GetType + Into<qbase::packet::long::DataHeader>,
     for<'a> &'a mut BytesMut: qbase::packet::header::io::WriteHeader<H>,
 {
-    let mut buffer = BytesMut::with_capacity(1200);
+    let mut buffer = BytesMut::zeroed(1200);
     let pn = journal.next_pn().unwrap();
     let mut frames = Vec::new();
     let mut packet =
         crate::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
-    let mut limits = qbase::packet::assemble::Constraints {
-        flow_ctrl: usize::MAX,
-        send_quota: 1200,
-        credit: 1200,
-        min_size: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
     packet.padding(&mut buffer, 1200 - packet.len());
@@ -229,7 +221,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
 
     use qbase::{
         frame::{ConnectionCloseFrame, CryptoFrame},
-        packet::{Constraints, GetType, Package, PacketBuffer, PacketNumber},
+        packet::{GetType, Package, PacketBuffer, PacketNumber},
     };
     use tokio::io::AsyncReadExt;
 
@@ -264,17 +256,14 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         let poll_close = || {
             let mut bytes = BytesMut::new();
             let mut frames = Vec::new();
-            let mut limits = Constraints {
-                send_quota: 1200,
-                credit: 1200,
-                max_size: 1200,
-                ..Default::default()
-            };
+            let limits_quota = 1200;
+            let limits_length = 1200;
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             (&terminator).poll_dump(
                 &mut Context::from_waker(Waker::noop()),
                 &mut PacketBuffer::new(
-                    &mut bytes,
-                    &mut limits,
+                    &mut writer_0,
+                    limits_quota,
                     &mut frames,
                     header().initial(vec![]).get_type(),
                     0,
@@ -943,7 +932,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
             let mut ping = PingFrame;
             let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
-            let source: &mut dyn for<'b> Package<&'b mut BytesMut> = match kind {
+            let source: &mut dyn for<'b> Package<&'b mut [u8]> = match kind {
                 0 => &mut ack,
                 1 => &mut ping,
                 _ => &mut crypto,

@@ -10,7 +10,7 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     error::Error,
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer, PacketContent},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer, PacketContent},
     time::heartbeat::*,
 };
 use tokio::time::Instant;
@@ -25,22 +25,19 @@ impl std::task::Wake for WakeCount {
 }
 
 fn poll(
-    heartbeat: &mut impl Package<BytesMut>,
+    heartbeat: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
     quota: usize,
     waker: &Waker,
 ) -> Poll<Result<usize, Error>> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: quota,
-        credit: 1,
-        max_size: 1,
-        ..Default::default()
-    };
+    let limits_quota = quota;
+    let limits_length = 1;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = heartbeat.poll_dump(
         &mut Context::from_waker(waker),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     );
     if matches!(result, Poll::Ready(Ok(1))) {
         assert_eq!(&bytes[..], &[0x01]);

@@ -6,10 +6,7 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     frame::{AckFrame, Frame, FrameReader},
-    packet::{
-        Constraints, GetType, InvalidPacketNumber, OneRttHeader, Package, PacketBuffer,
-        PacketNumber,
-    },
+    packet::{GetType, InvalidPacketNumber, OneRttHeader, Package, PacketBuffer, PacketNumber},
     varint::VarInt,
 };
 use qrecovery::journal::ArcRcvdJournal;
@@ -25,17 +22,14 @@ fn ack_package_at(records: &ArcRcvdJournal, pn: u64, received: Instant) -> AckFr
     let mut package = records.ack_package(Some((pn, received)));
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 1200;
+    let limits_length = 1200;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     assert!(matches!(
         package.poll_dump(
             &mut Context::from_waker(Waker::noop()),
-            &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0)
+            &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0)
         ),
         Poll::Ready(Ok(1))
     ));

@@ -16,7 +16,7 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         GetType, HeaderSize, PacketNumber, Type,
-        assemble::{Constraints, Metadata, Package},
+        assemble::{Metadata, Package},
     },
     time::heartbeat::ArcHeartbeat,
 };
@@ -312,20 +312,28 @@ pub trait Encapsulate: Transmit {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
         }
+        let quota = cc
+            .send_quota()
+            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
+                1200
+            } else {
+                0
+            });
+        if self.epoch() == Epoch::Initial && (datagram.get_ref().len() < 1200 || quota < 1200) {
+            return Poll::Ready((None, 0));
+        }
         let Some(mut packet) = self.packet(dcid) else {
             return Poll::Ready((None, 0));
         };
         let start = frames.len();
         let offset = datagram.position() as usize;
-        let mut packet_limits = packet_limits(self.epoch(), cc, datagram);
         let mut crypto = self.crypto().outgoing();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .collect();
         sources.push(&mut crypto);
-        let mut writer = &mut datagram.get_mut()[offset..];
-        let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
+        let result = packet.assemble(cx, datagram, quota, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((size, _)) if size > 0 => {
@@ -353,20 +361,22 @@ pub trait Encapsulate: Transmit {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
         }
+        let quota = cc
+            .send_quota()
+            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
+                1200
+            } else {
+                0
+            });
+        if self.epoch() == Epoch::Initial && (bytes.get_ref().len() < 1200 || quota < 1200) {
+            return Poll::Ready((None, 0));
+        }
         let Some(mut packet) = self.packet(dcid) else {
             return Poll::Ready((None, 0));
         };
         let start = frames.len();
         let offset = bytes.position() as usize;
-        let mut packet_limits = packet_limits(self.epoch(), cc, bytes);
-        let mut writer = &mut bytes.get_mut()[offset..];
-        match packet.assemble(
-            cx,
-            &mut writer,
-            &mut packet_limits,
-            frames,
-            &mut [ack, heartbeat],
-        ) {
+        match packet.assemble(cx, bytes, quota, frames, &mut [ack, heartbeat]) {
             Poll::Ready((size, _)) if size > 0 => {
                 bytes.set_position((offset + size) as u64);
                 Poll::Ready((Some(packet), size))
@@ -383,33 +393,4 @@ fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usiz
     let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
     // A PING occupies one byte. Header protection also needs a full sample.
     (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
-}
-
-fn packet_limits(epoch: Epoch, cc: &ArcCC, datagram: &Cursor<&mut [u8]>) -> Constraints {
-    let send_quota = cc.send_quota();
-    let probe_quota = if cc.need_send_ack_eliciting(epoch) > 0 {
-        1200
-    } else {
-        0
-    };
-    let max_size = if epoch == Epoch::Initial
-        && (datagram.get_ref().len() < 1200 || send_quota.max(probe_quota) < 1200)
-    {
-        0
-    } else {
-        datagram
-            .get_ref()
-            .len()
-            .saturating_sub(datagram.position() as usize)
-    };
-    Constraints {
-        send_quota,
-        probe_quota,
-        credit: datagram
-            .get_ref()
-            .len()
-            .saturating_sub(datagram.position() as usize),
-        max_size,
-        ..Default::default()
-    }
 }

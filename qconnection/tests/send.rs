@@ -14,11 +14,7 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{Frame, FrameReader, GuaranteedFrame, PingFrame},
     net::{addr::EndpointAddr, route::Pathway},
-    packet::{
-        DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketReader,
-        assemble::{Constraints, Limit},
-        long,
-    },
+    packet::{DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketReader, long},
     role::Role,
 };
 use qcongestion::Transport as _;
@@ -39,12 +35,6 @@ fn packet_continues_after_pending_and_no_space_sources() {
     let keys = keys(false);
     let mut bytes = [0u8; 64];
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 64,
-        credit: 64,
-        max_size: 64,
-        ..Default::default()
-    };
     let mut packet = Packet::new(
         DataHeader::Long(header.into()),
         (7, qbase::packet::PacketNumber::U16(7)),
@@ -58,7 +48,7 @@ fn packet_continues_after_pending_and_no_space_sources() {
     );
     let mut ping = PingFrame;
     assert!(matches!(
-        packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut bytes[..], &mut limits, &mut frames, &mut [&mut absent, &mut large, &mut ping]),
+        packet.assemble(&mut Context::from_waker(Waker::noop()), &mut Cursor::new(&mut bytes[..]), 64, &mut frames, &mut [&mut absent, &mut large, &mut ping]),
         Poll::Ready((n, _)) if n > 0
     ));
     assert_eq!(packet.meta.content, qbase::packet::PacketContent::JustPing);
@@ -69,14 +59,8 @@ fn packet_continues_after_pending_and_no_space_sources() {
 fn repeated_assembly_does_not_append_after_close() {
     let header = qbase::packet::OneRttHeader::new(Default::default(), Default::default());
     let keys = keys(false);
-    let mut bytes = BytesMut::with_capacity(128);
+    let mut bytes = BytesMut::zeroed(128);
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 128,
-        credit: 128,
-        max_size: 128,
-        ..Default::default()
-    };
     let mut packet = Packet::new(
         DataHeader::Short(header),
         (0, qbase::packet::PacketNumber::U16(0)),
@@ -85,14 +69,14 @@ fn repeated_assembly_does_not_append_after_close() {
     let mut close = qbase::frame::ConnectionCloseFrame::new_app(0u32.into(), "closed");
     let mut cx = Context::from_waker(Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut bytes, &mut limits, &mut frames, &mut [&mut close]), Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut Cursor::new(bytes.as_mut()), 128, &mut frames, &mut [&mut close]), Poll::Ready((n, _)) if n > 0)
     );
     let size = bytes.len();
     assert_eq!(
         packet.assemble(
             &mut cx,
-            &mut &mut bytes,
-            &mut limits,
+            &mut Cursor::new(bytes.as_mut()),
+            128,
             &mut frames,
             &mut [&mut PingFrame]
         ),
@@ -207,48 +191,35 @@ async fn mixed_packets_record_each_space() {
 }
 
 #[test]
-fn probe_uses_credit_without_replenishing_congestion_budget() {
+fn probe_packet_uses_an_explicit_quota_and_a_bounded_window() {
     let keys = keys(false);
-    let mut limits = Constraints {
-        send_quota: 0,
-        credit: 2400,
-        min_size: 1200,
-        max_size: 1200,
-        overhead: 40,
-        probe_quota: 1200,
-        ..Default::default()
-    };
     let mut frames = Vec::new();
-    for pn in 0..2 {
+    for (pn, quota) in [1160, 0].into_iter().enumerate() {
         let header =
             LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
         let mut packet = Packet::new(
             DataHeader::Long(header.into()),
-            (pn, qbase::packet::PacketNumber::U8(pn as u8)),
+            (pn as u64, qbase::packet::PacketNumber::U8(pn as u8)),
             &keys.sealing,
         );
-        let mut bytes = Vec::new();
+        let mut bytes = vec![0; 1160];
         let result = packet.assemble(
             &mut Context::from_waker(Waker::noop()),
-            &mut bytes,
-            &mut limits,
+            &mut Cursor::new(bytes.as_mut_slice()),
+            quota,
             &mut frames,
             &mut [&mut PingFrame],
         );
         if pn == 0 {
             assert!(matches!(result, Poll::Ready((n, _)) if n > 0));
-            bytes.resize(1160, 0);
             packet.padding(&mut bytes, 1160 - packet.len());
             packet.seal(&mut bytes);
-            limits.take(packet.len(), packet.len());
-            assert_eq!(bytes.len(), 1160);
+            assert_eq!(packet.len(), 1160);
         } else {
-            assert!(matches!(result, Poll::Ready((0, 0))));
+            assert_eq!(result, Poll::Ready((0, 0)));
+            assert_eq!(packet.len(), 0);
         }
-        assert_eq!(limits.credit, 1200);
-        assert_eq!(limits.send_quota, 0);
-        assert_eq!(limits.probe_quota, 0);
-        frames.clear();
+        assert!(frames.is_empty());
     }
 }
 
@@ -261,26 +232,18 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     let header =
         || LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]);
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 1200,
-        credit: 1200,
-        min_size: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
     let mut packet = Packet::new(
         DataHeader::Long(header().into()),
         (7, PacketNumber::U16(7)),
         &keys.sealing,
     );
-    let mut bytes = Vec::new();
+    let mut bytes = vec![0; 1200];
     assert!(
-        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut bytes, &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut Cursor::new(bytes.as_mut_slice()), 1200, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
     );
     bytes.resize(1200, 0);
     packet.padding(&mut bytes, 1200 - packet.len());
     packet.seal(&mut bytes);
-    limits.take(packet.len(), packet.len());
     assert_eq!(packet.meta.pn, 7);
     assert_eq!(packet.meta.pktlen, 1200);
     let ParsedPacket::Data(parsed) = PacketReader::new(BytesMut::from(bytes.as_slice()), 0)
@@ -301,8 +264,6 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     assert!(
         FrameReader::new(opened.body(), ty).any(|frame| matches!(frame.unwrap().0, Frame::Ping(_)))
     );
-    assert_eq!(limits.send_quota, 0);
-    assert_eq!(limits.credit, 0);
 
     let mut storage = [0; 1200];
     let mut io = IoSliceMut::new(&mut storage);
@@ -313,14 +274,8 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
         (7, PacketNumber::U16(7)),
         &keys.sealing,
     );
-    let mut limits = Constraints {
-        send_quota: 1200,
-        credit: 1200,
-        max_size: 1200,
-        ..Default::default()
-    };
     assert!(
-        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut io[..], &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut Cursor::new(&mut io[..]), 1200, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
     );
     assert_eq!(&io[pn_offset..pn_offset + 2], &[0, 7]);
     assert_eq!(io[pn_offset + 2], 1);

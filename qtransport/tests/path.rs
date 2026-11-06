@@ -11,7 +11,7 @@ use qbase::{
     frame::{PathChallengeFrame, io::ReceiveFrame},
     handshake::HandshakeFacts,
     net::{addr::EndpointAddr, route::Pathway},
-    packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+    packet::{GetType, OneRttHeader, Package, PacketBuffer},
     role::Role,
     time::heartbeat::ArcHeartbeat,
     util::{ArcIndexDeque, IndexDeque},
@@ -192,18 +192,13 @@ async fn validation_registers_only_when_both_sources_are_empty() {
             let waker = Waker::from(counter.clone());
             let mut bytes = bytes::BytesMut::new();
             let mut frames = Vec::new();
-            let mut limits = Constraints {
-                flow_ctrl: 0,
-                send_quota: quota,
-                credit: 128,
-                min_size: 0,
-                max_size: 128,
-                ..Default::default()
-            };
+            let limits_quota = quota;
+            let limits_length = 128;
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let result = path.validation.clone().poll_dump(
                 &mut Context::from_waker(&waker),
-                &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+                &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
             );
             assert_eq!(result.is_pending(), !queued);
             if queued {
@@ -240,16 +235,13 @@ async fn every_duplicate_challenge_is_packaged_as_a_response() {
     }
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
-    let mut limits = Constraints {
-        send_quota: 128,
-        credit: 128,
-        max_size: 128,
-        ..Default::default()
-    };
+    let limits_quota = 128;
+    let limits_length = 128;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = path.validation.clone().poll_dump(
         &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut bytes, &mut limits, &mut frames, ty, 0, 0),
+        &mut PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0),
     );
     assert_eq!(result, Poll::Ready(Ok(10)));
 }

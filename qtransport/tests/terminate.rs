@@ -8,7 +8,7 @@ use qbase::{
     error::{AppError, ErrorKind, QuicError},
     frame::{ConnectionCloseFrame, Frame, FrameReader, FrameType},
     packet::{
-        Constraints, GetType, Limit, OneRttHeader, Package, PacketBuffer, Type,
+        GetType, OneRttHeader, Package, PacketBuffer, Type,
         r#type::long::{Type::V1, Ver1},
     },
 };
@@ -27,17 +27,14 @@ fn local_reason() -> CloseReason {
 }
 
 fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, Error>> {
-    let mut limits = Constraints {
-        send_quota: 2400,
-        credit: 2400,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 2400;
+    let limits_length = 1200;
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
+    let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(
-        &mut bytes,
-        &mut limits,
+        &mut writer_0,
+        limits_quota,
         &mut frames,
         OneRttHeader::new(Default::default(), Default::default()).get_type(),
         0,
@@ -47,15 +44,12 @@ fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, E
 }
 
 fn dump_close(terminator: &ArcTerminator, packet_type: Type) -> ConnectionCloseFrame {
-    let mut limits = Constraints {
-        send_quota: 2400,
-        credit: 2400,
-        max_size: 1200,
-        ..Default::default()
-    };
+    let limits_quota = 2400;
+    let limits_length = 1200;
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
-    let mut buffer = PacketBuffer::new(&mut bytes, &mut limits, &mut frames, packet_type, 0, 0);
+    let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
+    let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, packet_type, 0, 0);
     assert_eq!(
         (&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer),
         Poll::Ready(Ok(1))
@@ -147,18 +141,15 @@ async fn draining_writes_one_close_and_never_schedules_another() {
             terminator.recv_conn_close_frame(frame.clone(), pto);
         }
         // Insufficient space must not consume the one permitted response.
-        for (max_size, expected) in [(1, 0), (1200, 1), (1200, 0)] {
-            let mut limits = Constraints {
-                send_quota: 2400,
-                credit: 2400,
-                max_size,
-                ..Default::default()
-            };
+        for (length, expected) in [(1, 0), (1200, 1), (1200, 0)] {
+            let limits_quota = 2400;
+            let limits_length = length;
             let mut bytes = bytes::BytesMut::new();
             let mut frames = Vec::new();
+            let mut writer_2 = bytes::BufMut::limit(&mut bytes, limits_length);
             let mut buffer = PacketBuffer::new(
-                &mut bytes,
-                &mut limits,
+                &mut writer_2,
+                limits_quota,
                 &mut frames,
                 OneRttHeader::new(Default::default(), Default::default()).get_type(),
                 0,
@@ -182,9 +173,9 @@ async fn draining_writes_one_close_and_never_schedules_another() {
                 assert!(matches!(decoded.as_slice(), [(Frame::Close(sent), _)] if sent == &frame));
                 assert!(!bytes.is_empty());
             } else {
+                assert!(buffer.is_finished());
                 assert!(frames.is_empty());
                 assert!(bytes.is_empty());
-                assert_eq!(limits.max_size(), 0);
             }
             terminator.on_rcvd_packet(Instant::now() + pto);
             terminator.recv_conn_close_frame(close_frame("again"), pto);
@@ -193,27 +184,21 @@ async fn draining_writes_one_close_and_never_schedules_another() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn closing_without_a_written_frame_preserves_send_budget() {
-    for (pending, overhead) in [(false, 0), (true, 0), (false, 40), (true, 40)] {
+async fn closing_without_a_written_frame_stops_collection() {
+    for pending in [false, true] {
         let terminator = ArcTerminator::no_error();
         terminator.close(local_reason(), Duration::from_secs(1));
         if pending {
             assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
         }
-        let mut limits = Constraints {
-            flow_ctrl: 0,
-            send_quota: 2400,
-            credit: 2400,
-            min_size: 0,
-            max_size: 1 + overhead,
-            overhead,
-            ..Default::default()
-        };
+        let limits_quota = 2400;
+        let limits_length = 1;
         let mut bytes = bytes::BytesMut::new();
         let mut frames = Vec::new();
+        let mut writer_3 = bytes::BufMut::limit(&mut bytes, limits_length);
         let mut buffer = PacketBuffer::new(
-            &mut bytes,
-            &mut limits,
+            &mut writer_3,
+            limits_quota,
             &mut frames,
             OneRttHeader::new(Default::default(), Default::default()).get_type(),
             0,
@@ -226,10 +211,8 @@ async fn closing_without_a_written_frame_preserves_send_budget() {
             assert!(matches!(result, Poll::Ready(Ok(0))));
             assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
         }
+        assert!(buffer.is_finished());
         assert!(frames.is_empty());
-        assert_eq!(limits.send_quota, 2400);
-        assert_eq!(limits.credit, 2400);
-        assert_eq!(limits.max_size(), 0);
     }
 }
 

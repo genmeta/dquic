@@ -81,7 +81,7 @@ mod tests {
 
     use qbase::{
         error::AppError,
-        packet::{Constraints, GetType, OneRttHeader, Package, PacketBuffer},
+        packet::{GetType, OneRttHeader, Package, PacketBuffer},
     };
 
     use super::*;
@@ -97,16 +97,13 @@ mod tests {
         let mut cx = Context::from_waker(Waker::noop());
         let mut bytes = Vec::new();
         let mut frames = Vec::new();
-        let mut limits = Constraints {
-            send_quota: 128,
-            credit: 128,
-            max_size: 128,
-            ..Default::default()
-        };
+        let limits_quota = 128;
+        let limits_length = 128;
         let packet_type = OneRttHeader::new(Default::default(), Default::default()).get_type();
         for _ in 0..2 {
+            let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let mut buffer =
-                PacketBuffer::new(&mut bytes, &mut limits, &mut frames, packet_type, 0, 0);
+                PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, packet_type, 0, 0);
             assert_eq!(
                 flow.outgoing.poll_dump(&mut cx, &mut buffer),
                 Poll::Ready(Ok(0))
