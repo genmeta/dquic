@@ -18,7 +18,9 @@ use qbase::{
         route::Pathway,
         validate::{ArcValidation, ArcValidations, Validation},
     },
-    packet::{Assemble, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer},
+    packet::{
+        Assemble, GetType, LongHeaderBuilder, OneRttHeader, Package, PacketBuffer, PacketContent,
+    },
 };
 
 #[derive(Default)]
@@ -597,6 +599,7 @@ fn assembly_filters_validation_out_of_long_header_packets() {
         buffer
             .assemble(
                 &mut Context::from_waker(Waker::noop()),
+                PacketContent::EffectivePayload,
                 &mut [&mut validation]
             )
             .is_pending()

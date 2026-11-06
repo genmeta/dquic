@@ -7,7 +7,8 @@ use bytes::BufMut;
 use qbase::{
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
-        DataHeader, GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
+        DataHeader, GetType, HeaderSize, LongSpecificBits, PacketContent, PacketNumber,
+        ShortSpecificBits, Type,
         assemble::{Assemble, Metadata, Package, PacketBuffer},
     },
 };
@@ -40,11 +41,13 @@ impl<K: Seal> Packet<K> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn assemble<'b>(
         &mut self,
         cx: &mut Context<'_>,
         datagram: &'b mut Cursor<&mut [u8]>,
         credit: usize,
+        packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
         sources: &mut [&mut dyn Package<&'b mut [u8]>],
     ) -> Poll<(usize, usize)> {
@@ -69,7 +72,7 @@ impl<K: Seal> Packet<K> {
         }
         // Source owners handle connection errors; this packet has no content to send.
         let result = buffer
-            .assemble(cx, sources)
+            .assemble(cx, packet_content, sources)
             .map(|result| result.unwrap_or(0));
         if matches!(result, Poll::Ready(n) if n > 0) {
             let required = buffer.pn_offset() + 4 + 16;

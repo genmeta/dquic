@@ -231,6 +231,11 @@ impl Burst<'_, '_> {
     ) -> Poll<usize> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
+        let packet_content = if path.is_active() {
+            PacketContent::EffectivePayload
+        } else {
+            PacketContent::JustPing
+        };
         let mut acks = Epoch::EPOCHS.map(|epoch| {
             (
                 epoch,
@@ -246,7 +251,9 @@ impl Burst<'_, '_> {
         let mut probes = Epoch::EPOCHS.map(|epoch| {
             (
                 epoch,
-                (path.cc.need_send_ack_eliciting(epoch) > 0).then_some(PingFrame),
+                (packet_content == PacketContent::EffectivePayload
+                    && path.cc.need_send_ack_eliciting(epoch) > 0)
+                    .then_some(PingFrame),
             )
         });
         let overhead = QuicProtocol::packet_overhead(path.pathway);
@@ -259,39 +266,33 @@ impl Burst<'_, '_> {
             };
             let length = 1200.min(credit.saturating_sub(overhead)).min(quota);
             buffer.resize(length, 0);
-            let (size, collected) = if path.is_active() {
-                let [a0, a1, a2] = &mut acks;
-                let [p0, p1, p2] = &mut probes;
-                let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
-                    &mut terminator,
-                    a0,
-                    a1,
-                    a2,
-                    &mut validation,
-                    &mut heartbeat,
-                    p0,
-                    p1,
-                    p2,
-                ];
-                spaces.poll_dump(
-                    cx,
-                    dcid,
-                    &path.cc,
-                    &mut Cursor::new(buffer.as_mut()),
-                    self.frames,
-                    &mut sources,
-                )
+            let [a0, a1, a2] = &mut acks;
+            let [p0, p1, p2] = &mut probes;
+            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
+                &mut terminator,
+                a0,
+                a1,
+                a2,
+                &mut validation,
+                &mut heartbeat,
+                p0,
+                p1,
+                p2,
+            ];
+            let external = if packet_content == PacketContent::EffectivePayload {
+                &mut sources[..]
             } else {
-                spaces.poll_ping(
-                    cx,
-                    dcid,
-                    &path.cc,
-                    &mut Cursor::new(buffer.as_mut()),
-                    self.frames,
-                    &mut heartbeat,
-                    &mut acks,
-                )
+                &mut sources[1..]
             };
+            let (size, collected) = spaces.poll_dump(
+                cx,
+                &path.cc,
+                dcid,
+                &mut Cursor::new(buffer.as_mut()),
+                packet_content,
+                self.frames,
+                external,
+            );
             *packets = collected;
             buffer.truncate(size);
             if size == 0 {

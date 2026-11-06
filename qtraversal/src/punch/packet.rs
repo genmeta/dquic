@@ -9,7 +9,7 @@ use qbase::{
     Epoch,
     cid::ArcDcid,
     frame::GuaranteedFrame,
-    packet::{DataHeader, OneRttHeader, assemble::Package},
+    packet::{DataHeader, OneRttHeader, PacketContent, assemble::Package},
 };
 use qtransport::{
     ArcReliableFrames,
@@ -68,6 +68,7 @@ impl PunchPacketEncoder for ProbeEncoder {
             &mut Context::from_waker(Waker::noop()),
             &mut std::io::Cursor::new(bytes.as_mut()),
             usize::MAX,
+            PacketContent::EffectivePayload,
             &mut frames,
             &mut [&mut frame],
         ) {

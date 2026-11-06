@@ -58,9 +58,10 @@ impl Sender {
         self.bytes.resize(length, 0);
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
-            ConnectionId::from_slice(b"original"),
             &self.path.cc,
+            ConnectionId::from_slice(b"original"),
             &mut std::io::Cursor::new(self.bytes.as_mut()),
+            PacketContent::EffectivePayload,
             &mut Vec::new(),
             &mut [&mut ack, &mut validation, &mut ping],
         );

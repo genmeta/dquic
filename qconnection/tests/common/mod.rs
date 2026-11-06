@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use qbase::{
     cid::ConnectionId,
+    packet::PacketContent,
     param::{ClientParameters, ParameterId, ServerParameters, WriteParameters},
 };
 use tls_backend::pki_types::pem::PemObject;
@@ -186,7 +187,7 @@ where
         qconnection::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), std::task::Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, PacketContent::EffectivePayload, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), std::task::Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
     packet.padding(&mut buffer, 1200 - packet.len());

@@ -533,7 +533,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_data() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let paths = crate::common::initial_paths(
@@ -563,13 +563,20 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
                     EndpointAddr::direct("127.0.0.1:33002".parse().unwrap()),
                 ),
                 paths.progress.facts(),
-                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
                 trackers.clone(),
                 paths.cid_registry.remote.apply_dcid(),
             ),
         );
         path.validation.enter_validated().unwrap();
         paths.progress.on_path_selected(&paths, &path);
+        path.heartbeat
+            .on_rcvd_at(
+                qbase::packet::PacketContent::EffectivePayload,
+                tokio::time::Instant::now(),
+            )
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(20)).await;
         let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
         terminator.close(
             crate::CloseReason::Internal(error.clone()),
