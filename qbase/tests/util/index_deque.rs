@@ -21,10 +21,7 @@ fn shared_guards_preserve_indexes_across_clones() {
     }
 
     assert_eq!(shared.write_guard().push_back(Entry(30)), Ok(2));
-    assert_eq!(
-        deque.write_guard().push_back(Entry(40)),
-        Err(IndexError::ExceedLimit(3, 2))
-    );
+    assert_eq!(deque.write_guard().push_back(Entry(40)), Err(IndexError::ExceedLimit(3, 2)));
     assert_eq!(deque.read_guard()[2].0, 30);
 }
 

@@ -20,16 +20,8 @@ pub struct Topology {
 }
 
 impl Topology {
-    pub fn new(
-        stun: Arc<StunProtocol>,
-        forward: Arc<ForwardProtocol>,
-        quic: Arc<QuicProtocol>,
-    ) -> Self {
-        Self {
-            stun,
-            forward,
-            quic,
-        }
+    pub fn new(stun: Arc<StunProtocol>, forward: Arc<ForwardProtocol>, quic: Arc<QuicProtocol>) -> Self {
+        Self { stun, forward, quic }
     }
 
     pub fn stun(&self) -> &Arc<StunProtocol> {
@@ -45,9 +37,7 @@ impl Topology {
     }
 
     pub async fn receive(&self, socket: Arc<UdpSocket>) -> io::Result<()> {
-        let mut packets = (0..qudp::BATCH_SIZE)
-            .map(|_| BytesMut::zeroed(MAX_DATAGRAM_SIZE))
-            .collect::<Vec<_>>();
+        let mut packets = (0..qudp::BATCH_SIZE).map(|_| BytesMut::zeroed(MAX_DATAGRAM_SIZE)).collect::<Vec<_>>();
         let mut lines = vec![Line::default(); qudp::BATCH_SIZE];
 
         loop {
@@ -59,17 +49,12 @@ impl Topology {
 
                 match be_datagram(packet) {
                     Ok(Datagram::Stun(transaction_id, message)) => {
-                        self.stun
-                            .on_datagram(&socket, transaction_id, message, link)
-                            .await?;
+                        self.stun.on_datagram(&socket, transaction_id, message, link).await?;
                     }
                     Ok(Datagram::Forward(pathway, datagram)) => {
                         let remote = pathway.remote();
-                        if self.forward.find_agent(remote.addr()).is_some()
-                            || self.quic.find_socket(remote).is_some()
-                        {
-                            self.quic
-                                .on_packet(datagram.into_raw(), pathway.flip(), link);
+                        if self.forward.find_agent(remote.addr()).is_some() || self.quic.find_socket(remote).is_some() {
+                            self.quic.on_packet(datagram.into_raw(), pathway.flip(), link);
                         } else {
                             self.forward.on_datagram(link, pathway, datagram).await?;
                         }

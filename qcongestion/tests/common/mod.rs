@@ -32,10 +32,7 @@ pub fn trackers(feedback: Arc<dyn Resend>) -> ArcIndexDeque<Arc<dyn Resend>, 2> 
     ArcIndexDeque::from(entries)
 }
 
-pub fn controller_with(
-    handshake: Arc<HandshakeFacts>,
-    trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-) -> ArcCC {
+pub fn controller_with(handshake: Arc<HandshakeFacts>, trackers: ArcIndexDeque<Arc<dyn Resend>, 2>) -> ArcCC {
     ArcCC::new(
         Algorithm::NewReno,
         Duration::from_millis(25),

@@ -21,9 +21,8 @@ use rustls::{
 use x509_parser::{extensions::GeneralName, prelude::FromDer};
 
 use crate::{
-    BidirectionalKeys, CertificateError, Epoch, ExporterError, HandshakeNotComplete,
-    LocalAuthority, OneRttKeyMaterial, PeerTlsError, RemoteAuthority, TlsAlert, TlsConfigError,
-    TlsError, TlsInvariantError, TlsLimits, root::RootCertsSnapshot,
+    BidirectionalKeys, CertificateError, Epoch, ExporterError, HandshakeNotComplete, LocalAuthority, OneRttKeyMaterial, PeerTlsError,
+    RemoteAuthority, TlsAlert, TlsConfigError, TlsError, TlsInvariantError, TlsLimits, root::RootCertsSnapshot,
 };
 
 pub enum InstalledKeys {
@@ -33,15 +32,9 @@ pub enum InstalledKeys {
 }
 
 pub enum TlsEvent {
-    WriteCrypto {
-        epoch: Epoch,
-        bytes: Bytes,
-    },
+    WriteCrypto { epoch: Epoch, bytes: Bytes },
     InstallKeys(InstalledKeys),
-    ClientHello {
-        server_name: Option<Arc<str>>,
-        transport_parameters: Bytes,
-    },
+    ClientHello { server_name: Option<Arc<str>>, transport_parameters: Bytes },
     ServerTransportParameters(Bytes),
     HandshakeComplete(HandshakeSummary),
     Alert(TlsAlert),
@@ -67,9 +60,7 @@ pub(crate) struct PeerState {
 
 impl PeerState {
     pub(crate) fn new() -> Self {
-        Self {
-            authorities: Arc::new(Mutex::new(AuthorityState::default())),
-        }
+        Self { authorities: Arc::new(Mutex::new(AuthorityState::default())) }
     }
 }
 
@@ -96,12 +87,7 @@ pub struct TlsHandshake {
 }
 
 impl TlsHandshake {
-    pub(crate) fn new(
-        connection: rustls::quic::Connection,
-        role: Role,
-        peer: PeerState,
-        limits: TlsLimits,
-    ) -> Result<Self, TlsError> {
+    pub(crate) fn new(connection: rustls::quic::Connection, role: Role, peer: PeerState, limits: TlsLimits) -> Result<Self, TlsError> {
         let mut handshake = Self {
             connection,
             role,
@@ -128,28 +114,16 @@ impl TlsHandshake {
         }
         if level != self.input_epoch {
             self.terminal = true;
-            return Err(PeerTlsError::WrongCryptoLevel {
-                expected: self.input_epoch,
-                actual: level,
-            }
-            .into());
+            return Err(PeerTlsError::WrongCryptoLevel { expected: self.input_epoch, actual: level }.into());
         }
         let Some(received_bytes) = self.received_bytes.checked_add(contiguous.len()) else {
             self.terminal = true;
-            return Err(PeerTlsError::ResourceLimit {
-                resource: "handshake bytes",
-                limit: self.limits.max_handshake_bytes,
-            }
-            .into());
+            return Err(PeerTlsError::ResourceLimit { resource: "handshake bytes", limit: self.limits.max_handshake_bytes }.into());
         };
         self.received_bytes = received_bytes;
         if self.received_bytes > self.limits.max_handshake_bytes {
             self.terminal = true;
-            return Err(PeerTlsError::ResourceLimit {
-                resource: "handshake bytes",
-                limit: self.limits.max_handshake_bytes,
-            }
-            .into());
+            return Err(PeerTlsError::ResourceLimit { resource: "handshake bytes", limit: self.limits.max_handshake_bytes }.into());
         }
 
         if let Err(error) = self.connection.read_hs(contiguous) {
@@ -192,10 +166,7 @@ impl TlsHandshake {
         if !self.complete {
             return Err(HandshakeNotComplete);
         }
-        Ok(EstablishedTls {
-            connection: self.connection,
-            terminal: self.terminal,
-        })
+        Ok(EstablishedTls { connection: self.connection, terminal: self.terminal })
     }
 
     fn emit_peer_parameters(&mut self) -> Result<(), TlsError> {
@@ -214,8 +185,7 @@ impl TlsHandshake {
                 });
             }
             (Role::Client, rustls::quic::Connection::Client(_)) => {
-                self.events
-                    .push_back(TlsEvent::ServerTransportParameters(parameters));
+                self.events.push_back(TlsEvent::ServerTransportParameters(parameters));
             }
             _ => return Err(TlsInvariantError::Missing("matching TLS role").into()),
         }
@@ -228,32 +198,21 @@ impl TlsHandshake {
             let mut output = Vec::new();
             let key_change = self.connection.write_hs(&mut output);
             if output.len() > self.limits.max_flight_bytes {
-                return Err(PeerTlsError::ResourceLimit {
-                    resource: "output flight",
-                    limit: self.limits.max_flight_bytes,
-                }
-                .into());
+                return Err(PeerTlsError::ResourceLimit { resource: "output flight", limit: self.limits.max_flight_bytes }.into());
             }
             let output_is_empty = output.is_empty();
             if !output_is_empty {
-                self.events.push_back(TlsEvent::WriteCrypto {
-                    epoch: self.output_epoch,
-                    bytes: output.into(),
-                });
+                self.events.push_back(TlsEvent::WriteCrypto { epoch: self.output_epoch, bytes: output.into() });
             }
 
             match key_change {
                 Some(rustls::quic::KeyChange::Handshake { keys }) => {
-                    self.events
-                        .push_back(TlsEvent::InstallKeys(InstalledKeys::Handshake(keys.into())));
+                    self.events.push_back(TlsEvent::InstallKeys(InstalledKeys::Handshake(keys.into())));
                     self.input_epoch = Epoch::Handshake;
                     self.output_epoch = Epoch::Handshake;
                 }
                 Some(rustls::quic::KeyChange::OneRtt { keys, next }) => {
-                    self.events
-                        .push_back(TlsEvent::InstallKeys(InstalledKeys::OneRtt(
-                            OneRttKeyMaterial::new(keys, next),
-                        )));
+                    self.events.push_back(TlsEvent::InstallKeys(InstalledKeys::OneRtt(OneRttKeyMaterial::new(keys, next))));
                     self.output_epoch = Epoch::Data;
                 }
                 None if output_is_empty => break,
@@ -267,11 +226,7 @@ impl TlsHandshake {
         if self.complete || self.connection.is_handshaking() {
             return Ok(());
         }
-        let authorities = self
-            .peer
-            .authorities
-            .lock()
-            .map_err(|_| TlsInvariantError::Missing("authority state lock"))?;
+        let authorities = self.peer.authorities.lock().map_err(|_| TlsInvariantError::Missing("authority state lock"))?;
         let resumed = self.handshake_kind() == Some(rustls::HandshakeKind::Resumed);
         let local = match (authorities.local.clone(), resumed) {
             (None, true) => authorities.resumed_local.clone(),
@@ -290,11 +245,7 @@ impl TlsHandshake {
             }
             _ => {}
         }
-        let summary = HandshakeSummary {
-            alpn: self.connection.alpn_protocol().map(Bytes::copy_from_slice),
-            local,
-            remote,
-        };
+        let summary = HandshakeSummary { alpn: self.connection.alpn_protocol().map(Bytes::copy_from_slice), local, remote };
         self.events.push_back(TlsEvent::HandshakeComplete(summary));
         self.complete = true;
         Ok(())
@@ -314,10 +265,7 @@ pub struct EstablishedTls {
 }
 
 impl EstablishedTls {
-    pub fn receive_post_handshake(
-        &mut self,
-        contiguous_one_rtt_crypto: &[u8],
-    ) -> Result<(), TlsError> {
+    pub fn receive_post_handshake(&mut self, contiguous_one_rtt_crypto: &[u8]) -> Result<(), TlsError> {
         if contiguous_one_rtt_crypto.is_empty() {
             return Ok(());
         }
@@ -332,24 +280,14 @@ impl EstablishedTls {
             return Err(PeerTlsError::Protocol(error.to_string()).into());
         }
         let mut unexpected_output = Vec::new();
-        if self.connection.write_hs(&mut unexpected_output).is_some()
-            || !unexpected_output.is_empty()
-        {
+        if self.connection.write_hs(&mut unexpected_output).is_some() || !unexpected_output.is_empty() {
             return Err(TlsInvariantError::Missing("post-handshake output sink").into());
         }
         Ok(())
     }
 
-    pub fn export_keying_material(
-        &self,
-        output: &mut [u8],
-        label: &[u8],
-        context: Option<&[u8]>,
-    ) -> Result<(), ExporterError> {
-        self.connection
-            .export_keying_material(output, label, context)
-            .map(|_| ())
-            .map_err(|_| ExporterError::Failed)
+    pub fn export_keying_material(&self, output: &mut [u8], label: &[u8], context: Option<&[u8]>) -> Result<(), ExporterError> {
+        self.connection.export_keying_material(output, label, context).map(|_| ()).map_err(|_| ExporterError::Failed)
     }
 }
 
@@ -365,19 +303,13 @@ pub(crate) struct FixedServerCert {
 
 impl FixedServerCert {
     pub fn new(authority: LocalAuthority, peer: PeerState, limits: TlsLimits) -> Self {
-        Self {
-            authority,
-            peer,
-            limits,
-        }
+        Self { authority, peer, limits }
     }
 }
 
 impl fmt::Debug for FixedServerCert {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("FixedServerCert")
-            .finish_non_exhaustive()
+        formatter.debug_struct("FixedServerCert").finish_non_exhaustive()
     }
 }
 
@@ -400,17 +332,10 @@ pub(crate) struct OptionalClientCert {
 
 impl OptionalClientCert {
     pub fn new(authority: Option<LocalAuthority>, peer: PeerState, limits: TlsLimits) -> Self {
-        Self {
-            authority,
-            peer,
-            limits,
-        }
+        Self { authority, peer, limits }
     }
 
-    pub(crate) fn rebind(
-        &self,
-        expected: &crate::resumption::AuthorityProjection,
-    ) -> Option<LocalAuthority> {
+    pub(crate) fn rebind(&self, expected: &crate::resumption::AuthorityProjection) -> Option<LocalAuthority> {
         let authority = self.authority.as_ref()?;
         if !authority_within_limits(authority, self.limits) || !expected.matches(authority) {
             return None;
@@ -421,9 +346,7 @@ impl OptionalClientCert {
 
 impl fmt::Debug for OptionalClientCert {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OptionalClientCert")
-            .finish_non_exhaustive()
+        formatter.debug_struct("OptionalClientCert").finish_non_exhaustive()
     }
 }
 
@@ -445,11 +368,7 @@ impl ResolvesClientCert for OptionalClientCert {
 
 fn authority_within_limits(authority: &LocalAuthority, limits: TlsLimits) -> bool {
     authority.certificates().len() <= limits.max_certificates
-        && authority
-            .certificates()
-            .iter()
-            .map(|certificate| certificate.as_ref().len())
-            .sum::<usize>()
+        && authority.certificates().iter().map(|certificate| certificate.as_ref().len()).sum::<usize>()
             <= limits.max_certificate_chain_bytes
         && authority.ocsp().len() <= limits.max_ocsp_bytes
 }
@@ -473,21 +392,13 @@ impl ServerVerifier {
         let inner = WebPkiServerVerifier::builder_with_provider(roots.store.clone(), provider)
             .build()
             .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
-        Ok(Self {
-            inner,
-            roots,
-            algorithms,
-            peer,
-            limits,
-        })
+        Ok(Self { inner, roots, algorithms, peer, limits })
     }
 }
 
 impl fmt::Debug for ServerVerifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ServerVerifier")
-            .finish_non_exhaustive()
+        formatter.debug_struct("ServerVerifier").finish_non_exhaustive()
     }
 }
 
@@ -502,37 +413,25 @@ impl ServerCertVerifier for ServerVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let certificates = chain(end_entity, intermediates);
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
-        self.inner.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        )?;
+        self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
         // A configured DDNS fallback must pass the same mandatory OCSP checks
         // as a peer staple.
-        let fetched_ocsp = if ocsp_response.is_empty()
-            && matches!(server_name, ServerName::DnsName(name) if name.as_ref() == "ddns.genmeta.net")
-        {
-            std::env::var_os("DQUIC_DDNS_OCSP_FILE")
-                .map(|path| {
-                    use std::io::Read as _;
-                    let mut response = Vec::new();
-                    std::fs::File::open(path)
-                        .and_then(|file| {
-                            file.take(self.limits.max_ocsp_bytes as u64 + 1)
-                                .read_to_end(&mut response)
-                        })
-                        .map_err(|_| {
-                            rustls::Error::InvalidCertificate(CertificateError::InvalidOcspResponse)
-                        })?;
-                    validate_peer_limits(&certificates, &response, self.limits)?;
-                    Ok::<_, rustls::Error>(response)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let fetched_ocsp =
+            if ocsp_response.is_empty() && matches!(server_name, ServerName::DnsName(name) if name.as_ref() == "ddns.genmeta.net") {
+                std::env::var_os("DQUIC_DDNS_OCSP_FILE")
+                    .map(|path| {
+                        use std::io::Read as _;
+                        let mut response = Vec::new();
+                        std::fs::File::open(path)
+                            .and_then(|file| file.take(self.limits.max_ocsp_bytes as u64 + 1).read_to_end(&mut response))
+                            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::InvalidOcspResponse))?;
+                        validate_peer_limits(&certificates, &response, self.limits)?;
+                        Ok::<_, rustls::Error>(response)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
         crate::ocsp::verify(
             fetched_ocsp.as_deref().unwrap_or(ocsp_response),
             end_entity,
@@ -545,13 +444,10 @@ impl ServerCertVerifier for ServerVerifier {
             ServerName::DnsName(name) => Arc::from(name.as_ref()),
             _ => return Err(CertificateError::NotValidForName.into()),
         };
-        let authority = RemoteAuthority::new(name, &certificates)
-            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        self.peer
-            .authorities
-            .lock()
-            .map_err(|_| rustls::Error::General("verified authority lock poisoned".into()))?
-            .remote = Some(authority);
+        let authority =
+            RemoteAuthority::new(name, &certificates).map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        self.peer.authorities.lock().map_err(|_| rustls::Error::General("verified authority lock poisoned".into()))?.remote =
+            Some(authority);
         Ok(ServerCertVerified::assertion())
     }
 
@@ -561,8 +457,7 @@ impl ServerCertVerifier for ServerVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls12_signature(message, certificate, signature)
+        self.inner.verify_tls12_signature(message, certificate, signature)
     }
 
     fn verify_tls13_signature(
@@ -571,8 +466,7 @@ impl ServerCertVerifier for ServerVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls13_signature(message, certificate, signature)
+        self.inner.verify_tls13_signature(message, certificate, signature)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -599,21 +493,13 @@ impl ClientVerifier {
         let inner = WebPkiClientVerifier::builder_with_provider(roots.store.clone(), provider)
             .build()
             .map_err(|error| TlsConfigError::Invalid(error.to_string()))?;
-        Ok(Self {
-            inner,
-            roots,
-            algorithms,
-            peer,
-            limits,
-        })
+        Ok(Self { inner, roots, algorithms, peer, limits })
     }
 }
 
 impl fmt::Debug for ClientVerifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClientVerifier")
-            .finish_non_exhaustive()
+        formatter.debug_struct("ClientVerifier").finish_non_exhaustive()
     }
 }
 
@@ -652,24 +538,13 @@ impl ClientCertVerifier for ClientVerifier {
     ) -> Result<ClientCertVerified, rustls::Error> {
         let certificates = chain(end_entity, intermediates);
         validate_peer_limits(&certificates, ocsp_response, self.limits)?;
-        self.inner
-            .verify_client_cert_with_ocsp(end_entity, intermediates, ocsp_response, now)?;
-        crate::ocsp::verify(
-            ocsp_response,
-            end_entity,
-            intermediates,
-            &self.roots,
-            now,
-            self.algorithms,
-        )?;
+        self.inner.verify_client_cert_with_ocsp(end_entity, intermediates, ocsp_response, now)?;
+        crate::ocsp::verify(ocsp_response, end_entity, intermediates, &self.roots, now, self.algorithms)?;
         let name = certificate_name(end_entity)?;
-        let authority = RemoteAuthority::new(name, &certificates)
-            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        self.peer
-            .authorities
-            .lock()
-            .map_err(|_| rustls::Error::General("verified authority lock poisoned".into()))?
-            .remote = Some(authority);
+        let authority =
+            RemoteAuthority::new(name, &certificates).map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        self.peer.authorities.lock().map_err(|_| rustls::Error::General("verified authority lock poisoned".into()))?.remote =
+            Some(authority);
         Ok(ClientCertVerified::assertion())
     }
 
@@ -679,8 +554,7 @@ impl ClientCertVerifier for ClientVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls12_signature(message, certificate, signature)
+        self.inner.verify_tls12_signature(message, certificate, signature)
     }
 
     fn verify_tls13_signature(
@@ -689,8 +563,7 @@ impl ClientCertVerifier for ClientVerifier {
         certificate: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls13_signature(message, certificate, signature)
+        self.inner.verify_tls13_signature(message, certificate, signature)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -698,19 +571,13 @@ impl ClientCertVerifier for ClientVerifier {
     }
 }
 
-fn chain<'a>(
-    end_entity: &CertificateDer<'a>,
-    intermediates: &[CertificateDer<'a>],
-) -> Vec<CertificateDer<'a>> {
-    std::iter::once(end_entity.clone())
-        .chain(intermediates.iter().cloned())
-        .collect()
+fn chain<'a>(end_entity: &CertificateDer<'a>, intermediates: &[CertificateDer<'a>]) -> Vec<CertificateDer<'a>> {
+    std::iter::once(end_entity.clone()).chain(intermediates.iter().cloned()).collect()
 }
 
 fn certificate_name(certificate: &CertificateDer<'_>) -> Result<Arc<str>, rustls::Error> {
     let (_, certificate) =
-        x509_parser::certificate::X509Certificate::from_der(certificate.as_ref())
-            .map_err(|_| CertificateError::BadEncoding)?;
+        x509_parser::certificate::X509Certificate::from_der(certificate.as_ref()).map_err(|_| CertificateError::BadEncoding)?;
     let name = certificate
         .subject_alternative_name()
         .map_err(|_| CertificateError::BadEncoding)?
@@ -721,22 +588,13 @@ fn certificate_name(certificate: &CertificateDer<'_>) -> Result<Arc<str>, rustls
             _ => None,
         })
         .ok_or(CertificateError::NotValidForName)?;
-    rustls::pki_types::DnsName::try_from(name.to_owned())
-        .map_err(|_| CertificateError::NotValidForName)?;
+    rustls::pki_types::DnsName::try_from(name.to_owned()).map_err(|_| CertificateError::NotValidForName)?;
     Ok(Arc::from(name))
 }
 
-fn validate_peer_limits(
-    certificates: &[CertificateDer<'_>],
-    ocsp: &[u8],
-    limits: TlsLimits,
-) -> Result<(), rustls::Error> {
+fn validate_peer_limits(certificates: &[CertificateDer<'_>], ocsp: &[u8], limits: TlsLimits) -> Result<(), rustls::Error> {
     if certificates.len() > limits.max_certificates
-        || certificates
-            .iter()
-            .map(|certificate| certificate.as_ref().len())
-            .sum::<usize>()
-            > limits.max_certificate_chain_bytes
+        || certificates.iter().map(|certificate| certificate.as_ref().len()).sum::<usize>() > limits.max_certificate_chain_bytes
     {
         return Err(CertificateError::BadEncoding.into());
     }

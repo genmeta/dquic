@@ -20,37 +20,22 @@ impl Display for SystemResolver {
 }
 
 impl Resolve for SystemResolver {
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        servname: &'l str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'l> {
+    fn lookup<'l>(&'l self, hostname: &'l str, servname: &'l str, family: Option<Family>) -> ResolveFuture<'l> {
         let host = hostname
             .rsplit_once(':')
-            .filter(|(host, suffix)| {
-                !host.contains(':')
-                    && !suffix.is_empty()
-                    && suffix.bytes().all(|b| b.is_ascii_digit())
-            })
+            .filter(|(host, suffix)| !host.contains(':') && !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
             .map_or(hostname, |(host, _)| host)
             .trim_end_matches('.')
             .to_ascii_lowercase();
         if host == "dhttp.net" || host.ends_with(".dhttp.net") {
-            return future::ready(Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "DHTTP names require a DHTTP resolver",
-            )))
-            .boxed();
+            return future::ready(Err(io::Error::new(io::ErrorKind::NotFound, "DHTTP names require a DHTTP resolver"))).boxed();
         }
         let hostname = hostname.to_owned();
         let servname = servname.to_owned();
         async move {
-            let addrs = tokio::task::spawn_blocking(move || {
-                lookup_socket_addrs(&hostname, &servname, family)
-            })
-            .await
-            .map_err(io::Error::other)??;
+            let addrs = tokio::task::spawn_blocking(move || lookup_socket_addrs(&hostname, &servname, family))
+                .await
+                .map_err(io::Error::other)??;
             let source = Source::System;
             Ok(stream::iter(addrs.into_iter().map(move |addr| {
                 let ep = EndpointAddr::direct(addr);
@@ -62,11 +47,7 @@ impl Resolve for SystemResolver {
     }
 }
 
-fn lookup_socket_addrs(
-    hostname: &str,
-    servname: &str,
-    family: Option<Family>,
-) -> io::Result<Vec<SocketAddr>> {
+fn lookup_socket_addrs(hostname: &str, servname: &str, family: Option<Family>) -> io::Result<Vec<SocketAddr>> {
     let (hostname, port) = split_name_port(hostname);
     let servname = port.unwrap_or(servname);
     let servname = if servname.is_empty() { "443" } else { servname };
@@ -79,9 +60,7 @@ fn lookup_socket_addrs(
         socktype: SockType::Stream.into(),
         ..AddrInfoHints::default()
     };
-    getaddrinfo(Some(hostname), Some(servname), Some(hints))?
-        .map(|info| info.map(|info| info.sockaddr))
-        .collect()
+    getaddrinfo(Some(hostname), Some(servname), Some(hints))?.map(|info| info.map(|info| info.sockaddr)).collect()
 }
 
 /// Split an optional numeric port from a hostname or bracketed IPv6 address.

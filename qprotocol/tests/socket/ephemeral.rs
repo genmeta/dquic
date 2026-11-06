@@ -20,10 +20,7 @@ async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let packet = [0x40, 1, 2, 3];
     peer.send_to(&packet, bound).await.unwrap();
-    let (received_packet, pathway) = timeout(Duration::from_secs(1), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let (received_packet, pathway) = timeout(Duration::from_secs(1), received.recv()).await.unwrap().unwrap();
     assert_eq!(received_packet.as_ref(), packet);
     assert_eq!(pathway.local(), endpoint);
 
@@ -31,10 +28,7 @@ async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
     assert!(dock.find_socket(bound).is_none());
     assert!(quic.find_socket(endpoint).is_none());
     assert_eq!(raw.local_addr().unwrap(), bound);
-    let error = stun
-        .detect_outer(bound, peer.local_addr().unwrap())
-        .await
-        .unwrap_err();
+    let error = stun.detect_outer(bound, peer.local_addr().unwrap()).await.unwrap_err();
     assert!(matches!(error, StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
 }
 
@@ -54,10 +48,7 @@ async fn failed_quic_registration_rolls_back_dock_and_preserves_the_existing_ali
     assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::AddrInUse));
     assert!(dock.find_socket(bound).is_none());
     assert!(Arc::ptr_eq(&quic.find_socket(endpoint).unwrap(), &existing));
-    let error = stun
-        .detect_outer(bound, existing.local_addr().unwrap())
-        .await
-        .unwrap_err();
+    let error = stun.detect_outer(bound, existing.local_addr().unwrap()).await.unwrap_err();
     assert!(matches!(error, StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
     quic.unregister(existing.local_addr().unwrap());
 }

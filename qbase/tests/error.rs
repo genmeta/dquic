@@ -23,11 +23,7 @@ fn test_error_creation() {
 
 #[test]
 fn test_error_conversion() {
-    let err = Error::Quic(QuicError::new(
-        ErrorKind::Internal,
-        FrameType::Ping.into(),
-        "test conversion",
-    ));
+    let err = Error::Quic(QuicError::new(ErrorKind::Internal, FrameType::Ping.into(), "test conversion"));
 
     // Test Error to ConnectionCloseFrame
     let frame: ConnectionCloseFrame = err.clone().into();
@@ -47,26 +43,12 @@ fn test_error_conversion() {
 #[test]
 fn test_error_kind_conversion() {
     // Test VarInt to ErrorKind
-    assert_eq!(
-        ErrorKind::try_from(VarInt::from(0x00u8)).unwrap(),
-        ErrorKind::None
-    );
-    assert_eq!(
-        ErrorKind::try_from(VarInt::from(0x10u8)).unwrap(),
-        ErrorKind::NoViablePath
-    );
-    assert_eq!(
-        ErrorKind::try_from(VarInt::from(0x0100u16)).unwrap(),
-        ErrorKind::Crypto(0)
-    );
+    assert_eq!(ErrorKind::try_from(VarInt::from(0x00u8)).unwrap(), ErrorKind::None);
+    assert_eq!(ErrorKind::try_from(VarInt::from(0x10u8)).unwrap(), ErrorKind::NoViablePath);
+    assert_eq!(ErrorKind::try_from(VarInt::from(0x0100u16)).unwrap(), ErrorKind::Crypto(0));
 
     // Test invalid error code
-    assert_eq!(
-        ErrorKind::try_from(VarInt::from(0x1000u16))
-            .unwrap_err()
-            .to_string(),
-        "Invalid error code 4096"
-    );
+    assert_eq!(ErrorKind::try_from(VarInt::from(0x1000u16)).unwrap_err().to_string(), "Invalid error code 4096");
 
     // Test ErrorKind to VarInt
     assert_eq!(VarInt::from(ErrorKind::None), VarInt::from(0x00u8));

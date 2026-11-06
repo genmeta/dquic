@@ -32,9 +32,7 @@ pub(crate) fn handshake() -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSumm
     handshake_with(Arc::new(qtls::default_provider()))
 }
 
-pub fn handshake_with(
-    provider: Arc<qtls::CryptoProvider>,
-) -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSummary; 2]) {
+pub fn handshake_with(provider: Arc<qtls::CryptoProvider>) -> ([qtls::OneRttKeyMaterial; 2], [qtls::HandshakeSummary; 2]) {
     qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(CA_CERT).unwrap()]).unwrap();
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
@@ -61,13 +59,8 @@ pub fn handshake_with(
         for i in 0..2 {
             while let Some(event) = peers[i].next_event() {
                 match event {
-                    qtls::TlsEvent::WriteCrypto {
-                        epoch: level,
-                        bytes,
-                    } => peers[1 - i].receive_crypto(level, &bytes).unwrap(),
-                    qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(key)) => {
-                        keys[i] = Some(key)
-                    }
+                    qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => peers[1 - i].receive_crypto(level, &bytes).unwrap(),
+                    qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(key)) => keys[i] = Some(key),
                     qtls::TlsEvent::HandshakeComplete(summary) => summaries[i] = Some(summary),
                     _ => {}
                 }

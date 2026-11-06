@@ -44,12 +44,7 @@ impl fmt::Display for LocalResolver {
 }
 
 impl Resolve for LocalResolver {
-    fn lookup<'a>(
-        &'a self,
-        name: &'a str,
-        _: &'a str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'a> {
+    fn lookup<'a>(&'a self, name: &'a str, _: &'a str, family: Option<Family>) -> ResolveFuture<'a> {
         async move {
             let matches = name == "localhost" && family != Some(Family::V6);
             Ok(stream::iter(matches.then_some((Source::System, self.0))).boxed())
@@ -66,10 +61,7 @@ struct LocalSocket {
 impl LocalSocket {
     fn bind(publish: bool) -> Result<Self, Error> {
         let udp = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
-        let socket = Self {
-            addr: udp.local_addr()?,
-            udp,
-        };
+        let socket = Self { addr: udp.local_addr()?, udp };
         Dock::global().add(socket.udp.clone())?;
         if publish {
             AddressBook::global().insert_inner(&socket.udp, socket.addr.into())?;
@@ -98,12 +90,8 @@ struct TestFile(PathBuf);
 impl TestFile {
     fn create() -> Result<Self, Error> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("dquic-transfer-{}-{nonce}.bin", std::process::id()));
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+        let path = std::env::temp_dir().join(format!("dquic-transfer-{}-{nonce}.bin", std::process::id()));
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
         let file = Self(path);
         // Deterministic, position-dependent bytes expose truncation and misplaced chunks.
         let mut state = 0x1234_5678_u32;
@@ -143,21 +131,13 @@ fn identity(server: bool) -> Result<Arc<Endpoint>, Error> {
             include_bytes!("keychain/localhost/client.ocsp"),
         )
     };
-    Ok(Endpoint::new(
-        name,
-        vec![qtls::CertificateDer::from_pem_slice(cert)?],
-        qtls::PrivateKeyDer::from_pem_slice(key)?,
-        ocsp.to_vec(),
-    )?)
+    Ok(Endpoint::new(name, vec![qtls::CertificateDer::from_pem_slice(cert)?], qtls::PrivateKeyDer::from_pem_slice(key)?, ocsp.to_vec())?)
 }
 
 async fn send(connection: &ArcConnection, payload: Arc<[u8]>, count: usize) -> Result<u64, Error> {
     let mut tasks = JoinSet::new();
     for index in 0..count {
-        let (_, (mut reader, mut writer)) = connection
-            .open_bi_stream()
-            .await?
-            .ok_or("bidirectional stream IDs exhausted")?;
+        let (_, (mut reader, mut writer)) = connection.open_bi_stream().await?.ok_or("bidirectional stream IDs exhausted")?;
         let payload = payload.clone();
         tasks.spawn(async move {
             writer.write_u32(index as u32).await?;
@@ -181,12 +161,7 @@ async fn send(connection: &ArcConnection, payload: Arc<[u8]>, count: usize) -> R
     Ok(total)
 }
 
-async fn receive(
-    connection: &ArcConnection,
-    payload: Arc<[u8]>,
-    count: usize,
-    progress: Arc<AtomicU64>,
-) -> Result<u64, Error> {
+async fn receive(connection: &ArcConnection, payload: Arc<[u8]>, count: usize, progress: Arc<AtomicU64>) -> Result<u64, Error> {
     let headers = Arc::new(AtomicU64::new(0));
     let mut tasks = JoinSet::new();
     let mut stream_ids = HashSet::new();
@@ -218,11 +193,7 @@ async fn receive(
                 progress.fetch_add(n as u64, Ordering::Relaxed);
             }
             if offset != payload.len() {
-                return Err(format!(
-                    "stream {index}: expected {} bytes, received {offset}",
-                    payload.len()
-                )
-                .into());
+                return Err(format!("stream {index}: expected {} bytes, received {offset}", payload.len()).into());
             }
             writer.write_u64(offset as u64).await?;
             writer.shutdown().await?;
@@ -258,17 +229,13 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
         return Err("require 1..=1024 streams and a positive timeout".into());
     }
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .try_init();
     let file = TestFile::create()?;
     // Read the real source file once; all streams share it instead of allocating 10 GiB.
     let payload: Arc<[u8]> = fs::read(&file.0)?.into();
     assert_eq!(payload.len(), FILE_SIZE);
-    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "keychain/localhost/ca.cert"
-    ))?])?;
+    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!("keychain/localhost/ca.cert"))?])?;
     let server_socket = LocalSocket::bind(false)?;
     let client_socket = LocalSocket::bind(true)?;
     Resolver::add(Arc::new(LocalResolver(server_socket.addr.into())));
@@ -276,21 +243,9 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     for (id, value) in ServerParameters::default().iter() {
         server.set_parameters(Role::Server, *id, value.clone())?;
     }
-    server.set_parameters(
-        Role::Server,
-        ParameterId::InitialMaxStreamsBidi,
-        count as u32,
-    )?;
-    server.set_parameters(
-        Role::Server,
-        ParameterId::InitialMaxData,
-        16u32 * 1024 * 1024,
-    )?;
-    server.set_parameters(
-        Role::Server,
-        ParameterId::InitialMaxStreamDataBidiRemote,
-        CHUNK_SIZE as u32,
-    )?;
+    server.set_parameters(Role::Server, ParameterId::InitialMaxStreamsBidi, count as u32)?;
+    server.set_parameters(Role::Server, ParameterId::InitialMaxData, 16u32 * 1024 * 1024)?;
+    server.set_parameters(Role::Server, ParameterId::InitialMaxStreamDataBidiRemote, CHUNK_SIZE as u32)?;
     let mut client = QuicEndpoint::from(identity(false)?);
     for (id, value) in ClientParameters::default().iter() {
         client.set_parameters(Role::Client, *id, value.clone())?;
@@ -301,27 +256,16 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     })?;
     let _listener = Listener;
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(15), async {
-        tokio::try_join!(client.connect("localhost".into()), async {
-            Ok(accepted.recv().await.expect("listener stopped"))
-        })
+        tokio::try_join!(client.connect("localhost".into()), async { Ok(accepted.recv().await.expect("listener stopped")) })
     })
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "loopback handshake timed out"))??;
-    eprintln!(
-        "Connected {} -> {}; {count} streams × 10 MiB = {} MiB",
-        client_socket.addr,
-        server_socket.addr,
-        count * 10
-    );
+    eprintln!("Connected {} -> {}; {count} streams × 10 MiB = {} MiB", client_socket.addr, server_socket.addr, count * 10);
     let expected = count as u64 * FILE_SIZE as u64;
     let progress = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
-    let transfer = async {
-        tokio::try_join!(
-            send(&client_conn, payload.clone(), count),
-            receive(&server_conn, payload, count, progress.clone())
-        )
-    };
+    let transfer =
+        async { tokio::try_join!(send(&client_conn, payload.clone(), count), receive(&server_conn, payload, count, progress.clone())) };
     let report = async {
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -342,10 +286,7 @@ async fn local_quic_1024_streams_10mib() -> Result<(), Error> {
     let (sent, received) = result.map_err(|_| {
         io::Error::new(
             io::ErrorKind::TimedOut,
-            format!(
-                "transfer timed out after {seconds}s: verified {} / {expected} bytes",
-                progress.load(Ordering::Relaxed)
-            ),
+            format!("transfer timed out after {seconds}s: verified {} / {expected} bytes", progress.load(Ordering::Relaxed)),
         )
     })??;
     assert_eq!(sent, expected);

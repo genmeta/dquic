@@ -131,21 +131,12 @@ impl Attribute {
         }
         let original = input;
         let (input, ty) = be_u8(input)?;
-        let ty = AttributeType::try_from(ty)
-            .map_err(|_| Err::Error(Error::new(original, ErrorKind::Alt)))?;
+        let ty = AttributeType::try_from(ty).map_err(|_| Err::Error(Error::new(original, ErrorKind::Alt)))?;
         match ty {
-            AttributeType::MappedAddress(family) => {
-                map(|input| be_socket_addr(input, family), Self::MappedAddress).parse(input)
-            }
-            AttributeType::ResponseAddress(family) => {
-                map(|input| be_socket_addr(input, family), Self::ResponseAddress).parse(input)
-            }
-            AttributeType::SourceAddress(family) => {
-                map(|input| be_socket_addr(input, family), Self::SourceAddress).parse(input)
-            }
-            AttributeType::ChangedAddress(family) => {
-                map(|input| be_socket_addr(input, family), Self::ChangedAddress).parse(input)
-            }
+            AttributeType::MappedAddress(family) => map(|input| be_socket_addr(input, family), Self::MappedAddress).parse(input),
+            AttributeType::ResponseAddress(family) => map(|input| be_socket_addr(input, family), Self::ResponseAddress).parse(input),
+            AttributeType::SourceAddress(family) => map(|input| be_socket_addr(input, family), Self::SourceAddress).parse(input),
+            AttributeType::ChangedAddress(family) => map(|input| be_socket_addr(input, family), Self::ChangedAddress).parse(input),
             AttributeType::ChangeRequest(flags) => Ok((input, Self::ChangeRequest(flags))),
         }
     }

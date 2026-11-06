@@ -12,11 +12,7 @@ pub type Header = Pathway;
 
 impl GetDatagramType for Header {
     fn get_datagram_type(&self) -> DatagramType {
-        DatagramType::V0(v0::Type::Forward(
-            self.local().family(),
-            self.local().kind(),
-            self.remote().kind(),
-        ))
+        DatagramType::V0(v0::Type::Forward(self.local().family(), self.local().kind(), self.remote().kind()))
     }
 }
 
@@ -29,21 +25,14 @@ pub struct Payload {
 
 impl Payload {
     /// Writes a Forward header into the headroom before a raw datagram.
-    pub fn from_raw(
-        pathway: &Pathway,
-        mut bytes: BytesMut,
-        raw_offset: usize,
-    ) -> Result<Self, Error> {
+    pub fn from_raw(pathway: &Pathway, mut bytes: BytesMut, raw_offset: usize) -> Result<Self, Error> {
         if raw_offset >= bytes.len() {
             return Err(Error::InvalidForwardDatagram);
         }
         let source = pathway.local();
         let destination = pathway.remote();
         let family = source.family();
-        if source.addr().family() != family
-            || destination.family() != family
-            || destination.addr().family() != family
-        {
+        if source.addr().family() != family || destination.family() != family || destination.addr().family() != family {
             return Err(Error::InvalidForwardDatagram);
         }
         let header_len = 2 + source.encoding_size() + destination.encoding_size();
@@ -58,10 +47,7 @@ impl Payload {
         header.put_pathway(pathway);
         debug_assert!(header.is_empty());
         bytes.unsplit(raw);
-        Ok(Self {
-            bytes,
-            raw_offset: header_len,
-        })
+        Ok(Self { bytes, raw_offset: header_len })
     }
 
     /// Removes the Forward header and returns the complete raw datagram.

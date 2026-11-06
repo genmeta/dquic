@@ -123,10 +123,7 @@ impl<T: BufMut> WriteSocketAddr for T {
 }
 
 pub fn be_socket_addr(input: &[u8], family: Family) -> IResult<&[u8], SocketAddr> {
-    flat_map(be_u16, |port| {
-        map(be_ip_addr(family), move |ip| SocketAddr::new(ip, port))
-    })
-    .parse(input)
+    flat_map(be_u16, |port| map(be_ip_addr(family), move |ip| SocketAddr::new(ip, port))).parse(input)
 }
 
 pub fn be_ip_addr(family: Family) -> impl Fn(&[u8]) -> IResult<&[u8], IpAddr> {

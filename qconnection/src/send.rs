@@ -47,15 +47,7 @@ impl<'a, 'path> Burst<'a, 'path> {
         frames: &'a mut Vec<GuaranteedFrame>,
         packets: &'a mut BurstPackets,
     ) -> Self {
-        Self {
-            paths,
-            path,
-            datagrams,
-            frames,
-            packets,
-            dcid: None,
-            spaces: None,
-        }
+        Self { paths, path, datagrams, frames, packets, dcid: None, spaces: None }
     }
 
     pub fn cancel(&mut self) {
@@ -92,15 +84,9 @@ impl<'a, 'path> Burst<'a, 'path> {
         let path = self.path;
         let dcid = self.dcid.expect("collected CID");
         let idle = self.paths.idle();
-        let deadlines = Epoch::EPOCHS.map(|epoch| {
-            (
-                path.cc.retransmit_and_expire_time(epoch).0,
-                path.cc.pto_base(epoch) * 3,
-            )
-        });
-        let datagrams: [_; MAX_BURST_PACKETS] = std::array::from_fn(|i| {
-            IoSlice::new(self.datagrams.get(i).map_or(&[], |bytes| &bytes[..]))
-        });
+        let deadlines = Epoch::EPOCHS.map(|epoch| (path.cc.retransmit_and_expire_time(epoch).0, path.cc.pto_base(epoch) * 3));
+        let datagrams: [_; MAX_BURST_PACKETS] =
+            std::array::from_fn(|i| IoSlice::new(self.datagrams.get(i).map_or(&[], |bytes| &bytes[..])));
         let mut first = 0;
         while first < count {
             let mut sent_handshake = false;
@@ -110,29 +96,17 @@ impl<'a, 'path> Burst<'a, 'path> {
                 // Retirement also cancels a batch already waiting for UDP writability.
                 path.validation.credit().map_err(std::io::Error::other)?;
                 if !path.is_active()
-                    && self.packets[first..count]
-                        .iter()
-                        .flatten()
-                        .any(|meta| meta.content == PacketContent::EffectivePayload)
+                    && self.packets[first..count].iter().flatten().any(|meta| meta.content == PacketContent::EffectivePayload)
                 {
                     return Poll::Ready(Ok(None));
                 }
-                let sent = ready!(QuicProtocol::global().poll_send(
-                    cx,
-                    path.pathway,
-                    &datagrams[first..count]
-                ))?;
+                let sent = ready!(QuicProtocol::global().poll_send(cx, path.pathway, &datagrams[first..count]))?;
                 for index in first..first + sent {
                     let mut packets = [None; 3];
                     for meta in self.packets[index].drain(..) {
                         let epoch = meta.epoch();
                         let space = spaces.0.get(epoch as u64).unwrap();
-                        space.on_sent(
-                            meta.pn,
-                            meta.in_flight,
-                            deadlines[epoch].0,
-                            deadlines[epoch].1,
-                        );
+                        space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
                         sent_handshake |= epoch == Epoch::Handshake;
                         packets[epoch] = Some(meta);
                     }
@@ -142,9 +116,7 @@ impl<'a, 'path> Burst<'a, 'path> {
                     &mut cc,
                     spaces,
                     dcid,
-                    path.validation
-                        .credit()
-                        .map_or(0, |credit| credit.unwrap_or(usize::MAX)),
+                    path.validation.credit().map_or(0, |credit| credit.unwrap_or(usize::MAX)),
                     QuicProtocol::packet_overhead(path.pathway),
                 );
                 Poll::Ready(Ok(Some(sent)))
@@ -179,8 +151,7 @@ impl Burst<'_, '_> {
         if path.validation.is_cancelled() {
             return Poll::Ready(Err(no_viable_path("path CID binding retired")));
         }
-        let cid = ready!(path.dcid.poll_borrow(cx))
-            .ok_or_else(|| no_viable_path("path CID binding retired"))?;
+        let cid = ready!(path.dcid.poll_borrow(cx)).ok_or_else(|| no_viable_path("path CID binding retired"))?;
         self.dcid = Some(cid);
         let result = self.poll_collect_with_cid(cx, cid);
         if result.is_pending() {
@@ -189,11 +160,7 @@ impl Burst<'_, '_> {
         result
     }
 
-    fn poll_collect_with_cid(
-        &mut self,
-        cx: &mut Context<'_>,
-        cid: ConnectionId,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_collect_with_cid(&mut self, cx: &mut Context<'_>, cid: ConnectionId) -> Poll<Result<usize, Error>> {
         let path = self.path;
         self.spaces = Some(Spaces(self.paths.spaces.read_guard().clone()));
         let credit = match path.validation.poll_credit(cx) {
@@ -204,13 +171,7 @@ impl Burst<'_, '_> {
         let send_quota = {
             let mut cc = path.cc.lock();
             // Update the budget before driving PTO, including when credit polling waits.
-            update_amplification_blocked(
-                &mut cc,
-                self.spaces.as_ref().unwrap(),
-                cid,
-                credit,
-                overhead,
-            );
+            update_amplification_blocked(&mut cc, self.spaces.as_ref().unwrap(), cid, credit, overhead);
             if credit == 0 {
                 ready!(cc.poll_send_quota(cx)).map_err(no_viable_path)?;
                 drop(cc);
@@ -222,13 +183,7 @@ impl Burst<'_, '_> {
         self.collect_spaces(cx, cid, send_quota, credit).map(Ok)
     }
 
-    fn collect_spaces(
-        &mut self,
-        cx: &mut Context<'_>,
-        dcid: ConnectionId,
-        mut send_quota: usize,
-        mut credit: usize,
-    ) -> Poll<usize> {
+    fn collect_spaces(&mut self, cx: &mut Context<'_>, dcid: ConnectionId, mut send_quota: usize, mut credit: usize) -> Poll<usize> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
         let packet_content = if path.is_active() {
@@ -236,25 +191,13 @@ impl Burst<'_, '_> {
         } else {
             PacketContent::JustPing
         };
-        let mut acks = Epoch::EPOCHS.map(|epoch| {
-            (
-                epoch,
-                spaces
-                    .0
-                    .get(epoch as u64)
-                    .map(|space| space.rcvd_journal().ack_package(path.cc.need_ack(epoch))),
-            )
-        });
+        let mut acks = Epoch::EPOCHS
+            .map(|epoch| (epoch, spaces.0.get(epoch as u64).map(|space| space.rcvd_journal().ack_package(path.cc.need_ack(epoch)))));
         let mut terminator = &self.paths.terminator;
         let mut heartbeat = path.heartbeat.clone();
         let mut validation = path.validation.clone();
         let mut probes = Epoch::EPOCHS.map(|epoch| {
-            (
-                epoch,
-                (packet_content == PacketContent::EffectivePayload
-                    && path.cc.need_send_ack_eliciting(epoch) > 0)
-                    .then_some(PingFrame),
-            )
+            (epoch, (packet_content == PacketContent::EffectivePayload && path.cc.need_send_ack_eliciting(epoch) > 0).then_some(PingFrame))
         });
         let overhead = QuicProtocol::packet_overhead(path.pathway);
         let mut count = 0;
@@ -268,42 +211,22 @@ impl Burst<'_, '_> {
             buffer.resize(length, 0);
             let [a0, a1, a2] = &mut acks;
             let [p0, p1, p2] = &mut probes;
-            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] = [
-                &mut terminator,
-                a0,
-                a1,
-                a2,
-                &mut validation,
-                &mut heartbeat,
-                p0,
-                p1,
-                p2,
-            ];
+            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] =
+                [&mut terminator, a0, a1, a2, &mut validation, &mut heartbeat, p0, p1, p2];
             let external = if packet_content == PacketContent::EffectivePayload {
                 &mut sources[..]
             } else {
                 &mut sources[1..]
             };
-            let (size, collected) = spaces.poll_dump(
-                cx,
-                &path.cc,
-                dcid,
-                &mut Cursor::new(buffer.as_mut()),
-                packet_content,
-                self.frames,
-                external,
-            );
+            let (size, collected) =
+                spaces.poll_dump(cx, &path.cc, dcid, &mut Cursor::new(buffer.as_mut()), packet_content, self.frames, external);
             *packets = collected;
             buffer.truncate(size);
             if size == 0 {
                 break;
             }
             credit -= size + overhead;
-            let in_flight: usize = packets
-                .iter()
-                .filter(|meta| meta.in_flight)
-                .map(|meta| meta.pktlen)
-                .sum();
+            let in_flight: usize = packets.iter().filter(|meta| meta.in_flight).map(|meta| meta.pktlen).sum();
             if in_flight > 0 {
                 send_quota = send_quota.saturating_sub(in_flight + overhead);
             }
@@ -334,13 +257,7 @@ impl Drop for Burst<'_, '_> {
     }
 }
 
-fn update_amplification_blocked(
-    cc: &mut CongestionController,
-    spaces: &Spaces,
-    dcid: ConnectionId,
-    credit: usize,
-    overhead: usize,
-) {
+fn update_amplification_blocked(cc: &mut CongestionController, spaces: &Spaces, dcid: ConnectionId, credit: usize, overhead: usize) {
     let epoch = cc.pto_epoch();
     let blocked = match credit {
         0 => true,

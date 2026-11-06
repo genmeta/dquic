@@ -8,11 +8,7 @@ use qbase::{
 
 #[test]
 fn test_reset_stream_frame() {
-    let frame = ResetStreamFrame::new(
-        VarInt::from_u32(0x1234).into(),
-        VarInt::from_u32(0x5678),
-        VarInt::from_u32(0x9abc),
-    );
+    let frame = ResetStreamFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678), VarInt::from_u32(0x9abc));
     assert_eq!(frame.frame_type(), FrameType::ResetStream);
     assert_eq!(frame.max_encoding_size(), 1 + 8 + 8 + 8);
     assert_eq!(frame.encoding_size(), 1 + 2 + 4 + 4);
@@ -21,10 +17,7 @@ fn test_reset_stream_frame() {
     assert_eq!(frame.final_size(), 0x9abc);
 
     let reset_stream_error: ResetStreamError = (&frame).into();
-    assert_eq!(
-        reset_stream_error,
-        ResetStreamError::new(VarInt::from_u32(0x5678), VarInt::from_u32(0x9abc))
-    );
+    assert_eq!(reset_stream_error, ResetStreamError::new(VarInt::from_u32(0x5678), VarInt::from_u32(0x9abc)));
 }
 
 #[test]
@@ -46,16 +39,11 @@ fn test_write_reset_stream_frame() {
 #[test]
 fn test_read_reset_stream_frame() {
     assert_eq!(
-        super::parse_frame(
-            &[0x04, 0x52, 0x34, 0x80, 0, 0x56, 0x78, 0x80, 0, 0x9a, 0xbc],
-            FrameType::ResetStream
-        ),
-        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::ResetStream(
-            ResetStreamFrame::new(
-                VarInt::from_u32(0x1234).into(),
-                VarInt::from_u32(0x5678),
-                VarInt::from_u32(0x9abc)
-            )
-        ))
+        super::parse_frame(&[0x04, 0x52, 0x34, 0x80, 0, 0x56, 0x78, 0x80, 0, 0x9a, 0xbc], FrameType::ResetStream),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::ResetStream(ResetStreamFrame::new(
+            VarInt::from_u32(0x1234).into(),
+            VarInt::from_u32(0x5678),
+            VarInt::from_u32(0x9abc)
+        )))
     );
 }

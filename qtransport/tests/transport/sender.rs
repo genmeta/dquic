@@ -15,13 +15,7 @@ pub(crate) struct Sender {
 
 impl Sender {
     pub(crate) fn new(transport: Arc<Transport>, path: Arc<Path>) -> Self {
-        Self {
-            transport,
-            path,
-            bytes: BytesMut::zeroed(1200),
-            pending: None,
-            heartbeat: false,
-        }
+        Self { transport, path, bytes: BytesMut::zeroed(1200), pending: None, heartbeat: false }
     }
 
     pub(crate) fn heartbeat(&mut self) {
@@ -32,29 +26,21 @@ impl Sender {
         if self.pending.is_some() {
             return Ok(true);
         }
-        let credit = self.path.validation.credit().map_err(|error| {
-            QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
-        })?;
+        let credit =
+            self.path.validation.credit().map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
         let mut spaces = Spaces(IndexDeque::with_capacity(1));
         spaces.0.reset_offset(Epoch::Data as u64);
         spaces.0.push_back(self.transport.data.clone()).unwrap();
         let quota = self.path.cc.send_quota();
         let overhead = QuicProtocol::packet_overhead(self.path.pathway);
-        let length = 1200
-            .min(credit.unwrap_or(usize::MAX).saturating_sub(overhead))
-            .min(if quota == 0 {
-                1200
-            } else {
-                quota.saturating_sub(overhead)
-            });
-        let mut ack = self
-            .transport
-            .data
-            .rcvd_journal
-            .ack_package(self.path.cc.need_ack(Epoch::Data));
+        let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead)).min(if quota == 0 {
+            1200
+        } else {
+            quota.saturating_sub(overhead)
+        });
+        let mut ack = self.transport.data.rcvd_journal.ack_package(self.path.cc.need_ack(Epoch::Data));
         let mut validation = self.path.validation.clone();
-        let mut ping = (self.heartbeat || self.path.cc.need_send_ack_eliciting(Epoch::Data) > 0)
-            .then_some(PingFrame);
+        let mut ping = (self.heartbeat || self.path.cc.need_send_ack_eliciting(Epoch::Data) > 0).then_some(PingFrame);
         self.bytes.resize(length, 0);
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
@@ -84,34 +70,16 @@ impl Sender {
         let delay = self.path.cc.retransmit_and_expire_time(Epoch::Data).0;
         let retention = self.path.cc.pto_base(Epoch::Data) * 3;
         let mut cc = self.path.cc.lock();
-        std::task::ready!(submit(cx, self.path.pathway, &self.bytes)).map_err(|error| {
-            QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string())
-        })?;
-        Transmit::on_sent(
-            self.transport.data.as_ref(),
-            meta.pn,
-            meta.in_flight,
-            delay,
-            retention,
-        );
-        self.path.on_sent(
-            &mut cc,
-            self.bytes.len(),
-            [None, None, self.pending.take()],
-            &ArcIdleTimer::new(Duration::ZERO),
-        );
+        std::task::ready!(submit(cx, self.path.pathway, &self.bytes))
+            .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+        Transmit::on_sent(self.transport.data.as_ref(), meta.pn, meta.in_flight, delay, retention);
+        self.path.on_sent(&mut cc, self.bytes.len(), [None, None, self.pending.take()], &ArcIdleTimer::new(Duration::ZERO));
         Poll::Ready(Ok(true))
     }
 
-    pub(crate) fn poll_send(
-        &mut self,
-        cx: &mut Context<'_>,
-        protocol: &QuicProtocol,
-    ) -> Poll<Result<bool, Error>> {
+    pub(crate) fn poll_send(&mut self, cx: &mut Context<'_>, protocol: &QuicProtocol) -> Poll<Result<bool, Error>> {
         self.poll_send_with(cx, |cx, path, bytes| {
-            protocol
-                .poll_send(cx, path, &[std::io::IoSlice::new(bytes)])
-                .map(|result| result.map(|_| bytes.len()))
+            protocol.poll_send(cx, path, &[std::io::IoSlice::new(bytes)]).map(|result| result.map(|_| bytes.len()))
         })
     }
 }
@@ -119,11 +87,7 @@ impl Sender {
 impl Drop for Sender {
     fn drop(&mut self) {
         if let Some(meta) = self.pending.take() {
-            Recover::cancel(
-                self.transport.data.as_ref(),
-                meta.pn,
-                &mut std::iter::empty(),
-            );
+            Recover::cancel(self.transport.data.as_ref(), meta.pn, &mut std::iter::empty());
         }
     }
 }

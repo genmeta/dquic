@@ -25,10 +25,8 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let pathway = Pathway::new(
-        EndpointAddr::direct("127.0.0.1:30001".parse().unwrap()),
-        EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()),
-    );
+    let pathway =
+        Pathway::new(EndpointAddr::direct("127.0.0.1:30001".parse().unwrap()), EndpointAddr::direct("127.0.0.1:30002".parse().unwrap()));
     let path = paths.add_path(pathway);
     let watchdog = std::thread::spawn({
         let path = path.clone();
@@ -59,22 +57,13 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
         EndpointAddr::direct("127.0.0.1:0".parse().unwrap()),
         EndpointAddr::direct("127.0.0.1:35002".parse().unwrap()),
     ));
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
     common::wait_for_sender_exit(&path).await;
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(path.validation.is_cancelled());
 
-    assert!(
-        space
-            .crypto
-            .writer()
-            .write_all(b"after close")
-            .await
-            .is_err()
-    );
+    assert!(space.crypto.writer().write_all(b"after close").await.is_err());
     assert!(paths.terminator.clone().now_or_never().is_some());
 }
 
@@ -98,59 +87,30 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
         crate::common::handshake_facts(Role::Server, true),
     );
     let space = crate::common::initial_space(&paths.spaces);
-    let path = paths.add_path(Pathway::new(
-        local,
-        EndpointAddr::direct(peer.local_addr().unwrap()),
-    ));
+    let path = paths.add_path(Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())));
     path.validation.enter_validated().unwrap();
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
-    space
-        .rcvd_journal
-        .on_rcvd_pn(0, true, Duration::from_secs(1));
+    space.rcvd_journal.on_rcvd_pn(0, true, Duration::from_secs(1));
     path.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
     let start = Instant::now();
     let mut buffers = [BytesMut::zeroed(1500)];
-    let mut lines = [Line::new(
-        Link::new(local.addr(), peer.local_addr().unwrap()),
-        64,
-        None,
-        1500,
-    )];
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        peer.receive(&mut buffers, &mut lines),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let mut lines = [Line::new(Link::new(local.addr(), peer.local_addr().unwrap()), 64, None, 1500)];
+    tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut buffers, &mut lines)).await.unwrap().unwrap();
     let received = Instant::now();
     buffers[0].truncate(lines[0].seg_size as usize);
-    let ParsedPacket::Data(packet) = PacketReader::new(buffers[0].clone(), 8)
-        .next()
-        .unwrap()
-        .unwrap()
-    else {
+    let ParsedPacket::Data(packet) = PacketReader::new(buffers[0].clone(), 8).next().unwrap().unwrap() else {
         panic!()
     };
     let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
         panic!()
     };
-    let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-        .decrypt_long_packet(&keys(false).opening, |_| Ok(0))
-        .unwrap()
-        .unwrap();
+    let opened =
+        CipherPacket::new(header, packet.bytes, packet.offset).decrypt_long_packet(&keys(false).opening, |_| Ok(0)).unwrap().unwrap();
     use qbase::packet::GetType;
-    assert!(
-        FrameReader::new(opened.body(), opened.get_type())
-            .all(|frame| matches!(frame.unwrap().0, Frame::Ack(_) | Frame::Padding(_)))
-    );
+    assert!(FrameReader::new(opened.body(), opened.get_type()).all(|frame| matches!(frame.unwrap().0, Frame::Ack(_) | Frame::Padding(_))));
     let reason = paths.terminator.clone().await;
-    assert!(
-        matches!(reason, qconnection::Error::Quic(error) if error.reason() == "connection idle timeout")
-    );
+    assert!(matches!(reason, qconnection::Error::Quic(error) if error.reason() == "connection idle timeout"));
     assert!(Instant::now() >= start + Duration::from_secs(5));
     assert!(Instant::now() <= received + Duration::from_secs(8));
     assert!(!common::take_heartbeat(&path));
@@ -174,13 +134,8 @@ async fn credit_blocked_sender_keeps_path_until_termination() {
     ));
     tokio::task::yield_now().await;
     let pto = path.cc.pto_base(Epoch::Data);
-    terminator.close(
-        qconnection::CloseReason::Internal(QuicError::with_default_fty(
-            ErrorKind::Internal,
-            "closed while credit blocked",
-        )),
-        pto,
-    );
+    terminator
+        .close(qconnection::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed while credit blocked")), pto);
     tokio::task::yield_now().await;
     assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
     assert!(!path.validation.is_cancelled());
@@ -210,27 +165,16 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
         ConnectionId::from_slice(b"original"),
         keys(false),
     );
-    let path = paths.add_path(Pathway::new(
-        local,
-        EndpointAddr::direct(peer.local_addr().unwrap()),
-    ));
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    let path = paths.add_path(Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
     let terminator = paths.terminator.clone();
     let error: qconnection::Error = AppError::new(42u32.into(), "closed").into();
     // Component failure is observable to its writer, not a fresh send-task error.
-    crate::common::initial_space(&paths.spaces)
-        .crypto
-        .on_error(&error);
+    crate::common::initial_space(&paths.spaces).crypto.on_error(&error);
     tokio::task::yield_now().await;
     assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
-    assert!(
-        crate::common::observe_close(&terminator)
-            .notified()
-            .is_none()
-    );
+    assert!(crate::common::observe_close(&terminator).notified().is_none());
     let pto = Duration::from_secs(10);
     terminator.close(error.clone().into(), pto);
     for retransmit in [false, true] {
@@ -240,22 +184,10 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
             }
         }
         let mut bytes = [BytesMut::zeroed(1500)];
-        let mut lines = [Line::new(
-            Link::new(local.addr(), peer.local_addr().unwrap()),
-            64,
-            None,
-            1500,
-        )];
-        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut bytes, &mut lines))
-            .await
-            .unwrap()
-            .unwrap();
+        let mut lines = [Line::new(Link::new(local.addr(), peer.local_addr().unwrap()), 64, None, 1500)];
+        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut bytes, &mut lines)).await.unwrap().unwrap();
         bytes[0].truncate(lines[0].seg_size as usize);
-        let ParsedPacket::Data(packet) = PacketReader::new(bytes[0].clone(), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-        else {
+        let ParsedPacket::Data(packet) = PacketReader::new(bytes[0].clone(), 8).next().unwrap().unwrap() else {
             panic!()
         };
         let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
@@ -265,19 +197,9 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
             .decrypt_long_packet(&keys(true).opening, |pn| Ok(pn.decode(0)))
             .unwrap()
             .unwrap();
-        let decoded = FrameReader::new(opened.body(), opened.get_type())
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            decoded
-                .iter()
-                .any(|(frame, _)| matches!(frame, Frame::Close(_)))
-        );
-        assert!(
-            decoded
-                .iter()
-                .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
-        );
+        let decoded = FrameReader::new(opened.body(), opened.get_type()).collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(decoded.iter().any(|(frame, _)| matches!(frame, Frame::Close(_))));
+        assert!(decoded.iter().all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_))));
         assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
     }
     tokio::time::advance(3 * pto).await;
@@ -309,35 +231,18 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
         crate::common::handshake_facts(Role::Client, false),
     );
     let space = crate::common::initial_space(&paths.spaces);
-    let path = paths.add_path(Pathway::new(
-        local,
-        EndpointAddr::direct(peer.local_addr().unwrap()),
-    ));
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    let path = paths.add_path(Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
     for message in [b"first".as_slice(), b"second".as_slice()] {
         tokio::task::yield_now().await;
         assert!(paths.entries.lock().unwrap().contains_key(&path.pathway));
         space.crypto.writer().write_all(message).await.unwrap();
         let mut bytes = [BytesMut::zeroed(1500)];
-        let mut lines = [Line::new(
-            Link::new(local.addr(), peer.local_addr().unwrap()),
-            64,
-            None,
-            1500,
-        )];
-        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut bytes, &mut lines))
-            .await
-            .unwrap()
-            .unwrap();
+        let mut lines = [Line::new(Link::new(local.addr(), peer.local_addr().unwrap()), 64, None, 1500)];
+        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut bytes, &mut lines)).await.unwrap().unwrap();
         bytes[0].truncate(lines[0].seg_size as usize);
-        let ParsedPacket::Data(packet) = PacketReader::new(bytes[0].clone(), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-        else {
+        let ParsedPacket::Data(packet) = PacketReader::new(bytes[0].clone(), 8).next().unwrap().unwrap() else {
             panic!("expected an Initial packet");
         };
         let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
@@ -347,9 +252,10 @@ async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
             .decrypt_long_packet(&keys(true).opening, |pn| Ok(pn.decode(0)))
             .unwrap()
             .unwrap();
-        assert!(FrameReader::new(opened.body(), opened.get_type()).any(
-            |frame| matches!(frame.unwrap().0, Frame::Crypto(_, bytes) if bytes.as_ref() == message)
-        ));
+        assert!(
+            FrameReader::new(opened.body(), opened.get_type())
+                .any(|frame| matches!(frame.unwrap().0, Frame::Crypto(_, bytes) if bytes.as_ref() == message))
+        );
     }
     path.close();
     common::wait_for_sender_exit(&path).await;

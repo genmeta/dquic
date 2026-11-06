@@ -51,51 +51,30 @@ impl<L: QLog + ?Sized> QLog for Arc<L> {
 }
 
 pub trait TelemetryStorage {
-    fn join(
-        &self,
-        file_name: &str,
-    ) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static;
+    fn join(&self, file_name: &str) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static;
 }
 
 impl TelemetryStorage for PathBuf {
-    fn join(
-        &self,
-        file_name: &str,
-    ) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
+    fn join(&self, file_name: &str) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
         let file_path = Path::join(self, file_name);
         async move {
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&file_path)
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "failed to create sqlog file {}: {e:?}, qlogs to this connection will be ignored.",
-                        file_path.display()
-                    )
-                })
+            tokio::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&file_path).await.unwrap_or_else(|e| {
+                panic!("failed to create sqlog file {}: {e:?}, qlogs to this connection will be ignored.", file_path.display())
+            })
         }
     }
 }
 
 impl TelemetryStorage for tokio::io::Stdout {
     #[allow(clippy::manual_async_fn)]
-    fn join(
-        &self,
-        _: &str,
-    ) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
+    fn join(&self, _: &str) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
         async move { tokio::io::stdout() }
     }
 }
 
 impl TelemetryStorage for tokio::io::Stderr {
     #[allow(clippy::manual_async_fn)]
-    fn join(
-        &self,
-        _: &str,
-    ) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
+    fn join(&self, _: &str) -> impl Future<Output = impl AsyncWrite + Send + Unpin + 'static> + Send + 'static {
         async move { tokio::io::stderr() }
     }
 }
@@ -106,9 +85,7 @@ pub struct LegacySeqLogger<S> {
 
 impl<S: Clone> Clone for LegacySeqLogger<S> {
     fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-        }
+        Self { storage: self.storage.clone() }
     }
 }
 
@@ -127,11 +104,7 @@ impl<S: TelemetryStorage> QLog for LegacySeqLogger<S> {
 
         let qlog_file_seq = crate::build!(legacy::QlogFileSeq {
             title: file_name,
-            trace: legacy::TraceSeq {
-                vantage_point: VantagePoint {
-                    r#type: vantage_point
-                },
-            }
+            trace: legacy::TraceSeq { vantage_point: VantagePoint { r#type: vantage_point } }
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
@@ -179,11 +152,7 @@ impl QLog for TracingLogger {
 
         let qlog_file_seq = crate::build!(legacy::QlogFileSeq {
             title: format!("{group_id}_{vantage_point}.sqlog"),
-            trace: legacy::TraceSeq {
-                vantage_point: VantagePoint {
-                    r#type: vantage_point
-                },
-            }
+            trace: legacy::TraceSeq { vantage_point: VantagePoint { r#type: vantage_point } }
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();

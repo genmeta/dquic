@@ -18,11 +18,7 @@ pub use sys::{SystemResolver, split_name_port};
 pub type PublishFuture<'a> = BoxFuture<'a, io::Result<()>>;
 
 pub trait Publish: Any + Send + Sync + Display + Debug {
-    fn publish<'a>(
-        &'a self,
-        name: &'a str,
-        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
-    ) -> PublishFuture<'a>;
+    fn publish<'a>(&'a self, name: &'a str, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,12 +61,7 @@ pub trait Resolve: Any + Send + Sync + Display + Debug {
     /// as `"443"`; an empty `servname` defaults to `"443"`. A `family` of `None`
     /// corresponds to `AF_UNSPEC`; `Some(Family::V4)` and `Some(Family::V6)`
     /// correspond to `AF_INET` and `AF_INET6`, respectively.
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        servname: &'l str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'l>;
+    fn lookup<'l>(&'l self, hostname: &'l str, servname: &'l str, family: Option<Family>) -> ResolveFuture<'l>;
 }
 
 /// A snapshot of the process-wide resolvers. The registry is empty by default.
@@ -96,9 +87,7 @@ pub struct Resolver {
 impl Resolver {
     /// Snapshot all registered resolvers for an aggregate lookup.
     pub fn get() -> Arc<dyn Resolve> {
-        Arc::new(Self {
-            resolvers: Self::global().read().unwrap().clone(),
-        })
+        Arc::new(Self { resolvers: Self::global().read().unwrap().clone() })
     }
 
     /// Add a resolver for subsequent snapshots. System DNS is opt-in like any other source.
@@ -127,12 +116,7 @@ impl Resolve for Resolver {
     /// a successful empty stream counts as success. Errors arriving after a
     /// successful lookup are also skipped because `RecordStream` carries records
     /// only. Dropping the future or stream drops its pending child operations.
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        servname: &'l str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'l> {
+    fn lookup<'l>(&'l self, hostname: &'l str, servname: &'l str, family: Option<Family>) -> ResolveFuture<'l> {
         let hostname: Arc<str> = Arc::from(hostname);
         let servname: Arc<str> = Arc::from(servname);
         let mut pending = self
@@ -150,9 +134,7 @@ impl Resolve for Resolver {
             while let Some(result) = pending.next().await {
                 match result {
                     Ok(first) => {
-                        let remaining = pending
-                            .filter_map(|result| future::ready(result.ok()))
-                            .flatten_unordered(None);
+                        let remaining = pending.filter_map(|result| future::ready(result.ok())).flatten_unordered(None);
                         return Ok(stream::select(first, remaining).boxed());
                     }
                     Err(failed) => error = failed,

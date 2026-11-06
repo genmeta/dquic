@@ -32,12 +32,7 @@ impl fmt::Display for StreamingResolver {
 }
 
 impl Resolve for StreamingResolver {
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        servname: &'l str,
-        _: Option<Family>,
-    ) -> ResolveFuture<'l> {
+    fn lookup<'l>(&'l self, hostname: &'l str, servname: &'l str, _: Option<Family>) -> ResolveFuture<'l> {
         async move {
             assert_eq!(servname, "");
             if hostname == self.hostname
@@ -58,9 +53,7 @@ impl Registration {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         Dock::global().add(socket.clone()).unwrap();
         if publish {
-            AddressBook::global()
-                .insert_inner(&socket, socket.local_addr().unwrap().into())
-                .unwrap();
+            AddressBook::global().insert_inner(&socket, socket.local_addr().unwrap().into()).unwrap();
         }
         Self(socket)
     }
@@ -100,15 +93,8 @@ async fn connect_case(anonymous: bool, alpn: &[u8]) {
         .unwrap();
     let server_name = format!("localhost:{}", server_socket.0.local_addr().unwrap().port());
     let (send, records) = mpsc::unbounded();
-    Resolver::add(Arc::new(StreamingResolver {
-        hostname: server_name.clone(),
-        records: Mutex::new(Some(records)),
-    }));
-    send.unbounded_send((
-        qresolve::Source::System,
-        server_socket.0.local_addr().unwrap().into(),
-    ))
-    .unwrap();
+    Resolver::add(Arc::new(StreamingResolver { hostname: server_name.clone(), records: Mutex::new(Some(records)) }));
+    send.unbounded_send((qresolve::Source::System, server_socket.0.local_addr().unwrap().into())).unwrap();
     let ((_, _, client_conn), (_, _, server_conn)) = timeout(Duration::from_secs(5), async {
         let connected = connect(anonymous, server_name, alpn).await.unwrap();
         let accepted = incoming.recv().await.unwrap();
@@ -122,10 +108,7 @@ async fn connect_case(anonymous: bool, alpn: &[u8]) {
     })
     .await
     .expect("DNS must bootstrap an actual QUIC connection");
-    assert!(
-        !send.is_closed(),
-        "discovery continues after connection delivery"
-    );
+    assert!(!send.is_closed(), "discovery continues after connection delivery");
 
     timeout(Duration::from_secs(3), async {
         let echo = async {
@@ -168,20 +151,14 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
     .expect("connection resources must be released");
 }
 
-async fn connect(
-    anonymous: bool,
-    server_name: String,
-    alpn: &[u8],
-) -> Result<qconnection::Connected, qconnection::Error> {
+async fn connect(anonymous: bool, server_name: String, alpn: &[u8]) -> Result<qconnection::Connected, qconnection::Error> {
     let mut endpoint: QuicEndpoint = if anonymous {
         Anonymous.into()
     } else {
         common::quic_endpoint()
     };
     for (id, value) in qbase::param::ClientParameters::default().iter() {
-        endpoint
-            .set_parameters(Role::Client, *id, value.clone())
-            .unwrap();
+        endpoint.set_parameters(Role::Client, *id, value.clone()).unwrap();
     }
     endpoint.set_alpn(vec![alpn.to_vec()]);
     endpoint.connect(server_name).await
@@ -226,11 +203,7 @@ async fn cancel_lookup(anonymous: bool) {
     let hostname = format!("pending-{anonymous}.test");
     let started = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicBool::new(false));
-    Resolver::add(Arc::new(PendingResolver {
-        hostname: hostname.clone(),
-        started: started.clone(),
-        dropped: dropped.clone(),
-    }));
+    Resolver::add(Arc::new(PendingResolver { hostname: hostname.clone(), started: started.clone(), dropped: dropped.clone() }));
     let connecting = tokio::spawn(async move { connect(anonymous, hostname, b"h3").await });
     wait_until(|| started.load(Ordering::SeqCst)).await;
     connecting.abort();
@@ -251,15 +224,10 @@ fn route_exists(cid: ConnectionId) -> bool {
     router.on_incoming(move |_, _, _| {
         observed.store(true, Ordering::SeqCst);
     });
-    let link = Link::new(
-        "127.0.0.1:30001".parse().unwrap(),
-        "127.0.0.1:30002".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:30001".parse().unwrap(), "127.0.0.1:30002".parse().unwrap());
     router.deliver(
         Packet::Data(DataPacket {
-            header: DataHeader::Long(long::DataHeader::Initial(
-                LongHeaderBuilder::with_cid(cid, cid).initial(vec![]),
-            )),
+            header: DataHeader::Long(long::DataHeader::Initial(LongHeaderBuilder::with_cid(cid, cid).initial(vec![]))),
             bytes: BytesMut::new(),
             offset: 0,
         }),
@@ -278,37 +246,26 @@ async fn cancel_handshake(anonymous: bool) {
     peer.set_nonblocking(true).unwrap();
     let hostname = format!("silent-{anonymous}.test");
     let (send, records) = mpsc::unbounded();
-    Resolver::add(Arc::new(StreamingResolver {
-        hostname: hostname.clone(),
-        records: Mutex::new(Some(records)),
-    }));
-    send.unbounded_send((qresolve::Source::System, peer.local_addr().unwrap().into()))
-        .unwrap();
+    Resolver::add(Arc::new(StreamingResolver { hostname: hostname.clone(), records: Mutex::new(Some(records)) }));
+    send.unbounded_send((qresolve::Source::System, peer.local_addr().unwrap().into())).unwrap();
     let connecting = tokio::spawn(async move { connect(anonymous, hostname, b"h3").await });
     let mut datagram = vec![0; 65536];
     let size = timeout(Duration::from_secs(5), async {
         loop {
             match peer.recv_from(&mut datagram) {
                 Ok((size, _)) => break size,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    tokio::task::yield_now().await
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => tokio::task::yield_now().await,
                 Err(error) => panic!("receive Initial: {error}"),
             }
         }
     })
     .await
     .expect("client must start TLS on the discovered path");
-    let packet = PacketReader::new(BytesMut::from(&datagram[..size]), 8)
-        .next()
-        .unwrap()
-        .unwrap();
+    let packet = PacketReader::new(BytesMut::from(&datagram[..size]), 8).next().unwrap().unwrap();
     let Packet::Data(packet) = packet else {
         panic!("expected Initial packet");
     };
-    let qbase::packet::DataHeader::Long(qbase::packet::long::DataHeader::Initial(header)) =
-        packet.header
-    else {
+    let qbase::packet::DataHeader::Long(qbase::packet::long::DataHeader::Initial(header)) = packet.header else {
         panic!("expected Initial header");
     };
     let cid = *header.scid();
@@ -338,39 +295,19 @@ async fn cancel_queued_connection() {
         .unwrap();
     let hostname = format!("localhost:{}", server_socket.0.local_addr().unwrap().port());
     let (send, records) = mpsc::unbounded();
-    Resolver::add(Arc::new(StreamingResolver {
-        hostname: hostname.clone(),
-        records: Mutex::new(Some(records)),
-    }));
-    send.unbounded_send((
-        qresolve::Source::System,
-        server_socket.0.local_addr().unwrap().into(),
-    ))
-    .unwrap();
+    Resolver::add(Arc::new(StreamingResolver { hostname: hostname.clone(), records: Mutex::new(Some(records)) }));
+    send.unbounded_send((qresolve::Source::System, server_socket.0.local_addr().unwrap().into())).unwrap();
     let mut connecting = Box::pin(connect(true, hostname, b"h3"));
     // Poll once to start the lifecycle, then leave the delivery receiver unpolled.
     let ready = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = futures::task::waker(ready.clone());
-    assert!(
-        connecting
-            .as_mut()
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    let (_, _, connection) = timeout(Duration::from_secs(5), accepted.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(connecting.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    let (_, _, connection) = timeout(Duration::from_secs(5), accepted.recv()).await.unwrap().unwrap();
     // The delivery slot is ready, but its connection has not reached the caller.
     wait_until(|| ready.0.load(Ordering::SeqCst)).await;
     drop(connecting);
     wait_until(|| send.is_closed()).await;
-    assert!(
-        timeout(Duration::from_secs(5), connection.accept_uni_stream())
-            .await
-            .unwrap()
-            .is_err()
-    );
+    assert!(timeout(Duration::from_secs(5), connection.accept_uni_stream()).await.unwrap().is_err());
     ServerRegistry::global().remove("localhost");
 }
 
@@ -382,16 +319,13 @@ async fn reject_wrong_server_identity() {
     let wrong = qbase::endpoint::Endpoint::new(
         "wrong.test",
         identity.cert_chain().to_vec(),
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key"))
-            .unwrap(),
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key")).unwrap(),
         identity.ocsp().to_vec(),
     )
     .unwrap();
     let mut server = QuicEndpoint::from(wrong);
     for (id, value) in qbase::param::ServerParameters::default().iter() {
-        server
-            .set_parameters(Role::Server, *id, value.clone())
-            .unwrap();
+        server.set_parameters(Role::Server, *id, value.clone()).unwrap();
     }
     let accepted = Arc::new(AtomicBool::new(false));
     let observed = accepted.clone();
@@ -401,29 +335,11 @@ async fn reject_wrong_server_identity() {
         })
         .unwrap();
     let (send, records) = mpsc::unbounded();
-    Resolver::add(Arc::new(StreamingResolver {
-        hostname: "wrong.test".into(),
-        records: Mutex::new(Some(records)),
-    }));
-    send.unbounded_send((
-        qresolve::Source::System,
-        server_socket.0.local_addr().unwrap().into(),
-    ))
-    .unwrap();
-    assert!(
-        timeout(
-            Duration::from_secs(5),
-            connect(true, "wrong.test".into(), b"h3")
-        )
-        .await
-        .unwrap()
-        .is_err()
-    );
+    Resolver::add(Arc::new(StreamingResolver { hostname: "wrong.test".into(), records: Mutex::new(Some(records)) }));
+    send.unbounded_send((qresolve::Source::System, server_socket.0.local_addr().unwrap().into())).unwrap();
+    assert!(timeout(Duration::from_secs(5), connect(true, "wrong.test".into(), b"h3")).await.unwrap().is_err());
     wait_until(|| send.is_closed()).await;
-    assert!(
-        !accepted.load(Ordering::SeqCst),
-        "wrong-name handshake must not be accepted"
-    );
+    assert!(!accepted.load(Ordering::SeqCst), "wrong-name handshake must not be accepted");
     ServerRegistry::global().remove("wrong.test");
 }
 
@@ -442,28 +358,18 @@ async fn reject_invalid_client_certificate() {
     let invalid = qbase::endpoint::Endpoint::new(
         "localhost",
         identity.cert_chain().to_vec(),
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key"))
-            .unwrap(),
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key")).unwrap(),
         b"invalid OCSP".to_vec(),
     )
     .unwrap();
     let mut client = QuicEndpoint::from(invalid);
     for (id, value) in qbase::param::ClientParameters::default().iter() {
-        client
-            .set_parameters(Role::Client, *id, value.clone())
-            .unwrap();
+        client.set_parameters(Role::Client, *id, value.clone()).unwrap();
     }
     let hostname = format!("localhost:{}", server_socket.0.local_addr().unwrap().port());
     let (send, records) = mpsc::unbounded();
-    Resolver::add(Arc::new(StreamingResolver {
-        hostname: hostname.clone(),
-        records: Mutex::new(Some(records)),
-    }));
-    send.unbounded_send((
-        qresolve::Source::System,
-        server_socket.0.local_addr().unwrap().into(),
-    ))
-    .unwrap();
+    Resolver::add(Arc::new(StreamingResolver { hostname: hostname.clone(), records: Mutex::new(Some(records)) }));
+    send.unbounded_send((qresolve::Source::System, server_socket.0.local_addr().unwrap().into())).unwrap();
     timeout(Duration::from_secs(5), async {
         if let Ok((_, _, connection)) = client.connect(hostname).await {
             // TLS can finish locally before the server rejects the client certificate.
@@ -474,10 +380,7 @@ async fn reject_invalid_client_certificate() {
     .unwrap();
     wait_until(|| send.is_closed()).await;
     assert!(
-        matches!(
-            accepted.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ),
+        matches!(accepted.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
         "invalid credentials must not invoke the accept callback"
     );
     ServerRegistry::global().remove("localhost");

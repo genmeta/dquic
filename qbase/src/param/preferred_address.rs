@@ -28,18 +28,8 @@ pub struct PreferredAddress {
 
 impl PreferredAddress {
     /// Create a new preferred address.
-    pub fn new(
-        address_v4: SocketAddrV4,
-        address_v6: SocketAddrV6,
-        connection_id: ConnectionId,
-        stateless_reset_token: ResetToken,
-    ) -> Self {
-        Self {
-            address_v4,
-            address_v6,
-            connection_id,
-            stateless_reset_token,
-        }
+    pub fn new(address_v4: SocketAddrV4, address_v6: SocketAddrV6, connection_id: ConnectionId, stateless_reset_token: ResetToken) -> Self {
+        Self { address_v4, address_v6, connection_id, stateless_reset_token }
     }
 
     /// Returns the encoding size of the preferred address.
@@ -72,15 +62,7 @@ pub fn be_preferred_address(input: &[u8]) -> nom::IResult<&[u8], PreferredAddres
     let (input, connection_id) = be_connection_id(input)?;
     let (input, stateless_reset_token) = be_reset_token(input)?;
 
-    Ok((
-        input,
-        PreferredAddress {
-            address_v4,
-            address_v6,
-            connection_id,
-            stateless_reset_token,
-        },
-    ))
+    Ok((input, PreferredAddress { address_v4, address_v6, connection_id, stateless_reset_token }))
 }
 
 /// A [`bytes::BufMut`] extension trait, makes buffer more friendly

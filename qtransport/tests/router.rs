@@ -22,19 +22,14 @@ fn router() -> Arc<QuicRouter> {
 
 fn packet(cid: ConnectionId) -> Packet {
     Packet::Data(DataPacket {
-        header: DataHeader::Long(long::DataHeader::Initial(
-            LongHeaderBuilder::with_cid(cid, cid).initial(vec![]),
-        )),
+        header: DataHeader::Long(long::DataHeader::Initial(LongHeaderBuilder::with_cid(cid, cid).initial(vec![]))),
         bytes: BytesMut::new(),
         offset: 0,
     })
 }
 
 fn way() -> (Pathway, Link) {
-    let link = Link::new(
-        "127.0.0.1:4433".parse().unwrap(),
-        "127.0.0.1:9000".parse().unwrap(),
-    );
+    let link = Link::new("127.0.0.1:4433".parse().unwrap(), "127.0.0.1:9000".parse().unwrap());
     (link.into(), link)
 }
 
@@ -103,9 +98,7 @@ async fn incoming_initial_uses_the_router_callback() {
         Packet::Data(packet) => packet,
         _ => unreachable!(),
     };
-    handshake.header = DataHeader::Long(long::DataHeader::Handshake(
-        LongHeaderBuilder::with_cid(cid, cid).handshake(),
-    ));
+    handshake.header = DataHeader::Long(long::DataHeader::Handshake(LongHeaderBuilder::with_cid(cid, cid).handshake()));
     let (pathway, link) = way();
     router.deliver(Packet::Data(handshake), pathway, link);
     assert!(incoming.lock().unwrap().is_none());
@@ -146,10 +139,7 @@ fn concurrent_initials_share_one_connection_and_preserve_both_paths() {
         created.lock().unwrap().push((scid, registry, received));
     });
 
-    let links = [
-        way().1,
-        Link::new("[::1]:4434".parse().unwrap(), "[::1]:9001".parse().unwrap()),
-    ];
+    let links = [way().1, Link::new("[::1]:4434".parse().unwrap(), "[::1]:9001".parse().unwrap())];
     std::thread::scope(|scope| {
         for link in links {
             let router = &router;

@@ -22,11 +22,7 @@ struct RawDatagarmReader {
 
 impl RawDatagarmReader {
     fn new(local_max_size: usize) -> Self {
-        Self {
-            local_max_size,
-            rcvd_datagrams: VecDeque::new(),
-            read_waker: None,
-        }
+        Self { local_max_size, rcvd_datagrams: VecDeque::new(), read_waker: None }
     }
 }
 
@@ -36,9 +32,7 @@ pub struct DatagramIncoming(Arc<Mutex<Result<RawDatagarmReader, Error>>>);
 impl DatagramIncoming {
     /// Create a new [`DatagramIncoming`] to receive datagram frames.
     pub fn new(local_max_size: usize) -> Self {
-        Self(Arc::new(Mutex::new(Ok(RawDatagarmReader::new(
-            local_max_size,
-        )))))
+        Self(Arc::new(Mutex::new(Ok(RawDatagarmReader::new(local_max_size)))))
     }
 
     /// Try to create a new [`DatagramReader`] for the application to read the received datagram frames.
@@ -50,10 +44,7 @@ impl DatagramIncoming {
         let reader = guard.as_mut().map_err(|e| e.clone())?;
         if reader.local_max_size == 0 {
             tracing::error!("   Cause by: DatagramIncoming::new_reader local_max_size is 0");
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Unreliable Datagram Extension was disenabled by local parameters",
-            ));
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "Unreliable Datagram Extension was disenabled by local parameters"));
         }
 
         Ok(DatagramReader(self.0.clone()))
@@ -77,11 +68,7 @@ impl DatagramIncoming {
             return Err(QuicError::new(
                 ErrorKind::ProtocolViolation,
                 frame.frame_type().into(),
-                format!(
-                    "datagram size {} exceeds the maximum size {}",
-                    frame.encoding_size() + data.len(),
-                    reader.local_max_size
-                ),
+                format!("datagram size {} exceeds the maximum size {}", frame.encoding_size() + data.len(), reader.local_max_size),
             )
             .into());
         }
@@ -280,12 +267,7 @@ mod tests {
             }
         });
 
-        incoming
-            .recv_datagram(
-                DatagramFrame::new(false, VarInt::from_u32(11)),
-                Bytes::from_static(b"hello world"),
-            )
-            .unwrap();
+        incoming.recv_datagram(DatagramFrame::new(false, VarInt::from_u32(11)), Bytes::from_static(b"hello world")).unwrap();
 
         recv.await.unwrap();
     }
@@ -293,21 +275,10 @@ mod tests {
     #[tokio::test]
     async fn test_datagram_reader_on_conn_error() {
         let incoming = DatagramIncoming::new(1024);
-        let error = QuicError::new(
-            ErrorKind::ProtocolViolation,
-            FrameType::Datagram(0).into(),
-            "protocol violation",
-        )
-        .into();
+        let error = QuicError::new(ErrorKind::ProtocolViolation, FrameType::Datagram(0).into(), "protocol violation").into();
         incoming.on_conn_error(&error);
 
-        assert_eq!(
-            incoming.recv_datagram(
-                DatagramFrame::new(true, VarInt::from_u32(4)),
-                Bytes::from_static(b"late"),
-            ),
-            Ok(())
-        );
+        assert_eq!(incoming.recv_datagram(DatagramFrame::new(true, VarInt::from_u32(4)), Bytes::from_static(b"late"),), Ok(()));
 
         let new_reader = incoming.new_reader();
         assert!(new_reader.is_err());

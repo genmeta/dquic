@@ -104,10 +104,7 @@ impl CryptoFrame {
 pub fn be_crypto_frame(input: &[u8]) -> nom::IResult<&[u8], CryptoFrame> {
     let (remain, (offset, length)) = (be_varint, be_varint).parse(input)?;
     if offset.into_u64() + offset.into_u64() > VARINT_MAX {
-        return Err(nom::Err::Error(nom::error::make_error(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
+        return Err(nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::TooLarge)));
     }
     Ok((remain, CryptoFrame { offset, length }))
 }

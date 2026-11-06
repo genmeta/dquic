@@ -30,8 +30,6 @@ fn test_write_retire_connection_id_frame() {
 fn test_read_retire_connection_id_frame() {
     assert_eq!(
         super::parse_frame(&[0x19, 0x52, 0x34], FrameType::RetireConnectionId),
-        qbase::frame::Frame::RetireConnectionId(RetireConnectionIdFrame::new(VarInt::from_u32(
-            0x1234
-        )))
+        qbase::frame::Frame::RetireConnectionId(RetireConnectionIdFrame::new(VarInt::from_u32(0x1234)))
     );
 }

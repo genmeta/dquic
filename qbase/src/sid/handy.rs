@@ -9,9 +9,7 @@ pub struct ConsistentConcurrency {
 
 impl ConsistentConcurrency {
     pub fn new(initial_max_bi: u64, initial_max_uni: u64) -> Self {
-        Self {
-            max_streams: [initial_max_bi, initial_max_uni],
-        }
+        Self { max_streams: [initial_max_bi, initial_max_uni] }
     }
 }
 

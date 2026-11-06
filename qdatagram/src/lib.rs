@@ -29,10 +29,7 @@ impl DatagramFlow {
     /// [`max_datagram_frame_size`]: https://www.rfc-editor.org/rfc/rfc9221.html#name-transport-parameter
     #[inline]
     pub fn new(local_max_datagram_frame_size: u64) -> Self {
-        Self {
-            incoming: DatagramIncoming::new(local_max_datagram_frame_size as _),
-            outgoing: DatagramOutgoing::new(),
-        }
+        Self { incoming: DatagramIncoming::new(local_max_datagram_frame_size as _), outgoing: DatagramOutgoing::new() }
     }
 
     /// Create a new **unique** instance of [`DatagramReader`].
@@ -102,29 +99,16 @@ mod tests {
         let packet_type = OneRttHeader::new(Default::default(), Default::default()).get_type();
         for _ in 0..2 {
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-            let mut buffer =
-                PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, packet_type, 0, 0);
-            assert_eq!(
-                flow.outgoing.poll_dump(&mut cx, &mut buffer),
-                Poll::Ready(Ok(0))
-            );
+            let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, packet_type, 0, 0);
+            assert_eq!(flow.outgoing.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(0)));
         }
         assert!(bytes.is_empty());
         assert!(frames.is_empty());
         // Even an oversized datagram is ignored after close.
-        assert_eq!(
-            flow.recv_frame((
-                DatagramFrame::new(true, 128u32.into()),
-                Bytes::from(vec![0; 128])
-            )),
-            Ok(())
-        );
+        assert_eq!(flow.recv_frame((DatagramFrame::new(true, 128u32.into()), Bytes::from(vec![0; 128]))), Ok(()));
         assert!(matches!(reader.poll_recv(&mut cx), Poll::Ready(Err(_))));
         let failure = writer.send_bytes(Bytes::from_static(b"late")).unwrap_err();
-        assert_eq!(
-            failure.get_ref().unwrap().downcast_ref::<Error>(),
-            Some(&error)
-        );
+        assert_eq!(failure.get_ref().unwrap().downcast_ref::<Error>(), Some(&error));
         assert!(flow.reader().is_err());
         assert!(flow.writer(64).is_err());
     }

@@ -30,9 +30,10 @@ async fn scan(relay: Option<SocketAddr>) -> Result<Network, Error> {
             .ok_or("nat.genmeta.net has no IPv4 address")?,
     };
     let mut sockets = Vec::new();
-    for interface in netdev::get_interfaces().into_iter().filter(|iface| {
-        iface.is_up() && iface.is_running() && !iface.is_loopback() && iface.is_physical()
-    }) {
+    for interface in netdev::get_interfaces()
+        .into_iter()
+        .filter(|iface| iface.is_up() && iface.is_running() && !iface.is_loopback() && iface.is_physical())
+    {
         for ip in &interface.ipv4 {
             let result = Socket::bind((ip.addr(), 0).into(), &interface);
             match result {
@@ -55,10 +56,7 @@ async fn scan(relay: Option<SocketAddr>) -> Result<Network, Error> {
         }
     }))
     .await;
-    let mut network = Network {
-        endpoints: Vec::new(),
-        _sockets: Vec::new(),
-    };
+    let mut network = Network { endpoints: Vec::new(), _sockets: Vec::new() };
     for result in results {
         match result {
             Ok((socket, endpoint)) => {
@@ -85,10 +83,7 @@ impl Socket {
         let udp = Arc::new(UdpSocket::bind_to_device(addr, device)?);
         Dock::global().add(udp.clone())?;
         let direct = udp.local_addr()?.into();
-        Ok(Self {
-            udp,
-            aliases: vec![direct],
-        })
+        Ok(Self { udp, aliases: vec![direct] })
     }
 
     fn register(&mut self, endpoint: EndpointAddr) -> Result<(), Error> {
@@ -106,10 +101,7 @@ impl Socket {
         if nat == NatType::Blocked {
             return Err(io::Error::other(format!("{bound}: STUN blocked")).into());
         }
-        let outer = stun
-            .detect_outer(bound, relay)
-            .await?
-            .ok_or("missing STUN mapping")?;
+        let outer = stun.detect_outer(bound, relay).await?.ok_or("missing STUN mapping")?;
         let endpoint = EndpointAddr::mediate(relay, outer);
         self.register(outer.into())?;
         self.register(endpoint)?;

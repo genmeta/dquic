@@ -46,13 +46,7 @@ fn record(space: &Space<ArcKeys<()>>) -> u64 {
     let frames = support::frames::take_frames(&mut space.crypto.outgoing());
     assert_eq!(frames.len(), 1);
     let (pn, _) = space.next_pn();
-    space.sent_journal.on_sealed(
-        pn,
-        None,
-        0,
-        metadata(space.epoch, &frames),
-        frames.into_iter().map(|frame| frame.try_into().unwrap()),
-    );
+    space.sent_journal.on_sealed(pn, None, 0, metadata(space.epoch, &frames), frames.into_iter().map(|frame| frame.try_into().unwrap()));
     space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     pn
 }
@@ -63,32 +57,12 @@ async fn only_crypto_ack_disables_shared_replay_across_spaces() {
 
     for acknowledged in Epoch::EPOCHS {
         let facts = handshake_facts(true);
-        let spaces = Epoch::EPOCHS
-            .map(|epoch| Space::new(epoch, Default::default(), ArcKeys::new(()), facts.clone()));
+        let spaces = Epoch::EPOCHS.map(|epoch| Space::new(epoch, Default::default(), ArcKeys::new(()), facts.clone()));
         let space = &spaces[acknowledged];
         let (ping_pn, _) = space.next_pn();
-        space.sent_journal.on_sealed(
-            ping_pn,
-            None,
-            0,
-            metadata(acknowledged, &[Frame::Ping(PingFrame)]),
-            std::iter::empty(),
-        );
-        space.on_sent(
-            ping_pn,
-            true,
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        );
-        let ack = |pn: u64| {
-            AckFrame::new(
-                pn.try_into().unwrap(),
-                0u32.into(),
-                0u32.into(),
-                vec![],
-                None,
-            )
-        };
+        space.sent_journal.on_sealed(ping_pn, None, 0, metadata(acknowledged, &[Frame::Ping(PingFrame)]), std::iter::empty());
+        space.on_sent(ping_pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        let ack = |pn: u64| AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
         assert!(!space.on_acked(&ack(ping_pn)).unwrap());
         assert!(facts.is_mp_handshaking());
 
@@ -109,30 +83,19 @@ async fn only_crypto_ack_disables_shared_replay_across_spaces() {
 
 #[tokio::test]
 async fn shared_space_recovers_once_and_stops_after_key_retirement() {
-    let space = Arc::new(Space::new(
-        Epoch::Initial,
-        Default::default(),
-        ArcKeys::new(()),
-        handshake_facts(false),
-    ));
+    let space = Arc::new(Space::new(Epoch::Initial, Default::default(), ArcKeys::new(()), handshake_facts(false)));
     let paths: [Arc<dyn qcongestion::Resend>; 2] = [space.clone(), space.clone()];
     space.crypto.writer().write_all(b"first").await.unwrap();
     let first = record(&space);
     paths[0].resend(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());
     paths[1].resend(PacketLostTrigger::TimeThreshold, &mut [first].into_iter());
-    assert_eq!(
-        support::frames::take_frames(&mut space.crypto.outgoing()).len(),
-        1
-    );
+    assert_eq!(support::frames::take_frames(&mut space.crypto.outgoing()).len(), 1);
     assert!(support::frames::take_frames(&mut space.crypto.outgoing()).is_empty());
 
     space.crypto.writer().write_all(b"second").await.unwrap();
     record(&space);
     space.on_tick(Instant::now() + Duration::from_secs(2));
-    assert_eq!(
-        support::frames::take_frames(&mut space.crypto.outgoing()).len(),
-        1
-    );
+    assert_eq!(support::frames::take_frames(&mut space.crypto.outgoing()).len(), 1);
 
     space.crypto.writer().write_all(b"third").await.unwrap();
     let third = record(&space);
@@ -150,13 +113,7 @@ async fn late_ack_cancels_crypto_recovery() {
     space.crypto.writer().write_all(b"crypto").await.unwrap();
     let pn = record(&space);
     space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
-    let ack = AckFrame::new(
-        pn.try_into().unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    );
+    let ack = AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
     assert!(space.on_acked(&ack).unwrap());
     space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
     space.on_tick(Instant::now() + Duration::from_secs(2));
@@ -167,47 +124,26 @@ async fn late_ack_cancels_crypto_recovery() {
 #[tokio::test(start_paused = true)]
 async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
-        let space = Space::new(
-            epoch,
-            Default::default(),
-            ArcKeys::new(()),
-            handshake_facts(false),
-        );
+        let space = Space::new(epoch, Default::default(), ArcKeys::new(()), handshake_facts(false));
         let mut pns = Vec::new();
         for bytes in [b"first".as_slice(), b"second", b"third"] {
             space.crypto.writer().write_all(bytes).await.unwrap();
             let pn = space.next_pn().0;
             let frames = support::frames::take_frames(&mut space.crypto.outgoing());
-            space.sent_journal.on_sealed(
-                pn,
-                None,
-                0,
-                metadata(epoch, &frames),
-                frames.into_iter().map(|frame| frame.try_into().unwrap()),
-            );
+            space.sent_journal.on_sealed(pn, None, 0, metadata(epoch, &frames), frames.into_iter().map(|frame| frame.try_into().unwrap()));
             pns.push(pn);
         }
-        let ack = AckFrame::new(
-            pns[0].try_into().unwrap(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        );
+        let ack = AckFrame::new(pns[0].try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
         assert!(space.on_acked(&ack).unwrap());
         for &pn in &pns[..2] {
             space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
         }
         space.on_tick(Instant::now() + Duration::from_secs(2));
         let recovered = support::frames::take_frames(&mut space.crypto.outgoing());
-        assert!(
-            matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 5 && frame.len() == 6)
-        );
+        assert!(matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 5 && frame.len() == 6));
         space.cancel(pns[2]);
         let recovered = support::frames::take_frames(&mut space.crypto.outgoing());
-        assert!(
-            matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 11 && frame.len() == 5)
-        );
+        assert!(matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 11 && frame.len() == 5));
         assert!(!space.on_acked(&ack).unwrap());
     }
 }
@@ -224,24 +160,10 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
         pn,
         Some(7),
         0,
-        metadata(
-            Epoch::Data,
-            &[Frame::StreamCtl(StreamCtlFrame::MaxData(
-                MaxDataFrame::new(123u32.into()),
-            ))],
-        ),
-        &mut [qbase::frame::GuaranteedFrame::Reliable(
-            StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())).into(),
-        )]
-        .into_iter(),
+        metadata(Epoch::Data, &[Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())))]),
+        &mut [qbase::frame::GuaranteedFrame::Reliable(StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())).into())].into_iter(),
     );
-    let ack = AckFrame::new(
-        pn.try_into().unwrap(),
-        0u32.into(),
-        0u32.into(),
-        vec![],
-        None,
-    );
+    let ack = AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
     assert_eq!(data.on_acked(&ack).unwrap(), Some(7));
     data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     data.on_tick(Instant::now() + Duration::from_secs(2));
@@ -256,8 +178,7 @@ async fn retired_data_keys_stop_loss_and_timer_recovery() {
     use qtransport::space::{Recover as _, Transmit};
 
     let data = support::data::data();
-    data.reliable_frames
-        .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
+    data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
     let mut frames = support::frames::take_frames(&mut data.reliable_frames.clone());
     assert_eq!(frames.len(), 1);
     let (pn, _) = data.next_pn();
@@ -286,25 +207,19 @@ async fn data_trait_cancel_recovers_staged_and_sealed_frames() {
         let (_, mut writer) = data.streams.open_uni().await.unwrap().unwrap();
         writer.write_all(b"stream").await.unwrap();
         data.crypto.writer().write_all(b"crypto").await.unwrap();
-        data.reliable_frames
-            .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
+        data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
         assert_eq!(data.streams.fresh_bytes(), 6);
 
         let prefix = Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(1u32.into())));
         let mut frames = vec![prefix.clone()];
         frames.extend(support::frames::take_frames(&mut data.crypto.outgoing()));
-        frames.extend(support::frames::take_frames(
-            &mut data.reliable_frames.clone(),
-        ));
+        frames.extend(support::frames::take_frames(&mut data.reliable_frames.clone()));
         frames.extend(support::frames::take_frames(&mut data.streams.clone()));
         assert_eq!(frames.len(), 4);
         assert_eq!(data.streams.fresh_bytes(), 0);
         let (pn, _) = space.pn_and_keys().unwrap();
         let meta = metadata(Epoch::Data, &frames[1..]);
-        let mut frames: Vec<GuaranteedFrame> = frames
-            .into_iter()
-            .map(|frame| frame.try_into().unwrap())
-            .collect();
+        let mut frames: Vec<GuaranteedFrame> = frames.into_iter().map(|frame| frame.try_into().unwrap()).collect();
         if sealed {
             space.on_sealed(pn.0, Some(0), 128, meta, &mut frames.drain(1..));
         }
@@ -369,14 +284,7 @@ async fn data_trait_unregister_removes_all_source_waiters() {
                 source
                     .poll_dump(
                         &mut Context::from_waker(&waker),
-                        &mut PacketBuffer::new(
-                            &mut writer_0,
-                            limits_quota,
-                            &mut Vec::new(),
-                            ty,
-                            0,
-                            0
-                        ),
+                        &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut Vec::new(), ty, 0, 0),
                     )
                     .is_pending()
             );
@@ -386,12 +294,8 @@ async fn data_trait_unregister_removes_all_source_waiters() {
         }
         data.crypto.writer().write_all(b"crypto").await.unwrap();
         data.rcvd_journal.on_rcvd_pn(0, true, Duration::ZERO);
-        data.reliable_frames
-            .send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
+        data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
         writer.write_all(b"stream").await.unwrap();
-        assert_eq!(
-            counter.0.load(Ordering::Relaxed),
-            if unregister { 0 } else { 4 }
-        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), if unregister { 0 } else { 4 });
     }
 }

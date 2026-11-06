@@ -21,10 +21,7 @@ pub fn quic_parameters(item: TokenStream) -> Result<TokenStream2, Error> {
         let discriminant = match variant.discriminant.as_ref() {
             Some((_eq, discriminant)) => discriminant,
             None => {
-                return Err(Error::new_spanned(
-                    variant,
-                    "Each variant must have a discriminant, e.g., `= 0`",
-                ));
+                return Err(Error::new_spanned(variant, "Each variant must have a discriminant, e.g., `= 0`"));
             }
         };
 
@@ -39,8 +36,7 @@ pub fn quic_parameters(item: TokenStream) -> Result<TokenStream2, Error> {
         });
 
         let param_args = parse_variant_attrs(variant)?;
-        let validate =
-            (param_args.gen_validate(ident)).map_err(|msg| Error::new_spanned(variant, msg))?;
+        let validate = (param_args.gen_validate(ident)).map_err(|msg| Error::new_spanned(variant, msg))?;
         validate_match_arms.extend(quote! {
             #enum_name::#ident => { #validate }
         });
@@ -105,12 +101,7 @@ fn parse_variant_attrs(variant: &Variant) -> Result<ParamArgs, Error> {
         .attrs
         .iter()
         .find(|attr| attr.path().is_ident("param"))
-        .ok_or_else(|| {
-            Error::new_spanned(
-                variant,
-                "Each variant must have a `#[param(...)]` attribute",
-            )
-        })?;
+        .ok_or_else(|| Error::new_spanned(variant, "Each variant must have a `#[param(...)]` attribute"))?;
 
     let mut value_type = None;
     let mut default = None;
@@ -142,14 +133,9 @@ fn parse_variant_attrs(variant: &Variant) -> Result<ParamArgs, Error> {
         Ok(())
     })?;
 
-    let value_type = value_type
-        .ok_or_else(|| Error::new_spanned(param_attr, "missing `value_type` argument"))?;
+    let value_type = value_type.ok_or_else(|| Error::new_spanned(param_attr, "missing `value_type` argument"))?;
 
-    Ok(ParamArgs {
-        value_type,
-        default,
-        bound,
-    })
+    Ok(ParamArgs { value_type, default, bound })
 }
 
 struct ParamArgs {
@@ -220,10 +206,7 @@ impl Parse for ParamType {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let expr = input.parse::<Expr>()?;
         let Expr::Path(path) = expr else {
-            return Err(Error::new_spanned(
-                expr,
-                "`value_type` must be an identifier",
-            ));
+            return Err(Error::new_spanned(expr, "`value_type` must be an identifier"));
         };
 
         match path.to_token_stream().to_string().as_str() {
@@ -234,10 +217,7 @@ impl Parse for ParamType {
             "ResetToken" => Ok(ParamType::ResetToken),
             "ConnectionId" => Ok(ParamType::ConnectionId),
             "PreferredAddress" => Ok(ParamType::PreferredAddress),
-            other => Err(Error::new_spanned(
-                path,
-                format!("unsupported `value_type` `{other}`"),
-            )),
+            other => Err(Error::new_spanned(path, format!("unsupported `value_type` `{other}`"))),
         }
     }
 }

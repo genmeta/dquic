@@ -19,10 +19,7 @@ fn test_max_stream_data_frame() {
 #[test]
 fn test_write_max_stream_data_frame() {
     let mut buf = Vec::new();
-    buf.put_frame(&MaxStreamDataFrame::new(
-        VarInt::from_u32(0x1234).into(),
-        VarInt::from_u32(0x5678),
-    ));
+    buf.put_frame(&MaxStreamDataFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678)));
     let mut expected = Vec::new();
     expected.put_frame_type(FrameType::MaxStreamData);
     expected.extend_from_slice(&[0x52, 0x34, 0x80, 0, 0x56, 0x78]);
@@ -32,12 +29,10 @@ fn test_write_max_stream_data_frame() {
 #[test]
 fn test_read_max_stream_data_frame() {
     assert_eq!(
-        super::parse_frame(
-            &[0x11, 0x52, 0x34, 0x80, 0, 0x56, 0x78],
-            FrameType::MaxStreamData
-        ),
-        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::MaxStreamData(
-            MaxStreamDataFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678))
-        ))
+        super::parse_frame(&[0x11, 0x52, 0x34, 0x80, 0, 0x56, 0x78], FrameType::MaxStreamData),
+        qbase::frame::Frame::StreamCtl(qbase::frame::StreamCtlFrame::MaxStreamData(MaxStreamDataFrame::new(
+            VarInt::from_u32(0x1234).into(),
+            VarInt::from_u32(0x5678)
+        )))
     );
 }

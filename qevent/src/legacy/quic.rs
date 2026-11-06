@@ -9,11 +9,7 @@ use crate::{HexString, RawInfo};
 
 #[serde_with::skip_serializing_none]
 #[derive(Default, Builder, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ConnectivityServerListening {
     ip_v4: Option<IPAddress>,
     ip_v6: Option<IPAddress>,
@@ -227,11 +223,7 @@ pub struct TransportALPNInformation {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportParametersSet {
     owner: Option<Owner>,
 
@@ -402,11 +394,7 @@ pub enum TransportPacketReceivedTrigger {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportPacketDropped {
     /// primarily packet_type should be filled here,
     /// as other fields might not be parseable
@@ -437,11 +425,7 @@ pub enum TransportpacketDroppedTrigger {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportPacketBuffered {
     /// primarily packet_type and possible packet_number should be
     /// filled here as other elements might not be available yet
@@ -466,11 +450,7 @@ pub enum TransportPacketBufferedTrigger {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportPacketsAcked {
     packet_number_space: Option<PacketNumberSpace>,
 
@@ -480,11 +460,7 @@ pub struct TransportPacketsAcked {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportDatagramsSent {
     /// to support passing multiple at once
     count: Option<u16>,
@@ -500,11 +476,7 @@ pub struct TransportDatagramsSent {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportDatagramsReceived {
     /// to support passing multiple at once
     count: Option<u16>,
@@ -520,11 +492,7 @@ pub struct TransportDatagramsReceived {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportDatagramDropped {
     raw: Option<RawInfo>,
 }
@@ -600,11 +568,7 @@ pub struct TransportFramesProcessed {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TransportDataMoved {
     stream_id: Option<u64>,
     offset: Option<u64>,
@@ -805,11 +769,7 @@ pub enum LossTimerEventType {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct RecoveryPacketLost {
     /// should include at least the packet_type and packet_number
     header: Option<PacketHeader>,
@@ -940,11 +900,7 @@ pub struct PacketHeader {
 // A.9
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct Token {
     r#type: Option<TokenType>,
 
@@ -1194,11 +1150,7 @@ impl<'de> Deserialize<'de> for CryptoError {
         let string = String::deserialize(deserializer)?;
         string.strip_prefix("crypto_error_0x1").map_or_else(
             || Err(serde::de::Error::custom("invalid crypto error")),
-            |s| {
-                u8::from_str_radix(s, 16)
-                    .map(CryptoError)
-                    .map_err(serde::de::Error::custom)
-            },
+            |s| u8::from_str_radix(s, 16).map(CryptoError).map_err(serde::de::Error::custom),
         )
     }
 }

@@ -35,10 +35,7 @@ pub struct IndexDeque<T, const LIMIT: u64> {
 
 impl<T, const LIMIT: u64> Default for IndexDeque<T, LIMIT> {
     fn default() -> Self {
-        Self {
-            deque: VecDeque::default(),
-            offset: 0,
-        }
+        Self { deque: VecDeque::default(), offset: 0 }
     }
 }
 
@@ -53,10 +50,7 @@ impl<T, const LIMIT: u64> IndexDeque<T, LIMIT> {
     /// let deque: IndexDeque<u64, 19> = IndexDeque::with_capacity(10);
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            deque: VecDeque::with_capacity(capacity),
-            offset: 0,
-        }
+        Self { deque: VecDeque::with_capacity(capacity), offset: 0 }
     }
 
     /// Returns true if the queue is empty.
@@ -300,10 +294,7 @@ impl<T, const LIMIT: u64> IndexDeque<T, LIMIT> {
     /// }
     /// ```
     pub fn enumerate(&self) -> impl DoubleEndedIterator<Item = (u64, &T)> {
-        self.deque
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| (self.offset + idx as u64, item))
+        self.deque.iter().enumerate().map(|(idx, item)| (self.offset + idx as u64, item))
     }
 
     /// Returns a front-to-back iterator that returns
@@ -325,10 +316,7 @@ impl<T, const LIMIT: u64> IndexDeque<T, LIMIT> {
     /// assert_eq!(deque.enumerate_mut().collect::<Vec<(u64, &mut u64)>>().as_slice(), b);
     /// ```
     pub fn enumerate_mut(&mut self) -> impl DoubleEndedIterator<Item = (u64, &mut T)> {
-        self.deque
-            .iter_mut()
-            .enumerate()
-            .map(|(idx, item)| (self.offset + idx as u64, item))
+        self.deque.iter_mut().enumerate().map(|(idx, item)| (self.offset + idx as u64, item))
     }
 
     /// Shortens the queue, dropping the first `n` elements.

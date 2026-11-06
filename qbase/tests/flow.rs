@@ -63,9 +63,7 @@ fn empty_credit_refunds_do_not_wake_the_sender() {
 fn test_send_controler() {
     let broker = SendControllerBroker::default();
     let controler = ArcSendControler::new(0, broker.clone());
-    controler
-        .recv_frame(MaxDataFrame::new(100u32.into()))
-        .unwrap();
+    controler.recv_frame(MaxDataFrame::new(100u32.into())).unwrap();
     let mut credit = controler.credit(200);
     assert_eq!(credit.available(), 100);
     credit.post_sent(50);
@@ -82,9 +80,7 @@ fn test_send_controler() {
     assert_eq!(credit.available(), 0);
     drop(credit);
 
-    controler
-        .recv_frame(MaxDataFrame::new(200u32.into()))
-        .unwrap();
+    controler.recv_frame(MaxDataFrame::new(200u32.into())).unwrap();
 
     let mut credit = controler.credit(200);
     assert_eq!(credit.available(), 100);
@@ -113,15 +109,11 @@ fn test_recv_controller() {
     use qbase::frame::{Fin, Len, Offset};
     let broker = RecvControllerBroker::default();
     let controler = ArcRecvController::new(100, broker.clone());
-    let amount = controler
-        .on_new_rcvd(FrameType::Stream(Offset::Zero, Len::Omit, Fin::No), 20)
-        .unwrap();
+    let amount = controler.on_new_rcvd(FrameType::Stream(Offset::Zero, Len::Omit, Fin::No), 20).unwrap();
     assert_eq!(amount, 20);
     assert_eq!(broker.lock().unwrap().len(), 0);
 
-    let amount = controler
-        .on_new_rcvd(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::Yes), 30)
-        .unwrap();
+    let amount = controler.on_new_rcvd(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::Yes), 30).unwrap();
     assert_eq!(amount, 30);
     // broker should have a MaxDataFrame
     assert_eq!(broker.lock().unwrap().len(), 1);

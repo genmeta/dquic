@@ -17,11 +17,7 @@ pub trait Control: Send {
 
     fn on_packet_acked(&mut self, acked_packet: &SentPacket);
 
-    fn on_packets_lost(
-        &mut self,
-        lost_packets: &mut dyn Iterator<Item = &SentPacket>,
-        persistent_lost: bool,
-    );
+    fn on_packets_lost(&mut self, lost_packets: &mut dyn Iterator<Item = &SentPacket>, persistent_lost: bool);
 
     fn process_ecn(&mut self, ack: &AckFrame, sent_time: &Instant, epoch: Epoch);
 

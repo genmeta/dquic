@@ -89,16 +89,8 @@ fn test_frame_type_conversion() {
 #[test]
 fn test_frame_type_specs() {
     assert!(FrameType::Padding.specs().contain(Spec::NonAckEliciting));
-    assert!(
-        FrameType::Ack(Ecn::None)
-            .specs()
-            .contain(Spec::CongestionControlFree)
-    );
-    assert!(
-        FrameType::Stream(Offset::Zero, Len::Omit, Fin::No)
-            .specs()
-            .contain(Spec::FlowControlled)
-    );
+    assert!(FrameType::Ack(Ecn::None).specs().contain(Spec::CongestionControlFree));
+    assert!(FrameType::Stream(Offset::Zero, Len::Omit, Fin::No).specs().contain(Spec::FlowControlled));
     assert!(FrameType::PathChallenge.specs().contain(Spec::ProbeNewPath));
 }
 
@@ -143,12 +135,7 @@ fn test_invalid_frame_type() {
 fn test_frame_reader_parses_add_address_frame() {
     use qbase::frame::io::WriteFrame;
 
-    let add_address = AddAddressFrame::new(
-        1,
-        "127.0.0.1:4433".parse::<SocketAddr>().unwrap(),
-        2,
-        qbase::net::NatType::RestrictedPort,
-    );
+    let add_address = AddAddressFrame::new(1, "127.0.0.1:4433".parse::<SocketAddr>().unwrap(), 2, qbase::net::NatType::RestrictedPort);
     let expected = add_address;
     let mut buf = bytes::BytesMut::new();
     buf.put_frame(&ReliableFrame::AddAddress(add_address));
@@ -173,15 +160,9 @@ fn test_frame_reader_rejects_add_address_frame_in_non_data_packets() {
         qbase::net::NatType::Dynamic,
     )));
 
-    for packet_type in [
-        Type::Long(V1(Ver1::INITIAL)),
-        Type::Long(V1(Ver1::HANDSHAKE)),
-    ] {
+    for packet_type in [Type::Long(V1(Ver1::INITIAL)), Type::Long(V1(Ver1::HANDSHAKE))] {
         let mut reader = FrameReader::new(buf.clone().freeze(), packet_type);
-        assert_eq!(
-            reader.next().unwrap().unwrap_err(),
-            Error::WrongType(FrameType::AddAddress(Family::V4), packet_type)
-        );
+        assert_eq!(reader.next().unwrap().unwrap_err(), Error::WrongType(FrameType::AddAddress(Family::V4), packet_type));
     }
 }
 
@@ -198,23 +179,15 @@ fn test_manual_unknown_custom_frame_fallback() {
 
     fn be_unknown_custom_frame(input: &[u8]) -> nom::IResult<&[u8], UnknownCustomFrame> {
         use nom::{combinator::verify, sequence::preceded};
-        preceded(
-            verify(be_varint, |typ| typ == &VarInt::from_u32(0xff)),
-            (be_varint, be_varint, be_varint),
-        )
-        .map(|(seq_num, tire, nat_type)| UnknownCustomFrame {
-            seq_num,
-            tire,
-            nat_type,
-        })
-        .parse(input)
+        preceded(verify(be_varint, |typ| typ == &VarInt::from_u32(0xff)), (be_varint, be_varint, be_varint))
+            .map(|(seq_num, tire, nat_type)| UnknownCustomFrame { seq_num, tire, nat_type })
+            .parse(input)
     }
 
     fn parse_unknown_custom_frame(input: &[u8]) -> Result<(usize, UnknownCustomFrame), Error> {
         let origin = input.len();
-        let (remain, frame) = be_unknown_custom_frame(input).map_err(|_| {
-            Error::IncompleteType(format!("Incomplete frame type from input: {input:?}"))
-        })?;
+        let (remain, frame) =
+            be_unknown_custom_frame(input).map_err(|_| Error::IncompleteType(format!("Incomplete frame type from input: {input:?}")))?;
         let consumed = origin - remain.len();
         Ok((consumed, frame))
     }
@@ -229,11 +202,8 @@ fn test_manual_unknown_custom_frame_fallback() {
     }
 
     let mut buf = bytes::BytesMut::new();
-    let unknown_custom_frame = UnknownCustomFrame {
-        seq_num: VarInt::from_u32(0x01),
-        tire: VarInt::from_u32(0x02),
-        nat_type: VarInt::from_u32(0x03),
-    };
+    let unknown_custom_frame =
+        UnknownCustomFrame { seq_num: VarInt::from_u32(0x01), tire: VarInt::from_u32(0x02), nat_type: VarInt::from_u32(0x03) };
     buf.put_frame(&unknown_custom_frame);
     buf.put_frame(&PaddingFrame);
     buf.put_frame(&PaddingFrame);
@@ -276,27 +246,20 @@ fn test_frame_reader_stops_at_unknown_custom_frame() {
     buf.put_frame(&PaddingFrame);
 
     let mut padding_count = 0;
-    let _ = FrameReader::new(buf.freeze(), Type::Short(OneRtt(0.into()))).try_fold(
-        PacketContent::default(),
-        |packet_contains, frame| {
-            let (frame, frame_type) = frame?;
+    let _ = FrameReader::new(buf.freeze(), Type::Short(OneRtt(0.into()))).try_fold(PacketContent::default(), |packet_contains, frame| {
+        let (frame, frame_type) = frame?;
 
-            assert!(matches!(frame, Frame::Padding(_)));
-            assert_eq!(frame_type, FrameType::Padding);
-            padding_count += 1;
-            Result::<_, Error>::Ok(packet_contains)
-        },
-    );
+        assert!(matches!(frame, Frame::Padding(_)));
+        assert_eq!(frame_type, FrameType::Padding);
+        padding_count += 1;
+        Result::<_, Error>::Ok(packet_contains)
+    });
 
     assert_eq!(padding_count, 2);
 }
 
 fn parse_frame(input: &[u8], expected_type: FrameType) -> Frame<bytes::Bytes> {
-    let (consumed, frame, frame_type) = io::be_frame(
-        &bytes::Bytes::copy_from_slice(input),
-        Type::Short(OneRtt(0.into())),
-    )
-    .unwrap();
+    let (consumed, frame, frame_type) = io::be_frame(&bytes::Bytes::copy_from_slice(input), Type::Short(OneRtt(0.into()))).unwrap();
     assert_eq!(frame_type, expected_type);
     assert_eq!(consumed, input.len());
     frame

@@ -13,26 +13,11 @@ use qbase::{
 fn test_error_conversion_to_transport_error() {
     let cases = vec![
         (Error::NoFrames, QuicErrorKind::ProtocolViolation),
-        (
-            Error::IncompleteType("test".to_string()),
-            QuicErrorKind::FrameEncoding,
-        ),
-        (
-            Error::InvalidType(VarInt::from_u32(0x1f)),
-            QuicErrorKind::FrameEncoding,
-        ),
-        (
-            Error::WrongType(FrameType::Ping, Type::Long(V1(Ver1::INITIAL))),
-            QuicErrorKind::FrameEncoding,
-        ),
-        (
-            Error::IncompleteFrame(FrameType::Ping, "incomplete".to_string()),
-            QuicErrorKind::FrameEncoding,
-        ),
-        (
-            Error::ParseError(FrameType::Ping, "parse error".to_string()),
-            QuicErrorKind::FrameEncoding,
-        ),
+        (Error::IncompleteType("test".to_string()), QuicErrorKind::FrameEncoding),
+        (Error::InvalidType(VarInt::from_u32(0x1f)), QuicErrorKind::FrameEncoding),
+        (Error::WrongType(FrameType::Ping, Type::Long(V1(Ver1::INITIAL))), QuicErrorKind::FrameEncoding),
+        (Error::IncompleteFrame(FrameType::Ping, "incomplete".to_string()), QuicErrorKind::FrameEncoding),
+        (Error::ParseError(FrameType::Ping, "parse error".to_string()), QuicErrorKind::FrameEncoding),
     ];
 
     for (error, expected_kind) in cases {

@@ -17,25 +17,14 @@ async fn tls_io_exits_naturally_when_the_context_fails() {
     let (paths, closed) = common::paths(qbase::role::Role::Server);
     paths.progress.facts().quit_mp_handshaking();
     let spaces = Epoch::EPOCHS.map(|epoch| {
-        Space::new(
-            epoch,
-            Default::default(),
-            ArcKeys::new(std::sync::Arc::new(common::initial_keys(true))),
-            paths.progress.facts(),
-        )
+        Space::new(epoch, Default::default(), ArcKeys::new(std::sync::Arc::new(common::initial_keys(true))), paths.progress.facts())
     });
     for space in &spaces {
         closed.register(std::sync::Arc::new(space.crypto.clone()));
     }
     closed.register(std::sync::Arc::new(server.clone()));
-    let reads = spaces
-        .iter()
-        .map(|space| tokio::spawn(read_space_to_tls(server.clone(), space, paths.clone())))
-        .collect::<Vec<_>>();
-    let writes = spaces
-        .iter()
-        .map(|space| tokio::spawn(read_tls_to_space(server.clone(), space, paths.clone())))
-        .collect::<Vec<_>>();
+    let reads = spaces.iter().map(|space| tokio::spawn(read_space_to_tls(server.clone(), space, paths.clone()))).collect::<Vec<_>>();
+    let writes = spaces.iter().map(|space| tokio::spawn(read_tls_to_space(server.clone(), space, paths.clone()))).collect::<Vec<_>>();
     tokio::task::yield_now().await;
     server.on_error(QuicError::with_default_fty(ErrorKind::Internal, "connection ended").into());
     tokio::task::yield_now().await;
@@ -59,12 +48,7 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
     let (paths, closed) = common::paths(qbase::role::Role::Client);
     paths.progress.facts().quit_mp_handshaking();
     let spaces = Epoch::EPOCHS.map(|epoch| {
-        Space::new(
-            epoch,
-            Default::default(),
-            ArcKeys::new(std::sync::Arc::new(common::initial_keys(false))),
-            paths.progress.facts(),
-        )
+        Space::new(epoch, Default::default(), ArcKeys::new(std::sync::Arc::new(common::initial_keys(false))), paths.progress.facts())
     });
     for space in &spaces {
         closed.register(std::sync::Arc::new(space.crypto.clone()));
@@ -72,14 +56,8 @@ async fn crypto_output_failure_stops_tls_and_all_input_tasks() {
     // ClientHello is still pending, but its destination can no longer accept it.
     spaces[Epoch::Initial].crypto.sender.retire();
     closed.register(std::sync::Arc::new(client.clone()));
-    let reads = spaces
-        .iter()
-        .map(|space| tokio::spawn(read_space_to_tls(client.clone(), space, paths.clone())))
-        .collect::<Vec<_>>();
-    let writes = spaces
-        .iter()
-        .map(|space| tokio::spawn(read_tls_to_space(client.clone(), space, paths.clone())))
-        .collect::<Vec<_>>();
+    let reads = spaces.iter().map(|space| tokio::spawn(read_space_to_tls(client.clone(), space, paths.clone()))).collect::<Vec<_>>();
+    let writes = spaces.iter().map(|space| tokio::spawn(read_tls_to_space(client.clone(), space, paths.clone()))).collect::<Vec<_>>();
     tokio::time::timeout(Duration::from_secs(4), async {
         assert!(matches!(closed.await, crate::Error::Quic(_)));
         for write in writes {

@@ -52,10 +52,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
         }
         let result = (|| -> Result<(), crate::Error> {
             let scid = (epoch == Epoch::Initial).then(|| *packet.scid());
-            let Some(packet) = packet
-                .decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn))
-                .transpose()?
-            else {
+            let Some(packet) = packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose()? else {
                 return Ok(());
             };
             if let Some(scid) = scid {
@@ -87,12 +84,8 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
             }
             // An Initial ACK proves receipt, but does not identify the path
             // carrying the server's TLS flight. Keep racing until CRYPTO arrives.
-            let has_crypto_data = parsed_frames
-                .iter()
-                .any(|frame| matches!(frame, Frame::Crypto(_, bytes) if !bytes.is_empty()));
-            if epoch == Epoch::Handshake
-                || (role == Role::Client && epoch == Epoch::Initial && has_crypto_data)
-            {
+            let has_crypto_data = parsed_frames.iter().any(|frame| matches!(frame, Frame::Crypto(_, bytes) if !bytes.is_empty()));
+            if epoch == Epoch::Handshake || (role == Role::Client && epoch == Epoch::Initial && has_crypto_data) {
                 paths.progress.on_path_selected(&paths, &path);
             }
             if epoch == Epoch::Handshake {
@@ -121,18 +114,12 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                         return Ok(());
                     }
                     _ => {
-                        return Err(QuicError::with_default_fty(
-                            ErrorKind::ProtocolViolation,
-                            "unexpected handshake frame",
-                        )
-                        .into());
+                        return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "unexpected handshake frame").into());
                     }
                 }
             }
             let pto = path.cc.get_pto(epoch);
-            space
-                .rcvd_journal
-                .on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
+            space.rcvd_journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
             path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
             path.send_waker.wake_all();
             Ok(())
@@ -170,12 +157,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             continue;
         }
         let result = (|| -> Result<(), crate::Error> {
-            let Some(packet) = keys.open_packet(
-                packet,
-                |pn| data.rcvd_journal.decode_pn(pn),
-                paths.pto_for(&pathway, Epoch::Data),
-            )?
-            else {
+            let Some(packet) = keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), paths.pto_for(&pathway, Epoch::Data))? else {
                 return Ok(());
             };
             let pn = packet.pn();
@@ -199,9 +181,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                 match frame {
                     Frame::Ping(_) => {}
                     Frame::Ack(frame) => {
-                        recv::acknowledge(&data, &frame, &path, |generation| {
-                            keys.on_ack(generation)
-                        })?;
+                        recv::acknowledge(&data, &frame, &path, |generation| keys.on_ack(generation))?;
                     }
                     Frame::Crypto(frame, bytes) => {
                         data.crypto.incoming().recv_frame((frame, bytes))?;
@@ -221,16 +201,13 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                     Frame::NewToken(frame) => {
                         tokens.recv_frame(frame)?;
                     }
-                    Frame::PathChallenge(frame) => {
-                        paths.validations.recv_frame((pathway, frame))?
-                    }
+                    Frame::PathChallenge(frame) => paths.validations.recv_frame((pathway, frame))?,
                     Frame::PathResponse(frame) => paths.validations.recv_frame((pathway, frame))?,
                     Frame::HandshakeDone(frame) => {
                         handshake.recv_frame(frame)?;
                     }
                     Frame::Close(frame) => {
-                        terminator
-                            .recv_conn_close_frame(frame.clone(), path.cc.pto_base(Epoch::Data));
+                        terminator.recv_conn_close_frame(frame.clone(), path.cc.pto_base(Epoch::Data));
                         return Ok(());
                     }
                     Frame::AddAddress(frame) => paths.puncher.recv_add_address(frame),
@@ -241,27 +218,19 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                             paths.puncher.recv_remove_address(seq);
                         }
                     }
-                    Frame::PunchMeNow(frame) => {
-                        paths.puncher.recv_punch_me_now(path.pathway, frame)
-                    }
+                    Frame::PunchMeNow(frame) => paths.puncher.recv_punch_me_now(path.pathway, frame),
                     Frame::PunchHello(frame) => {
                         paths.puncher.recv_punch_hello(path.pathway, link, frame);
                     }
                     Frame::PunchDone(frame) => paths.puncher.recv_punch_done(link, frame),
                     _ => {
-                        return Err(QuicError::with_default_fty(
-                            ErrorKind::ProtocolViolation,
-                            "unnegotiated frame",
-                        )
-                        .into());
+                        return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "unnegotiated frame").into());
                     }
                 }
             }
             let pto = path.cc.get_pto(Epoch::Data);
-            data.rcvd_journal
-                .on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
-            path.cc
-                .on_pkt_rcvd(Epoch::Data, pn, content.is_ack_eliciting());
+            data.rcvd_journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
+            path.cc.on_pkt_rcvd(Epoch::Data, pn, content.is_ack_eliciting());
             path.send_waker.wake_all();
             Ok(())
         })();

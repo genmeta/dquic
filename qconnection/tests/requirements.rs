@@ -42,53 +42,31 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     let peer_socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
-    let link = Link::new(
-        socket.local_addr().unwrap(),
-        peer_socket.local_addr().unwrap(),
-    );
+    let link = Link::new(socket.local_addr().unwrap(), peer_socket.local_addr().unwrap());
     let pathway = Pathway::from(link);
 
     let client = common::anonymous_client();
     let (client_parameters, _) = common::parameters();
-    let tls =
-        TlsContext::client(&client, "localhost".try_into().unwrap(), &client_parameters).unwrap();
+    let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &client_parameters).unwrap();
     let (_, hello) = tls.read_msg().await.unwrap();
     let odcid = ConnectionId::from_slice(b"original");
-    let client_keys = client
-        .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-        .unwrap();
-    let server_keys = ServerRegistry::global()
-        .get(Some("localhost"))
-        .unwrap()
-        .tls_server
-        .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-        .unwrap();
+    let client_keys = client.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap();
+    let server_keys =
+        ServerRegistry::global().get(Some("localhost")).unwrap().tls_server.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap();
     let router = Arc::new(QuicRouter::new());
     let (inbox, received) = channel::new();
     let scid = ConnectionId::from_slice(b"server00");
     let reliable_frames = qconnection::ArcReliableFrames::with_capacity(0);
-    let local_cids = qconnection::ArcLocalCids::new(
-        Role::Server,
-        odcid,
-        scid,
-        router.insert(odcid.into(), inbox.clone(), reliable_frames.clone()),
-    );
+    let local_cids =
+        qconnection::ArcLocalCids::new(Role::Server, odcid, scid, router.insert(odcid.into(), inbox.clone(), reliable_frames.clone()));
     let facts = crate::common::handshake_facts(Role::Server, true);
-    let initial_space = Arc::new(InitialSpace::new(
-        scid,
-        ArcKeys::new(Arc::new(server_keys)),
-        None,
-        facts.clone(),
-    ));
+    let initial_space = Arc::new(InitialSpace::new(scid, ArcKeys::new(Arc::new(server_keys)), None, facts.clone()));
     let paths = Paths::new(
         initial_space.clone(),
         facts,
         qconnection::CidRegistry::new(
             local_cids,
-            qconnection::ArcRemoteCids::server(
-                ConnectionId::from_slice(b"wrongcid"),
-                reliable_frames.clone(),
-            ),
+            qconnection::ArcRemoteCids::server(ConnectionId::from_slice(b"wrongcid"), reliable_frames.clone()),
         ),
         reliable_frames,
         Duration::ZERO,
@@ -97,10 +75,7 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     paths.add_path(pathway);
 
     let data = [hello];
-    let mut crypto = (
-        CryptoFrame::new(0u32.into(), (data[0].len() as u32).into()),
-        data.as_slice(),
-    );
+    let mut crypto = (CryptoFrame::new(0u32.into(), (data[0].len() as u32).into()), data.as_slice());
     let packet = common::seal(
         LongHeaderBuilder::with_cid(odcid, ConnectionId::from_slice(b"wrongcid")).initial(vec![]),
         &client_keys.sealing,
@@ -108,37 +83,19 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         [&mut crypto],
     )
     .unwrap();
-    let Packet::Data(packet) = PacketReader::new(BytesMut::from(packet.as_ref()), 8)
-        .next()
-        .unwrap()
-        .unwrap()
-    else {
+    let Packet::Data(packet) = PacketReader::new(BytesMut::from(packet.as_ref()), 8).next().unwrap().unwrap() else {
         panic!("expected Initial packet");
     };
     let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
         panic!("expected Initial header");
     };
-    assert!(inbox.try_send_initial(
-        CipherPacket::new(header, packet.bytes, packet.offset),
-        pathway,
-        link
-    ));
+    assert!(inbox.try_send_initial(CipherPacket::new(header, packet.bytes, packet.offset), pathway, link));
     let tick = qconnection::recv::tick(paths.clone());
-    let growing = server_growing(
-        initial_space,
-        received,
-        paths.clone(),
-        ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-    );
+    let growing = server_growing(initial_space, received, paths.clone(), ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)));
     let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
+    assert!(matches!(growing.await.unwrap(), Error::Quic(error) if error.kind() == ErrorKind::TransportParameter));
     assert!(
-        matches!(growing.await.unwrap(), Error::Quic(error) if error.kind() == ErrorKind::TransportParameter)
-    );
-    assert!(
-        matches!(
-            acceptance.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ),
+        matches!(acceptance.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
         "a failed handshake must not invoke the accept callback"
     );
     assert!(paths.entries.lock().unwrap().is_empty());

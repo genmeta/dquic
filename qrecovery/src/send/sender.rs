@@ -15,10 +15,7 @@ use qbase::{
 };
 use qevent::{
     RawInfo,
-    quic::transport::{
-        DataMovedAdditionalInfo, GranularStreamStates, StreamDataLocation, StreamDataMoved,
-        StreamSide, StreamStateUpdated,
-    },
+    quic::transport::{DataMovedAdditionalInfo, GranularStreamStates, StreamDataLocation, StreamDataMoved, StreamSide, StreamStateUpdated},
 };
 
 use super::sndbuf::SendBuf;
@@ -51,12 +48,7 @@ pub struct ReadySender<TX> {
 }
 
 impl<TX> ReadySender<TX> {
-    pub(super) fn new(
-        stream_id: StreamId,
-        buf_size: u64,
-        broker: TX,
-        metrics: ArcConnectionMetrics,
-    ) -> ReadySender<TX> {
+    pub(super) fn new(stream_id: StreamId, buf_size: u64, broker: TX, metrics: ArcConnectionMetrics) -> ReadySender<TX> {
         ReadySender {
             stream_id,
             sndbuf: SendBuf::with_capacity(buf_size),
@@ -221,8 +213,7 @@ where
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );
-        self.broker
-            .send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
         log_reset_event(self.stream_id, GranularStreamStates::Ready);
         reset_stream_err
     }
@@ -299,11 +290,7 @@ impl<TX> SendingSender<TX> {
         }
     }
 
-    pub(super) fn pick_up<P>(
-        &'_ mut self,
-        predicate: P,
-        flow_limit: usize,
-    ) -> Result<StreamData<'_>, Poll<()>>
+    pub(super) fn pick_up<P>(&'_ mut self, predicate: P, flow_limit: usize) -> Result<StreamData<'_>, Poll<()>>
     where
         P: Fn(u64) -> Option<usize>,
     {
@@ -311,9 +298,7 @@ impl<TX> SendingSender<TX> {
         let sent = self.sndbuf.sent();
         self.sndbuf
             .pick_up(&predicate, flow_limit)
-            .map(|(range, is_fresh, data)| {
-                (range.clone(), is_fresh, data, Some(range.end) == total_size)
-            })
+            .map(|(range, is_fresh, data)| (range.clone(), is_fresh, data, Some(range.end) == total_size))
             .or_else(|availability| {
                 if total_size == Some(sent) {
                     predicate(sent).ok_or(Poll::Ready(()))?;
@@ -437,8 +422,7 @@ where
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );
-        self.broker
-            .send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
         log_reset_event(self.stream_id, GranularStreamStates::Send);
         reset_stream_err
     }
@@ -468,11 +452,7 @@ impl<TX> DataSentSender<TX> {
         self.stream_id
     }
 
-    pub(super) fn pick_up<P>(
-        &'_ mut self,
-        predicate: P,
-        flow_limit: usize,
-    ) -> Result<StreamData<'_>, Poll<()>>
+    pub(super) fn pick_up<P>(&'_ mut self, predicate: P, flow_limit: usize) -> Result<StreamData<'_>, Poll<()>>
     where
         P: Fn(u64) -> Option<usize>,
     {
@@ -582,8 +562,7 @@ where
             "{} is canceled by app layer, with error code {err_code}",
             self.stream_id
         );
-        self.broker
-            .send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
         log_reset_event(self.stream_id, GranularStreamStates::DataSent);
         reset_stream_err
     }
@@ -607,10 +586,7 @@ impl<TX> Sender<TX> {
             Self::DataSent(s) => &s.sndbuf,
             _ => return 0,
         };
-        buffer
-            .written()
-            .min(buffer.max_data())
-            .saturating_sub(buffer.sent()) as usize
+        buffer.written().min(buffer.max_data()).saturating_sub(buffer.sent()) as usize
     }
     pub(super) fn source(&self) -> Option<(StreamId, &ArcSendWakers)> {
         match self {
@@ -621,12 +597,7 @@ impl<TX> Sender<TX> {
         }
     }
 
-    pub fn new(
-        stream_id: StreamId,
-        buf_size: u64,
-        broker: TX,
-        metrics: ArcConnectionMetrics,
-    ) -> Self {
+    pub fn new(stream_id: StreamId, buf_size: u64, broker: TX, metrics: ArcConnectionMetrics) -> Self {
         Sender::Ready(ReadySender::new(stream_id, buf_size, broker, metrics))
     }
 }
@@ -646,15 +617,8 @@ pub struct ArcSender<TX>(Arc<Mutex<Result<Sender<TX>, Error>>>);
 
 impl<TX> ArcSender<TX> {
     #[doc(hidden)]
-    pub(crate) fn new(
-        stream_id: StreamId,
-        buf_size: u64,
-        broker: TX,
-        metrics: ArcConnectionMetrics,
-    ) -> Self {
-        ArcSender(Arc::new(Mutex::new(Ok(Sender::new(
-            stream_id, buf_size, broker, metrics,
-        )))))
+    pub(crate) fn new(stream_id: StreamId, buf_size: u64, broker: TX, metrics: ArcConnectionMetrics) -> Self {
+        ArcSender(Arc::new(Mutex::new(Ok(Sender::new(stream_id, buf_size, broker, metrics)))))
     }
 }
 

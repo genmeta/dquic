@@ -7,10 +7,7 @@ use qbase::{
     frame::{AppCloseFrame, ConnectionCloseFrame, QuicCloseFrame},
 };
 
-use super::{
-    ApplicationCode, ConnectionID, CryptoError, IPAddress, IpVersion, Owner, PathEndpointInfo,
-    TransportError,
-};
+use super::{ApplicationCode, ConnectionID, CryptoError, IPAddress, IpVersion, Owner, PathEndpointInfo, TransportError};
 use crate::{Deserialize, PathID, Serialize};
 
 /// Emitted when the server starts accepting connections. It has Extra
@@ -130,11 +127,7 @@ impl ConnectionStarted {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ConnectionClosed {
     /// which side closed the connection
     owner: Option<Owner>,
@@ -154,23 +147,19 @@ impl ConnectionClosedBuilder {
     }
 
     fn quic_close_frame(&mut self, frame: &QuicCloseFrame) -> &mut ConnectionClosedBuilder {
-        self.connection_code(frame.error_kind())
-            .reason(frame.reason().to_owned())
+        self.connection_code(frame.error_kind()).reason(frame.reason().to_owned())
     }
 
     fn app_close_frame(&mut self, frame: &AppCloseFrame) -> &mut ConnectionClosedBuilder {
-        self.application_code(frame.error_code() as u32)
-            .reason(frame.reason().to_owned())
+        self.application_code(frame.error_code() as u32).reason(frame.reason().to_owned())
     }
 
     pub fn quic_error(&mut self, error: &QuicError) -> &mut Self {
-        self.connection_code(error.kind())
-            .reason(error.reason().to_owned())
+        self.connection_code(error.kind()).reason(error.reason().to_owned())
     }
 
     pub fn app_error(&mut self, error: &AppError) -> &mut Self {
-        self.application_code(error.error_code() as u32)
-            .reason(error.reason().to_owned())
+        self.application_code(error.error_code() as u32).reason(error.reason().to_owned())
     }
 
     pub fn error(&mut self, error: &Error) {
@@ -464,21 +453,11 @@ mod rollback {
         #[inline]
         fn try_from(value: ConnectionCloseTrigger) -> Result<Self, ()> {
             match value {
-                ConnectionCloseTrigger::IdleTimeout => {
-                    Ok(legacy::ConnectivityConnectionClosedTrigger::IdleTimeout)
-                }
-                ConnectionCloseTrigger::Application => {
-                    Ok(legacy::ConnectivityConnectionClosedTrigger::Application)
-                }
-                ConnectionCloseTrigger::Error => {
-                    Ok(legacy::ConnectivityConnectionClosedTrigger::Error)
-                }
-                ConnectionCloseTrigger::VersionMismatch => {
-                    Ok(legacy::ConnectivityConnectionClosedTrigger::VersionMismatch)
-                }
-                ConnectionCloseTrigger::StatelessReset => {
-                    Ok(legacy::ConnectivityConnectionClosedTrigger::StatelessReset)
-                }
+                ConnectionCloseTrigger::IdleTimeout => Ok(legacy::ConnectivityConnectionClosedTrigger::IdleTimeout),
+                ConnectionCloseTrigger::Application => Ok(legacy::ConnectivityConnectionClosedTrigger::Application),
+                ConnectionCloseTrigger::Error => Ok(legacy::ConnectivityConnectionClosedTrigger::Error),
+                ConnectionCloseTrigger::VersionMismatch => Ok(legacy::ConnectivityConnectionClosedTrigger::VersionMismatch),
+                ConnectionCloseTrigger::StatelessReset => Ok(legacy::ConnectivityConnectionClosedTrigger::StatelessReset),
                 ConnectionCloseTrigger::Unspecified => Err(()),
             }
         }
@@ -520,36 +499,16 @@ mod rollback {
         #[inline]
         fn from(value: ConnectionState) -> Self {
             match value {
-                ConnectionState::Base(BaseConnectionStates::Attempted) => {
-                    legacy::ConnectionState::Attempted
-                }
-                ConnectionState::Base(BaseConnectionStates::HandshakeStarted) => {
-                    legacy::ConnectionState::HandshakeStarted
-                }
-                ConnectionState::Base(BaseConnectionStates::HandshakeComplete) => {
-                    legacy::ConnectionState::HandshakeComplete
-                }
-                ConnectionState::Base(BaseConnectionStates::Closed) => {
-                    legacy::ConnectionState::Closed
-                }
-                ConnectionState::Granular(GranularConnectionStates::PeerValidated) => {
-                    legacy::ConnectionState::PeerValidated
-                }
-                ConnectionState::Granular(GranularConnectionStates::EarlyWrite) => {
-                    legacy::ConnectionState::EarlyWrite
-                }
-                ConnectionState::Granular(GranularConnectionStates::HandshakeConfirmed) => {
-                    legacy::ConnectionState::HandshakeConfirmed
-                }
-                ConnectionState::Granular(GranularConnectionStates::Closing) => {
-                    legacy::ConnectionState::Closing
-                }
-                ConnectionState::Granular(GranularConnectionStates::Draining) => {
-                    legacy::ConnectionState::Draining
-                }
-                ConnectionState::Granular(GranularConnectionStates::Closed) => {
-                    legacy::ConnectionState::Closed
-                }
+                ConnectionState::Base(BaseConnectionStates::Attempted) => legacy::ConnectionState::Attempted,
+                ConnectionState::Base(BaseConnectionStates::HandshakeStarted) => legacy::ConnectionState::HandshakeStarted,
+                ConnectionState::Base(BaseConnectionStates::HandshakeComplete) => legacy::ConnectionState::HandshakeComplete,
+                ConnectionState::Base(BaseConnectionStates::Closed) => legacy::ConnectionState::Closed,
+                ConnectionState::Granular(GranularConnectionStates::PeerValidated) => legacy::ConnectionState::PeerValidated,
+                ConnectionState::Granular(GranularConnectionStates::EarlyWrite) => legacy::ConnectionState::EarlyWrite,
+                ConnectionState::Granular(GranularConnectionStates::HandshakeConfirmed) => legacy::ConnectionState::HandshakeConfirmed,
+                ConnectionState::Granular(GranularConnectionStates::Closing) => legacy::ConnectionState::Closing,
+                ConnectionState::Granular(GranularConnectionStates::Draining) => legacy::ConnectionState::Draining,
+                ConnectionState::Granular(GranularConnectionStates::Closed) => legacy::ConnectionState::Closed,
             }
         }
     }

@@ -28,21 +28,8 @@ pub struct SentPacket {
 }
 
 impl SentPacket {
-    pub(crate) fn new(
-        packet_number: u64,
-        time_sent: Instant,
-        ack_eliciting: bool,
-        count_for_cc: bool,
-        sent_bytes: usize,
-    ) -> Self {
-        SentPacket {
-            packet_number,
-            time_sent,
-            ack_eliciting,
-            count_for_cc,
-            sent_bytes,
-            state: State::Inflight,
-        }
+    pub(crate) fn new(packet_number: u64, time_sent: Instant, ack_eliciting: bool, count_for_cc: bool, sent_bytes: usize) -> Self {
+        SentPacket { packet_number, time_sent, ack_eliciting, count_for_cc, sent_bytes, state: State::Inflight }
     }
 }
 
@@ -83,14 +70,7 @@ impl RcvdRecords {
     }
 
     pub(crate) fn new(epoch: Epoch, max_ack_delay: Duration) -> Self {
-        Self {
-            epoch,
-            ack_immedietly: false,
-            ack_eliciting_since_ack: 0,
-            latest_rcvd_time: None,
-            largest_rcvd_packet: None,
-            max_ack_delay,
-        }
+        Self { epoch, ack_immedietly: false, ack_eliciting_since_ack: 0, latest_rcvd_time: None, largest_rcvd_packet: None, max_ack_delay }
     }
 
     pub(crate) fn on_pkt_rcvd(&mut self, pn: u64) {
@@ -109,19 +89,15 @@ impl RcvdRecords {
         if self.latest_rcvd_time.is_none() {
             self.latest_rcvd_time = Some(now);
         }
-        self.ack_immedietly |= self
-            .largest_rcvd_packet
-            .is_some_and(|(largest_pn, _)| pn < largest_pn || pn > largest_pn.saturating_add(1));
+        self.ack_immedietly |= self.largest_rcvd_packet.is_some_and(|(largest_pn, _)| pn < largest_pn || pn > largest_pn.saturating_add(1));
 
-        self.largest_rcvd_packet =
-            self.largest_rcvd_packet
-                .map_or(Some((pn, now)), |(largest_pn, time)| {
-                    if pn > largest_pn {
-                        Some((pn, now))
-                    } else {
-                        Some((largest_pn, time))
-                    }
-                });
+        self.largest_rcvd_packet = self.largest_rcvd_packet.map_or(Some((pn, now)), |(largest_pn, time)| {
+            if pn > largest_pn {
+                Some((pn, now))
+            } else {
+                Some((largest_pn, time))
+            }
+        });
     }
 
     /// Checks whether an ACK frame needs to be sent.
@@ -132,10 +108,7 @@ impl RcvdRecords {
             return self.largest_rcvd_packet;
         }
 
-        if self
-            .latest_rcvd_time
-            .is_some_and(|t| t + self.max_ack_delay < now)
-        {
+        if self.latest_rcvd_time.is_some_and(|t| t + self.max_ack_delay < now) {
             return self.largest_rcvd_packet;
         }
         None
@@ -146,10 +119,7 @@ impl RcvdRecords {
     pub(crate) fn on_ack_sent(&mut self, _pn: u64, largest_acked: u64) {
         // ACK assembly uses the path-local trigger as Largest Acknowledged. If a newer packet was
         // received while the ACK packet was being assembled, leave it pending for the next cycle.
-        if self
-            .largest_rcvd_packet
-            .is_some_and(|(largest_rcvd, _)| largest_rcvd == largest_acked)
-        {
+        if self.largest_rcvd_packet.is_some_and(|(largest_rcvd, _)| largest_rcvd == largest_acked) {
             self.largest_rcvd_packet = None;
             self.latest_rcvd_time = None;
             self.ack_immedietly = false;
@@ -194,11 +164,7 @@ impl PacketSpace {
         self.largest_acked_packet = self.largest_acked_packet.map(|n| n.max(pn)).or(Some(pn));
     }
 
-    pub(crate) fn on_ack_rcvd(
-        &mut self,
-        ack_frame: &AckFrame,
-        algorithm: &mut Box<dyn Control>,
-    ) -> Option<NewlyAckedPackets> {
+    pub(crate) fn on_ack_rcvd(&mut self, ack_frame: &AckFrame, algorithm: &mut Box<dyn Control>) -> Option<NewlyAckedPackets> {
         if self.sent_packets.is_empty() {
             return None;
         }
@@ -209,11 +175,7 @@ impl PacketSpace {
         // The ACK frame may cover huge PN intervals while this path only owns a sparse subset of
         // those packets. Walk the bounded local records instead of expanding every PN in the ACK.
         for sent in self.sent_packets.iter_mut().rev() {
-            if sent.state == State::Acked
-                || !ack_ranges
-                    .iter()
-                    .any(|range| range.contains(&sent.packet_number))
-            {
+            if sent.state == State::Acked || !ack_ranges.iter().any(|range| range.contains(&sent.packet_number)) {
                 continue;
             }
 
@@ -231,24 +193,15 @@ impl PacketSpace {
                 .or(Some((sent.packet_number, sent.time_sent)));
         }
 
-        while self
-            .sent_packets
-            .front()
-            .is_some_and(|sent| sent.state == State::Acked || sent.state == State::Retransmitted)
-        {
+        while self.sent_packets.front().is_some_and(|sent| sent.state == State::Acked || sent.state == State::Retransmitted) {
             self.sent_packets.pop_front();
         }
 
-        Some(NewlyAckedPackets {
-            include_ack_eliciting,
-            largest: largest_acked?,
-        })
+        Some(NewlyAckedPackets { include_ack_eliciting, largest: largest_acked? })
     }
 
     pub(crate) fn no_ack_eliciting_in_flight(&self) -> bool {
-        self.sent_packets
-            .iter()
-            .all(|sent| !sent.ack_eliciting || sent.state != State::Inflight)
+        self.sent_packets.iter().all(|sent| !sent.ack_eliciting || sent.state != State::Inflight)
     }
 
     pub(crate) fn detect_lost_packets(
@@ -266,19 +219,14 @@ impl PacketSpace {
         let lost_sent_time = now - loss_delay;
 
         // Front removal shifts both indexes equally; no separate sequence is needed.
-        let largest_acked_index = self
-            .sent_packets
-            .iter()
-            .rposition(|pkt| pkt.state == State::Acked);
+        let largest_acked_index = self.sent_packets.iter().rposition(|pkt| pkt.state == State::Acked);
         let loss: Vec<_> = self
             .sent_packets
             .iter_mut()
             .enumerate()
             .filter(|(_, pkt)| pkt.state == State::Inflight && pkt.packet_number <= largest_acked)
             .map(move |(idx, unacked)| {
-                if unacked.time_sent <= lost_sent_time
-                    || largest_acked_index.is_some_and(|largest| largest >= idx + packet_threshold)
-                {
+                if unacked.time_sent <= lost_sent_time || largest_acked_index.is_some_and(|largest| largest >= idx + packet_threshold) {
                     unacked.state = State::Retransmitted;
                     Ok((idx, &*unacked))
                 } else {
@@ -308,10 +256,7 @@ impl PacketSpace {
             })
             .is_err();
 
-        let (packet_numbers, loss_packet): (Vec<_>, Vec<_>) = loss
-            .into_iter()
-            .map(|(_, pkt)| (pkt.packet_number, pkt))
-            .unzip();
+        let (packet_numbers, loss_packet): (Vec<_>, Vec<_>) = loss.into_iter().map(|(_, pkt)| (pkt.packet_number, pkt)).unzip();
 
         if !loss_packet.is_empty() {
             algorithm.on_packets_lost(&mut loss_packet.into_iter(), persistent_lost);
@@ -322,16 +267,9 @@ impl PacketSpace {
     pub(crate) fn discard(&mut self, algorithm: &mut Box<dyn Control>) -> Vec<u64> {
         // Only packets that have not gone through loss feedback need to be handed to connection-
         // level recovery. Retransmitted packets have already submitted their frames for recovery.
-        let in_flight_packet_numbers = self
-            .sent_packets
-            .iter()
-            .filter(|sent| sent.state == State::Inflight)
-            .map(|sent| sent.packet_number)
-            .collect();
-        let mut remove_from_inflight = self
-            .sent_packets
-            .iter()
-            .filter(|sent| sent.state == State::Inflight);
+        let in_flight_packet_numbers =
+            self.sent_packets.iter().filter(|sent| sent.state == State::Inflight).map(|sent| sent.packet_number).collect();
+        let mut remove_from_inflight = self.sent_packets.iter().filter(|sent| sent.state == State::Inflight);
         algorithm.remove_from_bytes_in_flight(&mut remove_from_inflight);
         self.sent_packets.clear();
         self.largest_acked_packet = None;
@@ -362,23 +300,11 @@ mod tests {
         // let now = Instant::now();
 
         for i in 0..10 {
-            packet_space.sent_packets.push_back(SentPacket::new(
-                i,
-                Instant::now(),
-                true,
-                true,
-                1200,
-            ));
+            packet_space.sent_packets.push_back(SentPacket::new(i, Instant::now(), true, true, 1200));
         }
 
         // ack 9 ~ 4, 1 ~ 0 loss 2,3
-        let ack_frame = AckFrame::new(
-            9_u32.into(),
-            100_u32.into(),
-            5_u32.into(),
-            vec![(1_u32.into(), 1_u32.into())],
-            None,
-        );
+        let ack_frame = AckFrame::new(9_u32.into(), 100_u32.into(), 5_u32.into(), vec![(1_u32.into(), 1_u32.into())], None);
 
         let mut reno = new_reno();
         packet_space.on_ack_rcvd(&ack_frame, &mut reno);
@@ -391,33 +317,15 @@ mod tests {
         assert_eq!(reno.congestion_window(), 20400);
 
         for i in 10..15 {
-            packet_space.sent_packets.push_back(SentPacket::new(
-                i,
-                Instant::now(),
-                true,
-                true,
-                1200,
-            ));
+            packet_space.sent_packets.push_back(SentPacket::new(i, Instant::now(), true, true, 1200));
         }
         for i in 20..25 {
-            packet_space.sent_packets.push_back(SentPacket::new(
-                i,
-                Instant::now(),
-                false,
-                true,
-                1200,
-            ));
+            packet_space.sent_packets.push_back(SentPacket::new(i, Instant::now(), false, true, 1200));
         }
 
         // ack 24 ~ 20 13
         // loss 10, 11,12,14
-        let ack_frame = AckFrame::new(
-            24_u32.into(),
-            100_u32.into(),
-            5_u32.into(),
-            vec![(4_u32.into(), 0_u32.into())],
-            None,
-        );
+        let ack_frame = AckFrame::new(24_u32.into(), 100_u32.into(), 5_u32.into(), vec![(4_u32.into(), 0_u32.into())], None);
 
         packet_space.on_ack_rcvd(&ack_frame, &mut reno);
         packet_space.largest_acked_packet = Some(ack_frame.largest());

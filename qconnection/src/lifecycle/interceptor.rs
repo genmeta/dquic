@@ -41,15 +41,10 @@ impl Interceptor {
             let inspected = match buffer.len().checked_add(bytes.as_ref().len()) {
                 Some(received) if received <= self.max_bytes => {
                     buffer.extend_from_slice(bytes.as_ref());
-                    qtls::incoming::client_hello(buffer, self.max_bytes)
-                        .map_err(crate::tls::tls_error)
+                    qtls::incoming::client_hello(buffer, self.max_bytes).map_err(crate::tls::tls_error)
                 }
                 _ => Err(crate::tls::tls_error(
-                    qtls::PeerTlsError::ResourceLimit {
-                        resource: "ClientHello bytes",
-                        limit: self.max_bytes,
-                    }
-                    .into(),
+                    qtls::PeerTlsError::ResourceLimit { resource: "ClientHello bytes", limit: self.max_bytes }.into(),
                 )),
             };
             match inspected {
@@ -76,16 +71,8 @@ impl Interceptor {
     pub async fn read(self) -> Result<ClientHello, Error> {
         match self.result.await {
             Ok(Some(result)) => result,
-            Ok(None) => Err(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "ClientHello was already read",
-            )
-            .into()),
-            Err(_) => Err(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "ClientHello interception was cancelled",
-            )
-            .into()),
+            Ok(None) => Err(QuicError::with_default_fty(ErrorKind::Internal, "ClientHello was already read").into()),
+            Err(_) => Err(QuicError::with_default_fty(ErrorKind::Internal, "ClientHello interception was cancelled").into()),
         }
     }
 }
@@ -97,11 +84,7 @@ impl Default for Interceptor {
 }
 
 /// Feed Initial CRYPTO into the interceptor until ClientHello or a read failure.
-pub(super) async fn read_crypto_stream_to_interceptor(
-    interceptor: Interceptor,
-    stream: CryptoStream,
-    paths: Arc<Paths>,
-) {
+pub(super) async fn read_crypto_stream_to_interceptor(interceptor: Interceptor, stream: CryptoStream, paths: Arc<Paths>) {
     let terminator = paths.terminator.clone();
     let mut reader = stream.reader();
     let mut buffer = [0; 4096];
@@ -120,13 +103,8 @@ pub(super) async fn read_crypto_stream_to_interceptor(
             Ok(length) if interceptor.write(&buffer[..length]) => break,
             Ok(_) => {}
             Err(error) => {
-                terminator.close(
-                    CloseReason::Internal(QuicError::with_default_fty(
-                        ErrorKind::Internal,
-                        error.to_string(),
-                    )),
-                    paths.closing_pto(),
-                );
+                terminator
+                    .close(CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, error.to_string())), paths.closing_pto());
                 break;
             }
         }

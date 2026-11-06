@@ -18,18 +18,15 @@ pub use authority::{LocalAuthority, RemoteAuthority, SignError};
 pub use config::{ClientStart, ClientTlsConfig, ServerTlsConfig, TlsClient, TlsLimits, TlsServer};
 pub use epoch::Epoch;
 pub use error::{
-    CertificateError, CryptoError, ExporterError, HandshakeNotComplete, InvalidLocalAuthority,
-    PeerTlsError, StoreError, TlsAlert, TlsConfigError, TlsError, TlsInvariantError,
+    CertificateError, CryptoError, ExporterError, HandshakeNotComplete, InvalidLocalAuthority, PeerTlsError, StoreError, TlsAlert,
+    TlsConfigError, TlsError, TlsInvariantError,
 };
 pub use handshake::{EstablishedTls, HandshakeSummary, InstalledKeys, TlsEvent, TlsHandshake};
-pub use keys::{
-    BidirectionalKeys, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial, PacketKey,
-    PacketKeys, Secrets,
-};
+pub use keys::{BidirectionalKeys, DirectionalKeys, HeaderProtectionKey, OneRttKeyMaterial, PacketKey, PacketKeys, Secrets};
 pub use ocsp::validate_ocsp;
 pub use resumption::{
-    ClientResumptionConfig, MemoryResumptionStore, ResumptionKey, ResumptionStore,
-    ServerResumptionConfig, SessionSealKeyRing, StoredSession, TicketKeyRing,
+    ClientResumptionConfig, MemoryResumptionStore, ResumptionKey, ResumptionStore, ServerResumptionConfig, SessionSealKeyRing,
+    StoredSession, TicketKeyRing,
 };
 pub use root::RootCerts;
 /// Default provider for the enabled qtls backend; AWS-LC takes precedence over ring.

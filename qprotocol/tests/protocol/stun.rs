@@ -16,17 +16,11 @@ use qbase::{
         route::{Line, Link},
     },
 };
-use qprotocol::{
-    Dock, ForwardProtocol, QuicProtocol, UdpSocket, protocol::stun::*, topology::Topology,
-};
+use qprotocol::{Dock, ForwardProtocol, QuicProtocol, UdpSocket, protocol::stun::*, topology::Topology};
 use tokio::time::timeout;
 
 fn isolated_dock(protocol: &Arc<StunProtocol>) -> Arc<Dock> {
-    Dock::new(Arc::new(Topology::new(
-        protocol.clone(),
-        Arc::new(ForwardProtocol::new()),
-        Arc::new(QuicProtocol::new()),
-    )))
+    Dock::new(Arc::new(Topology::new(protocol.clone(), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new()))))
 }
 
 #[test]
@@ -53,24 +47,11 @@ async fn new_transactions_do_not_overwrite_each_other() {
     let first_mapping = "203.0.113.1:40000".parse().unwrap();
     let second_mapping = "203.0.113.1:40001".parse().unwrap();
     for (id, mapped) in [(second.id(), second_mapping), (first.id(), first_mapping)] {
-        protocol
-            .on_datagram(
-                &client,
-                id,
-                Message::Response(Response::with(vec![Attr::MappedAddress(mapped)])),
-                link,
-            )
-            .await
-            .unwrap();
+        protocol.on_datagram(&client, id, Message::Response(Response::with(vec![Attr::MappedAddress(mapped)])), link).await.unwrap();
     }
     for (transaction, mapped) in [(&mut first, first_mapping), (&mut second, second_mapping)] {
-        let (received_link, response) = timeout(
-            Duration::from_secs(1),
-            transaction.request(link, Request::default()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (received_link, response) =
+            timeout(Duration::from_secs(1), transaction.request(link, Request::default())).await.unwrap().unwrap();
         assert_eq!(received_link, link);
         assert_eq!(response.map_addr().unwrap(), mapped);
     }
@@ -80,11 +61,7 @@ async fn new_transactions_do_not_overwrite_each_other() {
 async fn transaction_retries_with_the_same_id_after_timeout() {
     let protocol = Arc::new(StunProtocol::new());
     protocol.disable_service();
-    let topology = Arc::new(Topology::new(
-        protocol.clone(),
-        Arc::new(ForwardProtocol::new()),
-        Arc::new(QuicProtocol::new()),
-    ));
+    let topology = Arc::new(Topology::new(protocol.clone(), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new())));
     let dock = Dock::new(topology);
     let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
@@ -95,24 +72,11 @@ async fn transaction_retries_with_the_same_id_after_timeout() {
 
     let mut transaction = protocol.new_transaction();
     let transaction_id = transaction.id();
-    assert!(
-        timeout(
-            Duration::from_millis(20),
-            transaction.request(link, Request::default()),
-        )
-        .await
-        .is_err()
-    );
+    assert!(timeout(Duration::from_millis(20), transaction.request(link, Request::default()),).await.is_err());
     assert_eq!(transaction.id(), transaction_id);
 
     protocol.enable_service();
-    let (response_link, response) = timeout(
-        Duration::from_secs(1),
-        transaction.request(link, Request::default()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (response_link, response) = timeout(Duration::from_secs(1), transaction.request(link, Request::default())).await.unwrap().unwrap();
 
     assert_eq!(response_link, link);
     assert_eq!(response.map_addr().unwrap(), client_addr);

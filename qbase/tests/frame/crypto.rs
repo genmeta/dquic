@@ -64,9 +64,6 @@ fn test_read_crypto_frame() {
     buf.extend_from_slice(&data);
     assert_eq!(
         super::parse_frame(&buf, FrameType::Crypto),
-        qbase::frame::Frame::Crypto(
-            CryptoFrame::new(VarInt::from_u32(0x1234), VarInt::from_u32(0x5678)),
-            data
-        )
+        qbase::frame::Frame::Crypto(CryptoFrame::new(VarInt::from_u32(0x1234), VarInt::from_u32(0x5678)), data)
     );
 }

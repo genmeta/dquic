@@ -60,14 +60,7 @@ mod tests {
             let limits_quota = 64;
             let written = self.0.len();
             let mut frames = Vec::new();
-            let mut buffer = PacketBuffer::new(
-                self,
-                limits_quota,
-                &mut frames,
-                Type::Long(Long::V1(Ver1::INITIAL)),
-                written,
-                0,
-            );
+            let mut buffer = PacketBuffer::new(self, limits_quota, &mut frames, Type::Long(Long::V1(Ver1::INITIAL)), written, 0);
             match source.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer) {
                 std::task::Poll::Ready(Ok(n)) if n > 0 => Ok(n),
                 _ => Err(()),
@@ -90,13 +83,9 @@ mod tests {
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
         for offset in [5u32, 15] {
-            stream
-                .outgoing()
-                .on_data_acked(&CryptoFrame::new(offset.into(), 5u32.into()));
+            stream.outgoing().on_data_acked(&CryptoFrame::new(offset.into(), 5u32.into()));
         }
-        stream
-            .outgoing()
-            .may_loss_data(&CryptoFrame::new(0u32.into(), 20u32.into()));
+        stream.outgoing().may_loss_data(&CryptoFrame::new(0u32.into(), 20u32.into()));
 
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
         packet.load(&mut stream.outgoing()).unwrap();
@@ -116,8 +105,7 @@ mod tests {
     async fn ack_in_any_crypto_stream_stops_replay_in_every_stream() {
         for acknowledged in 0..3 {
             let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
-            let streams =
-                std::array::from_fn::<_, 3, _>(|_| CryptoStream::with_facts(facts.clone()));
+            let streams = std::array::from_fn::<_, 3, _>(|_| CryptoStream::with_facts(facts.clone()));
             for stream in &streams {
                 stream.writer().write_all(b"hello world").await.unwrap();
                 for _ in 0..2 {
@@ -125,13 +113,9 @@ mod tests {
                     assert_eq!(packet.load(&mut stream.outgoing()), Ok(1));
                 }
             }
-            streams[acknowledged]
-                .outgoing()
-                .on_data_acked(&CryptoFrame::new(0u32.into(), 0u32.into()));
+            streams[acknowledged].outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 0u32.into()));
             assert!(facts.is_mp_handshaking());
-            streams[acknowledged]
-                .outgoing()
-                .on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
+            streams[acknowledged].outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
             assert!(!facts.is_mp_handshaking());
 
             // Previously Lost ranges can still be sent once; subsequent sends wait for recovery.
@@ -162,10 +146,7 @@ mod tests {
         let stream = CryptoStream::with_facts(Arc::new(HandshakeFacts::with_role(Role::Client)));
         stream.writer().write_all(b"ClientHello").await.unwrap();
         let mut expected = bytes::BytesMut::new();
-        expected.put_data_frame(
-            &CryptoFrame::new(0u32.into(), 11u32.into()),
-            &b"ClientHello".as_slice(),
-        );
+        expected.put_data_frame(&CryptoFrame::new(0u32.into(), 11u32.into()), &b"ClientHello".as_slice());
         let barrier = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             let workers = (0..8)
@@ -213,9 +194,7 @@ mod tests {
         let mut blocked = TestPacket(bytes::BytesMut::with_capacity(64));
         assert!(blocked.load(&mut stream.outgoing()).is_err());
 
-        stream
-            .outgoing()
-            .on_data_acked(&CryptoFrame::new(0u32.into(), 11u32.into()));
+        stream.outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 11u32.into()));
         assert!(blocked.load(&mut outgoing).is_err());
         stream.writer().flush().await.unwrap();
     }
@@ -231,10 +210,7 @@ mod tests {
         };
 
         let crypto_frame = |packet: &TestPacket| {
-            let mut frames = FrameReader::new(
-                packet.0.clone().freeze(),
-                Type::Long(Long::V1(Ver1::INITIAL)),
-            );
+            let mut frames = FrameReader::new(packet.0.clone().freeze(), Type::Long(Long::V1(Ver1::INITIAL)));
             let Frame::Crypto(frame, _) = frames.next().unwrap().unwrap().0 else {
                 panic!("expected CRYPTO")
             };
@@ -276,21 +252,14 @@ mod tests {
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
         let mut bytes = [0; 8];
-        assert!(
-            Pin::new(&mut reader)
-                .poll_read(&mut cx, &mut ReadBuf::new(&mut bytes))
-                .is_pending()
-        );
+        assert!(Pin::new(&mut reader).poll_read(&mut cx, &mut ReadBuf::new(&mut bytes)).is_pending());
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
         packet.load(&mut stream.outgoing()).unwrap();
 
         stream.recver.retire();
         assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            reader.read(&mut bytes).await.unwrap_err().kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
+        assert_eq!(reader.read(&mut bytes).await.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
         let frame = CryptoFrame::new(0u32.into(), 11u32.into());
         stream.outgoing().may_loss_data(&frame);
@@ -300,13 +269,7 @@ mod tests {
         stream.outgoing().on_data_acked(&frame);
         assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
         writer.flush().await.unwrap();
-        stream
-            .incoming()
-            .recv_frame((
-                CryptoFrame::new(0u32.into(), 4u32.into()),
-                bytes::Bytes::from_static(b"late"),
-            ))
-            .unwrap();
+        stream.incoming().recv_frame((CryptoFrame::new(0u32.into(), 4u32.into()), bytes::Bytes::from_static(b"late"))).unwrap();
         assert!(reader.read(&mut bytes).await.is_err());
     }
 
@@ -321,30 +284,14 @@ mod tests {
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
         stream.sender.retire();
         assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            writer.flush().await.unwrap_err().kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            stream.writer().write(b"late").await.unwrap_err().kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
+        assert_eq!(writer.flush().await.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(stream.writer().write(b"late").await.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
         assert!(packet.load(&mut stream.outgoing()).is_err());
-        stream
-            .outgoing()
-            .on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
-        stream
-            .outgoing()
-            .may_loss_data(&CryptoFrame::new(0u32.into(), 7u32.into()));
+        stream.outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 7u32.into()));
+        stream.outgoing().may_loss_data(&CryptoFrame::new(0u32.into(), 7u32.into()));
         assert!(packet.0.is_empty());
-        stream
-            .incoming()
-            .recv_frame((
-                CryptoFrame::new(0u32.into(), 4u32.into()),
-                bytes::Bytes::from_static(b"peer"),
-            ))
-            .unwrap();
+        stream.incoming().recv_frame((CryptoFrame::new(0u32.into(), 4u32.into()), bytes::Bytes::from_static(b"peer"))).unwrap();
         let mut bytes = [0; 4];
         stream.reader().read_exact(&mut bytes).await.unwrap();
         assert_eq!(&bytes, b"peer");
@@ -360,17 +307,10 @@ mod tests {
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
         let mut bytes = [0; 8];
-        assert!(
-            Pin::new(&mut reader)
-                .poll_read(&mut cx, &mut ReadBuf::new(&mut bytes))
-                .is_pending()
-        );
+        assert!(Pin::new(&mut reader).poll_read(&mut cx, &mut ReadBuf::new(&mut bytes)).is_pending());
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
 
-        let error = Error::from(QuicError::with_default_fty(
-            ErrorKind::Crypto(40),
-            "handshake failed",
-        ));
+        let error = Error::from(QuicError::with_default_fty(ErrorKind::Crypto(40), "handshake failed"));
         stream.on_error(&error);
         assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
         stream.on_error(&QuicError::with_default_fty(ErrorKind::Internal, "late error").into());
@@ -394,10 +334,7 @@ mod tests {
     async fn shutdown_is_unsupported_and_keeps_unacknowledged_data() {
         let stream = single_path_stream();
         stream.writer().write_all(b"outgoing").await.unwrap();
-        assert_eq!(
-            stream.writer().shutdown().await.unwrap_err().kind(),
-            std::io::ErrorKind::Unsupported,
-        );
+        assert_eq!(stream.writer().shutdown().await.unwrap_err().kind(), std::io::ErrorKind::Unsupported,);
         let mut packet = TestPacket(bytes::BytesMut::with_capacity(64));
         packet.load(&mut stream.outgoing()).unwrap();
         assert!(packet.0.ends_with(b"outgoing"));
@@ -415,9 +352,7 @@ mod tests {
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
         assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
-        stream
-            .outgoing()
-            .on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
+        stream.outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
         assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
         writer.flush().await.unwrap();
     }
@@ -425,30 +360,20 @@ mod tests {
     #[test]
     fn sparse_crypto_cannot_allocate_an_unbounded_handshake_buffer() {
         let stream = single_path_stream();
-        let result = stream.incoming().recv_frame((
-            CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)),
-            bytes::Bytes::from_static(b"x"),
-        ));
-        assert!(
-            matches!(result, Err(error) if error.kind() == qbase::error::ErrorKind::CryptoBufferExceeded)
-        );
+        let result = stream
+            .incoming()
+            .recv_frame((CryptoFrame::new(VarInt::from_u32(256 * 1024), VarInt::from_u32(1)), bytes::Bytes::from_static(b"x")));
+        assert!(matches!(result, Err(error) if error.kind() == qbase::error::ErrorKind::CryptoBufferExceeded));
     }
 
     #[tokio::test]
     async fn test_read() {
         let crypto_stream: CryptoStream = single_path_stream();
-        crypto_stream
-            .writer()
-            .write_all(b"hello world")
-            .await
-            .unwrap();
+        crypto_stream.writer().write_all(b"hello world").await.unwrap();
 
         crypto_stream
             .incoming()
-            .recv_frame((
-                CryptoFrame::new(VarInt::from_u32(0), VarInt::from_u32(11)),
-                bytes::Bytes::copy_from_slice(b"hello world"),
-            ))
+            .recv_frame((CryptoFrame::new(VarInt::from_u32(0), VarInt::from_u32(11)), bytes::Bytes::copy_from_slice(b"hello world")))
             .unwrap();
         let mut buf = [0u8; 11];
         crypto_stream.reader().read_exact(&mut buf).await.unwrap();
@@ -476,9 +401,7 @@ mod poll_tests {
         let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
         let stream = CryptoStream::with_facts(facts.clone());
         stream.writer().write_all(b"client hello").await.unwrap();
-        let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default())
-            .initial(vec![])
-            .get_type();
+        let ty = LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![]).get_type();
         let mut cx = Context::from_waker(Waker::noop());
         let mut previous = None;
         for pass in 0..4 {
@@ -497,10 +420,7 @@ mod poll_tests {
                 assert!(frames.is_empty());
             } else {
                 assert!(matches!(result, Poll::Ready(Ok(1))));
-                assert!(matches!(
-                    frames.as_slice(),
-                    [qbase::frame::GuaranteedFrame::Crypto(_)]
-                ));
+                assert!(matches!(frames.as_slice(), [qbase::frame::GuaranteedFrame::Crypto(_)]));
                 if let Some(previous) = &previous {
                     assert_eq!(&bytes, previous);
                 }

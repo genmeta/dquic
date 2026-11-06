@@ -1,9 +1,7 @@
 use bytes::BytesMut;
 use qbase::{frame::Frame, packet::OneRttHeader};
 
-pub(crate) fn take_frames(
-    source: &mut impl for<'b> qbase::packet::Package<bytes::buf::Limit<&'b mut BytesMut>>,
-) -> Vec<Frame> {
+pub(crate) fn take_frames(source: &mut impl for<'b> qbase::packet::Package<bytes::buf::Limit<&'b mut BytesMut>>) -> Vec<Frame> {
     use qbase::packet::{GetType, PacketBuffer};
     let mut bytes = BytesMut::with_capacity(1200);
     let mut frames = Vec::new();

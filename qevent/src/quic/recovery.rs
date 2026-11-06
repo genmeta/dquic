@@ -76,11 +76,7 @@ pub struct RecoveryParametersSet {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct RecoveryMetricsUpdated {
     /// Loss detection, see RFC 9002 Appendix A.3
     /// all following rtt fields are expressed in ms
@@ -200,11 +196,7 @@ pub enum EventType {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct PacketLost {
     /// should include at least the packet_type and packet_number
     header: Option<PacketHeader>,
@@ -384,12 +376,8 @@ mod rollback {
         #[inline]
         fn from(value: PacketLostTrigger) -> Self {
             match value {
-                PacketLostTrigger::ReorderingThreshold => {
-                    legacy::RecoveryPacketLostTrigger::ReorderingThreshold
-                }
-                PacketLostTrigger::TimeThreshold => {
-                    legacy::RecoveryPacketLostTrigger::TimeThreshold
-                }
+                PacketLostTrigger::ReorderingThreshold => legacy::RecoveryPacketLostTrigger::ReorderingThreshold,
+                PacketLostTrigger::TimeThreshold => legacy::RecoveryPacketLostTrigger::TimeThreshold,
                 PacketLostTrigger::PtoExpired => legacy::RecoveryPacketLostTrigger::PtoExpired,
             }
         }
@@ -407,9 +395,7 @@ mod rollback {
 
     impl From<MarkedForRetransmit> for legacy::RecoveryMarkedForRetransmit {
         fn from(value: MarkedForRetransmit) -> Self {
-            build!(legacy::RecoveryMarkedForRetransmit {
-                frames: value.frames.into_iter().map(Into::into).collect::<Vec<_>>(),
-            })
+            build!(legacy::RecoveryMarkedForRetransmit { frames: value.frames.into_iter().map(Into::into).collect::<Vec<_>>() })
         }
     }
 }

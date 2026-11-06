@@ -29,18 +29,11 @@ impl std::task::Wake for Counter {
 #[tokio::test]
 async fn activation_changes_wake_the_sender_without_retiring_the_path() {
     let path = Path::new(
-        Pathway::new(
-            "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
-            "127.0.0.1:5500".parse().unwrap(),
-        ),
+        Pathway::new("127.0.0.1:4400".parse::<EndpointAddr>().unwrap(), "127.0.0.1:5500".parse().unwrap()),
         Arc::new(HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     let counter = Arc::new(Counter(AtomicUsize::new(0)));
     path.send_waker.register(&Waker::from(counter.clone()));
@@ -49,11 +42,7 @@ async fn activation_changes_wake_the_sender_without_retiring_the_path() {
     path.disable();
     assert!(!path.is_active());
     assert!(!path.validation.is_cancelled());
-    assert!(
-        path.dcid
-            .poll_borrow(&mut Context::from_waker(Waker::noop()))
-            .is_ready()
-    );
+    assert!(path.dcid.poll_borrow(&mut Context::from_waker(Waker::noop())).is_ready());
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     path.enable();
     path.enable();
@@ -69,18 +58,11 @@ async fn handshake_events_stop_early_epoch_pto() {
     use qbase::Epoch;
     let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
     let path = Path::new(
-        Pathway::new(
-            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
-        ),
+        Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         handshake.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::from(IndexDeque::with_capacity(3)),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     path.validation.exempt().unwrap();
     handshake.install_handshake_key();
@@ -102,28 +84,17 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
     use qbase::Epoch;
 
     let path = Path::new(
-        Pathway::new(
-            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
-        ),
+        Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Client)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     path.validation.exempt().unwrap();
     let step = path.cc.get_pto(Epoch::Initial) / 10;
     for _ in 0..11 {
         tokio::time::advance(step).await;
-        assert!(matches!(
-            path.validation
-                .poll_credit(&mut Context::from_waker(Waker::noop())),
-            Poll::Ready(Ok(None))
-        ));
+        assert!(matches!(path.validation.poll_credit(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(None))));
         path.cc.do_tick().unwrap();
     }
     assert!(path.cc.need_send_ack_eliciting(Epoch::Initial) > 0);
@@ -132,34 +103,19 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
 #[tokio::test(start_paused = true)]
 async fn cancelling_shared_validation_retires_the_path() {
     let path = Path::new(
-        Pathway::new(
-            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
-        ),
+        Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     assert!(path.validation.credit().is_ok());
     path.validation.cancel();
-    assert!(matches!(
-        path.validation
-            .poll_credit(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Err(qbase::Cancelled))
-    ));
+    assert!(matches!(path.validation.poll_credit(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(qbase::Cancelled))));
     path.close();
     path.close();
     assert!(path.validation.enter_validated().is_err());
-    assert!(matches!(
-        path.validation
-            .poll_credit(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Err(qbase::Cancelled))
-    ));
+    assert!(matches!(path.validation.poll_credit(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(qbase::Cancelled))));
 }
 
 #[tokio::test(start_paused = true)]
@@ -174,19 +130,11 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 Arc::new(HandshakeFacts::with_role(Role::Server)),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 ArcIndexDeque::default(),
-                qbase::cid::ArcRemoteCids::client(
-                    Default::default(),
-                    qtransport::ArcReliableFrames::with_capacity(0),
-                )
-                .apply_dcid(),
+                qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
             );
             if queued {
-                path.validation
-                    .recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
-                    .unwrap();
-                path.validation
-                    .challenge(PathChallengeFrame::from_slice(&[2; 8]))
-                    .unwrap();
+                path.validation.recv_frame(PathChallengeFrame::from_slice(&[1; 8])).unwrap();
+                path.validation.challenge(PathChallengeFrame::from_slice(&[2; 8])).unwrap();
             }
             let counter = Arc::new(Counter(AtomicUsize::new(0)));
             let waker = Waker::from(counter.clone());
@@ -196,17 +144,15 @@ async fn validation_registers_only_when_both_sources_are_empty() {
             let limits_length = 128;
             let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-            let result = path.validation.clone().poll_dump(
-                &mut Context::from_waker(&waker),
-                &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-            );
+            let result = path
+                .validation
+                .clone()
+                .poll_dump(&mut Context::from_waker(&waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
             assert_eq!(result.is_pending(), !queued);
             if queued {
                 assert_eq!(result, Poll::Ready(Ok(if quota == 0 { 0 } else { 2 })));
             }
-            path.validation
-                .recv_frame(PathChallengeFrame::from_slice(&[3; 8]))
-                .unwrap();
+            path.validation.recv_frame(PathChallengeFrame::from_slice(&[3; 8])).unwrap();
             assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
         }
     }
@@ -215,23 +161,14 @@ async fn validation_registers_only_when_both_sources_are_empty() {
 #[tokio::test]
 async fn every_duplicate_challenge_is_packaged_as_a_response() {
     let path = Path::new(
-        Pathway::new(
-            EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
-            EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
-        ),
+        Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Server)),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(
-            Default::default(),
-            qtransport::ArcReliableFrames::with_capacity(0),
-        )
-        .apply_dcid(),
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
     );
     for _ in 0..10 {
-        path.validation
-            .recv_frame(PathChallengeFrame::from_slice(&[1; 8]))
-            .unwrap();
+        path.validation.recv_frame(PathChallengeFrame::from_slice(&[1; 8])).unwrap();
     }
     let mut bytes = bytes::BytesMut::new();
     let mut frames = Vec::new();
@@ -239,9 +176,9 @@ async fn every_duplicate_challenge_is_packaged_as_a_response() {
     let limits_length = 128;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
-    let result = path.validation.clone().poll_dump(
-        &mut Context::from_waker(Waker::noop()),
-        &mut PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0),
-    );
+    let result = path
+        .validation
+        .clone()
+        .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0));
     assert_eq!(result, Poll::Ready(Ok(10)));
 }

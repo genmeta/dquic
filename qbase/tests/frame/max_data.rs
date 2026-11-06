@@ -28,8 +28,6 @@ fn test_write_max_data_frame() {
 fn test_read_max_data_frame() {
     assert_eq!(
         super::parse_frame(&[0x10, 0x52, 0x34], FrameType::MaxData),
-        qbase::frame::Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(
-            VarInt::from_u32(0x1234)
-        )))
+        qbase::frame::Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(VarInt::from_u32(0x1234))))
     );
 }

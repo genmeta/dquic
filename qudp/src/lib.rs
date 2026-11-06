@@ -41,16 +41,9 @@ pub struct BoundDevice {
 
 impl BoundDevice {
     pub fn new(name: impl Into<String>, index: u32) -> io::Result<Self> {
-        let index = NonZeroU32::new(index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "interface index must be non-zero",
-            )
-        })?;
-        Ok(Self {
-            name: name.into(),
-            index,
-        })
+        let index =
+            NonZeroU32::new(index).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "interface index must be non-zero"))?;
+        Ok(Self { name: name.into(), index })
     }
 
     pub fn name(&self) -> &str {
@@ -86,12 +79,7 @@ impl UdpSocket {
             Self::bind_device_to_socket(&socket_ref, addr, device)?;
         }
         let io = tokio::net::UdpSocket::from_std(socket.into())?;
-        let usc = Self {
-            io,
-            send_wakers: Arc::new(Wakers::new()),
-            ttl: AtomicI32::new(Line::DEFAULT_TTL as i32),
-            bound_device,
-        };
+        let usc = Self { io, send_wakers: Arc::new(Wakers::new()), ttl: AtomicI32::new(Line::DEFAULT_TTL as i32), bound_device };
         Ok(usc)
     }
 
@@ -105,27 +93,18 @@ impl UdpSocket {
 
     /// Wake all concurrent senders through Tokio's single send-readiness waker.
     pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.send_wakers
-            .combine_with(cx, |cx| self.io.poll_send_ready(cx))
+        self.send_wakers.combine_with(cx, |cx| self.io.poll_send_ready(cx))
     }
 
     pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.io.poll_recv_ready(cx)
     }
 
-    pub fn poll_send(
-        &self,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-        line: &Line,
-    ) -> Poll<io::Result<usize>> {
+    pub fn poll_send(&self, cx: &mut Context<'_>, bufs: &[IoSlice<'_>], line: &Line) -> Poll<io::Result<usize>> {
         loop {
             ready!(self.poll_send_ready(cx))?;
             self.set_ttl(line.ttl as i32)?;
-            match self
-                .io
-                .try_io(Interest::WRITABLE, || self.sendmsg(bufs, line))
-            {
+            match self.io.try_io(Interest::WRITABLE, || self.sendmsg(bufs, line)) {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Poll::Ready(Err(e)),
@@ -133,12 +112,7 @@ impl UdpSocket {
         }
     }
 
-    pub fn poll_recv(
-        &self,
-        cx: &mut Context,
-        bufs: &mut [IoSliceMut<'_>],
-        lines: &mut [Line],
-    ) -> Poll<io::Result<usize>> {
+    pub fn poll_recv(&self, cx: &mut Context, bufs: &mut [IoSliceMut<'_>], lines: &mut [Line]) -> Poll<io::Result<usize>> {
         loop {
             ready!(self.poll_recv_ready(cx)?);
             let f = || self.recvmsg(bufs, lines);
@@ -176,11 +150,7 @@ impl UdpSocket {
 pub trait Io {
     fn config(io: &socket2::Socket, addr: SocketAddr) -> io::Result<()>;
 
-    fn bind_device_to_socket(
-        io: &socket2::SockRef<'_>,
-        addr: SocketAddr,
-        device: &BoundDevice,
-    ) -> io::Result<()>;
+    fn bind_device_to_socket(io: &socket2::SockRef<'_>, addr: SocketAddr, device: &BoundDevice) -> io::Result<()>;
 
     fn sendmsg(&self, bufs: &[IoSlice<'_>], line: &Line) -> io::Result<usize>;
 
@@ -191,19 +161,11 @@ pub trait Io {
 
 impl UdpSocket {
     pub fn send<'a>(&'a self, iovecs: &'a [IoSlice<'a>], line: Line) -> Send<'a> {
-        Send {
-            socket: self,
-            iovecs,
-            line,
-        }
+        Send { socket: self, iovecs, line }
     }
 
     pub fn receive<'a>(&'a self, iovecs: &'a mut [BytesMut], lines: &'a mut [Line]) -> Receive<'a> {
-        Receive {
-            socket: self,
-            iovecs,
-            lines,
-        }
+        Receive { socket: self, iovecs, lines }
     }
 }
 
@@ -233,11 +195,7 @@ impl Future for Receive<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut bufs = this
-            .iovecs
-            .iter_mut()
-            .map(|b| IoSliceMut::new(b))
-            .collect::<Vec<_>>();
+        let mut bufs = this.iovecs.iter_mut().map(|b| IoSliceMut::new(b)).collect::<Vec<_>>();
         this.socket.poll_recv(cx, &mut bufs, this.lines)
     }
 }

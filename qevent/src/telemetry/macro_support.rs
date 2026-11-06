@@ -5,16 +5,10 @@ use crate::{BeSpecificEventData, EventBuilder};
 
 #[inline]
 pub fn new_span(exporter: Arc<dyn ExportEvent>, fields: HashMap<&'static str, Value>) -> Span {
-    Span {
-        exporter,
-        fields: Arc::new(fields),
-    }
+    Span { exporter, fields: Arc::new(fields) }
 }
 
-pub fn modify_event_builder_costom_fields(
-    builder: &mut EventBuilder,
-    f: impl FnOnce(&mut HashMap<String, Value>),
-) {
+pub fn modify_event_builder_costom_fields(builder: &mut EventBuilder, f: impl FnOnce(&mut HashMap<String, Value>)) {
     if builder.custom_fields.is_none() {
         builder.custom_fields = Some(HashMap::new());
     }
@@ -37,10 +31,7 @@ pub fn try_load_current_span<T: DeserializeOwned>(name: &'static str) -> Option<
     })
 }
 
-pub fn build_and_emit_event<D: BeSpecificEventData>(
-    build_data: impl FnOnce() -> D,
-    build_event: impl FnOnce(D) -> Event,
-) {
+pub fn build_and_emit_event<D: BeSpecificEventData>(build_data: impl FnOnce() -> D, build_event: impl FnOnce(D) -> Event) {
     if !filter::event(D::scheme()) {
         return;
     }

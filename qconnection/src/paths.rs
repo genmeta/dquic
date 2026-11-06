@@ -56,28 +56,14 @@ impl Paths {
         let role = facts.role();
         let idle = ArcIdleTimer::new(max_idle_timeout);
         let mut loss_resender = IndexDeque::<Arc<dyn qcongestion::Resend>, 2>::with_capacity(3);
-        loss_resender
-            .push_back(initial_space.clone())
-            .expect("Initial epoch");
+        loss_resender.push_back(initial_space.clone()).expect("Initial epoch");
         let terminator = ArcTerminator::no_error();
         terminator.register(Arc::new(initial_space.crypto.clone()));
         let spaces = ArcSpaces::from(IndexDeque::with_capacity(3));
-        spaces
-            .write_guard()
-            .push_back(initial_space)
-            .expect("Initial epoch");
-        let puncher = ArcPuncher::new(
-            reliable_frames.clone(),
-            ProbeEncoder::new(spaces.clone(), cid_registry.remote.apply_dcid()),
-        );
+        spaces.write_guard().push_back(initial_space).expect("Initial epoch");
+        let puncher = ArcPuncher::new(reliable_frames.clone(), ProbeEncoder::new(spaces.clone(), cid_registry.remote.apply_dcid()));
         let loss_resender = ArcResend::from(loss_resender);
-        let progress = ArcProgress::new(
-            facts,
-            cid_registry.clone(),
-            spaces.clone(),
-            loss_resender.clone(),
-            terminator.clone(),
-        );
+        let progress = ArcProgress::new(facts, cid_registry.clone(), spaces.clone(), loss_resender.clone(), terminator.clone());
         let paths = Arc::new(Self {
             cid_registry,
             puncher,
@@ -128,12 +114,7 @@ impl Paths {
     pub fn get_or_create_path(self: &Arc<Self>, pathway: &Pathway) -> Arc<Path> {
         // Take shared facts before entries to preserve the Progress -> entries lock order.
         let facts = self.progress.facts();
-        self.entries
-            .lock()
-            .unwrap()
-            .entry(*pathway)
-            .or_insert_with(|| self.create_path(*pathway, facts))
-            .clone()
+        self.entries.lock().unwrap().entry(*pathway).or_insert_with(|| self.create_path(*pathway, facts)).clone()
     }
 
     /// Remove the registered path and stop its validation, heartbeat and sender.
@@ -161,11 +142,7 @@ impl Paths {
         if let Some(path) = entries.get(pathway) {
             return path.cc.get_pto(epoch);
         }
-        entries
-            .values()
-            .map(|path| path.cc.get_pto(epoch))
-            .max()
-            .unwrap_or(Duration::from_secs(1))
+        entries.values().map(|path| path.cc.get_pto(epoch)).max().unwrap_or(Duration::from_secs(1))
     }
 
     fn create_path(self: &Arc<Self>, pathway: Pathway, facts: Arc<HandshakeFacts>) -> Arc<Path> {
@@ -173,10 +150,7 @@ impl Paths {
         let path = Arc::new(Path::new(
             pathway,
             facts,
-            ArcHeartbeat::new(
-                self.defer_idle_timeout,
-                *self.max_idle_timeout.lock().unwrap(),
-            ),
+            ArcHeartbeat::new(self.defer_idle_timeout, *self.max_idle_timeout.lock().unwrap()),
             self.loss_resender.clone(),
             self.cid_registry.remote.apply_dcid(),
         ));
@@ -217,13 +191,7 @@ impl Paths {
     }
 
     pub(crate) fn closing_pto(&self) -> Duration {
-        self.entries
-            .lock()
-            .unwrap()
-            .values()
-            .map(|path| path.cc.pto_base(Epoch::Data))
-            .max()
-            .unwrap_or(Duration::from_secs(1))
+        self.entries.lock().unwrap().values().map(|path| path.cc.pto_base(Epoch::Data)).max().unwrap_or(Duration::from_secs(1))
     }
 
     /// Spawn one round at path creation or handshake confirmation.
@@ -267,11 +235,7 @@ impl Paths {
             // Check and remove under one lock: an old task must not remove a replacement.
             let no_paths = {
                 let mut entries = paths.entries.lock().unwrap();
-                if !path.validation.is_validated()
-                    && entries
-                        .get(&path.pathway)
-                        .is_some_and(|current| Arc::ptr_eq(current, &path))
-                {
+                if !path.validation.is_validated() && entries.get(&path.pathway).is_some_and(|current| Arc::ptr_eq(current, &path)) {
                     path.close();
                     entries.remove(&path.pathway);
                     paths.validations.remove(&path.pathway);
@@ -282,10 +246,7 @@ impl Paths {
             };
             if no_paths {
                 terminator.close(
-                    CloseReason::Internal(QuicError::with_default_fty(
-                        ErrorKind::NoViablePath,
-                        "path validation failed",
-                    )),
+                    CloseReason::Internal(QuicError::with_default_fty(ErrorKind::NoViablePath, "path validation failed")),
                     paths.closing_pto(),
                 );
             }

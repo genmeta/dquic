@@ -41,10 +41,7 @@ impl TryFrom<u8> for NatType {
             0x03 => Ok(NatType::RestrictedPort),
             0x04 => Ok(NatType::Symmetric),
             0x05 => Ok(NatType::Dynamic),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid value for NatType",
-            )),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid value for NatType")),
         }
     }
 }

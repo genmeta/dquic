@@ -6,8 +6,8 @@ use qbase::param::{ClientParameters, ParameterId, ServerParameters};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConnectionID, ECN, IPAddress, Owner, PacketHeader, PacketNumberSpace, PathEndpointInfo,
-    QuicFrame, QuicVersion, StatelessResetToken, StreamType,
+    ConnectionID, ECN, IPAddress, Owner, PacketHeader, PacketNumberSpace, PathEndpointInfo, QuicFrame, QuicVersion, StatelessResetToken,
+    StreamType,
 };
 use crate::{HexString, PathID, RawInfo};
 
@@ -28,11 +28,7 @@ use crate::{HexString, PathID, RawInfo};
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct VersionInformation {
     // Vec for `? filed: [ +ty]``, Option<Vec> for `* filed: [* ty]`
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -64,11 +60,7 @@ pub struct VersionInformation {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ALPNInformation {
     server_alpns: Option<Vec<ALPNIdentifier>>,
     client_alpns: Option<Vec<ALPNIdentifier>>,
@@ -81,11 +73,7 @@ pub struct ALPNInformation {
 /// none.
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ALPNIdentifier {
     byte_value: Option<HexString>,
     string_value: Option<String>,
@@ -129,11 +117,7 @@ pub struct ALPNIdentifier {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ParametersSet {
     owner: Option<Owner>,
 
@@ -219,9 +203,7 @@ impl ParametersSetBuilder {
 
     /// helper method to set all server parameters at once
     pub fn server_parameters(&mut self, params: &ServerParameters) -> &mut Self {
-        use qbase::{
-            cid::ConnectionId, param::preferred_address::PreferredAddress, token::ResetToken,
-        };
+        use qbase::{cid::ConnectionId, param::preferred_address::PreferredAddress, token::ResetToken};
         extract_parameter! {
             OriginalDestinationConnectionId as ConnectionId from params to self.original_destination_connection_id,
             InitialSourceConnectionId as ConnectionId from params to self.initial_source_connection_id,
@@ -294,11 +276,7 @@ pub struct UnknownParameter {
 
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct ParametersRestored {
     // RFC 9000
     disable_active_migration: Option<bool>,
@@ -432,11 +410,7 @@ pub enum PacketReceivedTrigger {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 #[serde(default)]
 pub struct PacketDropped {
     /// Primarily packet_type should be filled here,
@@ -474,8 +448,7 @@ pub enum PacketDroppedTrigger {
 impl From<qbase::packet::InvalidPacketNumber> for PacketDroppedTrigger {
     fn from(value: qbase::packet::InvalidPacketNumber) -> Self {
         match value {
-            qbase::packet::InvalidPacketNumber::TooOld
-            | qbase::packet::InvalidPacketNumber::TooLarge => PacketDroppedTrigger::Genera,
+            qbase::packet::InvalidPacketNumber::TooOld | qbase::packet::InvalidPacketNumber::TooLarge => PacketDroppedTrigger::Genera,
             qbase::packet::InvalidPacketNumber::Duplicate => PacketDroppedTrigger::Duplicate,
         }
     }
@@ -491,8 +464,9 @@ impl From<qbase::packet::error::Error> for PacketDroppedTrigger {
             | qbase::packet::error::Error::IncompleteHeader(_, _)
             | qbase::packet::error::Error::IncompletePacket(_, _)
             | qbase::packet::error::Error::UnderSampling(..) => Self::Invalid,
-            qbase::packet::error::Error::RemoveProtectionFailure
-            | qbase::packet::error::Error::DecryptPacketFailure => Self::DecryptionFailure,
+            qbase::packet::error::Error::RemoveProtectionFailure | qbase::packet::error::Error::DecryptPacketFailure => {
+                Self::DecryptionFailure
+            }
         }
     }
 }
@@ -506,11 +480,7 @@ impl From<qbase::packet::error::Error> for PacketDroppedTrigger {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct PacketBuffered {
     /// Primarily packet_type should be filled here,
     /// as other fields might not be decrypteable or parseable
@@ -545,11 +515,7 @@ pub enum PacketBufferedTrigger {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct PacketsAcked {
     packet_number_space: Option<PacketNumberSpace>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -563,11 +529,7 @@ pub struct PacketsAcked {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct UdpDatagramsSent {
     /// to support passing multiple at once
     count: Option<u16>,
@@ -595,11 +557,7 @@ pub struct UdpDatagramsSent {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct UdpDatagramsReceived {
     /// to support passing multiple at once
     count: Option<u16>,
@@ -628,11 +586,7 @@ pub struct UdpDatagramsReceived {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct UdpDatagramDropped {
     /// The RawInfo fields do not include the UDP headers,
     /// only the UDP payload
@@ -796,11 +750,7 @@ pub struct FramesProcessed {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct StreamDataMoved {
     stream_id: Option<u64>,
     offset: Option<u64>,
@@ -860,11 +810,7 @@ pub enum DataMovedAdditionalInfo {
 /// [QLOG-MAIN]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-09
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct DatagramDataMoved {
     /// byte length of the moved data
     length: Option<u64>,
@@ -988,14 +934,7 @@ mod rollback {
 
     impl From<ALPNIdentifier> for String {
         fn from(value: ALPNIdentifier) -> Self {
-            value.string_value.as_ref().map_or(
-                value
-                    .byte_value
-                    .as_ref()
-                    .map(|b| b.to_string())
-                    .unwrap_or_default(),
-                |s| s.to_string(),
-            )
+            value.string_value.as_ref().map_or(value.byte_value.as_ref().map(|b| b.to_string()).unwrap_or_default(), |s| s.to_string())
         }
     }
 
@@ -1241,12 +1180,8 @@ mod rollback {
                 StreamState::Base(BaseStreamStates::Idle) => Self::Idle,
                 StreamState::Base(BaseStreamStates::Open) => Self::Open,
                 StreamState::Base(BaseStreamStates::Closed) => Self::Closed,
-                StreamState::Granular(GranularStreamStates::HalfClosedLocal) => {
-                    Self::HalfClosedLocal
-                }
-                StreamState::Granular(GranularStreamStates::HalfClosedRemote) => {
-                    Self::HalfClosedRemote
-                }
+                StreamState::Granular(GranularStreamStates::HalfClosedLocal) => Self::HalfClosedLocal,
+                StreamState::Granular(GranularStreamStates::HalfClosedRemote) => Self::HalfClosedRemote,
                 StreamState::Granular(GranularStreamStates::Ready) => Self::Ready,
                 StreamState::Granular(GranularStreamStates::Send) => Self::Send,
                 StreamState::Granular(GranularStreamStates::DataSent) => Self::DataSent,
@@ -1287,8 +1222,7 @@ mod rollback {
     impl From<FramesProcessed> for legacy::TransportFramesProcessed {
         fn from(value: FramesProcessed) -> Self {
             assert!(
-                value.packet_numbers.as_ref().is_none()
-                    || value.packet_numbers.as_ref().is_some_and(|v| v.len() != 1),
+                value.packet_numbers.as_ref().is_none() || value.packet_numbers.as_ref().is_some_and(|v| v.len() != 1),
                 "it not possible to do this convert"
             );
             build!(legacy::TransportFramesProcessed {

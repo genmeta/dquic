@@ -20,19 +20,13 @@ async fn missing_server_name_requires_exactly_one_listener() {
     let identity = Endpoint::new(
         "other.test",
         common::identity().cert_chain().to_vec(),
-        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key"))
-            .unwrap(),
+        qtls::PrivateKeyDer::from_pem_slice(include_bytes!("keychain/localhost/server.key")).unwrap(),
         common::identity().ocsp().to_vec(),
     )
     .unwrap();
-    QuicEndpoint::from(identity)
-        .listen(Scopes::ALL, |_| {})
-        .unwrap();
+    QuicEndpoint::from(identity).listen(Scopes::ALL, |_| {}).unwrap();
     assert!(registry.get(None).is_none());
-    assert!(Arc::ptr_eq(
-        &server,
-        &registry.get(Some("localhost")).unwrap()
-    ));
+    assert!(Arc::ptr_eq(&server, &registry.get(Some("localhost")).unwrap()));
     assert!(registry.get(Some("other.test")).is_some());
     assert!(registry.get(Some("unknown.test")).is_none());
 

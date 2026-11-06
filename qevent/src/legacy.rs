@@ -107,11 +107,7 @@ pub struct Trace {
 
 #[serde_with::skip_serializing_none]
 #[derive(Default, Builder, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct TraceSeq {
     title: Option<String>,
     description: Option<String>,

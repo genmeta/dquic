@@ -95,10 +95,7 @@ where
     /// The `output` is responsible for sending the [`HandshakeDoneFrame`] to the client,
     /// see [`ServerHandshake`].
     pub fn new(output: T) -> Self {
-        ServerHandshake {
-            is_done: Arc::new(AtomicBool::new(false)),
-            output,
-        }
+        ServerHandshake { is_done: Arc::new(AtomicBool::new(false)), output }
     }
 
     /// Check if the server handshake is complete.
@@ -117,11 +114,7 @@ where
     ///
     /// This method return [`true`] when it first time set the handshake status to complete.
     pub fn done(&self) -> bool {
-        if self
-            .is_done
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+        if self.is_done.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
             self.output.send_frame([HandshakeDoneFrame]);
             true
         } else {
@@ -268,11 +261,7 @@ where
     fn recv_frame(&self, frame: HandshakeDoneFrame) -> Result<bool, Error> {
         match &mut *self.0.lock().unwrap() {
             Handshake::Client(h) => Ok(h.recv_handshake_done_frame(frame)),
-            _ => Err(QuicError::with_default_fty(
-                ErrorKind::ProtocolViolation,
-                "Server received a HANDSHAKE_DONE frame",
-            )
-            .into()),
+            _ => Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "Server received a HANDSHAKE_DONE frame").into()),
         }
     }
 }

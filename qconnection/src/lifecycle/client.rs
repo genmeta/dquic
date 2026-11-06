@@ -45,9 +45,7 @@ pub async fn client_growing(
     let cid_registry = &paths.cid_registry;
     let scid = initial_space.initial_scid;
     let odcid = cid_registry.local.origin_dcid();
-    cid_registry
-        .remote
-        .set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
+    cid_registry.remote.set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
     let handshake_dcid = cid_registry.remote.apply_dcid();
 
     let discovery = tokio::spawn({
@@ -61,75 +59,32 @@ pub async fn client_growing(
             }
         }
     });
-    tokio::spawn(read_tls_to_space(
-        tls_context.clone(),
-        initial_space.as_ref(),
-        paths.clone(),
-    ));
-    tokio::spawn(read_space_to_tls(
-        tls_context.clone(),
-        initial_space.as_ref(),
-        paths.clone(),
-    ));
-    tokio::spawn(recv_ih_pkt_and_deliver_frames(
-        (rcvd_pkt.initial, None),
-        initial_space.clone(),
-        paths.clone(),
-    ));
+    tokio::spawn(read_tls_to_space(tls_context.clone(), initial_space.as_ref(), paths.clone()));
+    tokio::spawn(read_space_to_tls(tls_context.clone(), initial_space.as_ref(), paths.clone()));
+    tokio::spawn(recv_ih_pkt_and_deliver_frames((rcvd_pkt.initial, None), initial_space.clone(), paths.clone()));
 
     let result = {
         let establish = async {
             let handshake_keys = tls_context.read_keys().await?;
-            let hs_space = Arc::new(HandshakeSpace::new(
-                scid,
-                ArcKeys::from(handshake_keys),
-                progress.facts(),
-            ));
-            assert!(
-                progress.install_handshake(hs_space.clone()),
-                "first Handshake key installation"
-            );
-            let server_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx))
-                .await
-                .expect("handshake CID is available");
+            let hs_space = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys), progress.facts()));
+            assert!(progress.install_handshake(hs_space.clone()), "first Handshake key installation");
+            let server_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx)).await.expect("handshake CID is available");
             handshake_dcid.refresh();
 
-            tokio::spawn(read_tls_to_space(
-                tls_context.clone(),
-                hs_space.as_ref(),
-                paths.clone(),
-            ));
-            tokio::spawn(read_space_to_tls(
-                tls_context.clone(),
-                hs_space.as_ref(),
-                paths.clone(),
-            ));
-            tokio::spawn(recv_ih_pkt_and_deliver_frames(
-                (rcvd_pkt.handshake, None),
-                hs_space.clone(),
-                paths.clone(),
-            ));
+            tokio::spawn(read_tls_to_space(tls_context.clone(), hs_space.as_ref(), paths.clone()));
+            tokio::spawn(read_space_to_tls(tls_context.clone(), hs_space.as_ref(), paths.clone()));
+            tokio::spawn(recv_ih_pkt_and_deliver_frames((rcvd_pkt.handshake, None), hs_space.clone(), paths.clone()));
 
-            let parameters = ArcParameters::new(
-                Role::Client,
-                Arc::new(client_params),
-                Arc::new(tls_context.read_server_parameters().await?),
-            );
+            let parameters =
+                ArcParameters::new(Role::Client, Arc::new(client_params), Arc::new(tls_context.read_server_parameters().await?));
             parameters.authenticate_cids(Requirements::require_server(server_scid, odcid))?;
-            cid_registry
-                .local
-                .set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
+            cid_registry.local.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             let keys = ArcOneRttKeys::from(tls_context.read_keys().await?);
             let concurrency = Box::new(ConsistentConcurrency::new(
                 parameters.local(ParameterId::InitialMaxStreamsBidi),
                 parameters.local(ParameterId::InitialMaxStreamsUni),
             ));
-            let streams = DataStreams::new(
-                parameters.clone(),
-                concurrency,
-                reliable_frames.clone(),
-                Default::default(),
-            );
+            let streams = DataStreams::new(parameters.clone(), concurrency, reliable_frames.clone(), Default::default());
             terminator.register(Arc::new(streams.clone()));
             let data_space = Arc::new(DataSpace::new(
                 scid,
@@ -153,50 +108,35 @@ pub async fn client_growing(
                 handshake_done.clone(),
             ));
 
-            tokio::spawn(read_tls_to_space(
-                tls_context.clone(),
-                data_space.as_ref(),
-                paths.clone(),
-            ));
-            tokio::spawn(read_space_to_tls(
-                tls_context.clone(),
-                data_space.as_ref(),
-                paths.clone(),
-            ));
+            tokio::spawn(read_tls_to_space(tls_context.clone(), data_space.as_ref(), paths.clone()));
+            tokio::spawn(read_space_to_tls(tls_context.clone(), data_space.as_ref(), paths.clone()));
 
             let summary = tls_context.finished().await?;
             progress.on_tls_finished();
-            let remote_authority = summary.remote.ok_or_else(|| {
-                QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing")
-            })?;
+            let remote_authority =
+                summary.remote.ok_or_else(|| QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing"))?;
 
             Ok::<_, Error>((
                 (
                     summary.local,
                     remote_authority,
-                    qtransport::ArcConnection::new(
-                        summary.alpn.unwrap_or_default(),
-                        data_space.streams.clone(),
-                        terminator.clone(),
-                    )
-                    .with_path_observer({
-                        let paths = Arc::downgrade(&paths);
-                        move |visit| {
-                            if let Some(paths) = paths.upgrade() {
-                                for path in paths.entries.lock().unwrap().values() {
-                                    visit(path);
+                    qtransport::ArcConnection::new(summary.alpn.unwrap_or_default(), data_space.streams.clone(), terminator.clone())
+                        .with_path_observer({
+                            let paths = Arc::downgrade(&paths);
+                            move |visit| {
+                                if let Some(paths) = paths.upgrade() {
+                                    for path in paths.entries.lock().unwrap().values() {
+                                        visit(path);
+                                    }
                                 }
                             }
-                        }
-                    }),
+                        }),
                 ),
                 handshake_done,
                 puncher,
             ))
         };
-        any(establish, terminator.clone())
-            .await
-            .and_then(std::convert::identity)
+        any(establish, terminator.clone()).await.and_then(std::convert::identity)
     };
 
     let (connected, handshake_done, puncher) = match result {
@@ -247,12 +187,7 @@ pub(crate) async fn resolve_paths(
     let mut records = resolver
         .lookup(server_name, "", None)
         .await
-        .map_err(|error| {
-            QuicError::with_default_fty(
-                ErrorKind::NoViablePath,
-                format!("DNS lookup for {server_name} failed: {error}"),
-            )
-        })?;
+        .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, format!("DNS lookup for {server_name} failed: {error}")))?;
     while let Some((source, peer)) = records.next().await {
         for pathway in addresses.pathways_to(peer, &source) {
             let Some(socket) = QuicProtocol::global().find_socket(pathway.local()) else {
@@ -261,10 +196,7 @@ pub(crate) async fn resolve_paths(
             let Ok(bound) = socket.local_addr() else {
                 continue;
             };
-            if !Dock::global()
-                .find_socket(bound)
-                .is_some_and(|registered| Arc::ptr_eq(&registered, &socket))
-            {
+            if !Dock::global().find_socket(bound).is_some_and(|registered| Arc::ptr_eq(&registered, &socket)) {
                 continue;
             }
             paths.add_path(pathway);

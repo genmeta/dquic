@@ -43,12 +43,7 @@ impl Default for Rtt {
 }
 
 impl Rtt {
-    fn update(
-        &mut self,
-        latest_rtt: Duration,
-        mut ack_delay: Duration,
-        is_handshake_confirmed: bool,
-    ) {
+    fn update(&mut self, latest_rtt: Duration, mut ack_delay: Duration, is_handshake_confirmed: bool) {
         self.latest_rtt = latest_rtt;
         if self.first_rtt_sample.is_none() {
             self.min_rtt = latest_rtt;
@@ -80,10 +75,7 @@ impl Rtt {
     }
 
     fn loss_delay(&self) -> Duration {
-        std::cmp::max(
-            std::cmp::max(self.latest_rtt, self.smoothed_rtt).mul_f32(TIME_THRESHOLD),
-            GRANULARITY,
-        )
+        std::cmp::max(std::cmp::max(self.latest_rtt, self.smoothed_rtt).mul_f32(TIME_THRESHOLD), GRANULARITY)
     }
 
     /// duration = (smoothed_rtt + max(4 * rttvar, kGranularity))
@@ -96,10 +88,7 @@ impl Rtt {
         if self.first_rtt_sample.is_some() {
             return;
         }
-        self.smoothed_rtt = self
-            .smoothed_rtt
-            .mul_f32(TIME_THRESHOLD)
-            .min(MAX_INITIAL_RTT);
+        self.smoothed_rtt = self.smoothed_rtt.mul_f32(TIME_THRESHOLD).min(MAX_INITIAL_RTT);
         self.rttvar = self.smoothed_rtt / 2;
         tracing::trace!(
             target: "dquic",
@@ -123,10 +112,7 @@ impl ArcRtt {
     }
 
     pub fn update(&self, latest_rtt: Duration, ack_delay: Duration, is_handshake_confirmed: bool) {
-        self.0
-            .lock()
-            .unwrap()
-            .update(latest_rtt, ack_delay, is_handshake_confirmed);
+        self.0.lock().unwrap().update(latest_rtt, ack_delay, is_handshake_confirmed);
     }
 
     pub fn loss_delay(&self) -> Duration {

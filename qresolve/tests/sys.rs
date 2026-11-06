@@ -29,14 +29,8 @@ mod sys {
 
     #[test]
     fn splits_host_and_port() {
-        assert_eq!(
-            split_name_port("example.com:8443"),
-            ("example.com", Some("8443"))
-        );
-        assert_eq!(
-            split_name_port("[2001:db8::1]:8443"),
-            ("2001:db8::1", Some("8443"))
-        );
+        assert_eq!(split_name_port("example.com:8443"), ("example.com", Some("8443")));
+        assert_eq!(split_name_port("[2001:db8::1]:8443"), ("2001:db8::1", Some("8443")));
         assert_eq!(split_name_port("2001:db8::1"), ("2001:db8::1", None));
         assert_eq!(split_name_port("[2001:db8::1]"), ("2001:db8::1", None));
         assert_eq!(split_name_port("example.com"), ("example.com", None));
@@ -53,28 +47,11 @@ mod sys {
 
     #[tokio::test]
     async fn system_dns_never_treats_certificate_sequence_as_a_port() {
-        for name in [
-            "dhttp.net",
-            "alice.dhttp.net",
-            "ALICE.DHTTP.NET.:2",
-            "alice.dhttp.net:999999999999999999999",
-        ] {
+        for name in ["dhttp.net", "alice.dhttp.net", "ALICE.DHTTP.NET.:2", "alice.dhttp.net:999999999999999999999"] {
             let result = SystemResolver.lookup(name, "443", None).await;
-            assert!(
-                matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound),
-                "{name}"
-            );
+            assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound), "{name}");
         }
-        let records = SystemResolver
-            .lookup("127.0.0.1:8080", "443", None)
-            .await
-            .unwrap()
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            records
-                .iter()
-                .any(|(_, endpoint)| endpoint.addr().port() == 8080)
-        );
+        let records = SystemResolver.lookup("127.0.0.1:8080", "443", None).await.unwrap().collect::<Vec<_>>().await;
+        assert!(records.iter().any(|(_, endpoint)| endpoint.addr().port() == 8080));
     }
 }

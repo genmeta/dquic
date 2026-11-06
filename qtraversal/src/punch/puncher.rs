@@ -84,24 +84,12 @@ where
         }))
     }
 
-    pub fn on_local_added(
-        &self,
-        bound: SocketAddr,
-        endpoint: EndpointAddr,
-        outer: SocketAddr,
-        tire: u32,
-        nat: NatType,
-    ) {
+    pub fn on_local_added(&self, bound: SocketAddr, endpoint: EndpointAddr, outer: SocketAddr, tire: u32, nat: NatType) {
         let (local, remotes) = {
             let mut addresses = self.0.addresses.lock().unwrap();
             let frame = addresses.add_local(bound, endpoint, outer, tire, nat);
-            self.0
-                .reliable_frames
-                .send_frame([ReliableFrame::AddAddress(frame)]);
-            (
-                addresses.local_for_seq(frame.seq_num()).unwrap(),
-                addresses.remote_frames(),
-            )
+            self.0.reliable_frames.send_frame([ReliableFrame::AddAddress(frame)]);
+            (addresses.local_for_seq(frame.seq_num()).unwrap(), addresses.remote_frames())
         };
         for remote in remotes {
             self.try_start_active(local.clone(), remote);
@@ -113,9 +101,7 @@ where
             let mut addresses = self.0.addresses.lock().unwrap();
             let removed = addresses.remove_local_endpoint(endpoint);
             for frame in &removed {
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::RemoveAddress(*frame)]);
+                self.0.reliable_frames.send_frame([ReliableFrame::RemoveAddress(*frame)]);
             }
             removed
         };
@@ -135,22 +121,13 @@ where
     }
 
     pub fn recv_remove_address(&self, seq: u32) {
-        if self
-            .0
-            .addresses
-            .lock()
-            .unwrap()
-            .remove_remote(seq)
-            .is_some()
-        {
+        if self.0.addresses.lock().unwrap().remove_remote(seq).is_some() {
             self.cancel_transactions_using_remote(seq);
         }
     }
 
     fn try_start_active(&self, local: LocalAddress, remote: AddAddressFrame) {
-        if local.frame.tire() != remote.tire()
-            || !EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote))
-        {
+        if local.frame.tire() != remote.tire() || !EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote)) {
             return;
         }
         let id = (&local.frame, &remote).punch_id();
@@ -184,13 +161,7 @@ where
         if self.0.punch_history.contains_key(&id) {
             return;
         }
-        let Some(local) = self
-            .0
-            .addresses
-            .lock()
-            .unwrap()
-            .local_for_seq(frame.remote_seq())
-        else {
+        let Some(local) = self.0.addresses.lock().unwrap().local_for_seq(frame.remote_seq()) else {
             return;
         };
         let entry = self.0.transaction.entry(id);
@@ -211,12 +182,7 @@ where
         }
     }
 
-    fn spawn_passive(
-        &self,
-        id: PunchId,
-        local: LocalAddress,
-        frame: PunchMeNowFrame,
-    ) -> (AbortHandle, Arc<Transaction>) {
+    fn spawn_passive(&self, id: PunchId, local: LocalAddress, frame: PunchMeNowFrame) -> (AbortHandle, Arc<Transaction>) {
         let tx = Arc::new(Transaction::new());
         tx.store_punch_me_now(frame);
         let puncher = self.clone();
@@ -259,9 +225,7 @@ where
             drop(entry);
             let _ = tx.recv_frame((link, frame));
         } else {
-            self.0
-                .reliable_frames
-                .send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&frame))]);
+            self.0.reliable_frames.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(&frame))]);
         }
         let local = pathway.local();
         let puncher = self.clone();
@@ -291,12 +255,7 @@ where
     }
 
     fn cancel_transactions_using_local(&self, seq: u32) {
-        let ids = self
-            .0
-            .transaction
-            .iter()
-            .filter_map(|entry| (entry.key().local_seq == seq).then_some(*entry.key()))
-            .collect::<Vec<_>>();
+        let ids = self.0.transaction.iter().filter_map(|entry| (entry.key().local_seq == seq).then_some(*entry.key())).collect::<Vec<_>>();
         for id in ids {
             if let Some((_, (abort, _))) = self.0.transaction.remove(&id) {
                 abort.abort();
@@ -306,12 +265,7 @@ where
     }
 
     fn cancel_transactions_using_remote(&self, seq: u32) {
-        let ids = self
-            .0
-            .transaction
-            .iter()
-            .filter_map(|entry| (entry.key().remote_seq == seq).then_some(*entry.key()))
-            .collect::<Vec<_>>();
+        let ids = self.0.transaction.iter().filter_map(|entry| (entry.key().remote_seq == seq).then_some(*entry.key())).collect::<Vec<_>>();
         for id in ids {
             if let Some((_, (abort, _))) = self.0.transaction.remove(&id) {
                 abort.abort();
@@ -331,30 +285,17 @@ where
         self.0.temporary_sockets.clear();
     }
 
-    pub async fn send_packet<P>(
-        &self,
-        socket: &UdpSocket,
-        link: Link,
-        ttl: u8,
-        frame: P,
-    ) -> io::Result<()>
+    pub async fn send_packet<P>(&self, socket: &UdpSocket, link: Link, ttl: u8, frame: P) -> io::Result<()>
     where
         P: for<'b> Package<&'b mut [u8]>,
     {
         let bytes = self.0.packet_encoder.encode_probe(frame)?;
-        socket
-            .send(
-                &[IoSlice::new(&bytes)],
-                Line::new(link, ttl, None, bytes.len() as u16),
-            )
-            .await?;
+        socket.send(&[IoSlice::new(&bytes)], Line::new(link, ttl, None, bytes.len() as u16)).await?;
         Ok(())
     }
 
     fn send_reliable_done(&self, hello: &PunchHelloFrame) {
-        self.0
-            .reliable_frames
-            .send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(hello))]);
+        self.0.reliable_frames.send_frame([ReliableFrame::PunchDone(PunchDoneFrame::respond_to(hello))]);
     }
 
     async fn wait_hello_or_done(&self, tx: &Transaction, delay: Duration) -> io::Result<()> {
@@ -368,45 +309,23 @@ where
         }
     }
 
-    async fn retry_hello(
-        &self,
-        socket: &UdpSocket,
-        link: Link,
-        id: PunchId,
-        tx: &Transaction,
-        hello_or_done: bool,
-    ) -> io::Result<()> {
+    async fn retry_hello(&self, socket: &UdpSocket, link: Link, id: PunchId, tx: &Transaction, hello_or_done: bool) -> io::Result<()> {
         let time = Duration::from_millis(100);
         for attempt in 0..MAX_RETRIES {
-            self.send_packet(
-                socket,
-                link,
-                HELLO_TTL,
-                PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
-            )
-            .await?;
+            self.send_packet(socket, link, HELLO_TTL, PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID)).await?;
             let delay = time * (1 << attempt);
             if hello_or_done {
                 if self.wait_hello_or_done(tx, delay).await.is_ok() {
                     return Ok(());
                 }
-            } else if tokio::time::timeout(delay, tx.wait_punch_done())
-                .await
-                .is_ok()
-            {
+            } else if tokio::time::timeout(delay, tx.wait_punch_done()).await.is_ok() {
                 return Ok(());
             }
         }
         Err(timed_out())
     }
 
-    async fn collision(
-        &self,
-        socket: &UdpSocket,
-        link: Link,
-        id: PunchId,
-        ttl: u8,
-    ) -> io::Result<()> {
+    async fn collision(&self, socket: &UdpSocket, link: Link, id: PunchId, ttl: u8) -> io::Result<()> {
         let mut ports = HashSet::new();
         while ports.len() < COLLISION_PORTS {
             let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
@@ -414,13 +333,7 @@ where
                 continue;
             }
             let target = Link::new(link.src, SocketAddr::new(link.dst.ip(), port));
-            self.send_packet(
-                socket,
-                target,
-                ttl,
-                PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
-            )
-            .await?;
+            self.send_packet(socket, target, ttl, PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID)).await?;
         }
         Ok(())
     }
@@ -437,31 +350,18 @@ where
             .iter()
             .copied()
             .find(|server| server.is_ipv4() == local.is_ipv4())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "no STUN server for address family")
-            })?;
-        let outer = socket
-            .outer_addr(topology.stun(), server)
-            .await
-            .map_err(io::Error::other)?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no STUN server for address family"))?;
+        let outer = socket.outer_addr(topology.stun(), server).await.map_err(io::Error::other)?;
         Ok((socket, outer))
     }
 
     fn retain_temporary(&self, socket: EphemeralSocket) -> io::Result<()> {
         let local = socket.udp_socket().local_addr()?;
-        self.0
-            .temporary_sockets
-            .insert(EndpointAddr::direct(local), socket);
+        self.0.temporary_sockets.insert(EndpointAddr::direct(local), socket);
         Ok(())
     }
 
-    async fn predict(
-        &self,
-        bound: SocketAddr,
-        dst: SocketAddr,
-        id: PunchId,
-        tx: Arc<Transaction>,
-    ) -> io::Result<EphemeralSocket> {
+    async fn predict(&self, bound: SocketAddr, dst: SocketAddr, id: PunchId, tx: Arc<Transaction>) -> io::Result<EphemeralSocket> {
         let mut predictor = PortPredictor::new(bound, dst)?;
         let puncher = self.clone();
         predictor
@@ -473,12 +373,7 @@ where
             .ok_or_else(timed_out)
     }
 
-    async fn punch_actively(
-        &self,
-        local: LocalAddress,
-        remote: AddAddressFrame,
-        tx: Arc<Transaction>,
-    ) -> io::Result<()> {
+    async fn punch_actively(&self, local: LocalAddress, remote: AddAddressFrame, tx: Arc<Transaction>) -> io::Result<()> {
         use NatType::*;
         let id = (&local.frame, &remote).punch_id();
         let local_nat = local.frame.nat_type();
@@ -486,22 +381,14 @@ where
         tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
             remote = %*remote, ?local_nat, ?remote_nat, "active punch strategy");
         let dst = *remote;
-        let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
-        })?;
+        let socket = Dock::global()
+            .find_socket(local.bound)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable"))?;
         let link = Link::new(socket.local_addr()?, dst);
-        let mut now = PunchMeNowFrame::new(
-            id.local_seq,
-            id.remote_seq,
-            *local.frame,
-            local.frame.tire(),
-            local_nat,
-        );
+        let mut now = PunchMeNowFrame::new(id.local_seq, id.remote_seq, *local.frame, local.frame.tire(), local_nat);
 
         match (local_nat, remote_nat) {
-            (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric) => {
-                Err(io::Error::other("unsupported NAT pair"))
-            }
+            (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric) => Err(io::Error::other("unsupported NAT pair")),
             (_, FullCone) => self.retry_hello(&socket, link, id, &tx, true).await,
             (Dynamic, Symmetric) => {
                 let (temporary, outer) = self.dynamic_socket(local.bound).await?;
@@ -510,16 +397,11 @@ where
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
                 self.retain_temporary(temporary)?;
                 now.set_addr(outer);
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
                 let temp_link = Link::new(temp_addr, dst);
                 let result = async {
-                    tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now())
-                        .await
-                        .map_err(|_| timed_out())?;
-                    self.collision(&temp_socket, temp_link, id, KNOCK_TTL)
-                        .await?;
+                    tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now()).await.map_err(|_| timed_out())?;
+                    self.collision(&temp_socket, temp_link, id, KNOCK_TTL).await?;
                     self.wait_hello_or_done(&tx, BIRTHDAY_TIMEOUT).await
                 }
                 .await;
@@ -529,19 +411,13 @@ where
                 result
             }
             (Symmetric, RestrictedPort) => {
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
-                tokio::time::timeout(COLLISION_TIMEOUT, tx.wait_punch_me_now())
-                    .await
-                    .map_err(|_| timed_out())?;
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
+                tokio::time::timeout(COLLISION_TIMEOUT, tx.wait_punch_me_now()).await.map_err(|_| timed_out())?;
                 let won = self.predict(local.bound, dst, id, tx).await?;
                 self.retain_temporary(won)
             }
             (Symmetric, RestrictedCone) => {
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
                 let _ = tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now()).await;
                 self.retry_hello(&socket, link, id, &tx, false).await
             }
@@ -552,13 +428,9 @@ where
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
                 self.retain_temporary(temporary)?;
                 now.set_addr(outer);
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
                 let temp_link = Link::new(temp_addr, dst);
-                let result = self
-                    .retry_hello(&temp_socket, temp_link, id, &tx, true)
-                    .await;
+                let result = self.retry_hello(&temp_socket, temp_link, id, &tx, true).await;
                 if result.is_err() {
                     self.0.temporary_sockets.remove(&temp_endpoint);
                 }
@@ -567,88 +439,52 @@ where
             (FullCone | RestrictedCone, Symmetric)
             | (FullCone | RestrictedCone | RestrictedPort, Dynamic)
             | (_, RestrictedCone | RestrictedPort) => {
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
-                self.send_packet(
-                    &socket,
-                    link,
-                    HELLO_TTL,
-                    PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
-                )
-                .await?;
-                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello())
-                    .await
-                    .map_err(|_| timed_out())?;
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.send_packet(&socket, link, HELLO_TTL, PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID)).await?;
+                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello()).await.map_err(|_| timed_out())?;
                 self.send_reliable_done(&hello);
                 Ok(())
             }
             (RestrictedPort, Symmetric) => {
                 self.collision(&socket, link, id, KNOCK_TTL).await?;
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
-                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello())
-                    .await
-                    .map_err(|_| timed_out())?;
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello()).await.map_err(|_| timed_out())?;
                 self.send_reliable_done(&hello);
                 Ok(())
             }
             (Symmetric, Dynamic) => {
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
                 let won = self.predict(local.bound, dst, id, tx).await?;
                 self.retain_temporary(won)
             }
         }
     }
 
-    async fn punch_passively(
-        &self,
-        local: LocalAddress,
-        remote: PunchMeNowFrame,
-        tx: Arc<Transaction>,
-    ) -> io::Result<()> {
+    async fn punch_passively(&self, local: LocalAddress, remote: PunchMeNowFrame, tx: Arc<Transaction>) -> io::Result<()> {
         use NatType::*;
         let id = PunchId::new(local.frame.seq_num(), remote.local_seq());
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
         tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
             remote = %remote.address(), ?local_nat, ?remote_nat, "passive punch strategy");
-        let socket = Dock::global().find_socket(local.bound).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable")
-        })?;
+        let socket = Dock::global()
+            .find_socket(local.bound)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable"))?;
         let link = Link::new(socket.local_addr()?, remote.address());
-        let now = PunchMeNowFrame::new(
-            id.local_seq,
-            id.remote_seq,
-            *local.frame,
-            local.frame.tire(),
-            local_nat,
-        );
-        if matches!(
-            (local_nat, remote_nat),
-            (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric)
-        ) {
+        let now = PunchMeNowFrame::new(id.local_seq, id.remote_seq, *local.frame, local.frame.tire(), local_nat);
+        if matches!((local_nat, remote_nat), (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric)) {
             return Err(io::Error::other("unsupported NAT pair"));
         }
         match (local_nat, remote_nat) {
             (Dynamic, Symmetric) => {
-                tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now())
-                    .await
-                    .map_err(|_| timed_out())?;
+                tokio::time::timeout(PUNCH_ME_NOW_TIMEOUT, tx.wait_punch_me_now()).await.map_err(|_| timed_out())?;
                 self.collision(&socket, link, id, KNOCK_TTL).await?;
                 self.wait_hello_or_done(&tx, BIRTHDAY_TIMEOUT).await
             }
             (RestrictedPort, Symmetric) => {
                 self.collision(&socket, link, id, KNOCK_TTL).await?;
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
-                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello())
-                    .await
-                    .map_err(|_| timed_out())?;
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(BIRTHDAY_TIMEOUT, tx.wait_punch_hello()).await.map_err(|_| timed_out())?;
                 self.send_reliable_done(&hello);
                 Ok(())
             }
@@ -657,19 +493,9 @@ where
                 self.retain_temporary(won)
             }
             (RestrictedCone, Symmetric) => {
-                self.send_packet(
-                    &socket,
-                    link,
-                    HELLO_TTL,
-                    PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID),
-                )
-                .await?;
-                self.0
-                    .reliable_frames
-                    .send_frame([ReliableFrame::PunchMeNow(now)]);
-                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello())
-                    .await
-                    .map_err(|_| timed_out())?;
+                self.send_packet(&socket, link, HELLO_TTL, PunchHelloFrame::new(id.local_seq, id.remote_seq, DEFAULT_PROBE_ID)).await?;
+                self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
+                let (_, hello) = tokio::time::timeout(PUNCH_TIMEOUT, tx.wait_punch_hello()).await.map_err(|_| timed_out())?;
                 self.send_reliable_done(&hello);
                 Ok(())
             }

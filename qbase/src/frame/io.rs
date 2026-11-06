@@ -1,17 +1,13 @@
 use bytes::Bytes;
 
 use super::{
-    ack::ack_frame_with_ecn, add_address::be_add_address_frame,
-    connection_close::connection_close_frame_at_layer, crypto::be_crypto_frame,
-    data_blocked::be_data_blocked_frame, datagram::datagram_frame_with_flag,
-    max_data::be_max_data_frame, max_stream_data::be_max_stream_data_frame,
-    max_streams::max_streams_frame_with_dir, new_connection_id::be_new_connection_id_frame,
-    new_token::be_new_token_frame, path_challenge::be_path_challenge_frame,
-    path_response::be_path_response_frame, punch_done::be_punch_done_frame,
-    punch_hello::be_punch_hello_frame, punch_me_now::be_punch_me_now_frame,
-    remove_address::be_remove_address_frame, reset_stream::be_reset_stream_frame,
-    retire_connection_id::be_retire_connection_id_frame, stop_sending::be_stop_sending_frame,
-    stream::stream_frame_with_flag, stream_data_blocked::be_stream_data_blocked_frame,
+    ack::ack_frame_with_ecn, add_address::be_add_address_frame, connection_close::connection_close_frame_at_layer, crypto::be_crypto_frame,
+    data_blocked::be_data_blocked_frame, datagram::datagram_frame_with_flag, max_data::be_max_data_frame,
+    max_stream_data::be_max_stream_data_frame, max_streams::max_streams_frame_with_dir, new_connection_id::be_new_connection_id_frame,
+    new_token::be_new_token_frame, path_challenge::be_path_challenge_frame, path_response::be_path_response_frame,
+    punch_done::be_punch_done_frame, punch_hello::be_punch_hello_frame, punch_me_now::be_punch_me_now_frame,
+    remove_address::be_remove_address_frame, reset_stream::be_reset_stream_frame, retire_connection_id::be_retire_connection_id_frame,
+    stop_sending::be_stop_sending_frame, stream::stream_frame_with_flag, stream_data_blocked::be_stream_data_blocked_frame,
     streams_blocked::streams_blocked_frame_with_dir, *,
 };
 use crate::{ArcReceiving, util::Buffer};
@@ -21,52 +17,27 @@ use crate::{ArcReceiving, util::Buffer};
 ///
 /// Some frames like [`StreamFrame`] and [`CryptoFrame`] have a data body,
 /// which use `bytes::Bytes` to store.
-fn complete_frame(
-    frame_type: FrameType,
-    raw: Bytes,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame<Bytes>> {
+fn complete_frame(frame_type: FrameType, raw: Bytes) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame<Bytes>> {
     use nom::{Parser, combinator::map};
     move |input: &[u8]| match frame_type {
         FrameType::Padding => Ok((input, Frame::Padding(PaddingFrame))),
         FrameType::Ping => Ok((input, Frame::Ping(PingFrame))),
-        FrameType::ConnectionClose(layer) => {
-            map(connection_close_frame_at_layer(layer), Frame::Close).parse(input)
-        }
-        FrameType::NewConnectionId => {
-            map(be_new_connection_id_frame, Frame::NewConnectionId).parse(input)
-        }
-        FrameType::RetireConnectionId => {
-            map(be_retire_connection_id_frame, Frame::RetireConnectionId).parse(input)
-        }
-        FrameType::DataBlocked => {
-            map(be_data_blocked_frame, |f| Frame::StreamCtl(f.into())).parse(input)
-        }
+        FrameType::ConnectionClose(layer) => map(connection_close_frame_at_layer(layer), Frame::Close).parse(input),
+        FrameType::NewConnectionId => map(be_new_connection_id_frame, Frame::NewConnectionId).parse(input),
+        FrameType::RetireConnectionId => map(be_retire_connection_id_frame, Frame::RetireConnectionId).parse(input),
+        FrameType::DataBlocked => map(be_data_blocked_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::MaxData => map(be_max_data_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::PathChallenge => map(be_path_challenge_frame, Frame::PathChallenge).parse(input),
         FrameType::PathResponse => map(be_path_response_frame, Frame::PathResponse).parse(input),
         FrameType::HandshakeDone => Ok((input, Frame::HandshakeDone(HandshakeDoneFrame))),
         FrameType::NewToken => map(be_new_token_frame, Frame::NewToken).parse(input),
         FrameType::Ack(ecn) => map(ack_frame_with_ecn(ecn), Frame::Ack).parse(input),
-        FrameType::ResetStream => {
-            map(be_reset_stream_frame, |f| Frame::StreamCtl(f.into())).parse(input)
-        }
-        FrameType::StopSending => {
-            map(be_stop_sending_frame, |f| Frame::StreamCtl(f.into())).parse(input)
-        }
-        FrameType::MaxStreamData => {
-            map(be_max_stream_data_frame, |f| Frame::StreamCtl(f.into())).parse(input)
-        }
-        FrameType::MaxStreams(dir) => map(max_streams_frame_with_dir(dir), |f| {
-            Frame::StreamCtl(f.into())
-        })
-        .parse(input),
-        FrameType::StreamsBlocked(dir) => map(streams_blocked_frame_with_dir(dir), |f| {
-            Frame::StreamCtl(f.into())
-        })
-        .parse(input),
-        FrameType::StreamDataBlocked => {
-            map(be_stream_data_blocked_frame, |f| Frame::StreamCtl(f.into())).parse(input)
-        }
+        FrameType::ResetStream => map(be_reset_stream_frame, |f| Frame::StreamCtl(f.into())).parse(input),
+        FrameType::StopSending => map(be_stop_sending_frame, |f| Frame::StreamCtl(f.into())).parse(input),
+        FrameType::MaxStreamData => map(be_max_stream_data_frame, |f| Frame::StreamCtl(f.into())).parse(input),
+        FrameType::MaxStreams(dir) => map(max_streams_frame_with_dir(dir), |f| Frame::StreamCtl(f.into())).parse(input),
+        FrameType::StreamsBlocked(dir) => map(streams_blocked_frame_with_dir(dir), |f| Frame::StreamCtl(f.into())).parse(input),
+        FrameType::StreamDataBlocked => map(be_stream_data_blocked_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::Crypto => {
             let (input, frame) = be_crypto_frame(input)?;
             let start = raw.len() - input.len();
@@ -93,15 +64,12 @@ fn complete_frame(
             let (input, frame) = datagram_frame_with_flag(with_len)(input)?;
             let start = raw.len() - input.len();
             match frame.encode_len() {
-                true if frame.len().into_u64() > input.len() as u64 => Err(nom::Err::Incomplete(
-                    nom::Needed::new((frame.len().into_u64() - input.len() as u64) as usize),
-                )),
+                true if frame.len().into_u64() > input.len() as u64 => {
+                    Err(nom::Err::Incomplete(nom::Needed::new((frame.len().into_u64() - input.len() as u64) as usize)))
+                }
                 true => {
                     let data = raw.slice(start..start + frame.len().into_u64() as usize);
-                    Ok((
-                        &input[frame.len().into_u64() as usize..],
-                        Frame::Datagram(frame, data),
-                    ))
+                    Ok((&input[frame.len().into_u64() as usize..], Frame::Datagram(frame, data)))
                 }
                 false => {
                     let data = raw.slice(start..);
@@ -109,13 +77,9 @@ fn complete_frame(
                 }
             }
         }
-        FrameType::AddAddress(family) => {
-            map(be_add_address_frame(family), Frame::AddAddress).parse(input)
-        }
+        FrameType::AddAddress(family) => map(be_add_address_frame(family), Frame::AddAddress).parse(input),
         FrameType::RemoveAddress => map(be_remove_address_frame, Frame::RemoveAddress).parse(input),
-        FrameType::PunchMeNow(family) => {
-            map(be_punch_me_now_frame(family), Frame::PunchMeNow).parse(input)
-        }
+        FrameType::PunchMeNow(family) => map(be_punch_me_now_frame(family), Frame::PunchMeNow).parse(input),
         FrameType::PunchHello => map(be_punch_hello_frame, Frame::PunchHello).parse(input),
         FrameType::PunchDone => map(be_punch_done_frame, Frame::PunchDone).parse(input),
     }
@@ -130,17 +94,12 @@ pub fn be_frame(raw: &Bytes, packet_type: Type) -> Result<(usize, Frame<Bytes>, 
     }
 
     let (remain, frame) = complete_frame(frame_type, raw.clone())(remain).map_err(|e| match e {
-        ne @ nom::Err::Incomplete(_) => {
-            nom::Err::Error(Error::IncompleteFrame(frame_type, ne.to_string()))
-        }
+        ne @ nom::Err::Incomplete(_) => nom::Err::Error(Error::IncompleteFrame(frame_type, ne.to_string())),
         nom::Err::Error(ne) => {
             // may be TooLarge in MaxStreamsFrame/CryptoFrame/StreamFrame,
             // or may be Verify in NewConnectionIdFrame,
             // or may be Alt in ConnectionCloseFrame
-            nom::Err::Error(Error::ParseError(
-                frame_type,
-                ne.code.description().to_owned(),
-            ))
+            nom::Err::Error(Error::ParseError(frame_type, ne.code.description().to_owned()))
         }
         _ => unreachable!("parsing frame never fails"),
     })?;

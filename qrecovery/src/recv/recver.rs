@@ -7,16 +7,11 @@ use std::{
 use bytes::{BufMut, Bytes};
 use qbase::{
     error::{Error, ErrorKind, QuicError},
-    frame::{
-        GetFrameType, MaxStreamDataFrame, ResetStreamError, ResetStreamFrame, StopSendingFrame,
-        StreamFrame, io::SendFrame,
-    },
+    frame::{GetFrameType, MaxStreamDataFrame, ResetStreamError, ResetStreamFrame, StopSendingFrame, StreamFrame, io::SendFrame},
     sid::StreamId,
     varint::{VARINT_MAX, VarInt},
 };
-use qevent::quic::transport::{
-    GranularStreamStates, StreamDataLocation, StreamDataMoved, StreamSide, StreamStateUpdated,
-};
+use qevent::quic::transport::{GranularStreamStates, StreamDataLocation, StreamDataMoved, StreamSide, StreamStateUpdated};
 
 use super::rcvbuf;
 
@@ -52,7 +47,7 @@ where
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
 
         let threshold = 1_000_000;
@@ -60,10 +55,7 @@ where
             let max_stream_data = (self.rcvbuf.nread() + threshold * 2).min(VARINT_MAX);
             if max_stream_data > self.max_stream_data {
                 self.max_stream_data = max_stream_data;
-                self.broker.send_frame([MaxStreamDataFrame::new(
-                    self.stream_id,
-                    VarInt::from_u64(max_stream_data).unwrap(),
-                )]);
+                self.broker.send_frame([MaxStreamDataFrame::new(self.stream_id, VarInt::from_u64(max_stream_data).unwrap())]);
             }
         }
 
@@ -84,7 +76,7 @@ where
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
 
         let threshold = 1_000_000;
@@ -92,10 +84,7 @@ where
             let max_stream_data = (self.rcvbuf.nread() + threshold * 2).min(VARINT_MAX);
             if max_stream_data > self.max_stream_data {
                 self.max_stream_data = max_stream_data;
-                self.broker.send_frame([MaxStreamDataFrame::new(
-                    self.stream_id,
-                    VarInt::from_u64(max_stream_data).unwrap(),
-                )]);
+                self.broker.send_frame([MaxStreamDataFrame::new(self.stream_id, VarInt::from_u64(max_stream_data).unwrap())]);
             }
         }
 
@@ -119,10 +108,7 @@ where
 }
 
 impl<TX: Clone> Recv<TX> {
-    pub(super) fn determin_size(
-        &mut self,
-        stream_frame: &StreamFrame,
-    ) -> Result<SizeKnown<TX>, QuicError> {
+    pub(super) fn determin_size(&mut self, stream_frame: &StreamFrame) -> Result<SizeKnown<TX>, QuicError> {
         if let Some(waker) = self.read_waker.take() {
             waker.wake();
         }
@@ -177,11 +163,7 @@ impl<TX> Recv<TX> {
         self.stream_id
     }
 
-    pub(super) fn recv(
-        &mut self,
-        stream_frame: StreamFrame,
-        body: Bytes,
-    ) -> Result<usize, QuicError> {
+    pub(super) fn recv(&mut self, stream_frame: StreamFrame, body: Bytes) -> Result<usize, QuicError> {
         let data_start = stream_frame.offset();
 
         let data_end = data_start + body.len() as u64;
@@ -189,11 +171,7 @@ impl<TX> Recv<TX> {
             return Err(QuicError::new(
                 ErrorKind::FlowControl,
                 stream_frame.frame_type().into(),
-                format!(
-                    "{} send {data_end} bytes which exceeds the stream data limit {}",
-                    stream_frame.stream_id(),
-                    self.max_stream_data
-                ),
+                format!("{} send {data_end} bytes which exceeds the stream data limit {}", stream_frame.stream_id(), self.max_stream_data),
             ));
         }
         let data_length = body.len() as u64;
@@ -219,10 +197,7 @@ impl<TX> Recv<TX> {
         Ok(fresh_data as _)
     }
 
-    pub(super) fn recv_reset(
-        &mut self,
-        reset_frame: &ResetStreamFrame,
-    ) -> Result<usize, QuicError> {
+    pub(super) fn recv_reset(&mut self, reset_frame: &ResetStreamFrame) -> Result<usize, QuicError> {
         let final_size = reset_frame.final_size();
         if final_size < self.largest {
             return Err(QuicError::new(
@@ -269,33 +244,21 @@ impl<TX> SizeKnown<TX> {
         self.stream_id
     }
 
-    pub(super) fn recv(
-        &mut self,
-        stream_frame: StreamFrame,
-        data: Bytes,
-    ) -> Result<usize, QuicError> {
+    pub(super) fn recv(&mut self, stream_frame: StreamFrame, data: Bytes) -> Result<usize, QuicError> {
         let data_start = stream_frame.offset();
         let data_end = data_start + data.len() as u64;
         if data_end > self.final_size {
             return Err(QuicError::new(
                 ErrorKind::FinalSize,
                 stream_frame.frame_type().into(),
-                format!(
-                    "{} send {data_end} bytes which exceeds the final_size {}",
-                    stream_frame.stream_id(),
-                    self.final_size
-                ),
+                format!("{} send {data_end} bytes which exceeds the final_size {}", stream_frame.stream_id(), self.final_size),
             ));
         }
         if stream_frame.is_fin() && data_end != self.final_size {
             return Err(QuicError::new(
                 ErrorKind::FinalSize,
                 stream_frame.frame_type().into(),
-                format!(
-                    "{} change the final size from {} to {data_end}",
-                    stream_frame.stream_id(),
-                    self.final_size
-                ),
+                format!("{} change the final size from {} to {data_end}", stream_frame.stream_id(), self.final_size),
             ));
         }
         let data_length = data.len() as u64;
@@ -350,7 +313,7 @@ impl<TX> SizeKnown<TX> {
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
         Poll::Ready(())
     }
@@ -369,7 +332,7 @@ impl<TX> SizeKnown<TX> {
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
         Poll::Ready(data)
     }
@@ -380,11 +343,7 @@ impl<TX> SizeKnown<TX> {
             return Err(QuicError::new(
                 ErrorKind::FinalSize,
                 reset_frame.frame_type().into(),
-                format!(
-                    "{} change the final size from {} to {final_size}",
-                    reset_frame.stream_id(),
-                    self.final_size
-                ),
+                format!("{} change the final size from {} to {final_size}", reset_frame.stream_id(), self.final_size),
             ));
         }
         self.wake_reader();
@@ -416,10 +375,7 @@ where
             stream_side: StreamSide::Receiving
         });
         self.wake_reader();
-        DataRcvd {
-            stream_id: self.stream_id,
-            rcvbuf: std::mem::take(&mut self.rcvbuf),
-        }
+        DataRcvd { stream_id: self.stream_id, rcvbuf: std::mem::take(&mut self.rcvbuf) }
     }
 }
 
@@ -472,7 +428,7 @@ impl DataRcvd {
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
     }
 
@@ -485,7 +441,7 @@ impl DataRcvd {
             offset,
             length,
             from: StreamDataLocation::Transport,
-            to: StreamDataLocation::Application,
+            to: StreamDataLocation::Application
         });
         Some(data)
     }
@@ -557,9 +513,7 @@ where
 {
     #[doc(hidden)]
     pub(crate) fn new(stream_id: StreamId, buf_size: u64, frames_tx: TX) -> Self {
-        ArcRecver(Arc::new(Mutex::new(Ok(Recver::new(
-            stream_id, buf_size, frames_tx,
-        )))))
+        ArcRecver(Arc::new(Mutex::new(Ok(Recver::new(stream_id, buf_size, frames_tx)))))
     }
 }
 

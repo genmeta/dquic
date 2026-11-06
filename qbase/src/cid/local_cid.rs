@@ -42,27 +42,13 @@ where
     /// Create a new local connection ID manager.
     fn new(role: Role, odcid: ConnectionId, scid: ConnectionId, issued_cids: ISSUED) -> Self {
         let mut cid_deque = IndexDeque::default();
-        cid_deque
-            .push_back(Some((scid, ResetToken::default())))
-            .unwrap();
+        cid_deque.push_back(Some((scid, ResetToken::default()))).unwrap();
 
         let new_cid = issued_cids.gen_unique_cid();
-        let new_cid_frame =
-            NewConnectionIdFrame::new(new_cid, VarInt::from_u32(1), VarInt::from_u32(0));
+        let new_cid_frame = NewConnectionIdFrame::new(new_cid, VarInt::from_u32(1), VarInt::from_u32(0));
         issued_cids.send_frame([new_cid_frame]);
-        cid_deque
-            .push_back(Some((
-                *new_cid_frame.connection_id(),
-                *new_cid_frame.reset_token(),
-            )))
-            .unwrap();
-        Self {
-            role,
-            odcid,
-            cid_deque,
-            issued_cids,
-            active_cid_limit: None,
-        }
+        cid_deque.push_back(Some((*new_cid_frame.connection_id(), *new_cid_frame.reset_token()))).unwrap();
+        Self { role, odcid, cid_deque, issued_cids, active_cid_limit: None }
     }
 
     fn initial_scid(&self) -> Option<ConnectionId> {
@@ -98,7 +84,8 @@ where
         let new_cid = self.issued_cids.gen_unique_cid();
         let new_cid_frame = NewConnectionIdFrame::new(new_cid, seq, retire_prior_to);
         self.issued_cids.send_frame([new_cid_frame]);
-        self.cid_deque.push_back(Some((*new_cid_frame.connection_id(), *new_cid_frame.reset_token())))
+        self.cid_deque
+            .push_back(Some((*new_cid_frame.connection_id(), *new_cid_frame.reset_token())))
             .expect("it's very very hard to issue a new connection ID whose sequence excceeds VARINT_MAX");
     }
 
@@ -114,7 +101,8 @@ where
                     "Sequence({seq}) in RetireConnectionIdFrame exceeds the largest one({}) issued by us",
                     self.cid_deque.largest().saturating_sub(1)
                 ),
-            ).into());
+            )
+            .into());
         }
 
         if let Some(value) = self.cid_deque.get_mut(seq) {
@@ -271,10 +259,7 @@ where
 
     /// Receive a [`RetireConnectionIdFrame`] from the peer,
     /// retire the connection IDs of the sequence in [`RetireConnectionIdFrame`].
-    fn recv_frame(
-        &self,
-        frame: RetireConnectionIdFrame,
-    ) -> Result<Self::Output, crate::error::Error> {
+    fn recv_frame(&self, frame: RetireConnectionIdFrame) -> Result<Self::Output, crate::error::Error> {
         self.0.lock().unwrap().recv_retire_cid_frame(frame)
     }
 }

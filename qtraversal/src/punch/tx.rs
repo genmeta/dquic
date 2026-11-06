@@ -14,17 +14,11 @@ pub(crate) struct PunchId {
 
 impl PunchId {
     pub fn new(local_seq: u32, remote_seq: u32) -> Self {
-        Self {
-            local_seq,
-            remote_seq,
-        }
+        Self { local_seq, remote_seq }
     }
 
     pub fn flip(self) -> Self {
-        Self {
-            local_seq: self.remote_seq,
-            remote_seq: self.local_seq,
-        }
+        Self { local_seq: self.remote_seq, remote_seq: self.local_seq }
     }
 }
 
@@ -70,11 +64,7 @@ pub(crate) struct Transaction {
 
 impl Transaction {
     pub fn new() -> Self {
-        Self {
-            punch_me_now_frame: SetOnce::new(),
-            punch_hello_frame: SetOnce::new(),
-            punch_done_frame: SetOnce::new(),
-        }
+        Self { punch_me_now_frame: SetOnce::new(), punch_hello_frame: SetOnce::new(), punch_done_frame: SetOnce::new() }
     }
 
     pub async fn wait_punch_done(&self) -> (Link, PunchDoneFrame) {
@@ -101,10 +91,7 @@ impl Transaction {
 impl ReceiveFrame<(Link, PunchHelloFrame)> for Transaction {
     type Output = ();
 
-    fn recv_frame(
-        &self,
-        (link, frame): (Link, PunchHelloFrame),
-    ) -> Result<Self::Output, qbase::error::Error> {
+    fn recv_frame(&self, (link, frame): (Link, PunchHelloFrame)) -> Result<Self::Output, qbase::error::Error> {
         _ = self.punch_hello_frame.set((link, frame));
         Ok(())
     }
@@ -113,10 +100,7 @@ impl ReceiveFrame<(Link, PunchHelloFrame)> for Transaction {
 impl ReceiveFrame<(Link, PunchDoneFrame)> for Transaction {
     type Output = ();
 
-    fn recv_frame(
-        &self,
-        (link, frame): (Link, PunchDoneFrame),
-    ) -> Result<Self::Output, qbase::error::Error> {
+    fn recv_frame(&self, (link, frame): (Link, PunchDoneFrame)) -> Result<Self::Output, qbase::error::Error> {
         _ = self.punch_done_frame.set((link, frame));
         Ok(())
     }
@@ -125,10 +109,7 @@ impl ReceiveFrame<(Link, PunchDoneFrame)> for Transaction {
 impl ReceiveFrame<(Link, PunchMeNowFrame)> for Transaction {
     type Output = ();
 
-    fn recv_frame(
-        &self,
-        (_link, frame): (Link, PunchMeNowFrame),
-    ) -> Result<Self::Output, qbase::error::Error> {
+    fn recv_frame(&self, (_link, frame): (Link, PunchMeNowFrame)) -> Result<Self::Output, qbase::error::Error> {
         _ = self.punch_me_now_frame.set(frame);
         Ok(())
     }

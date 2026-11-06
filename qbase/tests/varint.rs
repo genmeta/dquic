@@ -28,10 +28,7 @@ fn test_be_varint() {
     {
         let buf = &[0b11000000u8, 1, 1, 1, 1, 1, 1, 1][..];
         let r = qbase::varint::be_varint(buf);
-        assert_eq!(
-            r,
-            Ok((&[][..], VarInt::from_u64(0x01010101010101).unwrap()))
-        );
+        assert_eq!(r, Ok((&[][..], VarInt::from_u64(0x01010101010101).unwrap())));
     }
     {
         let buf = &[0b11000000u8, 0x06u8][..];
@@ -55,14 +52,8 @@ fn test_put_varint() {
     assert_put_varint_eq(0x0000_0000_0000_3FFF, &[0x7F, 0xFF]);
     assert_put_varint_eq(0x0000_0000_0000_4000, &[0x80, 0x00, 0x40, 0x00]);
     assert_put_varint_eq(0x0000_0000_3FFF_FFFF, &[0xBF, 0xFF, 0xFF, 0xFF]);
-    assert_put_varint_eq(
-        0x0000_0000_4000_0000,
-        &[0xC0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00],
-    );
-    assert_put_varint_eq(
-        0x3FFF_FFFF_FFFF_FFFF,
-        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-    );
+    assert_put_varint_eq(0x0000_0000_4000_0000, &[0xC0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]);
+    assert_put_varint_eq(0x3FFF_FFFF_FFFF_FFFF, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 }
 
 #[test]

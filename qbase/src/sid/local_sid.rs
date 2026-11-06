@@ -35,13 +35,7 @@ where
 {
     /// Create a new [`LocalStreamIds`] with the given role,
     /// and maximum number of streams that can be created in each [`Dir`].
-    fn new(
-        role: Role,
-        init_max_bi_streams: u64,
-        init_max_uni_streams: u64,
-        blocked: BLOCKED,
-        tx_wakers: ArcSendWakers,
-    ) -> Self {
+    fn new(role: Role, init_max_bi_streams: u64, init_max_uni_streams: u64, blocked: BLOCKED, tx_wakers: ArcSendWakers) -> Self {
         // These may be remembered client limits or already validated peer
         // limits when a server creates its data components after negotiation.
         Self {
@@ -111,12 +105,7 @@ where
         }
     }
 
-    pub fn revise_max_streams(
-        &mut self,
-        zero_rtt_rejected: bool,
-        max_stream_bidi: u64,
-        max_stream_uni: u64,
-    ) {
+    pub fn revise_max_streams(&mut self, zero_rtt_rejected: bool, max_stream_bidi: u64, max_stream_uni: u64) {
         if zero_rtt_rejected {
             self.max = [0, 0];
         }
@@ -145,16 +134,8 @@ where
     /// Create a new [`ArcLocalStreamIds`] with the given role,
     /// and maximum number of streams that can be created in each direction,
     /// the `blocked` contains the [`StreamsBlockedFrame`] that will be sent to peer.
-    pub fn new(
-        role: Role,
-        max_bidi: u64,
-        max_uni: u64,
-        blocked: BLOCKED,
-        tx_wakers: ArcSendWakers,
-    ) -> Self {
-        Self(Arc::new(Mutex::new(LocalStreamIds::new(
-            role, max_bidi, max_uni, blocked, tx_wakers,
-        ))))
+    pub fn new(role: Role, max_bidi: u64, max_uni: u64, blocked: BLOCKED, tx_wakers: ArcSendWakers) -> Self {
+        Self(Arc::new(Mutex::new(LocalStreamIds::new(role, max_bidi, max_uni, blocked, tx_wakers))))
     }
 
     /// Returns local role
@@ -215,17 +196,8 @@ where
         }
     }
 
-    pub fn revise_max_streams(
-        &self,
-        zero_rtt_rejected: bool,
-        max_stream_bidi: u64,
-        max_stream_uni: u64,
-    ) {
-        self.0.lock().unwrap().revise_max_streams(
-            zero_rtt_rejected,
-            max_stream_bidi,
-            max_stream_uni,
-        );
+    pub fn revise_max_streams(&self, zero_rtt_rejected: bool, max_stream_bidi: u64, max_stream_uni: u64) {
+        self.0.lock().unwrap().revise_max_streams(zero_rtt_rejected, max_stream_bidi, max_stream_uni);
     }
 }
 

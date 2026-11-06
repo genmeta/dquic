@@ -36,12 +36,7 @@ struct ProbeTable {
 
 impl ProbeTable {
     fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-            active_ports: HashMap::new(),
-            order: VecDeque::new(),
-            next_probe_id: FIRST_PROBE_ID,
-        }
+        Self { pending: HashMap::new(), active_ports: HashMap::new(), order: VecDeque::new(), next_probe_id: FIRST_PROBE_ID }
     }
 
     fn allocate_probe_id(&mut self) -> u32 {
@@ -75,40 +70,23 @@ pub(super) struct PortPredictor {
 
 impl PortPredictor {
     pub(super) fn new(bound: SocketAddr, dst: SocketAddr) -> io::Result<Self> {
-        let source = Dock::global().find_socket(bound).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "source socket unavailable")
-        })?;
+        let source =
+            Dock::global().find_socket(bound).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "source socket unavailable"))?;
         let device = match source.bound_device() {
             Some(device) => device.name().to_owned(),
             None => bound.ip().to_string(),
         };
-        Ok(Self {
-            bound,
-            dst,
-            device,
-            probes: ProbeTable::new(),
-            quota_held: 0,
-            probes_created: 0,
-        })
+        Ok(Self { bound, dst, device, probes: ProbeTable::new(), quota_held: 0, probes_created: 0 })
     }
 
     async fn acquire_quota(&mut self) -> io::Result<()> {
-        poll_fn(|cx| {
-            SCHEDULER
-                .lock()
-                .unwrap()
-                .poll_allocate(cx, self.dst, self.device.clone(), 1)
-        })
-        .await?;
+        poll_fn(|cx| SCHEDULER.lock().unwrap().poll_allocate(cx, self.dst, self.device.clone(), 1)).await?;
         self.quota_held += 1;
         Ok(())
     }
 
     fn release_quota(&mut self) -> io::Result<()> {
-        SCHEDULER
-            .lock()
-            .unwrap()
-            .release_port(1, self.dst, self.device.clone())?;
+        SCHEDULER.lock().unwrap().release_port(1, self.dst, self.device.clone())?;
         self.quota_held -= 1;
         Ok(())
     }
@@ -152,13 +130,7 @@ impl PortPredictor {
             let local = socket.udp_socket().local_addr()?;
             let probe_id = self.probes.allocate_probe_id();
             let hello = PunchHelloFrame::new(punch_id.local_seq, punch_id.remote_seq, probe_id);
-            send(
-                socket.udp_socket().clone(),
-                Link::new(local, self.dst),
-                PACKET_TTL,
-                hello,
-            )
-            .await?;
+            send(socket.udp_socket().clone(), Link::new(local, self.dst), PACKET_TTL, hello).await?;
             self.probes.insert(probe_id, socket, local.port());
             Ok(())
         }
@@ -170,12 +142,7 @@ impl PortPredictor {
     }
 
     /// Keep the original 300-probe matrix branch and its 60-socket/20ms pacing.
-    pub(super) async fn predict<F, Fut>(
-        &mut self,
-        punch_id: PunchId,
-        tx: Arc<Transaction>,
-        send: F,
-    ) -> io::Result<Option<EphemeralSocket>>
+    pub(super) async fn predict<F, Fut>(&mut self, punch_id: PunchId, tx: Arc<Transaction>, send: F) -> io::Result<Option<EphemeralSocket>>
     where
         F: Fn(Arc<UdpSocket>, Link, u8, PunchHelloFrame) -> Fut + Send + Sync,
         Fut: Future<Output = io::Result<()>> + Send,
@@ -212,11 +179,7 @@ impl PortPredictor {
 impl Drop for PortPredictor {
     fn drop(&mut self) {
         if self.quota_held > 0 {
-            let _ = SCHEDULER.lock().unwrap().release_port(
-                self.quota_held,
-                self.dst,
-                self.device.clone(),
-            );
+            let _ = SCHEDULER.lock().unwrap().release_port(self.quota_held, self.dst, self.device.clone());
             self.quota_held = 0;
         }
     }

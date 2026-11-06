@@ -64,11 +64,7 @@ impl TlsContext {
         let mut encoded = BytesMut::new();
         encoded.put_parameters(parameters);
         let tls = endpoint
-            .start(qtls::ClientStart {
-                server_name,
-                quic_version: qtls::QuicVersion::V1,
-                local_transport_parameters: encoded.freeze(),
-            })
+            .start(qtls::ClientStart { server_name, quic_version: qtls::QuicVersion::V1, local_transport_parameters: encoded.freeze() })
             .map_err(tls_error)?;
         Self::new(tls, max_pending_bytes)
     }
@@ -79,9 +75,7 @@ impl TlsContext {
         parameters: Bytes,
         hello: qtls::incoming::ClientHello,
     ) -> Result<(Self, Arc<ClientParameters>), Error> {
-        let client_parameters = Arc::new(ClientParameters::parse_from_bytes(
-            hello.transport_parameters(),
-        )?);
+        let client_parameters = Arc::new(ClientParameters::parse_from_bytes(hello.transport_parameters())?);
         let tls = endpoint.start(version, parameters).map_err(tls_error)?;
         let context = Self::new(tls, endpoint.max_flight_bytes())?;
         context.write_msg(Epoch::Initial, hello.encoded())?;
@@ -141,11 +135,7 @@ impl TlsContext {
                 Ok(tls) => tls,
                 Err(error) => return Poll::Ready(Err(error.clone())),
             };
-            if let Some(index) = tls
-                .messages
-                .iter()
-                .position(|(message_level, _)| *message_level == level)
-            {
+            if let Some(index) = tls.messages.iter().position(|(message_level, _)| *message_level == level) {
                 let (_, bytes) = tls.messages.remove(index).unwrap();
                 tls.pending_bytes -= bytes.len();
                 Poll::Ready(Ok(bytes))
@@ -160,11 +150,7 @@ impl TlsContext {
     pub(crate) fn try_read_msg_at(&self, level: Epoch) -> Result<Option<Bytes>, Error> {
         let mut guard = self.0.lock().unwrap();
         let tls = guard.as_mut().map_err(|error| error.clone())?;
-        let Some(index) = tls
-            .messages
-            .iter()
-            .position(|(message_level, _)| *message_level == level)
-        else {
+        let Some(index) = tls.messages.iter().position(|(message_level, _)| *message_level == level) else {
             return Ok(None);
         };
         let (_, bytes) = tls.messages.remove(index).unwrap();
@@ -295,10 +281,7 @@ impl Tls {
         while let Backend::Handshake(tls) = &mut self.backend {
             let Some(event) = tls.next_event() else { break };
             match event {
-                TlsEvent::WriteCrypto {
-                    epoch: level,
-                    bytes,
-                } => {
+                TlsEvent::WriteCrypto { epoch: level, bytes } => {
                     if bytes.len() > self.max_pending_bytes - self.pending_bytes {
                         return Err(QuicError::with_default_fty(
                             ErrorKind::CryptoBufferExceeded,
@@ -321,10 +304,7 @@ impl Tls {
                         waker.wake();
                     }
                 }
-                TlsEvent::ClientHello {
-                    server_name,
-                    transport_parameters,
-                } => {
+                TlsEvent::ClientHello { server_name, transport_parameters } => {
                     self.client_hello = Some((server_name, transport_parameters));
                     if let Some(waker) = self.client_hello_waker.take() {
                         waker.wake();
@@ -346,8 +326,7 @@ impl Tls {
             }
         }
         if matches!(&self.backend, Backend::Handshake(tls) if tls.is_complete()) {
-            let Backend::Handshake(tls) = std::mem::replace(&mut self.backend, Backend::Closed)
-            else {
+            let Backend::Handshake(tls) = std::mem::replace(&mut self.backend, Backend::Closed) else {
                 unreachable!()
             };
             self.backend = Backend::Established(Box::new(tls.finish().expect("completed TLS")));
@@ -377,9 +356,7 @@ impl Tls {
 pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
     let kind = match &error {
         qtls::TlsError::Alert(alert) => ErrorKind::Crypto(alert.description()),
-        qtls::TlsError::Peer(qtls::PeerTlsError::ResourceLimit { .. }) => {
-            ErrorKind::CryptoBufferExceeded
-        }
+        qtls::TlsError::Peer(qtls::PeerTlsError::ResourceLimit { .. }) => ErrorKind::CryptoBufferExceeded,
         qtls::TlsError::Peer(_) => ErrorKind::Crypto(40),
         _ => ErrorKind::Internal,
     };
@@ -387,11 +364,7 @@ pub(crate) fn tls_error(error: qtls::TlsError) -> Error {
 }
 
 /// One detached input coroutine per space. Retiring the reader ends only that space.
-pub fn read_space_to_tls(
-    tls: TlsContext,
-    space: &dyn Transmit,
-    paths: Arc<Paths>,
-) -> impl Future<Output = ()> + Send + 'static + use<> {
+pub fn read_space_to_tls(tls: TlsContext, space: &dyn Transmit, paths: Arc<Paths>) -> impl Future<Output = ()> + Send + 'static + use<> {
     let terminator = paths.terminator.clone();
     let epoch = space.epoch();
     let mut reader = space.crypto().reader();
@@ -428,13 +401,8 @@ pub(crate) fn read_tls_to_space(
                 }
             };
             if let Err(error) = stream.writer().write_all(&bytes).await {
-                terminator.close(
-                    CloseReason::Internal(QuicError::with_default_fty(
-                        ErrorKind::Internal,
-                        error.to_string(),
-                    )),
-                    paths.closing_pto(),
-                );
+                terminator
+                    .close(CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, error.to_string())), paths.closing_pto());
                 break;
             }
         }

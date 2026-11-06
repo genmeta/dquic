@@ -26,8 +26,7 @@ pub enum Scope {
 pub struct Scopes(u8);
 
 impl Scopes {
-    pub const ALL: Self =
-        Self(Scope::Loopback as u8 | Scope::Internal as u8 | Scope::External as u8);
+    pub const ALL: Self = Self(Scope::Loopback as u8 | Scope::Internal as u8 | Scope::External as u8);
 
     pub fn contains(self, scope: Scope) -> bool {
         self.0 & scope as u8 != 0
@@ -94,36 +93,23 @@ impl<E> Pathway<E> {
 
     #[inline]
     pub fn map<E1>(self, mut f: impl FnMut(E) -> E1) -> Pathway<E1> {
-        Pathway {
-            local: f(self.local),
-            remote: f(self.remote),
-        }
+        Pathway { local: f(self.local), remote: f(self.remote) }
     }
 
     #[inline]
     pub fn flip(self) -> Self {
-        Self {
-            local: self.remote,
-            remote: self.local,
-        }
+        Self { local: self.remote, remote: self.local }
     }
 }
 
 impl Pathway {
     /// Returns whether the remote endpoint belongs to a listening scope.
     pub fn belongs_to(&self, scopes: Scopes) -> bool {
-        self.remote
-            .scope()
-            .is_some_and(|scope| scopes.contains(scope))
+        self.remote.scope().is_some_and(|scope| scopes.contains(scope))
     }
 }
 
-pub fn be_pathway(
-    input: &[u8],
-    family: Family,
-    local_kind: Kind,
-    remote_kind: Kind,
-) -> nom::IResult<&[u8], Pathway> {
+pub fn be_pathway(input: &[u8], family: Family, local_kind: Kind, remote_kind: Kind) -> nom::IResult<&[u8], Pathway> {
     let (remain, local) = be_endpoint_addr(input, family, local_kind)?;
     let (remain, remote) = be_endpoint_addr(remain, family, remote_kind)?;
     Ok((remain, Pathway::new(local, remote)))
@@ -164,10 +150,7 @@ pub fn be_link(input: &[u8]) -> nom::IResult<&[u8], Link> {
         0 => Family::V4,
         1 => Family::V6,
         _ => {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Alt,
-            )));
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alt)));
         }
     };
     let (remain, src) = be_socket_addr(remain, family)?;
@@ -206,10 +189,7 @@ impl Link {
 
     #[inline]
     pub fn flip(self) -> Self {
-        Self {
-            src: self.dst,
-            dst: self.src,
-        }
+        Self { src: self.dst, dst: self.src }
     }
 }
 
@@ -235,22 +215,14 @@ impl Line {
     pub const DEFAULT_TTL: u8 = 64;
 
     pub fn new(link: Link, ttl: u8, ecn: Option<u8>, seg_size: u16) -> Self {
-        Self {
-            link,
-            ttl,
-            ecn,
-            seg_size,
-        }
+        Self { link, ttl, ecn, seg_size }
     }
 }
 
 impl Default for Line {
     fn default() -> Self {
         Self {
-            link: Link::new(
-                SocketAddr::from(([0, 0, 0, 0], 0)),
-                SocketAddr::from(([0, 0, 0, 0], 0)),
-            ),
+            link: Link::new(SocketAddr::from(([0, 0, 0, 0], 0)), SocketAddr::from(([0, 0, 0, 0], 0))),
             ttl: Self::DEFAULT_TTL,
             ecn: None,
             seg_size: 0,

@@ -69,20 +69,11 @@ where
 {
     /// Create a new [`RemoteStreamIds`] with the given role,
     /// and maximum number of streams that can be created by peer in each [`Dir`].
-    fn new(
-        role: Role,
-        max_bi: u64,
-        max_uni: u64,
-        max_tx: MAX,
-        ctrl: Box<dyn ControlStreamsConcurrency>,
-    ) -> Self {
+    fn new(role: Role, max_bi: u64, max_uni: u64, max_tx: MAX, ctrl: Box<dyn ControlStreamsConcurrency>) -> Self {
         Self {
             role,
             max: [max_bi, max_uni],
-            unallocated: [
-                StreamId::new(role, Dir::Bi, 0),
-                StreamId::new(role, Dir::Uni, 0),
-            ],
+            unallocated: [StreamId::new(role, Dir::Bi, 0), StreamId::new(role, Dir::Uni, 0)],
             ctrl,
             max_tx,
         }
@@ -109,8 +100,7 @@ where
                 self.max[idx] = max_streams;
                 self.max_tx.send_frame([MaxStreamsFrame::with(
                     sid.dir(),
-                    VarInt::from_u64(max_streams)
-                        .expect("max_streams must be less than VARINT_MAX"),
+                    VarInt::from_u64(max_streams).expect("max_streams must be less than VARINT_MAX"),
                 )]);
             }
             Ok(AcceptSid::New(NeedCreate { start, end: sid }))
@@ -138,10 +128,8 @@ where
         };
         if let Some(max_streams) = self.ctrl.on_streams_blocked(dir, max_streams) {
             self.max[dir as usize] = max_streams;
-            self.max_tx.send_frame([MaxStreamsFrame::with(
-                dir,
-                VarInt::from_u64(max_streams).expect("max_streams must be less than VARINT_MAX"),
-            )]);
+            self.max_tx
+                .send_frame([MaxStreamsFrame::with(dir, VarInt::from_u64(max_streams).expect("max_streams must be less than VARINT_MAX"))]);
         }
     }
 }
@@ -178,16 +166,8 @@ where
     /// See [section-18.2-4.21](https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.21)
     /// and [section-18.2-4.23](https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.23)
     /// of [QUIC](https://www.rfc-editor.org/rfc/rfc9000.html) for more details.
-    pub fn new(
-        role: Role,
-        max_bi: u64,
-        max_uni: u64,
-        max_tx: MAX,
-        ctrl: Box<dyn ControlStreamsConcurrency>,
-    ) -> Self {
-        Self(Arc::new(Mutex::new(RemoteStreamIds::new(
-            role, max_bi, max_uni, max_tx, ctrl,
-        ))))
+    pub fn new(role: Role, max_bi: u64, max_uni: u64, max_tx: MAX, ctrl: Box<dyn ControlStreamsConcurrency>) -> Self {
+        Self(Arc::new(Mutex::new(RemoteStreamIds::new(role, max_bi, max_uni, max_tx, ctrl))))
     }
 
     /// Returns the role of the peer.

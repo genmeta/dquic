@@ -59,20 +59,13 @@ impl LocalAuthority {
         public_key: SubjectPublicKeyInfoDer<'static>,
         ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
-        rustls::pki_types::DnsName::try_from(name.as_ref())
-            .map_err(|_| InvalidLocalAuthority::InvalidName)?;
+        rustls::pki_types::DnsName::try_from(name.as_ref()).map_err(|_| InvalidLocalAuthority::InvalidName)?;
         if ocsp.is_empty() {
             return Err(InvalidLocalAuthority::EmptyOcsp);
         }
 
         certified_key.ocsp = Some(ocsp.clone());
-        Ok(Self {
-            name,
-            certificates: certified_key.cert.into(),
-            public_key,
-            ocsp,
-            signing_key: certified_key.key,
-        })
+        Ok(Self { name, certificates: certified_key.cert.into(), public_key, ocsp, signing_key: certified_key.key })
     }
 
     pub fn name(&self) -> &str {
@@ -101,11 +94,7 @@ impl LocalAuthority {
     }
 
     pub(crate) fn certified_key(&self) -> Arc<CertifiedKey> {
-        Arc::new(CertifiedKey {
-            cert: self.certificates.to_vec(),
-            key: self.signing_key.clone(),
-            ocsp: Some(self.ocsp.to_vec()),
-        })
+        Arc::new(CertifiedKey { cert: self.certificates.to_vec(), key: self.signing_key.clone(), ocsp: Some(self.ocsp.to_vec()) })
     }
 }
 
@@ -117,23 +106,11 @@ pub struct RemoteAuthority {
 }
 
 impl RemoteAuthority {
-    pub(crate) fn new(
-        name: Arc<str>,
-        certificates: &[CertificateDer<'_>],
-    ) -> Result<Self, InvalidLocalAuthority> {
-        rustls::pki_types::DnsName::try_from(name.as_ref())
-            .map_err(|_| InvalidLocalAuthority::InvalidName)?;
-        let certificates = certificates
-            .iter()
-            .map(CertificateDer::clone)
-            .map(CertificateDer::into_owned)
-            .collect::<Vec<_>>();
+    pub(crate) fn new(name: Arc<str>, certificates: &[CertificateDer<'_>]) -> Result<Self, InvalidLocalAuthority> {
+        rustls::pki_types::DnsName::try_from(name.as_ref()).map_err(|_| InvalidLocalAuthority::InvalidName)?;
+        let certificates = certificates.iter().map(CertificateDer::clone).map(CertificateDer::into_owned).collect::<Vec<_>>();
         let public_key = extract_public_key(&certificates)?;
-        Ok(Self {
-            name,
-            certificates: certificates.into(),
-            public_key,
-        })
+        Ok(Self { name, certificates: certificates.into(), public_key })
     }
 
     pub fn name(&self) -> &str {
@@ -149,12 +126,8 @@ impl RemoteAuthority {
     }
 }
 
-fn extract_public_key(
-    certificates: &[CertificateDer<'_>],
-) -> Result<SubjectPublicKeyInfoDer<'static>, InvalidLocalAuthority> {
-    let leaf = certificates
-        .first()
-        .ok_or(InvalidLocalAuthority::EmptyCertificateChain)?;
+fn extract_public_key(certificates: &[CertificateDer<'_>]) -> Result<SubjectPublicKeyInfoDer<'static>, InvalidLocalAuthority> {
+    let leaf = certificates.first().ok_or(InvalidLocalAuthority::EmptyCertificateChain)?;
     let (_, certificate) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
         .map_err(|error| InvalidLocalAuthority::InvalidCertificate(error.to_string()))?;
     Ok(certificate.public_key().raw.to_vec().into())

@@ -87,11 +87,7 @@ impl super::EncodeSize for AckFrame {
             + self.delay.encoding_size()
             + ack_range_count.encoding_size()
             + self.first_range.encoding_size()
-            + self
-                .ranges
-                .iter()
-                .map(|(gap, ack)| gap.encoding_size() + ack.encoding_size())
-                .sum::<usize>()
+            + self.ranges.iter().map(|(gap, ack)| gap.encoding_size() + ack.encoding_size()).sum::<usize>()
             + if let Some(e) = self.ecn.as_ref() {
                 e.encoding_size()
             } else {
@@ -102,20 +98,8 @@ impl super::EncodeSize for AckFrame {
 
 impl AckFrame {
     /// Create a new [`AckFrame`].
-    pub fn new(
-        largest: VarInt,
-        delay: VarInt,
-        first_range: VarInt,
-        ranges: Vec<(VarInt, VarInt)>,
-        ecn: Option<EcnCounts>,
-    ) -> Self {
-        Self {
-            largest,
-            delay,
-            first_range,
-            ranges,
-            ecn,
-        }
+    pub fn new(largest: VarInt, delay: VarInt, first_range: VarInt, ranges: Vec<(VarInt, VarInt)>, ecn: Option<EcnCounts>) -> Self {
+        Self { largest, delay, first_range, ranges, ecn }
     }
 
     /// Return the largest acknowledged packet number.
@@ -157,17 +141,15 @@ impl AckFrame {
     pub fn iter_ranges(&self) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
         let right = self.largest.into_u64();
         let left = right - self.first_range.into_u64();
-        Some(left..=right).into_iter().chain(
-            self.ranges
-                .iter()
-                .map(|(gap, range)| (gap.into_u64(), range.into_u64()))
-                .scan(left, |largest, (gap, range)| {
-                    let right = *largest - gap - 2;
-                    let left = right - range;
-                    *largest = left;
-                    Some(left..=right)
-                }),
-        )
+        Some(left..=right).into_iter().chain(self.ranges.iter().map(|(gap, range)| (gap.into_u64(), range.into_u64())).scan(
+            left,
+            |largest, (gap, range)| {
+                let right = *largest - gap - 2;
+                let left = right - range;
+                *largest = left;
+                Some(left..=right)
+            },
+        ))
     }
 
     /// Iterate through the sequence numbers of the packets acknowledged by the ACK frame,
@@ -218,8 +200,7 @@ impl EcnCounts {
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub fn ack_frame_with_ecn(ecn: Ecn) -> impl Fn(&[u8]) -> nom::IResult<&[u8], AckFrame> {
     move |input: &[u8]| {
-        let (mut remain, (largest, delay, count, first_range)) =
-            (be_varint, be_varint, be_varint, be_varint).parse(input)?;
+        let (mut remain, (largest, delay, count, first_range)) = (be_varint, be_varint, be_varint, be_varint).parse(input)?;
         let mut ranges = Vec::new();
         let mut count = count.into_u64() as usize;
         while count > 0 {
@@ -237,26 +218,14 @@ pub fn ack_frame_with_ecn(ecn: Ecn) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Ack
             None
         };
 
-        Ok((
-            remain,
-            AckFrame {
-                largest,
-                delay,
-                first_range,
-                ranges,
-                ecn,
-            },
-        ))
+        Ok((remain, AckFrame { largest, delay, first_range, ranges, ecn }))
     }
 }
 
 /// Parse the ECN counts from the input bytes,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub(super) fn be_ecn_counts(input: &[u8]) -> nom::IResult<&[u8], EcnCounts> {
-    map((be_varint, be_varint, be_varint), |(ect0, ect1, ce)| {
-        EcnCounts { ect0, ect1, ce }
-    })
-    .parse(input)
+    map((be_varint, be_varint, be_varint), |(ect0, ect1, ce)| EcnCounts { ect0, ect1, ce }).parse(input)
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<AckFrame> for T {

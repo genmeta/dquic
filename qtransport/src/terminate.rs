@@ -66,21 +66,13 @@ enum Terminator {
 
 impl Terminator {
     fn no_error() -> Self {
-        Self::NoError {
-            tx_wakers: ArcSendWakers::default(),
-            components: Vec::new(),
-            waiters: Arc::new(Wakers::new()),
-        }
+        Self::NoError { tx_wakers: ArcSendWakers::default(), components: Vec::new(), waiters: Arc::new(Wakers::new()) }
     }
 
     fn close(&mut self, reason: &CloseReason, pto: Duration) -> Option<Duration> {
         let now = Instant::now();
         match self {
-            Self::NoError {
-                tx_wakers,
-                components,
-                waiters,
-            } => {
+            Self::NoError { tx_wakers, components, waiters } => {
                 let error: Error = match reason {
                     CloseReason::App(error) => error.clone().into(),
                     CloseReason::Peer(frame) => frame.clone().into(),
@@ -91,13 +83,7 @@ impl Terminator {
                 }
                 tx_wakers.wake_all();
                 match reason {
-                    CloseReason::Peer(_) => {
-                        *self = Self::Draining {
-                            waiters: waiters.clone(),
-                            error,
-                            sent_ccf: false,
-                        }
-                    }
+                    CloseReason::Peer(_) => *self = Self::Draining { waiters: waiters.clone(), error, sent_ccf: false },
                     CloseReason::App(_) | CloseReason::Internal(_) => {
                         *self = Self::Closing {
                             waiters: waiters.clone(),
@@ -126,10 +112,7 @@ impl Terminator {
             let mut frame = match (buffer.meta.pktype, error) {
                 (Type::Long(V1(Ver1::INITIAL | Ver1::HANDSHAKE)), Error::App(_)) => {
                     // RFC 9000 §10.2.3: conceal application details at these levels.
-                    ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(
-                        ErrorKind::Application,
-                        "",
-                    )))
+                    ConnectionCloseFrame::from(Error::from(QuicError::with_default_fty(ErrorKind::Application, "")))
                 }
                 (_, error) => ConnectionCloseFrame::from(error.clone()),
             };
@@ -140,13 +123,7 @@ impl Terminator {
                 tx_wakers.register(cx.waker());
                 Poll::Pending
             }
-            Self::Closing {
-                tx_wakers: send_wakers,
-                sync_ccf,
-                sent_ccf,
-                error,
-                ..
-            } => {
+            Self::Closing { tx_wakers: send_wakers, sync_ccf, sent_ccf, error, .. } => {
                 if *sync_ccf {
                     let result = dump_ccf(error, buffer);
                     if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
@@ -162,9 +139,7 @@ impl Terminator {
                     Poll::Pending
                 }
             }
-            Self::Draining {
-                error, sent_ccf, ..
-            } => {
+            Self::Draining { error, sent_ccf, .. } => {
                 if !*sent_ccf {
                     let result = dump_ccf(error, buffer);
                     if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
@@ -183,15 +158,7 @@ impl Terminator {
     }
 
     fn on_rcvd_packet(&mut self, now: Instant) {
-        if let Self::Closing {
-            tx_wakers,
-            sync_ccf,
-            rcvd_packets,
-            last_sent,
-            interval,
-            ..
-        } = self
-        {
+        if let Self::Closing { tx_wakers, sync_ccf, rcvd_packets, last_sent, interval, .. } = self {
             *rcvd_packets = rcvd_packets.saturating_add(1);
             let time_due = now.saturating_duration_since(*last_sent) >= *interval;
             if !*sync_ccf && (*rcvd_packets >= 5 || time_due) {
@@ -204,21 +171,11 @@ impl Terminator {
     }
 
     fn recv_conn_close_frame(&mut self, frame: ConnectionCloseFrame) {
-        if let Self::Closing {
-            waiters,
-            tx_wakers: send_wakers,
-            sent_ccf,
-            ..
-        } = self
-        {
+        if let Self::Closing { waiters, tx_wakers: send_wakers, sent_ccf, .. } = self {
             if !*sent_ccf {
                 send_wakers.wake_all();
             }
-            *self = Self::Draining {
-                waiters: waiters.clone(),
-                error: frame.into(),
-                sent_ccf: *sent_ccf,
-            }
+            *self = Self::Draining { waiters: waiters.clone(), error: frame.into(), sent_ccf: *sent_ccf }
         }
     }
 
@@ -226,13 +183,9 @@ impl Terminator {
         match self {
             Self::NoError { tx_wakers, .. } => {
                 tx_wakers.wake_all();
-                *self = Self::Terminated(
-                    QuicError::with_default_fty(ErrorKind::None, "connection terminated").into(),
-                );
+                *self = Self::Terminated(QuicError::with_default_fty(ErrorKind::None, "connection terminated").into());
             }
-            Self::Closing {
-                tx_wakers, error, ..
-            } => {
+            Self::Closing { tx_wakers, error, .. } => {
                 tx_wakers.wake_all();
                 *self = Self::Terminated(error.clone());
             }
@@ -246,9 +199,7 @@ impl Terminator {
     fn poll_terminate(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
         match self {
             Self::Terminated(error) => Poll::Ready(error.clone()),
-            Self::NoError { waiters, .. }
-            | Self::Closing { waiters, .. }
-            | Self::Draining { waiters, .. } => {
+            Self::NoError { waiters, .. } | Self::Closing { waiters, .. } | Self::Draining { waiters, .. } => {
                 waiters.add(cx.waker());
                 Poll::Pending
             }
@@ -280,9 +231,7 @@ impl ArcTerminator {
                     components.push(component);
                     return;
                 }
-                Terminator::Closing { error, .. }
-                | Terminator::Draining { error, .. }
-                | Terminator::Terminated(error) => error.clone(),
+                Terminator::Closing { error, .. } | Terminator::Draining { error, .. } | Terminator::Terminated(error) => error.clone(),
             }
         };
         component.close_with_error(error);
@@ -319,14 +268,8 @@ impl ArcTerminator {
         let (error, components, waiters) = {
             let mut state = self.0.lock().unwrap();
             let (components, waiters) = match &mut *state {
-                Terminator::NoError {
-                    components,
-                    waiters,
-                    ..
-                } => (std::mem::take(components), waiters.clone()),
-                Terminator::Closing { waiters, .. } | Terminator::Draining { waiters, .. } => {
-                    (Vec::new(), waiters.clone())
-                }
+                Terminator::NoError { components, waiters, .. } => (std::mem::take(components), waiters.clone()),
+                Terminator::Closing { waiters, .. } | Terminator::Draining { waiters, .. } => (Vec::new(), waiters.clone()),
                 Terminator::Terminated(_) => return,
             };
             state.terminate();
@@ -364,11 +307,7 @@ impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
         u32::MAX
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         self.0.lock().unwrap().poll_dump(cx, buffer)
     }
 }

@@ -20,8 +20,7 @@ pub struct DataFixture {
 
 impl DataFixture {
     pub fn peer_cid(&self) -> qbase::cid::ConnectionId {
-        self.parameters
-            .remote(qbase::param::ParameterId::InitialSourceConnectionId)
+        self.parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId)
     }
 }
 
@@ -31,10 +30,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
     while material.iter().any(Option::is_none) {
         while let Some(event) = client.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto {
-                    epoch: level,
-                    bytes,
-                } => {
+                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
                     server.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {
@@ -45,10 +41,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
         }
         while let Some(event) = server.next_event() {
             match event {
-                qtls::TlsEvent::WriteCrypto {
-                    epoch: level,
-                    bytes,
-                } => {
+                qtls::TlsEvent::WriteCrypto { epoch: level, bytes } => {
                     client.receive_crypto(level, &bytes).unwrap();
                 }
                 qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) => {
@@ -63,11 +56,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
         .into_iter()
         .zip(material)
         .map(|(role, keys)| {
-            let parameters = ArcParameters::new(
-                role,
-                Arc::new(client_params.clone()),
-                Arc::new(server_params.clone()),
-            );
+            let parameters = ArcParameters::new(role, Arc::new(client_params.clone()), Arc::new(server_params.clone()));
             let scid = parameters.local(qbase::param::ParameterId::InitialSourceConnectionId);
             let peer = parameters.remote(qbase::param::ParameterId::InitialSourceConnectionId);
             let facts = crate::common::handshake_facts(role, false);
@@ -110,16 +99,8 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
                 facts,
             ));
-            let concrete = SpaceFixture {
-                initial: super::initial_space(&paths.spaces),
-                handshake,
-                data,
-            };
-            let fixture = Arc::new(DataFixture {
-                paths,
-                parameters,
-                spaces: concrete,
-            });
+            let concrete = SpaceFixture { initial: super::initial_space(&paths.spaces), handshake, data };
+            let fixture = Arc::new(DataFixture { paths, parameters, spaces: concrete });
             // CID registration can queue NEW_CONNECTION_ID before any punch input.
             take_reliable(&fixture);
             fixture

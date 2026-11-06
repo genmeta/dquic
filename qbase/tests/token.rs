@@ -24,10 +24,7 @@ fn test_read_reset_token() {
     assert_eq!(remain.len(), 0);
     assert_eq!(token, qbase::token::ResetToken::new(&[0; 16]));
     let buf = vec![0; 15];
-    assert_eq!(
-        qbase::token::be_reset_token(&buf),
-        Err(nom::Err::Error(Error::new(&buf[..], ErrorKind::Eof)))
-    );
+    assert_eq!(qbase::token::be_reset_token(&buf), Err(nom::Err::Error(Error::new(&buf[..], ErrorKind::Eof))));
 }
 
 #[test]

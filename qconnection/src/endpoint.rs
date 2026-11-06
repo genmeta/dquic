@@ -19,10 +19,7 @@ use qbase::{
 use qtransport::{keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::sync::oneshot;
 
-use crate::{
-    Accepted, ArcLocalCids, ArcReliableFrames, ArcRemoteCids, CidRegistry, Connected, Error, Paths,
-    TlsContext, client_growing,
-};
+use crate::{Accepted, ArcLocalCids, ArcReliableFrames, ArcRemoteCids, CidRegistry, Connected, Error, Paths, TlsContext, client_growing};
 
 /// A QUIC endpoint with optional local credentials.
 /// Anonymous endpoints can connect; listening requires an identity.
@@ -98,11 +95,7 @@ impl QuicEndpoint {
     /// Atomically publish or replace this server name for future connections.
     /// Anonymous endpoints log a warning and return without listening.
     /// The callback receives only successfully handshaken connections.
-    pub fn listen(
-        &self,
-        scopes: impl Into<Scopes>,
-        accept_cb: impl Fn(Accepted) + Send + Sync + 'static,
-    ) -> Result<(), Error> {
+    pub fn listen(&self, scopes: impl Into<Scopes>, accept_cb: impl Fn(Accepted) + Send + Sync + 'static) -> Result<(), Error> {
         let Some(identity) = self.identity.as_deref() else {
             tracing::warn!("anonymous QUIC endpoint cannot listen");
             return Ok(());
@@ -111,12 +104,7 @@ impl QuicEndpoint {
         let tls_server = self.tls_server(identity)?;
         ServerRegistry::global().insert(
             identity.name().to_owned(),
-            Server {
-                tls_server,
-                server_parameters: self.server_parameters.clone(),
-                scopes: scopes.into(),
-                accept_cb: Arc::new(accept_cb),
-            },
+            Server { tls_server, server_parameters: self.server_parameters.clone(), scopes: scopes.into(), accept_cb: Arc::new(accept_cb) },
         );
         Ok(())
     }
@@ -157,42 +145,26 @@ impl QuicEndpoint {
         })
         .map_err(|error| internal_error(error.to_string()))?;
         let origin_dcid = ConnectionId::random_gen(8);
-        let initial_keys = identity
-            .initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref())
-            .map_err(|error| internal_error(error.to_string()))?;
+        let initial_keys =
+            identity.initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref()).map_err(|error| internal_error(error.to_string()))?;
         let reliable_frames = ArcReliableFrames::with_capacity(0);
         let (inbox, rcvd_pkt) = channel::new();
-        let router_registry =
-            QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
+        let router_registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable_frames.clone());
         let initial_scid = router_registry.gen_unique_cid();
         let mut client_params = client_parameters;
-        client_params
-            .set(ParameterId::InitialSourceConnectionId, initial_scid)
-            .map_err(|error| internal_error(error.to_string()))?;
+        client_params.set(ParameterId::InitialSourceConnectionId, initial_scid).map_err(|error| internal_error(error.to_string()))?;
         let tls = TlsContext::client(
             &identity,
-            tls_name
-                .clone()
-                .try_into()
-                .map_err(|error| internal_error(format!("invalid server name: {error}")))?,
+            tls_name.clone().try_into().map_err(|error| internal_error(format!("invalid server name: {error}")))?,
             &client_params,
         )?;
-        let local_cids =
-            ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
+        let local_cids = ArcLocalCids::new(Role::Client, origin_dcid, initial_scid, router_registry);
         let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
-        let initial_space = Arc::new(InitialSpace::new(
-            initial_scid,
-            ArcKeys::new(Arc::new(initial_keys)),
-            None,
-            facts.clone(),
-        ));
+        let initial_space = Arc::new(InitialSpace::new(initial_scid, ArcKeys::new(Arc::new(initial_keys)), None, facts.clone()));
         let paths = Paths::new(
             initial_space.clone(),
             facts,
-            CidRegistry::new(
-                local_cids,
-                ArcRemoteCids::client(origin_dcid, reliable_frames.clone()),
-            ),
+            CidRegistry::new(local_cids, ArcRemoteCids::client(origin_dcid, reliable_frames.clone())),
             reliable_frames,
             client_params.get::<Duration>(ParameterId::MaxIdleTimeout),
             Duration::ZERO,
@@ -203,20 +175,11 @@ impl QuicEndpoint {
         let pending_paths = paths.clone();
 
         let tick = crate::recv::tick(paths.clone());
-        let growing = client_growing(
-            initial_space,
-            server_name,
-            client_params,
-            paths,
-            rcvd_pkt,
-            tls,
-            token,
-            move |result| {
-                if let Err(Ok((_, _, connection))) = deliver.send(result) {
-                    connection.close(0u32.into(), "connection request cancelled");
-                }
-            },
-        );
+        let growing = client_growing(initial_space, server_name, client_params, paths, rcvd_pkt, tls, token, move |result| {
+            if let Err(Ok((_, _, connection))) = deliver.send(result) {
+                connection.close(0u32.into(), "connection request cancelled");
+            }
+        });
         tokio::spawn(async move {
             let driving = async { tokio::join!(growing, tick).0 };
             tokio::pin!(driving);
@@ -238,9 +201,7 @@ impl QuicEndpoint {
             }
         });
 
-        let result = connected
-            .await
-            .map_err(|error| internal_error(error.to_string()))?;
+        let result = connected.await.map_err(|error| internal_error(error.to_string()))?;
         // There is no await between receiving the connection and transferring ownership.
         let _ = claim.send(());
         result
@@ -275,21 +236,12 @@ impl Server {
         odcid: ConnectionId,
     ) -> Result<(TlsContext, Arc<ClientParameters>, Arc<ServerParameters>), Error> {
         let mut server_parameters = self.server_parameters.clone();
-        server_parameters
-            .set(ParameterId::InitialSourceConnectionId, scid)
-            .map_err(|error| internal_error(error.to_string()))?;
-        server_parameters
-            .set(ParameterId::OriginalDestinationConnectionId, odcid)
-            .map_err(|error| internal_error(error.to_string()))?;
+        server_parameters.set(ParameterId::InitialSourceConnectionId, scid).map_err(|error| internal_error(error.to_string()))?;
+        server_parameters.set(ParameterId::OriginalDestinationConnectionId, odcid).map_err(|error| internal_error(error.to_string()))?;
         let server_parameters = Arc::new(server_parameters);
         let mut encoded_server_parameters = BytesMut::new();
         encoded_server_parameters.put_parameters(&server_parameters);
-        let (tls, client_parameters) = TlsContext::server(
-            &self.tls_server,
-            version,
-            encoded_server_parameters.freeze(),
-            hello,
-        )?;
+        let (tls, client_parameters) = TlsContext::server(&self.tls_server, version, encoded_server_parameters.freeze(), hello)?;
         Ok((tls, client_parameters, server_parameters))
     }
 }
@@ -307,34 +259,24 @@ impl ServerRegistry {
                 let (inbox, rcvd_pkt) = channel::new();
                 let router = QuicRouter::global();
                 let reliable_frames = ArcReliableFrames::with_capacity(0);
-                let router_registry =
-                    match router.try_insert(odcid.into(), inbox.clone(), reliable_frames.clone()) {
-                        Ok(registry) => registry,
-                        Err(existing) => {
-                            existing.try_send_initial(packet, pathway, link);
-                            return;
-                        }
-                    };
+                let router_registry = match router.try_insert(odcid.into(), inbox.clone(), reliable_frames.clone()) {
+                    Ok(registry) => registry,
+                    Err(existing) => {
+                        existing.try_send_initial(packet, pathway, link);
+                        return;
+                    }
+                };
                 let initial_scid = router_registry.gen_unique_cid();
-                let local_cids =
-                    ArcLocalCids::new(Role::Server, odcid, initial_scid, router_registry);
+                let local_cids = ArcLocalCids::new(Role::Server, odcid, initial_scid, router_registry);
                 let Some(initial_keys) = ServerRegistry::global().initial_keys(odcid) else {
                     return;
                 };
                 let facts = Arc::new(HandshakeFacts::with_role(Role::Server));
-                let initial_space = Arc::new(InitialSpace::new(
-                    initial_scid,
-                    ArcKeys::new(Arc::new(initial_keys)),
-                    None,
-                    facts.clone(),
-                ));
+                let initial_space = Arc::new(InitialSpace::new(initial_scid, ArcKeys::new(Arc::new(initial_keys)), None, facts.clone()));
                 let paths = Paths::new(
                     initial_space.clone(),
                     facts,
-                    CidRegistry::new(
-                        local_cids,
-                        ArcRemoteCids::server(client_scid, reliable_frames.clone()),
-                    ),
+                    CidRegistry::new(local_cids, ArcRemoteCids::server(client_scid, reliable_frames.clone())),
                     reliable_frames,
                     Duration::ZERO,
                     Duration::ZERO,
@@ -344,12 +286,8 @@ impl ServerRegistry {
                 inbox.try_send_initial(packet, pathway, link);
 
                 let tick = crate::recv::tick(paths.clone());
-                let growing = crate::server_growing(
-                    initial_space,
-                    rcvd_pkt,
-                    paths,
-                    ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-                );
+                let growing =
+                    crate::server_growing(initial_space, rcvd_pkt, paths, ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)));
                 tokio::spawn(async move { tokio::join!(growing, tick).0 });
             });
             Self(RwLock::new(HashMap::new()))
@@ -358,17 +296,11 @@ impl ServerRegistry {
 
     fn initial_keys(&self, odcid: ConnectionId) -> Option<qtls::BidirectionalKeys> {
         let server = self.0.read().unwrap().values().next()?.clone();
-        server
-            .tls_server
-            .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-            .ok()
+        server.tls_server.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).ok()
     }
 
     fn insert(&self, server_name: String, server: Server) -> Option<Arc<Server>> {
-        self.0
-            .write()
-            .unwrap()
-            .insert(server_name, Arc::new(server))
+        self.0.write().unwrap().insert(server_name, Arc::new(server))
     }
 
     pub fn remove(&self, server_name: &str) -> Option<Arc<Server>> {

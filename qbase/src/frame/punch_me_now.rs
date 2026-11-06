@@ -35,31 +35,16 @@ pub struct PunchMeNowFrame {
     nat_type: NatType,
 }
 
-pub(crate) fn be_punch_me_now_frame(
-    family: Family,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], PunchMeNowFrame> {
+pub(crate) fn be_punch_me_now_frame(family: Family) -> impl Fn(&[u8]) -> nom::IResult<&[u8], PunchMeNowFrame> {
     move |input| {
         let (remain, local_seq) = be_varint(input)?;
         let (remain, remote_seq) = be_varint(remain)?;
         let (remain, address) = be_socket_addr(remain, family)?;
         let (remain, tire) = be_varint(remain)?;
         let (remain, nat_type) = be_varint(remain)?;
-        let nat_type = NatType::try_from(nat_type).map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(
-                remain,
-                nom::error::ErrorKind::Verify,
-            ))
-        })?;
-        Ok((
-            remain,
-            PunchMeNowFrame {
-                local_seq,
-                remote_seq,
-                address,
-                tire,
-                nat_type,
-            },
-        ))
+        let nat_type =
+            NatType::try_from(nat_type).map_err(|_| nom::Err::Error(nom::error::Error::new(remain, nom::error::ErrorKind::Verify)))?;
+        Ok((remain, PunchMeNowFrame { local_seq, remote_seq, address, tire, nat_type }))
     }
 }
 
@@ -85,13 +70,7 @@ impl EncodeSize for PunchMeNowFrame {
 }
 
 impl PunchMeNowFrame {
-    pub fn new(
-        local_seq: u32,
-        remote_seq: u32,
-        address: SocketAddr,
-        tire: u32,
-        nat_type: NatType,
-    ) -> Self {
+    pub fn new(local_seq: u32, remote_seq: u32, address: SocketAddr, tire: u32, nat_type: NatType) -> Self {
         Self {
             local_seq: VarInt::from_u32(local_seq),
             remote_seq: VarInt::from_u32(remote_seq),

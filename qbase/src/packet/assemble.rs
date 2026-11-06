@@ -5,10 +5,7 @@ use bytes::{BufMut, buf::UninitSlice};
 
 use crate::{
     error::Error,
-    frame::{
-        ContainSpec, EncodeSize, Frame, FrameFeature, FrameType, GetFrameType, Len, Spec,
-        io::WriteFrame, *,
-    },
+    frame::{ContainSpec, EncodeSize, Frame, FrameFeature, FrameType, GetFrameType, Len, Spec, io::WriteFrame, *},
     packet::{PacketContent, Type},
 };
 
@@ -37,15 +34,7 @@ impl Metadata {
     }
 
     pub fn new(pktype: Type) -> Self {
-        Self {
-            pn: 0,
-            pktlen: 0,
-            pktype,
-            nframes: 0,
-            content: Default::default(),
-            in_flight: false,
-            ack: None,
-        }
+        Self { pn: 0, pktlen: 0, pktype, nframes: 0, content: Default::default(), in_flight: false, ack: None }
     }
 
     pub fn record(&mut self, frame: &Frame) {
@@ -91,11 +80,7 @@ pub trait Package<B: BufMut + ?Sized> {
     /// Closed sources return Ready(Ok(0)); their stored close error belongs to application I/O.
     /// A new error requests connection closure, not immediate termination of its sending task.
     /// Retain recovery descriptors in `buffer.frames`; return the number of all frames written.
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>>;
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>>;
 }
 
 pub trait Assemble {
@@ -126,10 +111,7 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
         sources.sort_by_key(|source| std::cmp::Reverse(source.priority()));
         let start = self.meta.nframes;
         let mut result = Poll::Pending;
-        for source in sources
-            .iter_mut()
-            .filter(|source| source.belongs_to(packet_type) && source.content() <= packet_content)
-        {
+        for source in sources.iter_mut().filter(|source| source.belongs_to(packet_type) && source.content() <= packet_content) {
             if self.finished {
                 break;
             }
@@ -155,9 +137,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
         nwrote: usize,
         tag_len: usize,
     ) -> Self {
-        let end = nwrote
-            .saturating_add(buffer.remaining_mut())
-            .saturating_sub(tag_len);
+        let end = nwrote.saturating_add(buffer.remaining_mut()).saturating_sub(tag_len);
         Self {
             buffer,
             credit,
@@ -179,11 +159,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     }
 
     /// Encode a header and PN, remembering the layout without retaining the header.
-    pub fn begin<H: super::HeaderSize + super::GetType>(
-        &mut self,
-        header: &H,
-        pn: super::PacketNumber,
-    ) -> bool
+    pub fn begin<H: super::HeaderSize + super::GetType>(&mut self, header: &H, pn: super::PacketNumber) -> bool
     where
         for<'b> &'b mut Self: super::header::io::WriteHeader<H>,
     {
@@ -192,9 +168,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
         let long = matches!(self.meta.pktype, Type::Long(_));
         self.pn_offset = header.size() + if long { 2 } else { 0 };
         self.min_size = self.pn_offset + 4 + 16;
-        if self.pn_offset + pn.size() > self.remaining_mut()
-            || self.nwrote.saturating_add(self.buffer.remaining_mut()) < self.min_size
-        {
+        if self.pn_offset + pn.size() > self.remaining_mut() || self.nwrote.saturating_add(self.buffer.remaining_mut()) < self.min_size {
             return false;
         }
         let mut writer = self;
@@ -217,17 +191,13 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
             return;
         }
         let limit = self.nwrote.saturating_add(self.buffer.remaining_mut());
-        let limit =
-            if self.meta.in_flight || !frame_type.specs().contain(Spec::CongestionControlFree) {
-                limit.min(self.credit)
-            } else {
-                limit
-            };
+        let limit = if self.meta.in_flight || !frame_type.specs().contain(Spec::CongestionControlFree) {
+            limit.min(self.credit)
+        } else {
+            limit
+        };
         let mut min_size = self.min_size;
-        if matches!(
-            frame_type,
-            FrameType::PathChallenge | FrameType::PathResponse
-        ) {
+        if matches!(frame_type, FrameType::PathChallenge | FrameType::PathResponse) {
             min_size = min_size.max(self.validation_min_size);
         }
         self.end = if limit < min_size {
@@ -244,9 +214,7 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
             FrameType::PathChallenge | FrameType::PathResponse => {
                 self.min_size = self.min_size.max(self.validation_min_size);
             }
-            FrameType::ConnectionClose(_)
-            | FrameType::Stream(_, Len::Omit, _)
-            | FrameType::Datagram(0) => {
+            FrameType::ConnectionClose(_) | FrameType::Stream(_, Len::Omit, _) | FrameType::Datagram(0) => {
                 self.finished = true;
             }
             _ => {}
@@ -275,20 +243,13 @@ impl<'a, B: BufMut + ?Sized> PacketBuffer<'a, B> {
     /// Padding needed to reach the minimum size consumes congestion quota too.
     pub fn can_fit(&self, size: usize) -> bool {
         size <= self.remaining_mut()
-            && (self
-                .nwrote
-                .saturating_add(size)
-                .saturating_add(self.tag_len)
-                >= self.min_size
-                || self.credit >= self.min_size)
+            && (self.nwrote.saturating_add(size).saturating_add(self.tag_len) >= self.min_size || self.credit >= self.min_size)
     }
 }
 
 unsafe impl<B: BufMut + ?Sized> BufMut for PacketBuffer<'_, B> {
     fn remaining_mut(&self) -> usize {
-        self.end
-            .saturating_sub(self.nwrote)
-            .min(self.buffer.remaining_mut())
+        self.end.saturating_sub(self.nwrote).min(self.buffer.remaining_mut())
     }
 
     unsafe fn advance_mut(&mut self, count: usize) {
@@ -322,35 +283,25 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
         (**self).priority()
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         (**self).poll_dump(cx, buffer)
     }
 }
 
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
     fn content(&self) -> PacketContent {
-        self.as_ref()
-            .map_or(PacketContent::default(), Package::content)
+        self.as_ref().map_or(PacketContent::default(), Package::content)
     }
 
     fn belongs_to(&self, packet_type: Type) -> bool {
-        self.as_ref()
-            .is_some_and(|source| source.belongs_to(packet_type))
+        self.as_ref().is_some_and(|source| source.belongs_to(packet_type))
     }
 
     fn priority(&self) -> u32 {
         self.as_ref().map_or(0, Package::priority)
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         let Some(source) = self.as_mut() else {
             return Poll::Pending;
         };
@@ -383,11 +334,7 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for (crate::Epoch, P) {
         self.1.priority()
     }
 
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         self.1.poll_dump(cx, buffer)
     }
 }

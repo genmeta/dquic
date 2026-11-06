@@ -30,10 +30,8 @@ pub fn be_datagram(bytes: BytesMut) -> Result<Datagram, Error> {
     let (input, ty) = super::be_datagram_type(&bytes).map_err(|_| Error::InvalidDatagramType)?;
     match ty {
         Type::V0(v0::Type::Stun(ty)) => {
-            let (input, transaction_id) =
-                stun::be_transaction_id(input).map_err(|_| Error::InvalidStunMessage)?;
-            let (remain, message) =
-                stun::be_stun_message(ty, input).map_err(|_| Error::InvalidStunMessage)?;
+            let (input, transaction_id) = stun::be_transaction_id(input).map_err(|_| Error::InvalidStunMessage)?;
+            let (remain, message) = stun::be_stun_message(ty, input).map_err(|_| Error::InvalidStunMessage)?;
             if !remain.is_empty() {
                 return Err(Error::InvalidStunMessage);
             }
@@ -41,8 +39,7 @@ pub fn be_datagram(bytes: BytesMut) -> Result<Datagram, Error> {
         }
         Type::V0(v0::Type::Forward(family, source, destination)) => {
             let (raw_offset, pathway) = {
-                let (raw, pathway) = be_pathway(input, family, source, destination)
-                    .map_err(|_| Error::InvalidForwardDatagram)?;
+                let (raw, pathway) = be_pathway(input, family, source, destination).map_err(|_| Error::InvalidForwardDatagram)?;
                 if raw.is_empty() {
                     return Err(Error::InvalidForwardDatagram);
                 }

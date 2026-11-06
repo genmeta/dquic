@@ -65,11 +65,7 @@ pub mod io {
 
     /// Parse a 1RTT header from the input buffer,
     /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-    pub fn be_one_rtt_header(
-        spin: SpinBit,
-        dcid_len: usize,
-        input: &[u8],
-    ) -> nom::IResult<&[u8], OneRttHeader> {
+    pub fn be_one_rtt_header(spin: SpinBit, dcid_len: usize, input: &[u8]) -> nom::IResult<&[u8], OneRttHeader> {
         use nom::bytes::streaming::take;
         let (remain, dcid) = take(dcid_len)(input)?;
         let dcid = crate::cid::ConnectionId::from_slice(dcid);

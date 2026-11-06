@@ -20,9 +20,7 @@ use qprotocol::{QuicProtocol, UdpSocket};
 
 fn receiver() -> StdUdpSocket {
     let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
+    socket.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
     socket
 }
 
@@ -62,10 +60,7 @@ async fn direct_pathway_sends_a_batch_without_splitting_datagrams() {
     let slices = packets.each_ref().map(|packet| IoSlice::new(packet));
     let mut sent = 0;
     while sent < packets.len() {
-        let count = protocol
-            .send(Pathway::new(local, remote), &slices[sent..])
-            .await
-            .unwrap();
+        let count = protocol.send(Pathway::new(local, remote), &slices[sent..]).await.unwrap();
         assert!(count > 0);
         sent += count;
     }
@@ -82,10 +77,7 @@ async fn mediated_pathway_sends_a_batch_of_forward_datagrams_to_agent() {
     let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let receiver = receiver();
     let local = EndpointAddr::direct(raw.local_addr().unwrap());
-    let remote = EndpointAddr::mediate(
-        receiver.local_addr().unwrap(),
-        "127.0.0.1:4433".parse().unwrap(),
-    );
+    let remote = EndpointAddr::mediate(receiver.local_addr().unwrap(), "127.0.0.1:4433".parse().unwrap());
     let pathway = Pathway::new(local, remote);
     let protocol = QuicProtocol::new();
     protocol.register(local, &raw).unwrap();
@@ -101,9 +93,7 @@ async fn mediated_pathway_sends_a_batch_of_forward_datagrams_to_agent() {
     let mut received = [0; 1500];
     for packet in packets {
         let (len, source) = receiver.recv_from(&mut received).unwrap();
-        let Datagram::Forward(decoded_pathway, payload) =
-            be_datagram(BytesMut::from(&received[..len])).unwrap()
-        else {
+        let Datagram::Forward(decoded_pathway, payload) = be_datagram(BytesMut::from(&received[..len])).unwrap() else {
             panic!("expected Forward datagram");
         };
         assert_eq!(decoded_pathway, pathway);
@@ -118,10 +108,7 @@ async fn unavailable_local_endpoint_fails_to_send() {
     let remote = EndpointAddr::direct("127.0.0.1:4434".parse().unwrap());
     let protocol = QuicProtocol::new();
 
-    let error = protocol
-        .send(Pathway::new(local, remote), &[IoSlice::new(&[0x40])])
-        .await
-        .unwrap_err();
+    let error = protocol.send(Pathway::new(local, remote), &[IoSlice::new(&[0x40])]).await.unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::NotConnected);
 }
@@ -137,10 +124,7 @@ async fn reclaimed_udp_socket_fails_to_send_and_clears_registration() {
     };
     let remote = EndpointAddr::direct("127.0.0.1:4434".parse().unwrap());
 
-    let error = protocol
-        .send(Pathway::new(local, remote), &[IoSlice::new(&[0x40])])
-        .await
-        .unwrap_err();
+    let error = protocol.send(Pathway::new(local, remote), &[IoSlice::new(&[0x40])]).await.unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::NotConnected);
     assert!(protocol.find_socket(local).is_none());

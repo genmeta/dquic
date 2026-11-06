@@ -8,13 +8,7 @@ fn test_read_connection_id() {
     assert_eq!(*cid, [0x01, 0x02, 0x03, 0x04],);
 
     let buf = vec![21, 0x01, 0x02, 0x03, 0x04];
-    assert_eq!(
-        be_connection_id(&buf),
-        Err(nom::Err::Error(nom::error::make_error(
-            &buf[1..],
-            nom::error::ErrorKind::TooLarge
-        )))
-    );
+    assert_eq!(be_connection_id(&buf), Err(nom::Err::Error(nom::error::make_error(&buf[1..], nom::error::ErrorKind::TooLarge))));
 }
 
 #[test]
@@ -29,8 +23,5 @@ fn test_write_connection_id() {
     let mut buf = BytesMut::new();
     let cid = ConnectionId::from_slice(&[0x01, 0x02, 0x03, 0x04]);
     buf.put_connection_id(&cid);
-    assert_eq!(
-        buf.freeze(),
-        Bytes::from_static(&[0x04, 0x01, 0x02, 0x03, 0x04])
-    );
+    assert_eq!(buf.freeze(), Bytes::from_static(&[0x04, 0x01, 0x02, 0x03, 0x04]));
 }

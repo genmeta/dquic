@@ -8,16 +8,10 @@ use std::{
 };
 
 use clap::Parser;
-use qprotocol::{
-    Dock, ForwardProtocol, QuicProtocol, StunProtocol, UdpSocket, protocol::stun::ChangeServer,
-    topology::Topology,
-};
+use qprotocol::{Dock, ForwardProtocol, QuicProtocol, StunProtocol, UdpSocket, protocol::stun::ChangeServer, topology::Topology};
 
 #[derive(Debug, Parser)]
-#[command(
-    version,
-    about = "Serve dquic STUN on two UDP ports; optionally relay dquic packets"
-)]
+#[command(version, about = "Serve dquic STUN on two UDP ports; optionally relay dquic packets")]
 struct Options {
     /// Concrete IP assigned to this machine (not 0.0.0.0 or ::).
     #[arg(long)]
@@ -45,36 +39,17 @@ impl Options {
     fn validate(&self) -> io::Result<()> {
         let public = self.public_ip();
         let addresses = [self.bind_ip, public, self.change_ip];
-        if addresses.iter().any(|ip| {
-            ip.is_unspecified()
-                || ip.is_multicast()
-                || matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())
-        }) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "bind-ip, public-ip and change-ip must be concrete unicast addresses",
-            ));
+        if addresses.iter().any(|ip| ip.is_unspecified() || ip.is_multicast() || matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bind-ip, public-ip and change-ip must be concrete unicast addresses"));
         }
-        if addresses
-            .iter()
-            .any(|ip| ip.is_ipv4() != self.bind_ip.is_ipv4())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "all addresses must use the same IP family",
-            ));
+        if addresses.iter().any(|ip| ip.is_ipv4() != self.bind_ip.is_ipv4()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "all addresses must use the same IP family"));
         }
         if public == self.change_ip || self.bind_ip == self.change_ip {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "change-ip must belong to another STUN node",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "change-ip must belong to another STUN node"));
         }
         if self.port == self.alternate_port {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "port and alternate-port must differ",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "port and alternate-port must differ"));
         }
         Ok(())
     }
@@ -86,24 +61,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     options.validate()?;
     tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     // This server owns its topology; it never bootstraps the client's global DNS.
     let stun = Arc::new(StunProtocol::new());
     stun.disable_service();
     let forward = Arc::new(ForwardProtocol::new());
-    let dock = Dock::new(Arc::new(Topology::new(
-        stun.clone(),
-        forward.clone(),
-        Arc::new(QuicProtocol::new()),
-    )));
+    let dock = Dock::new(Arc::new(Topology::new(stun.clone(), forward.clone(), Arc::new(QuicProtocol::new()))));
     let ports = [options.port, options.alternate_port];
     // Bind both sockets before starting either receive task, so partial startup fails cleanly.
-    let sockets =
-        ports.map(|port| UdpSocket::bind(SocketAddr::new(options.bind_ip, port)).map(Arc::new));
+    let sockets = ports.map(|port| UdpSocket::bind(SocketAddr::new(options.bind_ip, port)).map(Arc::new));
     let [first, second] = sockets;
     let sockets = [first?, second?];
     for (index, socket) in sockets.iter().enumerate() {
@@ -111,14 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let outer = SocketAddr::new(options.public_ip(), ports[index]);
         let changed = SocketAddr::new(options.change_ip, ports[1 - index]);
         dock.add(socket.clone())?;
-        stun.set_change_server(
-            bound,
-            ChangeServer {
-                change_port: ports[1 - index],
-                change_address: changed,
-                outer_address: outer,
-            },
-        )?;
+        stun.set_change_server(bound, ChangeServer { change_port: ports[1 - index], change_address: changed, outer_address: outer })?;
         if options.relay {
             // The receiving address selects the socket; the public alias selects
             // the agent when this node is behind a port-preserving NAT.
@@ -154,10 +115,7 @@ async fn receive_health(dock: &Dock, sockets: &[Arc<UdpSocket>; 2]) -> io::Resul
         for socket in sockets {
             let bound = socket.local_addr()?;
             if dock.find_socket(bound).is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    format!("UDP receive task stopped for {bound}"),
-                ));
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, format!("UDP receive task stopped for {bound}")));
             }
         }
     }
@@ -166,8 +124,7 @@ async fn receive_health(dock: &Dock, sockets: &[Arc<UdpSocket>; 2]) -> io::Resul
 async fn shutdown_signal() -> io::Result<()> {
     #[cfg(unix)]
     {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             result = tokio::signal::ctrl_c() => result,
             _ = terminate.recv() => Ok(()),

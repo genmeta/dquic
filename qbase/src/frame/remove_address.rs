@@ -18,12 +18,7 @@ pub struct RemoveAddressFrame {
 
 pub(crate) fn be_remove_address_frame(input: &[u8]) -> nom::IResult<&[u8], RemoveAddressFrame> {
     let (input, sequence_number) = be_varint(input)?;
-    Ok((
-        input,
-        RemoveAddressFrame {
-            seq_num: sequence_number,
-        },
-    ))
+    Ok((input, RemoveAddressFrame { seq_num: sequence_number }))
 }
 
 impl GetFrameType for RemoveAddressFrame {

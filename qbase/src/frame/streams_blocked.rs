@@ -54,9 +54,7 @@ impl super::EncodeSize for StreamsBlockedFrame {
 
 /// Return a parser for STREAMS_BLOCKED frame with the given direction,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn streams_blocked_frame_with_dir(
-    dir: Dir,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], StreamsBlockedFrame> {
+pub fn streams_blocked_frame_with_dir(dir: Dir) -> impl Fn(&[u8]) -> nom::IResult<&[u8], StreamsBlockedFrame> {
     move |input: &[u8]| {
         let (input, max_streams) = be_varint(input)?;
         Ok((

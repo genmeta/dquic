@@ -7,10 +7,7 @@ use bytes::Bytes;
 use qbase::{Epoch, error::AppError, net::route::Pathway};
 use qrecovery::streams::DataStreams;
 
-use crate::{
-    ArcReliableFrames, CloseReason, Error, StreamId, StreamReader, StreamWriter, VarInt,
-    path::Path, terminate::ArcTerminator,
-};
+use crate::{ArcReliableFrames, CloseReason, Error, StreamId, StreamReader, StreamWriter, VarInt, path::Path, terminate::ArcTerminator};
 
 /// A successfully handshaken QUIC connection. Clones share stream queues and lifetime.
 /// Keep one handle alive while using detached stream readers and writers.
@@ -30,25 +27,13 @@ impl ArcConnection {
     /// Integration only: TLS and parameters are authenticated. Register streams with
     /// the terminator before constructing this handle; qconnection awaits termination.
     #[doc(hidden)]
-    pub fn new(
-        alpn: Bytes,
-        streams: DataStreams<ArcReliableFrames>,
-        terminator: ArcTerminator,
-    ) -> Self {
-        Self(Arc::new(Connection {
-            alpn,
-            streams,
-            terminator,
-            paths: OnceLock::new(),
-        }))
+    pub fn new(alpn: Bytes, streams: DataStreams<ArcReliableFrames>, terminator: ArcTerminator) -> Self {
+        Self(Arc::new(Connection { alpn, streams, terminator, paths: OnceLock::new() }))
     }
 
     /// Integration only: visit borrowed paths synchronously without retaining their owner.
     #[doc(hidden)]
-    pub fn with_path_observer(
-        self,
-        paths: impl Fn(&mut dyn FnMut(&Path)) + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_path_observer(self, paths: impl Fn(&mut dyn FnMut(&Path)) + Send + Sync + 'static) -> Self {
         let _ = self.0.paths.set(Box::new(paths));
         self
     }
@@ -71,9 +56,7 @@ impl ArcConnection {
     }
 
     /// Wait for stream credit; None means the stream-number space is exhausted.
-    pub async fn open_bi_stream(
-        &self,
-    ) -> Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error> {
+    pub async fn open_bi_stream(&self) -> Result<Option<(StreamId, (StreamReader, StreamWriter))>, Error> {
         self.0.streams.open_bi().await
     }
 
@@ -82,9 +65,7 @@ impl ArcConnection {
     }
 
     /// Use one accept loop per direction. Cancellation does not consume a stream.
-    pub async fn accept_bi_stream(
-        &self,
-    ) -> Result<(StreamId, (StreamReader, StreamWriter)), Error> {
+    pub async fn accept_bi_stream(&self) -> Result<(StreamId, (StreamReader, StreamWriter)), Error> {
         self.0.streams.accept_bi().await
     }
 
@@ -107,18 +88,12 @@ impl Connection {
                 pto = Some(pto.map_or(base, |pto: Duration| pto.max(base)));
             });
         }
-        self.terminator.close(
-            CloseReason::App(error),
-            pto.unwrap_or(Duration::from_secs(1)),
-        );
+        self.terminator.close(CloseReason::App(error), pto.unwrap_or(Duration::from_secs(1)));
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.close(AppError::new(
-            VarInt::from_u32(0),
-            "last connection handle dropped",
-        ));
+        self.close(AppError::new(VarInt::from_u32(0), "last connection handle dropped"));
     }
 }

@@ -1,15 +1,12 @@
-use std::{
-    collections::HashMap, fmt::Display, marker::PhantomData, net::SocketAddr, time::Duration,
-};
+use std::{collections::HashMap, fmt::Display, marker::PhantomData, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use derive_builder::Builder;
 use derive_more::{From, Into, LowerHex};
 use qbase::{
     frame::{
-        AckFrame, ConnectionCloseFrame, CryptoFrame, DatagramFrame, EncodeSize, Frame,
-        GetFrameType, MaxStreamsFrame, NewTokenFrame, PathChallengeFrame, PathResponseFrame,
-        PingFrame, ReliableFrame, StreamCtlFrame, StreamFrame, StreamsBlockedFrame,
+        AckFrame, ConnectionCloseFrame, CryptoFrame, DatagramFrame, EncodeSize, Frame, GetFrameType, MaxStreamsFrame, NewTokenFrame,
+        PathChallengeFrame, PathResponseFrame, PingFrame, ReliableFrame, StreamCtlFrame, StreamFrame, StreamsBlockedFrame,
     },
     packet::header::{
         GetDcid, GetScid,
@@ -129,11 +126,7 @@ pub enum IpVersion {
 /// different PathEndpointInfo instances, one for each half of the path.
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 pub struct PathEndpointInfo {
     ip_v4: Option<IPAddress>,
     ip_v6: Option<IPAddress>,
@@ -150,14 +143,8 @@ pub struct PathEndpointInfo {
 impl From<SocketAddr> for PathEndpointInfo {
     fn from(value: SocketAddr) -> Self {
         match value {
-            SocketAddr::V4(addr) => crate::build!(PathEndpointInfo {
-                ip_v4: addr.ip().to_string(),
-                port_v4: addr.port(),
-            }),
-            SocketAddr::V6(addr) => crate::build!(PathEndpointInfo {
-                ip_v6: addr.ip().to_string(),
-                port_v6: addr.port(),
-            }),
+            SocketAddr::V4(addr) => crate::build!(PathEndpointInfo { ip_v4: addr.ip().to_string(), port_v4: addr.port() }),
+            SocketAddr::V6(addr) => crate::build!(PathEndpointInfo { ip_v6: addr.ip().to_string(), port_v6: addr.port() }),
         }
     }
 }
@@ -182,21 +169,11 @@ impl From<qbase::packet::Type> for PacketType {
     fn from(r#type: qbase::packet::Type) -> Self {
         match r#type {
             qbase::packet::r#type::Type::Long(long) => match long {
-                qbase::packet::r#type::long::Type::VersionNegotiation => {
-                    PacketType::VersionNegotiation
-                }
-                qbase::packet::r#type::long::Type::V1(
-                    qbase::packet::r#type::long::Version::INITIAL,
-                ) => PacketType::Initial,
-                qbase::packet::r#type::long::Type::V1(
-                    qbase::packet::r#type::long::Version::HANDSHAKE,
-                ) => PacketType::Handshake,
-                qbase::packet::r#type::long::Type::V1(
-                    qbase::packet::r#type::long::Version::ZERO_RTT,
-                ) => PacketType::ZeroRTT,
-                qbase::packet::r#type::long::Type::V1(
-                    qbase::packet::r#type::long::Version::RETRY,
-                ) => PacketType::Retry,
+                qbase::packet::r#type::long::Type::VersionNegotiation => PacketType::VersionNegotiation,
+                qbase::packet::r#type::long::Type::V1(qbase::packet::r#type::long::Version::INITIAL) => PacketType::Initial,
+                qbase::packet::r#type::long::Type::V1(qbase::packet::r#type::long::Version::HANDSHAKE) => PacketType::Handshake,
+                qbase::packet::r#type::long::Type::V1(qbase::packet::r#type::long::Version::ZERO_RTT) => PacketType::ZeroRTT,
+                qbase::packet::r#type::long::Type::V1(qbase::packet::r#type::long::Version::RETRY) => PacketType::Retry,
             },
             qbase::packet::r#type::Type::Short(_one_rtt) => PacketType::OneRTT,
         }
@@ -308,9 +285,7 @@ impl PacketHeaderBuilder {
     ///
     /// Since the header defined by qbase is not complete enough, there are still many fields that need to be set manually.
     pub fn one_rtt(&mut self, header: &OneRttHeader) -> &mut Self {
-        self.packet_type(PacketType::OneRTT)
-            .dcil(header.dcid().len() as u8)
-            .dcid(*header.dcid())
+        self.packet_type(PacketType::OneRTT).dcil(header.dcid().len() as u8).dcid(*header.dcid())
     }
 }
 
@@ -349,11 +324,7 @@ impl From<&OneRttHeader> for PacketHeaderBuilder {
 // 8.9
 #[serde_with::skip_serializing_none]
 #[derive(Builder, Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[builder(
-    default,
-    setter(into, strip_option),
-    build_fn(private, name = "fallible_build")
-)]
+#[builder(default, setter(into, strip_option), build_fn(private, name = "fallible_build"))]
 #[serde(default)]
 pub struct Token {
     pub r#type: Option<TokenType>,
@@ -381,10 +352,7 @@ impl<H: 'static> TryFrom<&qbase::packet::header::LongHeader<H>> for Token {
             }));
         }
         if let Some(retry) = header.downcast_ref::<RetryHeader>() {
-            return Ok(crate::build!(Token {
-                r#type: TokenType::Retry,
-                raw: retry.token(),
-            }));
+            return Ok(crate::build!(Token { r#type: TokenType::Retry, raw: retry.token() }));
         }
         Err(())
     }
@@ -608,10 +576,7 @@ pub enum QuicFrame {
 
 impl From<&PingFrame> for QuicFrame {
     fn from(frame: &PingFrame) -> Self {
-        QuicFrame::Ping {
-            length: Some(frame.encoding_size() as u32),
-            payload_length: Some(0),
-        }
+        QuicFrame::Ping { length: Some(frame.encoding_size() as u32), payload_length: Some(0) }
     }
 }
 
@@ -623,11 +588,7 @@ impl<D: Buffer + ?Sized> From<(&CryptoFrame, &D)> for QuicFrame {
             offset: frame.offset(),
             length,
             payload_length: Some(payload_length as _),
-            raw: Some(crate::build!(RawInfo {
-                length,
-                payload_length,
-                data,
-            })),
+            raw: Some(crate::build!(RawInfo { length, payload_length, data })),
         }
     }
 }
@@ -640,10 +601,7 @@ impl From<&CryptoFrame> for QuicFrame {
             offset: frame.offset(),
             length,
             payload_length: Some(payload_length as _),
-            raw: Some(crate::build!(RawInfo {
-                length,
-                payload_length,
-            })),
+            raw: Some(crate::build!(RawInfo { length, payload_length })),
         }
     }
 }
@@ -657,11 +615,7 @@ impl<D: Buffer + ?Sized> From<(&StreamFrame, &D)> for QuicFrame {
             offset: frame.offset(),
             length: payload_length as u64,
             fin: frame.is_fin(),
-            raw: Some(crate::build!(RawInfo {
-                length: length as u64,
-                payload_length: payload_length as u64,
-                data: data,
-            })),
+            raw: Some(crate::build!(RawInfo { length: length as u64, payload_length: payload_length as u64, data: data })),
         }
     }
 }
@@ -675,10 +629,7 @@ impl From<&StreamFrame> for QuicFrame {
             offset: frame.offset(),
             length: payload_length as u64,
             fin: frame.is_fin(),
-            raw: Some(crate::build!(RawInfo {
-                length: length as u64,
-                payload_length: payload_length as u64,
-            })),
+            raw: Some(crate::build!(RawInfo { length: length as u64, payload_length: payload_length as u64 })),
         }
     }
 }
@@ -687,14 +638,7 @@ impl<D: Buffer + ?Sized> From<(&DatagramFrame, &D)> for QuicFrame {
     fn from((frame, data): (&DatagramFrame, &D)) -> Self {
         let payload_length = frame.len().into_u64();
         let length = frame.encoding_size() as u64 + payload_length;
-        QuicFrame::Datagram {
-            length: Some(payload_length as _),
-            raw: Some(crate::build!(RawInfo {
-                length,
-                payload_length,
-                data: data,
-            })),
-        }
+        QuicFrame::Datagram { length: Some(payload_length as _), raw: Some(crate::build!(RawInfo { length, payload_length, data: data })) }
     }
 }
 
@@ -702,29 +646,19 @@ impl From<&DatagramFrame> for QuicFrame {
     fn from(frame: &DatagramFrame) -> Self {
         let payload_length = frame.len().into_u64();
         let length = frame.encoding_size() as u64 + payload_length;
-        QuicFrame::Datagram {
-            length: Some(payload_length as _),
-            raw: Some(crate::build!(RawInfo {
-                length,
-                payload_length,
-            })),
-        }
+        QuicFrame::Datagram { length: Some(payload_length as _), raw: Some(crate::build!(RawInfo { length, payload_length })) }
     }
 }
 
 impl From<&PathChallengeFrame> for QuicFrame {
     fn from(frame: &PathChallengeFrame) -> Self {
-        QuicFrame::PathChallenge {
-            data: Some(Bytes::from_owner(frame.to_vec()).into()),
-        }
+        QuicFrame::PathChallenge { data: Some(Bytes::from_owner(frame.to_vec()).into()) }
     }
 }
 
 impl From<&PathResponseFrame> for QuicFrame {
     fn from(frame: &PathResponseFrame) -> Self {
-        QuicFrame::PathResponse {
-            data: Some(Bytes::from_owner(frame.to_vec()).into()),
-        }
+        QuicFrame::PathResponse { data: Some(Bytes::from_owner(frame.to_vec()).into()) }
     }
 }
 
@@ -736,10 +670,7 @@ impl From<&AckFrame> for QuicFrame {
                 .ranges()
                 .iter()
                 .fold(
-                    (
-                        frame.largest() - frame.first_range(),
-                        vec![[frame.largest() - frame.first_range(), frame.largest()]],
-                    ),
+                    (frame.largest() - frame.first_range(), vec![[frame.largest() - frame.first_range(), frame.largest()]]),
                     |(previous_smallest, mut acked_ranges), (gap, ack)| {
                         // see https://www.rfc-editor.org/rfc/rfc9000.html#name-ack-ranges
                         let largest = previous_smallest - gap.into_u64() - 2;
@@ -770,27 +701,21 @@ impl From<&ReliableFrame> for QuicFrame {
                 stateless_reset_token: Some((**new_connection_id_frame.reset_token()).into()),
             },
             ReliableFrame::RetireConnectionId(retire_connection_id_frame) => {
-                QuicFrame::RetireConnectionId {
-                    sequence_number: retire_connection_id_frame.sequence() as u32,
-                }
+                QuicFrame::RetireConnectionId { sequence_number: retire_connection_id_frame.sequence() as u32 }
             }
             ReliableFrame::HandshakeDone(_handshake_done_frame) => QuicFrame::HandshakeDone {},
-            ReliableFrame::AddAddress(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
-            ReliableFrame::RemoveAddress(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
-            ReliableFrame::PunchMeNow(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
-            ReliableFrame::PunchDone(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
+            ReliableFrame::AddAddress(frame) => {
+                QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None }
+            }
+            ReliableFrame::RemoveAddress(frame) => {
+                QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None }
+            }
+            ReliableFrame::PunchMeNow(frame) => {
+                QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None }
+            }
+            ReliableFrame::PunchDone(frame) => {
+                QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None }
+            }
             ReliableFrame::StreamCtl(stream_ctl_frame) => QuicFrame::from(stream_ctl_frame),
         }
     }
@@ -801,11 +726,7 @@ impl From<&NewTokenFrame> for QuicFrame {
         QuicFrame::NewToken {
             token: crate::build!(Token {
                 r#type: TokenType::Retry,
-                raw: RawInfo {
-                    length: value.encoding_size() as u64,
-                    payload_length: value.token().len() as u64,
-                    data: value.token(),
-                },
+                raw: RawInfo { length: value.encoding_size() as u64, payload_length: value.token().len() as u64, data: value.token() },
             }),
         }
     }
@@ -814,12 +735,8 @@ impl From<&NewTokenFrame> for QuicFrame {
 impl From<&StreamCtlFrame> for QuicFrame {
     fn from(frame: &StreamCtlFrame) -> Self {
         match frame {
-            StreamCtlFrame::MaxData(frame) => QuicFrame::MaxData {
-                maximum: frame.max_data(),
-            },
-            StreamCtlFrame::DataBlocked(frame) => QuicFrame::DataBlocked {
-                limit: frame.limit(),
-            },
+            StreamCtlFrame::MaxData(frame) => QuicFrame::MaxData { maximum: frame.max_data() },
+            StreamCtlFrame::DataBlocked(frame) => QuicFrame::DataBlocked { limit: frame.limit() },
             StreamCtlFrame::ResetStream(reset_stream_frame) => QuicFrame::ResetStream {
                 stream_id: reset_stream_frame.stream_id().id(),
                 error_code: (reset_stream_frame.app_error_code() as u32).into(),
@@ -838,30 +755,24 @@ impl From<&StreamCtlFrame> for QuicFrame {
                 maximum: max_stream_data_frame.max_stream_data(),
             },
             StreamCtlFrame::MaxStreams(max_streams_frame) => match max_streams_frame {
-                MaxStreamsFrame::Bi(maximum) => QuicFrame::MaxStreams {
-                    stream_type: StreamType::Bidirectional,
-                    maximum: maximum.into_u64(),
-                },
-                MaxStreamsFrame::Uni(maximum) => QuicFrame::MaxStreams {
-                    stream_type: StreamType::Unidirectional,
-                    maximum: maximum.into_u64(),
-                },
-            },
-            StreamCtlFrame::StreamDataBlocked(stream_data_blocked_frame) => {
-                QuicFrame::StreamDataBlocked {
-                    stream_id: stream_data_blocked_frame.stream_id().id(),
-                    limit: stream_data_blocked_frame.maximum_stream_data(),
+                MaxStreamsFrame::Bi(maximum) => {
+                    QuicFrame::MaxStreams { stream_type: StreamType::Bidirectional, maximum: maximum.into_u64() }
                 }
-            }
+                MaxStreamsFrame::Uni(maximum) => {
+                    QuicFrame::MaxStreams { stream_type: StreamType::Unidirectional, maximum: maximum.into_u64() }
+                }
+            },
+            StreamCtlFrame::StreamDataBlocked(stream_data_blocked_frame) => QuicFrame::StreamDataBlocked {
+                stream_id: stream_data_blocked_frame.stream_id().id(),
+                limit: stream_data_blocked_frame.maximum_stream_data(),
+            },
             StreamCtlFrame::StreamsBlocked(streams_blocked_frame) => match streams_blocked_frame {
-                StreamsBlockedFrame::Bi(limit) => QuicFrame::StreamsBlocked {
-                    stream_type: StreamType::Bidirectional,
-                    limit: limit.into_u64(),
-                },
-                StreamsBlockedFrame::Uni(limit) => QuicFrame::StreamsBlocked {
-                    stream_type: StreamType::Unidirectional,
-                    limit: limit.into_u64(),
-                },
+                StreamsBlockedFrame::Bi(limit) => {
+                    QuicFrame::StreamsBlocked { stream_type: StreamType::Bidirectional, limit: limit.into_u64() }
+                }
+                StreamsBlockedFrame::Uni(limit) => {
+                    QuicFrame::StreamsBlocked { stream_type: StreamType::Unidirectional, limit: limit.into_u64() }
+                }
             },
         }
     }
@@ -875,12 +786,8 @@ impl From<&ConnectionCloseFrame> for QuicFrame {
                 ConnectionCloseFrame::Quic(..) => ConnectionCloseErrorSpace::Transport,
             }),
             error_code: match &frame {
-                ConnectionCloseFrame::App(frame) => {
-                    Some(ApplicationCode::from(frame.error_code() as u32).into())
-                }
-                ConnectionCloseFrame::Quic(frame) => {
-                    Some(connectivity::ConnectionCode::from(frame.error_kind()).into())
-                }
+                ConnectionCloseFrame::App(frame) => Some(ApplicationCode::from(frame.error_code() as u32).into()),
+                ConnectionCloseFrame::Quic(frame) => Some(connectivity::ConnectionCode::from(frame.error_kind()).into()),
             },
             reason: match &frame {
                 ConnectionCloseFrame::App(frame) => Some(frame.reason().to_owned()),
@@ -889,9 +796,7 @@ impl From<&ConnectionCloseFrame> for QuicFrame {
             // TODO: 不应该强制要求reason是utf8的
             reason_bytes: None,
             trigger_frame_type: match &frame {
-                ConnectionCloseFrame::Quic(frame) => {
-                    Some((VarInt::from(frame.frame_type()).into_u64()).into())
-                }
+                ConnectionCloseFrame::Quic(frame) => Some((VarInt::from(frame.frame_type()).into_u64()).into()),
                 ConnectionCloseFrame::App(..) => None,
             },
         }
@@ -901,14 +806,8 @@ impl From<&ConnectionCloseFrame> for QuicFrame {
 impl<D: Buffer> From<&Frame<D>> for QuicFrame {
     fn from(frame: &Frame<D>) -> Self {
         match frame {
-            Frame::Padding(..) => QuicFrame::Padding {
-                length: Some(1),
-                payload_length: 1,
-            },
-            Frame::Ping(..) => QuicFrame::Ping {
-                length: Some(1),
-                payload_length: Some(1),
-            },
+            Frame::Padding(..) => QuicFrame::Padding { length: Some(1), payload_length: 1 },
+            Frame::Ping(..) => QuicFrame::Ping { length: Some(1), payload_length: Some(1) },
             Frame::Ack(frame) => frame.into(),
             Frame::Close(frame) => frame.into(),
             Frame::NewToken(frame) => frame.into(),
@@ -927,14 +826,8 @@ impl<D: Buffer> From<&Frame<D>> for QuicFrame {
             Frame::Stream(frame, bytes) => (frame, bytes).into(),
             Frame::Crypto(frame, bytes) => (frame, bytes).into(),
             Frame::Datagram(frame, bytes) => (frame, bytes).into(),
-            Frame::PunchHello(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
-            Frame::PunchDone(frame) => QuicFrame::Unknow {
-                frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _,
-                raw: None,
-            },
+            Frame::PunchHello(frame) => QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None },
+            Frame::PunchDone(frame) => QuicFrame::Unknow { frame_type_bytes: VarInt::from(frame.frame_type()).into_u64() as _, raw: None },
         }
     }
 }
@@ -948,10 +841,7 @@ pub struct QuicFramesCollector<E> {
 
 impl<E> QuicFramesCollector<E> {
     pub fn new() -> Self {
-        Self {
-            event: PhantomData,
-            frames: Vec::new(),
-        }
+        Self { event: PhantomData, frames: Vec::new() }
     }
 }
 
@@ -973,20 +863,11 @@ where
         for frame in iter.into_iter().map(Into::into) {
             if let Some(last) = self.frames.last_mut() {
                 match last {
-                    QuicFrame::Padding {
-                        length,
-                        payload_length,
-                    } => {
-                        *last = QuicFrame::Padding {
-                            length: length.map(|length| length + 1),
-                            payload_length: *payload_length + 1,
-                        };
+                    QuicFrame::Padding { length, payload_length } => {
+                        *last = QuicFrame::Padding { length: length.map(|length| length + 1), payload_length: *payload_length + 1 };
                         continue;
                     }
-                    QuicFrame::Ping {
-                        length,
-                        payload_length,
-                    } => {
+                    QuicFrame::Ping { length, payload_length } => {
                         *last = QuicFrame::Ping {
                             length: length.map(|length| length + 1),
                             payload_length: payload_length.map(|length| length + 1),
@@ -1017,9 +898,7 @@ pub enum ApplicationCode {
 impl From<ApplicationCode> for ConnectionCloseErrorCode {
     fn from(value: ApplicationCode) -> Self {
         match value {
-            ApplicationCode::ApplicationError(error) => {
-                ConnectionCloseErrorCode::ApplicationError(error)
-            }
+            ApplicationCode::ApplicationError(error) => ConnectionCloseErrorCode::ApplicationError(error),
             ApplicationCode::Value(value) => ConnectionCloseErrorCode::Value(value as _),
         }
     }
@@ -1119,11 +998,7 @@ impl<'de> Deserialize<'de> for CryptoError {
         let string = String::deserialize(deserializer)?;
         string.strip_prefix("crypto_error_0x1").map_or_else(
             || Err(serde::de::Error::custom("invalid crypto error")),
-            |s| {
-                u8::from_str_radix(s, 16)
-                    .map(CryptoError)
-                    .map_err(serde::de::Error::custom)
-            },
+            |s| u8::from_str_radix(s, 16).map(CryptoError).map_err(serde::de::Error::custom),
         )
     }
 }
@@ -1262,18 +1137,12 @@ mod rollback {
                 TransportError::StreamStateError => legacy::TransportError::StreamStateError,
                 TransportError::FinalSizeError => legacy::TransportError::FinalSizeError,
                 TransportError::FrameEncodingError => legacy::TransportError::FrameEncodingError,
-                TransportError::TransportParameterError => {
-                    legacy::TransportError::TransportParameterError
-                }
-                TransportError::ConnectionIdLimitError => {
-                    legacy::TransportError::ConnectionIdLimitError
-                }
+                TransportError::TransportParameterError => legacy::TransportError::TransportParameterError,
+                TransportError::ConnectionIdLimitError => legacy::TransportError::ConnectionIdLimitError,
                 TransportError::ProtocolViolation => legacy::TransportError::ProtocolViolation,
                 TransportError::InvalidToken => legacy::TransportError::InvalidToken,
                 TransportError::ApplicationError => legacy::TransportError::ApplicationError,
-                TransportError::CryptoBufferExceeded => {
-                    legacy::TransportError::CryptoBufferExceeded
-                }
+                TransportError::CryptoBufferExceeded => legacy::TransportError::CryptoBufferExceeded,
                 TransportError::KeyUpdateError => legacy::TransportError::KeyUpdateError,
                 TransportError::AeadLimitReached => legacy::TransportError::AeadLimitReached,
                 TransportError::NoViablePath => legacy::TransportError::NoViablePath,
@@ -1295,12 +1164,8 @@ mod rollback {
         #[inline]
         fn from(value: ConnectionCloseErrorSpace) -> Self {
             match value {
-                ConnectionCloseErrorSpace::Transport => {
-                    legacy::ConnectionCloseErrorSpace::Transport
-                }
-                ConnectionCloseErrorSpace::Application => {
-                    legacy::ConnectionCloseErrorSpace::Application
-                }
+                ConnectionCloseErrorSpace::Transport => legacy::ConnectionCloseErrorSpace::Transport,
+                ConnectionCloseErrorSpace::Application => legacy::ConnectionCloseErrorSpace::Application,
             }
         }
     }
@@ -1310,16 +1175,10 @@ mod rollback {
         #[inline]
         fn try_from(value: ConnectionCloseErrorCode) -> Result<Self, ()> {
             match value {
-                ConnectionCloseErrorCode::TransportError(error) => Ok(
-                    legacy::ConnectionCloseErrorCode::TransportError(error.into()),
-                ),
+                ConnectionCloseErrorCode::TransportError(error) => Ok(legacy::ConnectionCloseErrorCode::TransportError(error.into())),
                 ConnectionCloseErrorCode::CryptoError(_error) => Err(()),
-                ConnectionCloseErrorCode::ApplicationError(error) => Ok(
-                    legacy::ConnectionCloseErrorCode::ApplicationError(error.into()),
-                ),
-                ConnectionCloseErrorCode::Value(value) => {
-                    Ok(legacy::ConnectionCloseErrorCode::Value(value))
-                }
+                ConnectionCloseErrorCode::ApplicationError(error) => Ok(legacy::ConnectionCloseErrorCode::ApplicationError(error.into())),
+                ConnectionCloseErrorCode::Value(value) => Ok(legacy::ConnectionCloseErrorCode::Value(value)),
             }
         }
     }
@@ -1328,12 +1187,8 @@ mod rollback {
         #[inline]
         fn from(value: ConnectionCloseTriggerFrameType) -> Self {
             match value {
-                ConnectionCloseTriggerFrameType::Id(id) => {
-                    legacy::ConnectionCloseTriggerFrameType::Id(id)
-                }
-                ConnectionCloseTriggerFrameType::Text(text) => {
-                    legacy::ConnectionCloseTriggerFrameType::Text(text)
-                }
+                ConnectionCloseTriggerFrameType::Id(id) => legacy::ConnectionCloseTriggerFrameType::Id(id),
+                ConnectionCloseTriggerFrameType::Text(text) => legacy::ConnectionCloseTriggerFrameType::Text(text),
             }
         }
     }
@@ -1341,107 +1196,33 @@ mod rollback {
     impl From<QuicFrame> for legacy::QuicFrame {
         fn from(value: QuicFrame) -> Self {
             match value {
-                QuicFrame::Padding {
-                    length,
-                    payload_length,
-                } => legacy::QuicFrame::Padding {
-                    length,
-                    payload_length,
-                },
-                QuicFrame::Ping {
-                    length,
-                    payload_length,
-                } => legacy::QuicFrame::Ping {
-                    length,
-                    payload_length,
-                },
-                QuicFrame::Ack {
-                    ack_delay,
-                    acked_ranges,
-                    ect1,
-                    ect0,
-                    ce,
-                    length,
-                    payload_length,
-                } => legacy::QuicFrame::Ack {
-                    ack_delay,
-                    acked_ranges,
-                    ect1,
-                    ect0,
-                    ce,
-                    length,
-                    payload_length,
-                },
-                QuicFrame::ResetStream {
-                    stream_id,
-                    error_code,
-                    final_size,
-                    length,
-                    payload_length,
-                } => legacy::QuicFrame::ResetStream {
-                    stream_id,
-                    error_code: error_code.into(),
-                    final_size,
-                    length,
-                    payload_length,
-                },
-                QuicFrame::StopSending {
-                    stream_id,
-                    error_code,
-                    length,
-                    payload_length,
-                } => legacy::QuicFrame::StopSending {
-                    stream_id,
-                    error_code: error_code.into(),
-                    length,
-                    payload_length,
-                },
-                QuicFrame::Crypto {
-                    offset,
-                    length,
-                    payload_length,
-                    raw: _,
-                } => legacy::QuicFrame::Crypto {
-                    offset,
-                    length,
-                    payload_length,
-                },
-                QuicFrame::NewToken { token } => legacy::QuicFrame::NewToken {
-                    token: token.into(),
-                },
-                QuicFrame::Stream {
-                    stream_id,
-                    offset,
-                    length,
-                    fin,
-                    raw,
-                } => legacy::QuicFrame::Stream {
-                    stream_id,
-                    offset,
-                    length,
-                    fin,
-                    raw,
-                },
+                QuicFrame::Padding { length, payload_length } => legacy::QuicFrame::Padding { length, payload_length },
+                QuicFrame::Ping { length, payload_length } => legacy::QuicFrame::Ping { length, payload_length },
+                QuicFrame::Ack { ack_delay, acked_ranges, ect1, ect0, ce, length, payload_length } => {
+                    legacy::QuicFrame::Ack { ack_delay, acked_ranges, ect1, ect0, ce, length, payload_length }
+                }
+                QuicFrame::ResetStream { stream_id, error_code, final_size, length, payload_length } => {
+                    legacy::QuicFrame::ResetStream { stream_id, error_code: error_code.into(), final_size, length, payload_length }
+                }
+                QuicFrame::StopSending { stream_id, error_code, length, payload_length } => {
+                    legacy::QuicFrame::StopSending { stream_id, error_code: error_code.into(), length, payload_length }
+                }
+                QuicFrame::Crypto { offset, length, payload_length, raw: _ } => {
+                    legacy::QuicFrame::Crypto { offset, length, payload_length }
+                }
+                QuicFrame::NewToken { token } => legacy::QuicFrame::NewToken { token: token.into() },
+                QuicFrame::Stream { stream_id, offset, length, fin, raw } => {
+                    legacy::QuicFrame::Stream { stream_id, offset, length, fin, raw }
+                }
                 QuicFrame::MaxData { maximum } => legacy::QuicFrame::MaxData { maximum },
-                QuicFrame::MaxStreamData { stream_id, maximum } => {
-                    legacy::QuicFrame::MaxStreamData { stream_id, maximum }
+                QuicFrame::MaxStreamData { stream_id, maximum } => legacy::QuicFrame::MaxStreamData { stream_id, maximum },
+                QuicFrame::MaxStreams { stream_type, maximum } => {
+                    legacy::QuicFrame::MaxStreams { stream_type: stream_type.into(), maximum }
                 }
-                QuicFrame::MaxStreams {
-                    stream_type,
-                    maximum,
-                } => legacy::QuicFrame::MaxStreams {
-                    stream_type: stream_type.into(),
-                    maximum,
-                },
                 QuicFrame::DataBlocked { limit } => legacy::QuicFrame::DataBlocked { limit },
-                QuicFrame::StreamDataBlocked { stream_id, limit } => {
-                    legacy::QuicFrame::StreamDataBlocked { stream_id, limit }
-                }
+                QuicFrame::StreamDataBlocked { stream_id, limit } => legacy::QuicFrame::StreamDataBlocked { stream_id, limit },
                 QuicFrame::StreamsBlocked { stream_type, limit } => {
-                    legacy::QuicFrame::StreamsBlocked {
-                        stream_type: stream_type.into(),
-                        limit,
-                    }
+                    legacy::QuicFrame::StreamsBlocked { stream_type: stream_type.into(), limit }
                 }
                 QuicFrame::NewConnectionId {
                     sequence_number,
@@ -1456,38 +1237,25 @@ mod rollback {
                     connection_id: connection_id.into(),
                     stateless_reset_token: stateless_reset_token.map(Into::into),
                 },
-                QuicFrame::RetireConnectionId { sequence_number } => {
-                    legacy::QuicFrame::RetireConnectionId { sequence_number }
-                }
+                QuicFrame::RetireConnectionId { sequence_number } => legacy::QuicFrame::RetireConnectionId { sequence_number },
                 QuicFrame::PathChallenge { data } => legacy::QuicFrame::PathChallenge { data },
                 QuicFrame::PathResponse { data } => legacy::QuicFrame::PathResponse { data },
-                QuicFrame::ConnectionClose {
-                    error_space,
-                    error_code,
-                    reason,
-                    reason_bytes: _,
-                    trigger_frame_type,
-                } => legacy::QuicFrame::ConnectionClose {
-                    error_space: error_space.map(Into::into),
-                    raw_error_code: match &error_code {
-                        Some(ConnectionCloseErrorCode::CryptoError(CryptoError(value))) => {
-                            Some(*value as u32)
-                        }
-                        _ => None,
-                    },
-                    error_code: error_code.and_then(|error_code| error_code.try_into().ok()),
-                    reason,
-                    trigger_frame_type: trigger_frame_type.map(Into::into),
-                },
+                QuicFrame::ConnectionClose { error_space, error_code, reason, reason_bytes: _, trigger_frame_type } => {
+                    legacy::QuicFrame::ConnectionClose {
+                        error_space: error_space.map(Into::into),
+                        raw_error_code: match &error_code {
+                            Some(ConnectionCloseErrorCode::CryptoError(CryptoError(value))) => Some(*value as u32),
+                            _ => None,
+                        },
+                        error_code: error_code.and_then(|error_code| error_code.try_into().ok()),
+                        reason,
+                        trigger_frame_type: trigger_frame_type.map(Into::into),
+                    }
+                }
                 QuicFrame::HandshakeDone {} => legacy::QuicFrame::HandshakeDone {},
-                QuicFrame::Unknow {
-                    frame_type_bytes,
-                    raw,
-                } => legacy::QuicFrame::Unknown {
+                QuicFrame::Unknow { frame_type_bytes, raw } => legacy::QuicFrame::Unknown {
                     raw_frame_type: frame_type_bytes,
-                    raw_length: raw
-                        .as_ref()
-                        .and_then(|raw| raw.length.map(|length| length as u32)),
+                    raw_length: raw.as_ref().and_then(|raw| raw.length.map(|length| length as u32)),
                     raw: raw.and_then(|raw| raw.data),
                 },
                 QuicFrame::Datagram { length, raw } => legacy::QuicFrame::Datagram { length, raw },
@@ -1506,9 +1274,7 @@ mod rollback {
         #[inline]
         fn from(value: ApplicationCode) -> Self {
             match value {
-                ApplicationCode::ApplicationError(error) => {
-                    legacy::ApplicationCode::ApplicationError(error.into())
-                }
+                ApplicationCode::ApplicationError(error) => legacy::ApplicationCode::ApplicationError(error.into()),
                 ApplicationCode::Value(value) => legacy::ApplicationCode::Value(value),
             }
         }

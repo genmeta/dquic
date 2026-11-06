@@ -31,12 +31,7 @@ impl ForwardProtocol {
         self.agents.remove(&agent);
     }
 
-    pub async fn on_datagram(
-        &self,
-        link: Link,
-        pathway: Pathway,
-        payload: ForwardPayload,
-    ) -> io::Result<usize> {
+    pub async fn on_datagram(&self, link: Link, pathway: Pathway, payload: ForwardPayload) -> io::Result<usize> {
         let Some(socket) = self.find_agent(link.src) else {
             return Ok(0);
         };
@@ -56,12 +51,7 @@ impl ForwardProtocol {
         };
 
         let encoded = payload.as_ref();
-        let line = Line::new(
-            Link::new(link.src, destination),
-            Line::DEFAULT_TTL,
-            None,
-            encoded.len().min(u16::MAX as usize) as u16,
-        );
+        let line = Line::new(Link::new(link.src, destination), Line::DEFAULT_TTL, None, encoded.len().min(u16::MAX as usize) as u16);
         let slices = [IoSlice::new(encoded)];
         socket.send(&slices, line).await
     }

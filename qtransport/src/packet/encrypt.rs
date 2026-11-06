@@ -7,8 +7,7 @@ use bytes::BufMut;
 use qbase::{
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
-        DataHeader, GetType, HeaderSize, LongSpecificBits, PacketContent, PacketNumber,
-        ShortSpecificBits, Type,
+        DataHeader, GetType, HeaderSize, LongSpecificBits, PacketContent, PacketNumber, ShortSpecificBits, Type,
         assemble::{Assemble, Metadata, Package, PacketBuffer},
     },
 };
@@ -27,18 +26,8 @@ pub struct Packet<K = Keys> {
 
 impl<K: Seal> Packet<K> {
     pub fn new(header: DataHeader, pn: (u64, PacketNumber), keys: K) -> Self {
-        let meta = Metadata {
-            pn: pn.0,
-            ..Metadata::new(header.get_type())
-        };
-        Self {
-            header,
-            pn,
-            meta,
-            keys,
-            cursor: 0,
-            finished: false,
-        }
+        let meta = Metadata { pn: pn.0, ..Metadata::new(header.get_type()) };
+        Self { header, pn, meta, keys, cursor: 0, finished: false }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -57,30 +46,18 @@ impl<K: Seal> Packet<K> {
         let tag = self.keys.tag_len();
         let offset = datagram.position() as usize;
         let mut bytes = &mut datagram.get_mut()[offset + self.cursor..];
-        let mut buffer = PacketBuffer::new(
-            &mut bytes,
-            credit,
-            frames,
-            self.header.get_type(),
-            self.cursor,
-            tag,
-        );
+        let mut buffer = PacketBuffer::new(&mut bytes, credit, frames, self.header.get_type(), self.cursor, tag);
         buffer.meta = self.meta;
         buffer.scope(1200usize.saturating_sub(offset));
         if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1) {
             return Poll::Ready((0, 0));
         }
         // Source owners handle connection errors; this packet has no content to send.
-        let result = buffer
-            .assemble(cx, packet_content, sources)
-            .map(|result| result.unwrap_or(0));
+        let result = buffer.assemble(cx, packet_content, sources).map(|result| result.unwrap_or(0));
         if matches!(result, Poll::Ready(n) if n > 0) {
             let required = buffer.pn_offset() + 4 + 16;
             let padding = required.saturating_sub(buffer.written() + tag);
-            assert!(
-                padding <= buffer.remaining_mut(),
-                "packet padding exceeds write window"
-            );
+            assert!(padding <= buffer.remaining_mut(), "packet padding exceeds write window");
             if padding > 0 {
                 buffer.put_bytes(0, padding);
                 buffer.meta.record(&Frame::Padding(PaddingFrame));
@@ -110,10 +87,7 @@ impl<K: Seal> Packet<K> {
     }
 
     pub fn padding(&mut self, bytes: &mut [u8], amount: usize) -> usize {
-        assert!(
-            self.len().saturating_add(amount) <= bytes.len(),
-            "packet padding exceeds write window"
-        );
+        assert!(self.len().saturating_add(amount) <= bytes.len(), "packet padding exceeds write window");
         if amount > 0 {
             bytes[self.cursor..self.cursor + amount].fill(0);
             self.cursor += amount;
@@ -125,10 +99,7 @@ impl<K: Seal> Packet<K> {
     pub fn seal(&mut self, bytes: &mut [u8]) -> K::Output {
         let long = matches!(self.header.get_type(), Type::Long(_));
         let pn_offset = self.header.size() + if long { 2 } else { 0 };
-        assert!(
-            self.meta.nframes > 0 && bytes.len() == self.len() && bytes.len() >= pn_offset + 4 + 16,
-            "invalid packet layout"
-        );
+        assert!(self.meta.nframes > 0 && bytes.len() == self.len() && bytes.len() >= pn_offset + 4 + 16, "invalid packet layout");
         bytes[0] |= if long {
             *LongSpecificBits::from_pn(&self.pn.1)
         } else {
@@ -136,22 +107,11 @@ impl<K: Seal> Packet<K> {
         };
         if long {
             let length = bytes.len() - pn_offset;
-            assert!(
-                length < 16384,
-                "packet length exceeds reserved length field"
-            );
+            assert!(length < 16384, "packet length exceeds reserved length field");
             (&mut bytes[pn_offset - 2..pn_offset]).put_u16(0x4000 | length as u16);
         }
-        let generation = self
-            .keys
-            .seal(
-                self.pn.0,
-                bytes,
-                pn_offset,
-                pn_offset + self.pn.1.size(),
-                self.keys.tag_len(),
-            )
-            .expect("auto update keys");
+        let generation =
+            self.keys.seal(self.pn.0, bytes, pn_offset, pn_offset + self.pn.1.size(), self.keys.tag_len()).expect("auto update keys");
         self.meta.pktlen = bytes.len();
         generation
     }

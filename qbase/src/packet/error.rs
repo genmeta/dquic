@@ -43,10 +43,9 @@ impl nom::error::ParseError<&[u8]> for Error {
 impl From<Error> for crate::error::QuicError {
     fn from(e: Error) -> Self {
         match e {
-            Error::InvalidReservedBits(_, _) => crate::error::QuicError::with_default_fty(
-                crate::error::ErrorKind::ProtocolViolation,
-                e.to_string(),
-            ),
+            Error::InvalidReservedBits(_, _) => {
+                crate::error::QuicError::with_default_fty(crate::error::ErrorKind::ProtocolViolation, e.to_string())
+            }
             _ => unreachable!(),
         }
     }

@@ -105,10 +105,6 @@ impl IntoRole for Server {
 
 impl RequiredParameters for Server {
     fn required_parameters() -> impl IntoIterator<Item = ParameterId> {
-        [
-            ParameterId::InitialSourceConnectionId,
-            ParameterId::OriginalDestinationConnectionId,
-        ]
-        .into_iter()
+        [ParameterId::InitialSourceConnectionId, ParameterId::OriginalDestinationConnectionId].into_iter()
     }
 }

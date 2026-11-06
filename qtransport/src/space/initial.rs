@@ -29,16 +29,8 @@ pub struct InitialSpace {
 }
 
 impl InitialSpace {
-    pub fn new(
-        initial_scid: ConnectionId,
-        keys: ArcKeys,
-        token: Option<Vec<u8>>,
-        facts: Arc<HandshakeFacts>,
-    ) -> Self {
-        Self {
-            space: Space::new(Epoch::Initial, initial_scid, keys, facts),
-            token,
-        }
+    pub fn new(initial_scid: ConnectionId, keys: ArcKeys, token: Option<Vec<u8>>, facts: Arc<HandshakeFacts>) -> Self {
+        Self { space: Space::new(Epoch::Initial, initial_scid, keys, facts), token }
     }
 }
 
@@ -85,21 +77,12 @@ impl UnregisterWaker for InitialSpace {
 impl Encapsulate for InitialSpace {
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
         let keys = self.keys.get().ok()?;
-        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid)
-            .initial(self.token.clone().unwrap_or_default());
-        Some(
-            super::probe_size(
-                &header,
-                self.sent_journal.lock_guard().next_pn_len(),
-                keys.sealing.tag_len(),
-            )
-            .max(1200),
-        )
+        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).initial(self.token.clone().unwrap_or_default());
+        Some(super::probe_size(&header, self.sent_journal.lock_guard().next_pn_len(), keys.sealing.tag_len()).max(1200))
     }
 
     fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
-        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid)
-            .initial(self.token.clone().unwrap_or_default());
+        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).initial(self.token.clone().unwrap_or_default());
         let (pn, keys) = self.pn_and_keys()?;
         Some(Packet::new(DataHeader::Long(header.into()), pn, keys))
     }

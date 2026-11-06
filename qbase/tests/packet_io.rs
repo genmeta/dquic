@@ -2,7 +2,8 @@ use bytes::BytesMut;
 use qbase::packet::{DataHeader, Packet, PacketReader, long};
 
 // Initial packet from the former writer test, with a transparent authentication tag.
-const INITIAL: &[u8] = b"\xc1\x00\x00\x00\x01\x08testdcid\x08testscid\x0atest_token\x40\x21\x00\x00\x06\x00\x0cclient_hellotransparent_keys";
+const INITIAL: &[u8] =
+    b"\xc1\x00\x00\x00\x01\x08testdcid\x08testscid\x0atest_token\x40\x21\x00\x00\x06\x00\x0cclient_hellotransparent_keys";
 
 #[test]
 fn initial_length_excludes_trailing_datagram_bytes() {
@@ -11,10 +12,7 @@ fn initial_length_excludes_trailing_datagram_bytes() {
     let Packet::Data(packet) = PacketReader::new(padded, 8).next().unwrap().unwrap() else {
         panic!("expected Initial packet");
     };
-    assert!(matches!(
-        packet.header,
-        DataHeader::Long(long::DataHeader::Initial(_))
-    ));
+    assert!(matches!(packet.header, DataHeader::Long(long::DataHeader::Initial(_))));
     assert_eq!(packet.bytes.as_ref(), INITIAL);
 }
 
@@ -27,10 +25,7 @@ fn coalesced_initial_packets_are_read_separately() {
         let Packet::Data(packet) = packets.next().unwrap().unwrap() else {
             panic!("expected Initial packet");
         };
-        assert!(matches!(
-            packet.header,
-            DataHeader::Long(long::DataHeader::Initial(_))
-        ));
+        assert!(matches!(packet.header, DataHeader::Long(long::DataHeader::Initial(_))));
         assert_eq!(packet.bytes.as_ref(), INITIAL);
     }
     assert!(packets.next().is_none());

@@ -13,8 +13,8 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::FrameReader,
     packet::{
-        DataHeader, DataPacket, GetPacketNumberLength, GetType, InvalidPacketNumber, KeyPhaseBit,
-        LongSpecificBits, PacketNumber, ShortSpecificBits, number::take_pn_len,
+        DataHeader, DataPacket, GetPacketNumberLength, GetType, InvalidPacketNumber, KeyPhaseBit, LongSpecificBits, PacketNumber,
+        ShortSpecificBits, number::take_pn_len,
     },
     varint::VARINT_MAX,
 };
@@ -116,9 +116,7 @@ impl OneRttPacketKeys {
             .keys
             .generation
             .checked_add(1)
-            .ok_or_else(|| {
-                QuicError::with_default_fty(ErrorKind::KeyUpdate, "key generation exhausted")
-            })?;
+            .ok_or_else(|| QuicError::with_default_fty(ErrorKind::KeyUpdate, "key generation exhausted"))?;
         if self.keys.len() == 3 {
             self.keys.pop_front();
         }
@@ -140,11 +138,7 @@ impl OneRttPacketKeys {
 
     fn update(&mut self) -> Result<(), Error> {
         if !self.can_update {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::KeyUpdate,
-                "local key update is not permitted",
-            )
-            .into());
+            return Err(QuicError::with_default_fty(ErrorKind::KeyUpdate, "local key update is not permitted").into());
         }
         let mut next_secret = self.next_secret.clone();
         let keys = next_secret.next_packet_keys();
@@ -153,60 +147,32 @@ impl OneRttPacketKeys {
 
     fn prepare_sealing(&mut self) -> Result<(), PacketError> {
         let keys = &self.keys.back().unwrap().keys;
-        let nearing_limit = keys.sealed_count.load(Ordering::Relaxed)
-            >= keys.sealing.confidentiality_limit().saturating_sub(1);
+        let nearing_limit = keys.sealed_count.load(Ordering::Relaxed) >= keys.sealing.confidentiality_limit().saturating_sub(1);
         if nearing_limit && self.can_update {
             self.update()?;
         }
         let keys = &self.keys.back().unwrap().keys;
         if keys.sealed_count.load(Ordering::Relaxed) >= keys.sealing.confidentiality_limit() {
-            return Err(Error::from(QuicError::with_default_fty(
-                ErrorKind::AeadLimitReached,
-                "packet protection confidentiality limit",
-            ))
-            .into());
+            return Err(
+                Error::from(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection confidentiality limit")).into()
+            );
         }
         Ok(())
     }
 
-    fn decrypt(
-        &mut self,
-        pn: u64,
-        phase: KeyPhaseBit,
-        header: &[u8],
-        body: &mut [u8],
-        pto: Duration,
-    ) -> Result<Option<usize>, Error> {
+    fn decrypt(&mut self, pn: u64, phase: KeyPhaseBit, header: &[u8], body: &mut [u8], pto: Duration) -> Result<Option<usize>, Error> {
         if self.retired {
             return Ok(None);
         }
         let now = Instant::now();
-        while self
-            .keys
-            .front()
-            .unwrap()
-            .expires
-            .is_some_and(|until| now >= until)
-        {
+        while self.keys.front().unwrap().expires.is_some_and(|until| now >= until) {
             self.keys.pop_front();
         }
         // The latest observed generation starting at or before PN determines its lower bound.
-        let mut index = self
-            .keys
-            .iter()
-            .rposition(|keys| {
-                keys.received
-                    .as_ref()
-                    .is_some_and(|range| pn >= *range.start())
-            })
-            .unwrap_or(0);
+        let mut index = self.keys.iter().rposition(|keys| keys.received.as_ref().is_some_and(|range| pn >= *range.start())).unwrap_or(0);
         let keys = &self.keys[index];
         if phase != KeyPhaseBit::from(keys.keys.generation & 1 != 0) {
-            if keys
-                .received
-                .as_ref()
-                .is_some_and(|range| pn <= *range.end())
-            {
+            if keys.received.as_ref().is_some_and(|range| pn <= *range.end()) {
                 return Ok(None);
             }
             index += 1;
@@ -225,11 +191,7 @@ impl OneRttPacketKeys {
             Err(_) => {
                 self.failed_opened += 1;
                 if self.failed_opened >= opening.integrity_limit() {
-                    return Err(QuicError::with_default_fty(
-                        ErrorKind::AeadLimitReached,
-                        "packet protection integrity limit",
-                    )
-                    .into());
+                    return Err(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection integrity limit").into());
                 }
                 return Ok(None);
             }
@@ -253,10 +215,7 @@ impl OneRttPacketKeys {
 
 impl From<qtls::OneRttKeyMaterial> for ArcOneRttKeys {
     fn from(keys: qtls::OneRttKeyMaterial) -> Self {
-        let headers = Arc::new(HeaderKeys {
-            opening: keys.opening_header,
-            sealing: keys.sealing_header,
-        });
+        let headers = Arc::new(HeaderKeys { opening: keys.opening_header, sealing: keys.sealing_header });
         let mut packets = VecDeque::with_capacity(3);
         packets.push_back(PacketKeys {
             keys: Arc::new(OneRttKeys {
@@ -301,16 +260,9 @@ impl ArcOneRttKeys {
     where
         H: crate::packet::LogPacketHeader,
     {
-        packet.decrypt_short_packet(
-            &self.headers.opening,
-            decode_pn,
-            |pn, phase, header, body| {
-                self.packets
-                    .lock()
-                    .unwrap()
-                    .decrypt(pn, phase, header, body, pto)
-            },
-        )
+        packet.decrypt_short_packet(&self.headers.opening, decode_pn, |pn, phase, header, body| {
+            self.packets.lock().unwrap().decrypt(pn, phase, header, body, pto)
+        })
     }
 
     /// Allow the first local update when qconnection confirms the handshake.
@@ -350,15 +302,7 @@ impl ArcOneRttKeys {
     }
 
     pub fn tag_len(&self) -> usize {
-        self.packets
-            .lock()
-            .unwrap()
-            .keys
-            .back()
-            .unwrap()
-            .keys
-            .sealing
-            .tag_len()
+        self.packets.lock().unwrap().keys.back().unwrap().keys.sealing.tag_len()
     }
 }
 
@@ -382,14 +326,7 @@ pub trait Seal {
 
     /// Protect the PN in pn_offset..body_offset and a reserved authentication tag.
     /// The caller supplies enough ciphertext/tag for a sample starting at pn_offset + 4.
-    fn seal(
-        &self,
-        pn: u64,
-        buffer: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError>;
+    fn seal(&self, pn: u64, buffer: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError>;
 }
 
 impl Open for qtls::DirectionalKeys {
@@ -400,11 +337,7 @@ impl Open for qtls::DirectionalKeys {
         _pto: Duration,
     ) -> Result<Option<(u64, FrameReader)>, Error> {
         open_with(packet, &self.header, decode_pn, |pn, _, header, body| {
-            Ok(self
-                .packet
-                .open(pn, header, body)
-                .ok()
-                .map(|plain| plain.len()))
+            Ok(self.packet.open(pn, header, body).ok().map(|plain| plain.len()))
         })
     }
 }
@@ -416,14 +349,7 @@ impl<K: Seal + ?Sized> Seal for &K {
         (**self).tag_len()
     }
 
-    fn seal(
-        &self,
-        pn: u64,
-        buffer: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError> {
+    fn seal(&self, pn: u64, buffer: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError> {
         (**self).seal(pn, buffer, pn_offset, body_offset, tag_len)
     }
 }
@@ -435,25 +361,14 @@ impl Seal for qtls::DirectionalKeys {
         self.packet.tag_len()
     }
 
-    fn seal(
-        &self,
-        pn: u64,
-        buffer: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError> {
+    fn seal(&self, pn: u64, buffer: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError> {
         let tag_offset = buffer.len() - tag_len;
         let (header, body_tag) = buffer.split_at_mut(body_offset);
         let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
         self.packet.seal(pn, header, body, tag)?;
         let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
         let sample_offset = 4 - pn_bytes.len();
-        self.header.protect(
-            &body_tag[sample_offset..sample_offset + self.header.sample_len()],
-            &mut prefix[0],
-            pn_bytes,
-        )?;
+        self.header.protect(&body_tag[sample_offset..sample_offset + self.header.sample_len()], &mut prefix[0], pn_bytes)?;
         Ok(())
     }
 }
@@ -465,25 +380,13 @@ impl Seal for OneRttKeys {
         self.sealing.tag_len()
     }
 
-    fn seal(
-        &self,
-        pn: u64,
-        buffer: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError> {
+    fn seal(&self, pn: u64, buffer: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError> {
         // fetch_update supports the workspace's Rust 1.88 minimum version.
         #[allow(deprecated)]
         self.sealed_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (count < self.sealing.confidentiality_limit()).then(|| count + 1)
-            })
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| (count < self.sealing.confidentiality_limit()).then(|| count + 1))
             .map_err(|_| {
-                Error::from(QuicError::with_default_fty(
-                    ErrorKind::AeadLimitReached,
-                    "packet protection confidentiality limit",
-                ))
+                Error::from(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection confidentiality limit"))
             })?;
         let tag_offset = buffer.len() - tag_len;
         let (header, body_tag) = buffer.split_at_mut(body_offset);
@@ -496,11 +399,7 @@ impl Seal for OneRttKeys {
         let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
         let header_key = &self.headers.sealing;
         let sample_offset = 4 - pn_bytes.len();
-        header_key.protect(
-            &body_tag[sample_offset..sample_offset + header_key.sample_len()],
-            &mut prefix[0],
-            pn_bytes,
-        )?;
+        header_key.protect(&body_tag[sample_offset..sample_offset + header_key.sample_len()], &mut prefix[0], pn_bytes)?;
         Ok((self.generation, phase))
     }
 }
@@ -512,20 +411,9 @@ impl Open for ArcOneRttKeys {
         decode_pn: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
         pto: Duration,
     ) -> Result<Option<(u64, FrameReader)>, Error> {
-        open_with(
-            packet,
-            &self.headers.opening,
-            decode_pn,
-            |pn, first, header, body| {
-                self.packets.lock().unwrap().decrypt(
-                    pn,
-                    ShortSpecificBits::from(first).key_phase(),
-                    header,
-                    body,
-                    pto,
-                )
-            },
-        )
+        open_with(packet, &self.headers.opening, decode_pn, |pn, first, header, body| {
+            self.packets.lock().unwrap().decrypt(pn, ShortSpecificBits::from(first).key_phase(), header, body, pto)
+        })
     }
 }
 
@@ -538,24 +426,18 @@ fn open_with(
 ) -> Result<Option<(u64, FrameReader)>, Error> {
     let kind = packet.get_type();
     let sample_start = packet.offset.saturating_add(4);
-    if packet.offset == 0
-        || sample_start.saturating_add(header_key.sample_len()) > packet.bytes.len()
-    {
+    if packet.offset == 0 || sample_start.saturating_add(header_key.sample_len()) > packet.bytes.len() {
         return Ok(None);
     }
     let (header_pn, sample) = packet.bytes.split_at_mut(sample_start);
     let (prefix, pn_bytes) = header_pn.split_at_mut(packet.offset);
-    if header_key
-        .unprotect(&sample[..header_key.sample_len()], &mut prefix[0], pn_bytes)
-        .is_err()
-    {
+    if header_key.unprotect(&sample[..header_key.sample_len()], &mut prefix[0], pn_bytes).is_err() {
         return Ok(None);
     }
     let first = packet.bytes[0];
     let pn_len = (first & 3) + 1;
-    let (_, encoded) = take_pn_len(pn_len)(&packet.bytes[packet.offset..]).map_err(|_| {
-        QuicError::with_default_fty(ErrorKind::Internal, "invalid packet-number layout")
-    })?;
+    let (_, encoded) = take_pn_len(pn_len)(&packet.bytes[packet.offset..])
+        .map_err(|_| QuicError::with_default_fty(ErrorKind::Internal, "invalid packet-number layout"))?;
     let Ok(pn) = decode_pn(encoded) else {
         return Ok(None);
     };
@@ -573,16 +455,9 @@ fn open_with(
         DataHeader::Long(_) => LongSpecificBits::from(first).pn_len(),
     }
     .map_err(qbase::error::QuicError::from)?;
-    let payload = packet
-        .bytes
-        .freeze()
-        .slice(body_offset..body_offset + plain_len);
+    let payload = packet.bytes.freeze().slice(body_offset..body_offset + plain_len);
     if payload.is_empty() {
-        return Err(QuicError::with_default_fty(
-            ErrorKind::ProtocolViolation,
-            "empty packet payload",
-        )
-        .into());
+        return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "empty packet payload").into());
     }
     Ok(Some((pn, FrameReader::new(payload, kind))))
 }
@@ -602,22 +477,10 @@ impl Seal for Keys {
         }
     }
 
-    fn seal(
-        &self,
-        pn: u64,
-        bytes: &mut [u8],
-        pn_offset: usize,
-        body_offset: usize,
-        tag_len: usize,
-    ) -> Result<Self::Output, PacketError> {
+    fn seal(&self, pn: u64, bytes: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError> {
         match self {
-            Self::Long(keys) => keys
-                .sealing
-                .seal(pn, bytes, pn_offset, body_offset, tag_len)
-                .map(|()| None),
-            Self::Short(keys) => keys
-                .seal(pn, bytes, pn_offset, body_offset, tag_len)
-                .map(|(generation, _)| Some(generation)),
+            Self::Long(keys) => keys.sealing.seal(pn, bytes, pn_offset, body_offset, tag_len).map(|()| None),
+            Self::Short(keys) => keys.seal(pn, bytes, pn_offset, body_offset, tag_len).map(|(generation, _)| Some(generation)),
         }
     }
 }

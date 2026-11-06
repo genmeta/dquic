@@ -18,12 +18,7 @@ impl Display for ControlledResolver {
 }
 
 impl Resolve for ControlledResolver {
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        servname: &'l str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'l> {
+    fn lookup<'l>(&'l self, hostname: &'l str, servname: &'l str, family: Option<Family>) -> ResolveFuture<'l> {
         assert_eq!(hostname, "example.test");
         assert_eq!(servname, "8443");
         assert_eq!(family, Some(Family::V4));
@@ -34,10 +29,7 @@ impl Resolve for ControlledResolver {
 
 fn controlled() -> (Arc<dyn Resolve>, oneshot::Sender<ResolveResult>) {
     let (sender, receiver) = oneshot::channel();
-    (
-        Arc::new(ControlledResolver(Mutex::new(Some(receiver)))),
-        sender,
-    )
+    (Arc::new(ControlledResolver(Mutex::new(Some(receiver)))), sender)
 }
 
 fn record(source: Source, port: u16) -> Record {
@@ -49,9 +41,7 @@ fn merges_streams_while_other_lookups_and_streams_are_pending() {
     block_on(async {
         let (slow, release_slow) = controlled();
         let (fast, release_fast) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![slow, fast],
-        };
+        let resolver = Resolver { resolvers: vec![slow, fast] };
         let mut lookup = resolver.lookup("example.test", "8443", Some(Family::V4));
         assert!(futures::poll!(&mut lookup).is_pending());
 
@@ -68,11 +58,7 @@ fn merges_streams_while_other_lookups_and_streams_are_pending() {
         assert_eq!(records.next().await, Some(first));
 
         let second = record(Source::System, 2);
-        assert!(
-            release_slow
-                .send(Ok(stream::iter([second.clone()]).boxed()))
-                .is_ok()
-        );
+        assert!(release_slow.send(Ok(stream::iter([second.clone()]).boxed())).is_ok());
         // The first stream is still open but idle; the newly ready one must progress.
         assert_eq!(records.next().await, Some(second));
         let third = record(Source::Dht, 3);
@@ -89,18 +75,12 @@ fn failed_sources_before_and_after_success_do_not_stop_results() {
         let (early, fail_early) = controlled();
         let (success, release) = controlled();
         let (late, fail_late) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![early, success, late],
-        };
+        let resolver = Resolver { resolvers: vec![early, success, late] };
         let mut lookup = resolver.lookup("example.test", "8443", Some(Family::V4));
         assert!(fail_early.send(Err(io::ErrorKind::NotFound.into())).is_ok());
         assert!(futures::poll!(&mut lookup).is_pending());
         let expected = record(Source::Dht, 1);
-        assert!(
-            release
-                .send(Ok(stream::iter([expected.clone()]).boxed()))
-                .is_ok()
-        );
+        assert!(release.send(Ok(stream::iter([expected.clone()]).boxed())).is_ok());
         let mut records = lookup.await.unwrap();
         assert!(fail_late.send(Err(io::ErrorKind::TimedOut.into())).is_ok());
         assert_eq!(records.next().await, Some(expected));
@@ -113,9 +93,7 @@ fn all_failed_lookups_return_the_last_error() {
     block_on(async {
         let (first, fail_first) = controlled();
         let (last, fail_last) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![first, last],
-        };
+        let resolver = Resolver { resolvers: vec![first, last] };
         let mut lookup = resolver.lookup("example.test", "8443", Some(Family::V4));
         assert!(fail_first.send(Err(io::ErrorKind::NotFound.into())).is_ok());
         assert!(futures::poll!(&mut lookup).is_pending());
@@ -132,15 +110,10 @@ fn an_empty_successful_stream_is_not_a_lookup_error() {
     block_on(async {
         let (success, release) = controlled();
         let (failed, fail) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![success, failed],
-        };
+        let resolver = Resolver { resolvers: vec![success, failed] };
         assert!(release.send(Ok(stream::empty().boxed())).is_ok());
         assert!(fail.send(Err(io::ErrorKind::NotFound.into())).is_ok());
-        let mut records = resolver
-            .lookup("example.test", "8443", Some(Family::V4))
-            .await
-            .unwrap();
+        let mut records = resolver.lookup("example.test", "8443", Some(Family::V4)).await.unwrap();
         assert_eq!(records.next().await, None);
     });
 }
@@ -149,9 +122,7 @@ fn an_empty_successful_stream_is_not_a_lookup_error() {
 fn dropping_aggregate_operations_cancels_children() {
     block_on(async {
         let (pending, sender) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![pending],
-        };
+        let resolver = Resolver { resolvers: vec![pending] };
         let mut lookup = resolver.lookup("example.test", "8443", Some(Family::V4));
         assert!(futures::poll!(&mut lookup).is_pending());
         drop(lookup);
@@ -159,9 +130,7 @@ fn dropping_aggregate_operations_cancels_children() {
 
         let (success, release) = controlled();
         let (pending, sender) = controlled();
-        let resolver = Resolver {
-            resolvers: vec![success, pending],
-        };
+        let resolver = Resolver { resolvers: vec![success, pending] };
         let mut lookup = resolver.lookup("example.test", "8443", Some(Family::V4));
         assert!(futures::poll!(&mut lookup).is_pending());
         let (stream_tx, stream_rx) = mpsc::unbounded();

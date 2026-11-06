@@ -21,17 +21,14 @@ pub use signal::{KeyPhaseBit, SpinBit};
 /// Definitions of QUIC packet types.
 pub mod r#type;
 #[doc(hidden)]
-pub use r#type::{
-    GetPacketNumberLength, LONG_RESERVED_MASK, LongSpecificBits, SHORT_RESERVED_MASK,
-    ShortSpecificBits, Type,
-};
+pub use r#type::{GetPacketNumberLength, LONG_RESERVED_MASK, LongSpecificBits, SHORT_RESERVED_MASK, ShortSpecificBits, Type};
 
 /// Definitions of QUIC packet headers.
 pub mod header;
 #[doc(hidden)]
 pub use header::{
-    GetDcid, GetScid, GetType, HandshakeHeader, Header, HeaderSize, InitialHeader,
-    LongHeaderBuilder, OneRttHeader, RetryHeader, VersionNegotiationHeader, ZeroRttHeader, long,
+    GetDcid, GetScid, GetType, HandshakeHeader, Header, HeaderSize, InitialHeader, LongHeaderBuilder, OneRttHeader, RetryHeader,
+    VersionNegotiationHeader, ZeroRttHeader, long,
 };
 
 pub mod assemble;
@@ -122,9 +119,7 @@ impl ops::AddAssign for PacketContent {
     fn add_assign(&mut self, rhs: Self) {
         match rhs {
             PacketContent::EffectivePayload => *self = PacketContent::EffectivePayload,
-            PacketContent::JustPing if *self == PacketContent::NonAckEliciting => {
-                *self = PacketContent::JustPing
-            }
+            PacketContent::JustPing if *self == PacketContent::NonAckEliciting => *self = PacketContent::JustPing,
             _ => {}
         }
     }
@@ -156,10 +151,7 @@ pub struct PacketReader {
 
 impl PacketReader {
     pub fn new(raw_bytes: BytesMut, dcid_len: usize) -> Self {
-        Self {
-            raw_bytes,
-            dcid_len,
-        }
+        Self { raw_bytes, dcid_len }
     }
 }
 

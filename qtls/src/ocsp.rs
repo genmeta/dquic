@@ -17,32 +17,18 @@ use crate::root::RootCertsSnapshot;
 
 /// Validate a fetched local staple using the same issuer/signature/status/time checks as TLS.
 /// Daily fetching is the caller's policy; no renewal deadline is returned.
-pub fn validate_ocsp(
-    response: &[u8],
-    certificates: &[CertificateDer<'_>],
-    now: UnixTime,
-) -> Result<(), rustls::Error> {
+pub fn validate_ocsp(response: &[u8], certificates: &[CertificateDer<'_>], now: UnixTime) -> Result<(), rustls::Error> {
     if response.len() > crate::TlsLimits::default().max_ocsp_bytes {
         return Err(invalid());
     }
     let (leaf, intermediates) = certificates.split_first().ok_or_else(invalid)?;
     let certificate = Certificate::from_der(leaf.as_ref()).map_err(|_| invalid())?;
     let validity = certificate.tbs_certificate().validity();
-    if now.as_secs() < validity.not_before.to_unix_duration().as_secs()
-        || now.as_secs() > validity.not_after.to_unix_duration().as_secs()
-    {
+    if now.as_secs() < validity.not_before.to_unix_duration().as_secs() || now.as_secs() > validity.not_after.to_unix_duration().as_secs() {
         return Err(rustls::Error::InvalidCertificate(CertificateError::Expired));
     }
-    let roots =
-        crate::RootCerts::get().map_err(|error| rustls::Error::General(error.to_string()))?;
-    verify(
-        response,
-        leaf,
-        intermediates,
-        &roots,
-        now,
-        crate::default_provider().signature_verification_algorithms,
-    )
+    let roots = crate::RootCerts::get().map_err(|error| rustls::Error::General(error.to_string()))?;
+    verify(response, leaf, intermediates, &roots, now, crate::default_provider().signature_verification_algorithms)
 }
 
 pub(crate) fn verify(
@@ -74,12 +60,10 @@ pub(crate) fn verify(
         // Keep the old certificate representation confined to the pkix boundary.
         let certificate = PkixCertificate::from_der(end_entity.as_ref()).map_err(|_| invalid())?;
         let issuer = PkixCertificate::from_der(issuer.as_ref()).map_err(|_| invalid())?;
-        return checker
-            .check_revocation(&certificate, &issuer)
-            .map_err(|error| {
-                eprintln!("OCSP diagnostic: status/signature: {error:?}");
-                invalid()
-            });
+        return checker.check_revocation(&certificate, &issuer).map_err(|error| {
+            eprintln!("OCSP diagnostic: status/signature: {error:?}");
+            invalid()
+        });
     }
 
     eprintln!("OCSP diagnostic: no valid issuer matched certificate");
@@ -96,10 +80,7 @@ fn issued_by(certificate: &Certificate, issuer: &Certificate, verifier: Provider
     verifier
         .verify_signature(
             certificate.signature_algorithm().owned_to_ref(),
-            issuer
-                .tbs_certificate()
-                .subject_public_key_info()
-                .owned_to_ref(),
+            issuer.tbs_certificate().subject_public_key_info().owned_to_ref(),
             &message,
             certificate.signature().raw_bytes(),
         )
@@ -120,17 +101,11 @@ impl pkix_path::SignatureVerifier for ProviderVerifier {
         signature: &[u8],
     ) -> Result<(), pkix_signature::Error> {
         // DER is the interchange format between pkix's types and RustCrypto 0.8.
-        let signature_algorithm = signature_algorithm
-            .to_der()
-            .map_err(|_| pkix_signature::Error::new())?;
-        let issuer_spki = issuer_spki
-            .to_der()
-            .map_err(|_| pkix_signature::Error::new())?;
+        let signature_algorithm = signature_algorithm.to_der().map_err(|_| pkix_signature::Error::new())?;
+        let issuer_spki = issuer_spki.to_der().map_err(|_| pkix_signature::Error::new())?;
         self.verify_signature(
-            AlgorithmIdentifierRef::from_der(&signature_algorithm)
-                .map_err(|_| pkix_signature::Error::new())?,
-            SubjectPublicKeyInfoRef::from_der(&issuer_spki)
-                .map_err(|_| pkix_signature::Error::new())?,
+            AlgorithmIdentifierRef::from_der(&signature_algorithm).map_err(|_| pkix_signature::Error::new())?,
+            SubjectPublicKeyInfoRef::from_der(&issuer_spki).map_err(|_| pkix_signature::Error::new())?,
             message,
             signature,
         )
@@ -163,13 +138,8 @@ impl ProviderVerifier {
     }
 }
 
-fn algorithm_identifier_value(
-    algorithm: AlgorithmIdentifierRef<'_>,
-) -> Result<Vec<u8>, signature::Error> {
-    let mut encoded = algorithm
-        .oid
-        .to_der()
-        .map_err(|_| signature::Error::new())?;
+fn algorithm_identifier_value(algorithm: AlgorithmIdentifierRef<'_>) -> Result<Vec<u8>, signature::Error> {
+    let mut encoded = algorithm.oid.to_der().map_err(|_| signature::Error::new())?;
     if let Some(parameters) = algorithm.parameters {
         encoded.extend(parameters.to_der().map_err(|_| signature::Error::new())?);
     }

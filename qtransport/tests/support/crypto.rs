@@ -73,21 +73,11 @@ impl Algorithm for LimitedAlgorithm {
 struct LimitedKey(Box<dyn PacketKey>);
 
 impl PacketKey for LimitedKey {
-    fn encrypt_in_place(
-        &self,
-        packet_number: u64,
-        header: &[u8],
-        payload: &mut [u8],
-    ) -> Result<Tag, tls_backend::Error> {
+    fn encrypt_in_place(&self, packet_number: u64, header: &[u8], payload: &mut [u8]) -> Result<Tag, tls_backend::Error> {
         self.0.encrypt_in_place(packet_number, header, payload)
     }
 
-    fn decrypt_in_place<'a>(
-        &self,
-        packet_number: u64,
-        header: &[u8],
-        payload: &'a mut [u8],
-    ) -> Result<&'a [u8], tls_backend::Error> {
+    fn decrypt_in_place<'a>(&self, packet_number: u64, header: &[u8], payload: &'a mut [u8]) -> Result<&'a [u8], tls_backend::Error> {
         OPENED.set(OPENED.get() + 1);
         self.0.decrypt_in_place(packet_number, header, payload)
     }

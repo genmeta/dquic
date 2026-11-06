@@ -54,16 +54,11 @@ impl super::EncodeSize for MaxStreamsFrame {
 
 /// Returns a parser for MAX_STREAMS frame with the given direction,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn max_streams_frame_with_dir(
-    dir: Dir,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], MaxStreamsFrame> {
+pub fn max_streams_frame_with_dir(dir: Dir) -> impl Fn(&[u8]) -> nom::IResult<&[u8], MaxStreamsFrame> {
     move |input: &[u8]| {
         let (remain, max_streams) = be_varint(input)?;
         if max_streams > MAX_STREAMS_LIMIT {
-            Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::TooLarge,
-            )))
+            Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)))
         } else {
             Ok((
                 remain,

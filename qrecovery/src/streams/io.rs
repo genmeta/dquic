@@ -57,10 +57,7 @@ pub(super) struct Output<TX> {
 
 impl<TX> Output<TX> {
     fn new() -> Self {
-        Self {
-            outgoings: BTreeMap::default(),
-            cursor: None,
-        }
+        Self { outgoings: BTreeMap::default(), cursor: None }
     }
 }
 
@@ -125,10 +122,7 @@ impl<TX> ArcOutputGuard<'_, TX> {
     ) {
         self.deref()
             .iter()
-            .filter(|(sid, _)| {
-                sid.dir() == Dir::Bi && sid.id() < opened_bidi
-                    || sid.dir() == Dir::Uni && sid.id() < opened_uni
-            })
+            .filter(|(sid, _)| sid.dir() == Dir::Bi && sid.id() < opened_bidi || sid.dir() == Dir::Uni && sid.id() < opened_uni)
             .for_each(|(sid, (outgoing, _))| match sid.dir() {
                 Dir::Bi => outgoing.revise_max_stream_data(zero_rtt_rejected, bidi_snd_wnd_size),
                 Dir::Uni => outgoing.revise_max_stream_data(zero_rtt_rejected, uni_snd_wnd_size),
@@ -146,9 +140,7 @@ impl<TX> ArcOutputGuard<'_, TX> {
 /// 有些异步任务可能还未完成，在置为Err后才会完成。
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone)]
-pub(super) struct ArcInput<TX>(
-    Arc<Mutex<Result<HashMap<StreamId, (Incoming<TX>, IOState)>, QuicError>>>,
-);
+pub(super) struct ArcInput<TX>(Arc<Mutex<Result<HashMap<StreamId, (Incoming<TX>, IOState)>, QuicError>>>);
 
 impl<TX> Default for ArcInput<TX> {
     fn default() -> Self {
@@ -158,9 +150,7 @@ impl<TX> Default for ArcInput<TX> {
 
 impl<TX> ArcInput<TX> {
     #[allow(clippy::type_complexity)]
-    pub(super) fn streams(
-        &self,
-    ) -> MutexGuard<'_, Result<HashMap<StreamId, (Incoming<TX>, IOState)>, QuicError>> {
+    pub(super) fn streams(&self) -> MutexGuard<'_, Result<HashMap<StreamId, (Incoming<TX>, IOState)>, QuicError>> {
         self.0.lock().unwrap()
     }
 

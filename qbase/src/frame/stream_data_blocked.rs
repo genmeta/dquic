@@ -41,10 +41,7 @@ impl super::EncodeSize for StreamDataBlockedFrame {
 impl StreamDataBlockedFrame {
     /// Create a new [`StreamDataBlockedFrame`].
     pub fn new(stream_id: StreamId, maximum_stream_data: VarInt) -> Self {
-        Self {
-            stream_id,
-            maximum_stream_data,
-        }
+        Self { stream_id, maximum_stream_data }
     }
 
     /// Return the stream ID of the frame.
@@ -63,13 +60,7 @@ impl StreamDataBlockedFrame {
 pub fn be_stream_data_blocked_frame(input: &[u8]) -> nom::IResult<&[u8], StreamDataBlockedFrame> {
     let (input, stream_id) = be_streamid(input)?;
     let (input, maximum_stream_data) = be_varint(input)?;
-    Ok((
-        input,
-        StreamDataBlockedFrame {
-            stream_id,
-            maximum_stream_data,
-        },
-    ))
+    Ok((input, StreamDataBlockedFrame { stream_id, maximum_stream_data }))
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<StreamDataBlockedFrame> for T {

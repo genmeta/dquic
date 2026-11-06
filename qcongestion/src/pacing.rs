@@ -17,22 +17,10 @@ pub(super) struct Pacer {
 }
 
 impl Pacer {
-    pub(super) fn new(
-        smoothed_rtt: Duration,
-        cwnd: usize,
-        mtu: usize,
-        now: Instant,
-        rate: Option<usize>,
-    ) -> Self {
+    pub(super) fn new(smoothed_rtt: Duration, cwnd: usize, mtu: usize, now: Instant, rate: Option<usize>) -> Self {
         let capacity = Pacer::calculate_capacity(smoothed_rtt, cwnd, mtu, rate);
 
-        Pacer {
-            capacity,
-            cwnd,
-            tokens: capacity,
-            last_burst_time: now,
-            rate,
-        }
+        Pacer { capacity, cwnd, tokens: capacity, last_burst_time: now, rate }
     }
 
     pub(super) fn on_sent(&mut self, packet_size: usize) {
@@ -40,14 +28,7 @@ impl Pacer {
     }
 
     // Schedule and return the packet size to send, max size is mtu
-    pub(super) fn schedule(
-        &mut self,
-        srtt: Duration,
-        cwnd: usize,
-        mtu: usize,
-        now: Instant,
-        rate: Option<usize>,
-    ) -> usize {
+    pub(super) fn schedule(&mut self, srtt: Duration, cwnd: usize, mtu: usize, now: Instant, rate: Option<usize>) -> usize {
         // Update capacity if cwnd or rate has changed
         if self.cwnd != cwnd || rate != self.rate {
             self.capacity = Pacer::calculate_capacity(srtt, cwnd, mtu, rate);
@@ -69,21 +50,13 @@ impl Pacer {
         // TODO: 时间间隔有上限
         // elapsed.max(srtt.as_secs_f64() * 2);
         let new_token = elapsed.as_secs_f64() * rate as f64;
-        self.tokens = self
-            .tokens
-            .saturating_add(new_token as usize)
-            .min(self.capacity);
+        self.tokens = self.tokens.saturating_add(new_token as usize).min(self.capacity);
         self.last_burst_time = now;
 
         self.tokens
     }
 
-    fn calculate_capacity(
-        smoothed_rtt: Duration,
-        cwnd: usize,
-        mtu: usize,
-        rate: Option<usize>,
-    ) -> usize {
+    fn calculate_capacity(smoothed_rtt: Duration, cwnd: usize, mtu: usize, rate: Option<usize>) -> usize {
         let rtt = smoothed_rtt.as_nanos().max(1);
 
         let capacity = match rate {
@@ -132,13 +105,7 @@ mod tests {
 
     #[test]
     fn test_on_sent() {
-        let mut pacer = Pacer::new(
-            Duration::from_millis(100),
-            10,
-            1500,
-            Instant::now(),
-            Some(1_000_000),
-        );
+        let mut pacer = Pacer::new(Duration::from_millis(100), 10, 1500, Instant::now(), Some(1_000_000));
         // token 15_000
         assert_eq!(pacer.tokens, 15_000);
         pacer.on_sent(1500); // 发送一个 MTU 大小的数据包

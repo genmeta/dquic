@@ -54,30 +54,17 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         path.validation.enter_validated().unwrap();
         path.disable();
         let space = paths.spaces.read_guard().get(epoch as u64).unwrap().clone();
-        for crypto in [
-            &data.spaces.initial.crypto,
-            &data.spaces.handshake.crypto,
-            &data.spaces.data.crypto,
-        ] {
+        for crypto in [&data.spaces.initial.crypto, &data.spaces.handshake.crypto, &data.spaces.data.crypto] {
             crypto.writer().write_all(b"queued crypto").await.unwrap();
         }
         let (_, mut writer) = data.spaces.data.streams.open_uni().await.unwrap().unwrap();
         writer.write_all(b"queued stream").await.unwrap();
-        data.spaces
-            .data
-            .reliable_frames
-            .send_frame([qbase::frame::StreamCtlFrame::from(MaxDataFrame::new(
-                1234u32.into(),
-            ))]);
+        data.spaces.data.reliable_frames.send_frame([qbase::frame::StreamCtlFrame::from(MaxDataFrame::new(1234u32.into()))]);
         path.validation.revalidate().unwrap();
         path.validation.on_received(1000);
-        path.validation
-            .challenge(PathChallengeFrame::from_slice(&[7; 8]))
-            .unwrap();
+        path.validation.challenge(PathChallengeFrame::from_slice(&[7; 8])).unwrap();
         for pn in [41, 42] {
-            space
-                .rcvd_journal()
-                .on_rcvd_pn(pn, true, Duration::from_secs(1));
+            space.rcvd_journal().on_rcvd_pn(pn, true, Duration::from_secs(1));
             path.cc.on_pkt_rcvd(epoch, pn, true);
         }
         let mut datagrams = [BytesMut::new()];
@@ -86,81 +73,38 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
         let mut cx = Context::from_waker(Waker::noop());
         let result = burst.poll_collect(&mut cx);
-        assert!(
-            matches!(result, Poll::Ready(Ok(1))),
-            "{epoch:?}: {result:?}"
-        );
+        assert!(matches!(result, Poll::Ready(Ok(1))), "{epoch:?}: {result:?}");
         let meta = packet_metadata(&burst.packets[0], epoch).unwrap();
         assert_eq!(meta.ack, Some(42));
         assert_eq!(meta.content, PacketContent::NonAckEliciting);
-        assert!(
-            space
-                .sent_journal()
-                .lock_guard()
-                .frames(meta.pn)
-                .next()
-                .is_none()
-        );
-        assert_eq!(
-            data.spaces.data.streams.fresh_bytes(),
-            b"queued stream".len()
-        );
+        assert!(space.sent_journal().lock_guard().frames(meta.pn).next().is_none());
+        assert_eq!(data.spaces.data.streams.fresh_bytes(), b"queued stream".len());
         burst.packets[0].retain(|meta| meta.epoch() != epoch);
-        space.on_sent(
-            meta.pn,
-            false,
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        );
-        path.cc
-            .on_pkt_sent(epoch, meta.pn, false, meta.pktlen, false, Some(42));
+        space.on_sent(meta.pn, false, Duration::from_secs(1), Duration::from_secs(3));
+        path.cc.on_pkt_sent(epoch, meta.pn, false, meta.pktlen, false, Some(42));
         burst.cancel();
-        path.heartbeat
-            .on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now())
-            .unwrap();
+        path.heartbeat.on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
         tokio::time::advance(Duration::from_secs(20)).await;
         path.cc.do_tick().unwrap();
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))));
         for meta in burst.packets.iter().flatten() {
             assert_ne!(meta.content, PacketContent::EffectivePayload);
         }
-        assert!(
-            burst
-                .packets
-                .iter()
-                .flatten()
-                .any(|meta| meta.content == PacketContent::JustPing)
-        );
+        assert!(burst.packets.iter().flatten().any(|meta| meta.content == PacketContent::JustPing));
         burst.cancel();
         path.enable();
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))));
-        assert!(
-            burst
-                .packets
-                .iter()
-                .flatten()
-                .any(|meta| meta.content == PacketContent::EffectivePayload)
-        );
+        assert!(burst.packets.iter().flatten().any(|meta| meta.content == PacketContent::EffectivePayload));
         assert!(data.spaces.data.streams.fresh_bytes() < b"queued stream".len());
         burst.cancel();
         path.disable();
-        paths.terminator.close(
-            crate::CloseReason::Internal(QuicError::with_default_fty(
-                ErrorKind::Internal,
-                "closed",
-            )),
-            paths.closing_pto(),
-        );
+        paths
+            .terminator
+            .close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")), paths.closing_pto());
         assert!(burst.poll_collect(&mut cx).is_pending());
         path.enable();
         assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))));
-        assert!(
-            burst
-                .packets
-                .iter()
-                .flatten()
-                .all(|meta| meta.content == PacketContent::NonAckEliciting)
-        );
+        assert!(burst.packets.iter().flatten().all(|meta| meta.content == PacketContent::NonAckEliciting));
         burst.cancel();
         task::cancel_waiters(&paths, &path);
         paths.retire_all();
@@ -176,12 +120,7 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
         keys(false),
     );
     let space = crate::common::initial_space(&paths.spaces);
-    space
-        .crypto
-        .writer()
-        .write_all(b"queued crypto")
-        .await
-        .unwrap();
+    space.crypto.writer().write_all(b"queued crypto").await.unwrap();
     let path = crate::common::registered_path(
         &paths,
         Path::new(
@@ -198,27 +137,16 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
     let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     let count = burst.collect().await.unwrap();
-    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
-        .unwrap()
-        .pn;
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap().pn;
     path.disable();
     // No socket is registered: successful cancellation must avoid UDP submission.
     burst.submit(count).await.unwrap();
     assert!(burst.packets.iter().all(|packets| packets.is_empty()));
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
-    assert!(
-        burst
-            .poll_collect(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    assert!(burst.poll_collect(&mut Context::from_waker(Waker::noop())).is_pending());
     path.enable();
-    assert!(matches!(
-        burst.poll_collect(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(1))
-    ));
-    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
-        .unwrap()
-        .pn;
+    assert!(matches!(burst.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap().pn;
     assert!(space.sent_journal.lock_guard().frames(pn).any(|frame| {
         matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == b"queued crypto".len() as u64)
     }));
@@ -238,19 +166,12 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     let trackers = paths.loss_resender.clone();
     super::install_handshake(
         &paths,
-        Arc::new(HandshakeSpace::new(
-            Default::default(),
-            ArcKeys::new(Arc::new(keys(false))),
-            paths.progress.facts(),
-        )),
+        Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(false))), paths.progress.facts())),
     );
     let path = crate::common::registered_path(
         &paths,
         Path::new(
-            Pathway::new(
-                "127.0.0.1:4400".parse::<EndpointAddr>().unwrap(),
-                "127.0.0.1:5500".parse().unwrap(),
-            ),
+            Pathway::new("127.0.0.1:4400".parse::<EndpointAddr>().unwrap(), "127.0.0.1:5500".parse().unwrap()),
             paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             trackers.clone(),
@@ -259,32 +180,23 @@ async fn retired_initial_is_discarded_before_polling_an_expired_pto() {
     );
     path.validation.exempt().unwrap();
     paths.progress.on_path_selected(&paths, &path);
-    path.cc
-        .on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
+    path.cc.on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
     tokio::time::advance(Duration::from_secs(10)).await;
     paths.progress.on_handshake_sent();
     assert_eq!(paths.spaces.read_guard().offset(), Epoch::Handshake as u64);
     assert_eq!(trackers.read_guard().offset(), Epoch::Handshake as u64);
-    let mut datagrams =
-        std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
     let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
     let mut collect = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
-    assert!(
-        collect
-            .poll_collect(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    assert!(collect.poll_collect(&mut Context::from_waker(Waker::noop())).is_pending());
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
     // While waiting for HANDSHAKE_DONE, an anti-deadlock probe must use live Handshake keys.
     tokio::time::advance(path.cc.pto_base(Epoch::Handshake)).await;
     path.cc.do_tick().unwrap();
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Initial), 0);
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
-    assert!(matches!(
-        collect.poll_collect(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(1))
-    ));
+    assert!(matches!(collect.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
     assert_eq!(pns_for(collect.packets, Epoch::Handshake).count(), 1);
 }
 
@@ -300,35 +212,15 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         crate::common::handshake_facts(Role::Client, false),
     );
     let message = vec![42; 7200];
-    crate::common::initial_space(&paths.spaces)
-        .crypto
-        .writer()
-        .write_all(&message)
-        .await
-        .unwrap();
-    let handshake = Arc::new(HandshakeSpace::new(
-        Default::default(),
-        ArcKeys::new(Arc::new(keys(false))),
-        paths.progress.facts(),
-    ));
-    handshake
-        .crypto
-        .writer()
-        .write_all(b"handshake")
-        .await
-        .unwrap();
-    crate::common::initial_space(&paths.spaces)
-        .rcvd_journal
-        .on_rcvd_pn(3, true, Duration::from_secs(1));
-    handshake
-        .rcvd_journal
-        .on_rcvd_pn(7, true, Duration::from_secs(1));
+    crate::common::initial_space(&paths.spaces).crypto.writer().write_all(&message).await.unwrap();
+    let handshake = Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(false))), paths.progress.facts()));
+    handshake.crypto.writer().write_all(b"handshake").await.unwrap();
+    crate::common::initial_space(&paths.spaces).rcvd_journal.on_rcvd_pn(3, true, Duration::from_secs(1));
+    handshake.rcvd_journal.on_rcvd_pn(7, true, Duration::from_secs(1));
     let trackers = paths.loss_resender.clone();
     super::install_handshake(&paths, handshake);
-    let pathway = Pathway::new(
-        EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()),
-        EndpointAddr::direct("127.0.0.1:31002".parse().unwrap()),
-    );
+    let pathway =
+        Pathway::new(EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()), EndpointAddr::direct("127.0.0.1:31002".parse().unwrap()));
     let path = crate::common::registered_path(
         &paths,
         Path::new(
@@ -347,24 +239,13 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
     let mut pns = std::array::from_fn(|_| Default::default());
-    let count = collect(Burst::new(
-        &paths,
-        &path,
-        &mut datagrams,
-        &mut frames,
-        &mut pns,
-    ))
-    .now_or_never()
-    .unwrap()
-    .unwrap();
+    let count = collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never().unwrap().unwrap();
     assert_eq!(count, 7);
     assert!(!pns_for(&pns, Epoch::Initial).next().is_none());
     assert_eq!(pns_for(&pns, Epoch::Handshake).count(), 1);
     for (epoch, largest) in [(Epoch::Initial, 3), (Epoch::Handshake, 7)] {
         assert_eq!(
-            pns.iter()
-                .filter_map(|slots| packet_metadata(slots, epoch).and_then(|meta| meta.ack))
-                .collect::<Vec<_>>(),
+            pns.iter().filter_map(|slots| packet_metadata(slots, epoch).and_then(|meta| meta.ack)).collect::<Vec<_>>(),
             [largest],
             "each space sends its ACK only once per burst"
         );
@@ -372,26 +253,17 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
     assert!(frames.is_empty());
     let mut recovered = Vec::new();
     for (index, pn) in pns_for(&pns, Epoch::Initial) {
-        let ParsedPacket::Data(parsed) = PacketReader::new(datagrams[index].clone(), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-        else {
+        let ParsedPacket::Data(parsed) = PacketReader::new(datagrams[index].clone(), 8).next().unwrap().unwrap() else {
             panic!()
         };
         let DataHeader::Long(long::DataHeader::Initial(header)) = parsed.header else {
             panic!()
         };
-        let packet = CipherPacket::new(header, parsed.bytes, parsed.offset)
-            .decrypt_long_packet(&keys(true).opening, |_| Ok(pn))
-            .unwrap()
-            .unwrap();
+        let packet =
+            CipherPacket::new(header, parsed.bytes, parsed.offset).decrypt_long_packet(&keys(true).opening, |_| Ok(pn)).unwrap().unwrap();
         for frame in FrameReader::new(
             packet.body(),
-            qbase::packet::GetType::get_type(
-                &LongHeaderBuilder::with_cid(Default::default(), Default::default())
-                    .initial(vec![]),
-            ),
+            qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![])),
         ) {
             if let Frame::Crypto(frame, bytes) = frame.unwrap().0 {
                 assert_eq!(frame.offset(), recovered.len() as u64);
@@ -413,12 +285,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     ConnectionId::from_slice(b"original"),
                     keys(role == Role::Server),
                 );
-                crate::common::initial_space(&paths.spaces)
-                    .crypto
-                    .writer()
-                    .write_all(b"hello")
-                    .await
-                    .unwrap();
+                crate::common::initial_space(&paths.spaces).crypto.writer().write_all(b"hello").await.unwrap();
                 if handshaking {
                     super::install_handshake(
                         &paths,
@@ -462,9 +329,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     entries.insert(competitor.pathway, competitor.clone());
                 }
                 if selected != u8::MAX {
-                    paths.progress.on_initial_received(crate::common::cid_value(
-                        &paths.cid_registry.remote.apply_dcid(),
-                    ));
+                    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
                 }
                 match selected {
                     0 => {
@@ -476,9 +341,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     2 => {
                         paths.progress.on_path_selected(&paths, &path);
                         paths.progress.facts().on_handshake_done();
-                        paths.progress.on_initial_received(crate::common::cid_value(
-                            &paths.cid_registry.remote.apply_dcid(),
-                        ));
+                        paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
                         paths.cid_registry.remote.upgrade();
                         for path in paths.entries.lock().unwrap().values() {
                             path.dcid.upgrade();
@@ -490,39 +353,21 @@ async fn crypto_replays_until_ack_or_path_selection() {
                 let mut frames = Vec::new();
                 let mut pns = std::array::from_fn(|_| Default::default());
                 for attempt in 0..4 {
-                    let result = collect(Burst::new(
-                        &paths,
-                        &path,
-                        &mut datagrams,
-                        &mut frames,
-                        &mut pns,
-                    ))
-                    .now_or_never();
-                    if (selected == u8::MAX && attempt < 3)
-                        || (matches!(selected, 1 | 2) && attempt == 0)
-                    {
-                        assert!(
-                            matches!(result, Some(Ok(1))),
-                            "{role:?} {handshaking} {selected} {attempt}"
-                        );
+                    let result = collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never();
+                    if (selected == u8::MAX && attempt < 3) || (matches!(selected, 1 | 2) && attempt == 0) {
+                        assert!(matches!(result, Some(Ok(1))), "{role:?} {handshaking} {selected} {attempt}");
                         for slots in &mut pns {
                             slots.retain(|meta| meta.epoch() != Epoch::Initial);
                         }
                     } else {
-                        assert!(
-                            result.is_none(),
-                            "{role:?} {handshaking} {selected} {attempt}"
-                        );
+                        assert!(result.is_none(), "{role:?} {handshaking} {selected} {attempt}");
                         assert!(pns.iter().all(|packets| packets.is_empty()));
                     }
                     if selected != 0 && attempt == 1 {
                         crate::common::initial_space(&paths.spaces)
                             .crypto
                             .outgoing()
-                            .on_data_acked(&qbase::frame::CryptoFrame::new(
-                                0u32.into(),
-                                1u32.into(),
-                            ));
+                            .on_data_acked(&qbase::frame::CryptoFrame::new(0u32.into(), 1u32.into()));
                     }
                     assert!(frames.is_empty());
                 }
@@ -546,11 +391,7 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
         let mut space = crate::common::initial_space(&paths.spaces);
         let trackers = paths.loss_resender.clone();
         if epoch == Epoch::Handshake {
-            let handshake = Arc::new(HandshakeSpace::new(
-                Default::default(),
-                ArcKeys::new(Arc::new(keys(true))),
-                paths.progress.facts(),
-            ));
+            let handshake = Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(true))), paths.progress.facts()));
             super::install_handshake(&paths, handshake.clone());
             space.retire();
             space = Arc::new(handshake.0.clone());
@@ -570,70 +411,41 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
         );
         path.validation.enter_validated().unwrap();
         paths.progress.on_path_selected(&paths, &path);
-        path.heartbeat
-            .on_rcvd_at(
-                qbase::packet::PacketContent::EffectivePayload,
-                tokio::time::Instant::now(),
-            )
-            .unwrap();
+        path.heartbeat.on_rcvd_at(qbase::packet::PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
         tokio::time::advance(Duration::from_secs(20)).await;
         let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
-        terminator.close(
-            crate::CloseReason::Internal(error.clone()),
-            paths.closing_pto(),
-        );
+        terminator.close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
         space.crypto.on_error(&error.into());
         let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
         let mut frames = Vec::new();
         let mut pns = std::array::from_fn(|_| Default::default());
         let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         let mut cx = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            collector.poll_collect(&mut cx),
-            Poll::Ready(Ok(1))
-        ));
+        assert!(matches!(collector.poll_collect(&mut cx), Poll::Ready(Ok(1))));
         let pn = pns_for(collector.packets, epoch).next().unwrap().1;
         assert_eq!(space.sent_journal.lock_guard().frames(pn).count(), 0);
         drop(collector);
-        let ParsedPacket::Data(packet) = PacketReader::new(datagrams[0].clone(), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-        else {
+        let ParsedPacket::Data(packet) = PacketReader::new(datagrams[0].clone(), 8).next().unwrap().unwrap() else {
             panic!()
         };
         use qbase::packet::GetType;
         let ty = packet.get_type();
         let body = match packet.header {
-            DataHeader::Long(long::DataHeader::Initial(header)) => {
-                CipherPacket::new(header, packet.bytes, packet.offset)
-                    .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
-                    .unwrap()
-                    .unwrap()
-                    .body()
-            }
-            DataHeader::Long(long::DataHeader::Handshake(header)) => {
-                CipherPacket::new(header, packet.bytes, packet.offset)
-                    .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
-                    .unwrap()
-                    .unwrap()
-                    .body()
-            }
+            DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
+                .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
+                .unwrap()
+                .unwrap()
+                .body(),
+            DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
+                .decrypt_long_packet(&keys(false).opening, |_| Ok(pn))
+                .unwrap()
+                .unwrap()
+                .body(),
             _ => panic!(),
         };
-        let decoded = FrameReader::new(body, ty)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            decoded
-                .iter()
-                .any(|(frame, _)| matches!(frame, Frame::Close(_)))
-        );
-        assert!(
-            decoded
-                .iter()
-                .all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_)))
-        );
+        let decoded = FrameReader::new(body, ty).collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(decoded.iter().any(|(frame, _)| matches!(frame, Frame::Close(_))));
+        assert!(decoded.iter().all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_))));
         for slots in &mut pns {
             slots.retain(|meta| meta.epoch() != epoch);
         }
@@ -650,11 +462,7 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
 fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
     use tls_backend::pki_types::pem::PemObject;
     let provider = Arc::new(qtls::default_provider());
-    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!(
-        "../keychain/localhost/ca.cert"
-    ))
-    .unwrap()])
-    .unwrap();
+    qtls::RootCerts::set([qtls::CertificateDer::from_pem_slice(include_bytes!("../keychain/localhost/ca.cert")).unwrap()]).unwrap();
     let client = qtls::TlsClient::new(qtls::ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
@@ -669,14 +477,8 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
         authority: qtls::LocalAuthority::new(
             &provider,
             Arc::from("localhost"),
-            vec![
-                qtls::CertificateDer::from_pem_slice(include_bytes!(
-                    "../keychain/localhost/server.cert"
-                ))
-                .unwrap(),
-            ],
-            qtls::PrivateKeyDer::from_pem_slice(include_bytes!("../keychain/localhost/server.key"))
-                .unwrap(),
+            vec![qtls::CertificateDer::from_pem_slice(include_bytes!("../keychain/localhost/server.cert")).unwrap()],
+            qtls::PrivateKeyDer::from_pem_slice(include_bytes!("../keychain/localhost/server.key")).unwrap(),
             include_bytes!("../keychain/localhost/server.ocsp").to_vec(),
         )
         .unwrap(),
@@ -691,22 +493,14 @@ fn server_one_rtt_keys() -> qtls::OneRttKeyMaterial {
             local_transport_parameters: bytes::Bytes::new(),
         })
         .unwrap();
-    let mut server = server
-        .start(qtls::QuicVersion::V1, bytes::Bytes::new())
-        .unwrap();
+    let mut server = server.start(qtls::QuicVersion::V1, bytes::Bytes::new()).unwrap();
     while let Some(event) = client.next_event() {
-        if let qtls::TlsEvent::WriteCrypto {
-            epoch: level,
-            bytes,
-        } = event
-        {
+        if let qtls::TlsEvent::WriteCrypto { epoch: level, bytes } = event {
             server.receive_crypto(level, &bytes).unwrap();
         }
     }
     loop {
-        if let qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) =
-            server.next_event().unwrap()
-        {
+        if let qtls::TlsEvent::InstallKeys(qtls::InstalledKeys::OneRtt(keys)) = server.next_event().unwrap() {
             return keys;
         }
     }
@@ -729,30 +523,12 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
         facts.clone(),
     );
     let mut client = ClientParameters::default();
-    client
-        .set(
-            ParameterId::InitialSourceConnectionId,
-            ConnectionId::from_slice(b"client00"),
-        )
-        .unwrap();
-    let parameters = ArcParameters::new(
-        Role::Server,
-        Arc::new(client),
-        Arc::new(ServerParameters::default()),
-    );
+    client.set(ParameterId::InitialSourceConnectionId, ConnectionId::from_slice(b"client00")).unwrap();
+    let parameters = ArcParameters::new(Role::Server, Arc::new(client), Arc::new(ServerParameters::default()));
     let terminator = &paths.terminator;
-    paths
-        .cid_registry
-        .remote
-        .set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
-    paths
-        .progress
-        .on_initial_received(parameters.remote(ParameterId::InitialSourceConnectionId));
-    let handshake = Arc::new(HandshakeSpace::new(
-        Default::default(),
-        ArcKeys::new(Arc::new(keys(true))),
-        facts.clone(),
-    ));
+    paths.cid_registry.remote.set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
+    paths.progress.on_initial_received(parameters.remote(ParameterId::InitialSourceConnectionId));
+    let handshake = Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(true))), facts.clone()));
     terminator.register(Arc::new(handshake.crypto.clone()));
     let reliable_frames = paths.reliable_frames.clone();
     let streams = crate::DataStreams::new(
@@ -775,19 +551,8 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
         facts,
     ));
     terminator.register(Arc::new(data.crypto.clone()));
-    let concrete = super::SpaceFixture {
-        initial: crate::common::initial_space(&paths.spaces),
-        handshake,
-        data,
-    };
-    (
-        paths.clone(),
-        super::DataFixture {
-            paths,
-            parameters,
-            spaces: concrete,
-        },
-    )
+    let concrete = super::SpaceFixture { initial: crate::common::initial_space(&paths.spaces), handshake, data };
+    (paths.clone(), super::DataFixture { paths, parameters, spaces: concrete })
 }
 
 #[tokio::test]
@@ -803,10 +568,7 @@ async fn space_installation_preserves_cid_cleanup_and_termination() {
     assert_eq!(crate::common::cid_value(&dcid), mature.peer_cid());
     super::install_data(&paths, &mature);
     assert_eq!(paths.cid_registry.local.initial_scid(), scid);
-    assert_eq!(
-        crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()),
-        mature.peer_cid()
-    );
+    assert_eq!(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()), mature.peer_cid());
 
     cid_registry.local.clear();
     assert!(paths.cid_registry.local.initial_scid().is_none());
@@ -830,11 +592,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
     for epoch in [Epoch::Handshake, Epoch::Data] {
         let (paths, data) = data_spaces(Role::Server, Duration::ZERO);
         if epoch == Epoch::Data {
-            assert!(
-                paths
-                    .progress
-                    .install_handshake(data.spaces.handshake.clone())
-            );
+            assert!(paths.progress.install_handshake(data.spaces.handshake.clone()));
         }
         let path = crate::common::registered_path(
             &paths,
@@ -862,9 +620,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         let counter = Arc::new(Counter::default());
         let other_counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        other
-            .send_waker
-            .register(&Waker::from(other_counter.clone()));
+        other.send_waker.register(&Waker::from(other_counter.clone()));
         let mut cx = Context::from_waker(&waker);
         let mut datagrams = [BytesMut::new()];
         let mut frames = Vec::new();
@@ -873,30 +629,14 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         assert!(burst.poll_collect(&mut cx).is_pending());
         let before = counter.0.load(Ordering::Relaxed);
         if epoch == Epoch::Handshake {
-            data.spaces
-                .handshake
-                .crypto
-                .writer()
-                .write_all(b"handshake")
-                .await
-                .unwrap();
+            data.spaces.handshake.crypto.writer().write_all(b"handshake").await.unwrap();
         } else {
-            data.spaces
-                .data
-                .crypto
-                .writer()
-                .write_all(b"data")
-                .await
-                .unwrap();
+            data.spaces.data.crypto.writer().write_all(b"data").await.unwrap();
         }
         assert_eq!(counter.0.load(Ordering::Relaxed), before);
         assert!(burst.poll_collect(&mut cx).is_pending());
         if epoch == Epoch::Handshake {
-            assert!(
-                paths
-                    .progress
-                    .install_handshake(data.spaces.handshake.clone())
-            );
+            assert!(paths.progress.install_handshake(data.spaces.handshake.clone()));
         } else {
             paths.progress.install_data(data.spaces.data.clone());
         }
@@ -937,10 +677,7 @@ async fn existing_path_recovers_newly_installed_spaces() {
     for epoch in [Epoch::Handshake, Epoch::Data] {
         let (crypto, journal) = if epoch == Epoch::Handshake {
             super::install_handshake(&paths, mature.spaces.handshake.clone());
-            (
-                &mature.spaces.handshake.crypto,
-                &mature.spaces.handshake.sent_journal,
-            )
+            (&mature.spaces.handshake.crypto, &mature.spaces.handshake.sent_journal)
         } else {
             super::install_data(&paths, &mature);
             super::confirm_handshake(&paths);
@@ -949,50 +686,30 @@ async fn existing_path_recovers_newly_installed_spaces() {
         let mut sent = Vec::new();
         for _ in 0..4 {
             crypto.writer().write_all(b"crypto").await.unwrap();
-            collect(Burst::new(
-                &paths,
-                &path,
-                &mut datagrams,
-                &mut frames,
-                &mut pns,
-            ))
-            .now_or_never()
-            .unwrap()
-            .unwrap();
+            collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never().unwrap().unwrap();
             assert_eq!(pns_for(&pns, epoch).count(), 1);
             let (index, pn) = pns_for(&pns, epoch).next().unwrap();
             journal.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
-            path.cc
-                .on_pkt_sent(epoch, pn, true, datagrams[index].len(), true, None);
+            path.cc.on_pkt_sent(epoch, pn, true, datagrams[index].len(), true, None);
             sent.push(pn);
             for entries in &mut pns {
                 entries.clear();
             }
         }
         // Three later packets prove the first one lost. CC must call the newly attached space.
-        let ack = qbase::frame::AckFrame::new(
-            sent[3].try_into().unwrap(),
-            0u32.into(),
-            0u32.into(),
-            vec![],
-            None,
-        );
+        let ack = qbase::frame::AckFrame::new(sent[3].try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
         path.cc.on_ack_rcvd(epoch, &ack);
-        collect(Burst::new(
-            &paths,
-            &path,
-            &mut datagrams,
-            &mut frames,
-            &mut pns,
-        ))
-        .now_or_never()
-        .expect("loss must make the original CRYPTO range sendable")
-        .unwrap();
+        collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns))
+            .now_or_never()
+            .expect("loss must make the original CRYPTO range sendable")
+            .unwrap();
         assert_eq!(pns_for(&pns, epoch).count(), 1);
         let records = journal.lock_guard();
-        assert!(records.frames(pns_for(&pns, epoch).next().unwrap().1).any(|frame| {
-            matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 6)
-        }));
+        assert!(
+            records
+                .frames(pns_for(&pns, epoch).next().unwrap().1)
+                .any(|frame| { matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 6) })
+        );
         for entries in &mut pns {
             entries.clear();
         }
@@ -1005,28 +722,19 @@ async fn growing_assigns_the_selected_cid_before_releasing_or_creating_other_pat
     let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
     let remote = &paths.cid_registry.remote;
     let next = ConnectionId::from_slice(b"client01");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     let make_path = |port| {
         let path = crate::common::registered_path(
             &paths,
             Path::new(
-                Pathway::new(
-                    EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-                    EndpointAddr::direct("127.0.0.1:34300".parse().unwrap()),
-                ),
+                Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], port).into()), EndpointAddr::direct("127.0.0.1:34300".parse().unwrap())),
                 paths.progress.facts(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
                 paths.loss_resender.clone(),
                 paths.cid_registry.remote.apply_dcid(),
             ),
         );
-        paths
-            .entries
-            .lock()
-            .unwrap()
-            .insert(path.pathway, path.clone());
+        paths.entries.lock().unwrap().insert(path.pathway, path.clone());
         path
     };
     let other = make_path(34301);
@@ -1079,11 +787,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     path.validation.enter_validated().unwrap();
     // The selected sender waits if the available CID was already consumed.
     assert!(!paths.progress.facts().is_handshake_done() && path.dcid.is_allocated());
-    for crypto in [
-        &mature.spaces.initial.crypto,
-        &mature.spaces.handshake.crypto,
-        &mature.spaces.data.crypto,
-    ] {
+    for crypto in [&mature.spaces.initial.crypto, &mature.spaces.handshake.crypto, &mature.spaces.data.crypto] {
         crypto.writer().write_all(b"crypto").await.unwrap();
     }
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
@@ -1093,24 +797,13 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     let mut cx = Context::from_waker(Waker::noop());
     assert!(collector.poll_collect(&mut cx).is_pending());
     let next = ConnectionId::from_slice(b"client01");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into()))
-        .unwrap();
-    assert!(matches!(
-        collector.poll_collect(&mut cx),
-        Poll::Ready(Ok(1))
-    ));
+    remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
+    assert!(matches!(collector.poll_collect(&mut cx), Poll::Ready(Ok(1))));
     // Keep the CID borrowed while the assembled datagram awaits UDP submission.
     let borrowed = collector.dcid.take().unwrap();
     drop(collector);
-    assert!(
-        Epoch::EPOCHS
-            .into_iter()
-            .all(|epoch| packet_metadata(&pns[0], epoch).is_some())
-    );
-    let packets = PacketReader::new(datagrams[0].clone(), 8)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    assert!(Epoch::EPOCHS.into_iter().all(|epoch| packet_metadata(&pns[0], epoch).is_some()));
+    let packets = PacketReader::new(datagrams[0].clone(), 8).collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(packets.len(), 3);
     for packet in packets {
         let ParsedPacket::Data(packet) = packet else {
@@ -1120,13 +813,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     }
     initial_cell.retire();
     let replacement = ConnectionId::from_slice(b"client02");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(
-            replacement,
-            2u32.into(),
-            2u32.into(),
-        ))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(replacement, 2u32.into(), 2u32.into())).unwrap();
     assert_eq!(borrowed, next);
     path.dcid.refresh();
     assert!(matches!(super::borrow(&path),
@@ -1135,31 +822,12 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
     for slots in &mut pns {
         slots.clear();
     }
-    for crypto in [
-        &mature.spaces.initial.crypto,
-        &mature.spaces.handshake.crypto,
-        &mature.spaces.data.crypto,
-    ] {
+    for crypto in [&mature.spaces.initial.crypto, &mature.spaces.handshake.crypto, &mature.spaces.data.crypto] {
         crypto.writer().write_all(b"next").await.unwrap();
     }
-    collect(Burst::new(
-        &paths,
-        &path,
-        &mut datagrams,
-        &mut frames,
-        &mut pns,
-    ))
-    .now_or_never()
-    .unwrap()
-    .unwrap();
-    assert!(
-        Epoch::EPOCHS
-            .into_iter()
-            .all(|epoch| packet_metadata(&pns[0], epoch).is_some())
-    );
-    let packets = PacketReader::new(datagrams[0].clone(), 8)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never().unwrap().unwrap();
+    assert!(Epoch::EPOCHS.into_iter().all(|epoch| packet_metadata(&pns[0], epoch).is_some()));
+    let packets = PacketReader::new(datagrams[0].clone(), 8).collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(packets.len(), 3);
     for packet in packets {
         let ParsedPacket::Data(packet) = packet else {
@@ -1172,11 +840,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
 #[tokio::test]
 async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
-    for crypto in [
-        &mature.spaces.initial.crypto,
-        &mature.spaces.handshake.crypto,
-        &mature.spaces.data.crypto,
-    ] {
+    for crypto in [&mature.spaces.initial.crypto, &mature.spaces.handshake.crypto, &mature.spaces.data.crypto] {
         crypto.writer().write_all(b"crypto").await.unwrap();
     }
     super::install_data(&paths, &mature);
@@ -1198,19 +862,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| BytesMut::with_capacity(1200));
     let mut frames = Vec::new();
     let mut pns = std::array::from_fn(|_| Default::default());
-    assert_eq!(
-        collect(Burst::new(
-            &paths,
-            &path,
-            &mut datagrams,
-            &mut frames,
-            &mut pns
-        ))
-        .now_or_never()
-        .unwrap()
-        .unwrap(),
-        1
-    );
+    assert_eq!(collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never().unwrap().unwrap(), 1);
     for epoch in Epoch::EPOCHS {
         assert_eq!(pns_for(&pns, epoch).count(), 1);
     }
@@ -1222,27 +874,10 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     for entries in &mut pns {
         entries.clear();
     }
-    mature
-        .spaces
-        .initial
-        .crypto
-        .writer()
-        .write_all(b"remaining")
-        .await
-        .unwrap();
+    mature.spaces.initial.crypto.writer().write_all(b"remaining").await.unwrap();
     paths.progress.facts().on_handshake_done();
     paths.cid_registry.remote.upgrade();
-    assert!(matches!(
-        collect(Burst::new(
-            &paths,
-            &path,
-            &mut datagrams,
-            &mut frames,
-            &mut pns
-        ))
-        .now_or_never(),
-        Some(Ok(1))
-    ));
+    assert!(matches!(collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never(), Some(Ok(1))));
     assert_eq!(pns_for(&pns, Epoch::Initial).count(), 1);
     for slots in &mut pns {
         slots.retain(|meta| meta.epoch() != Epoch::Initial);
@@ -1263,69 +898,30 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
         ),
     );
     waiting_path.validation.enter_validated().unwrap();
-    mature
-        .spaces
-        .data
-        .crypto
-        .writer()
-        .write_all(b"next")
-        .await
-        .unwrap();
-    paths
-        .entries
-        .lock()
-        .unwrap()
-        .insert(path.pathway, path.clone());
+    mature.spaces.data.crypto.writer().write_all(b"next").await.unwrap();
+    paths.entries.lock().unwrap().insert(path.pathway, path.clone());
     let sending_task = tokio::spawn(sending(paths.clone(), waiting_path.clone()));
     tokio::task::yield_now().await;
     assert!(!sending_task.is_finished());
     waiting_path.close();
-    tokio::time::timeout(Duration::from_secs(1), sending_task)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), sending_task).await.unwrap().unwrap();
     mature.spaces.initial.retire();
     mature.spaces.handshake.retire();
-    let (_, mut writer) = mature
-        .spaces
-        .data
-        .streams
-        .open_uni()
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, mut writer) = mature.spaces.data.streams.open_uni().await.unwrap().unwrap();
     writer.write_all(b"queued before closing").await.unwrap();
     assert!(mature.spaces.data.streams.fresh_bytes() > 0);
     let error = QuicError::with_default_fty(ErrorKind::Internal, "connection failed");
-    paths.terminator.close(
-        crate::CloseReason::Internal(error.clone()),
-        paths.closing_pto(),
-    );
+    paths.terminator.close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
     mature.spaces.data.crypto.on_error(&error.into());
     // Closing removes queued stream output; only the close response remains sendable.
     assert_eq!(mature.spaces.data.streams.fresh_bytes(), 0);
-    assert_eq!(
-        collect(Burst::new(
-            &paths,
-            &path,
-            &mut datagrams,
-            &mut frames,
-            &mut pns
-        ))
-        .now_or_never()
-        .unwrap()
-        .unwrap(),
-        1
-    );
+    assert_eq!(collect(Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns)).now_or_never().unwrap().unwrap(), 1);
     assert!(pns_for(&pns, Epoch::Initial).next().is_none());
     assert!(pns_for(&pns, Epoch::Handshake).next().is_none());
     let pn = pns_for(&pns, Epoch::Data).next().unwrap().1;
     let journal = mature.spaces.data.sent_journal.lock_guard();
     assert_eq!(journal.frames(pn).count(), 0);
-    assert_eq!(
-        journal.packet(pn).unwrap().content,
-        qbase::packet::PacketContent::NonAckEliciting
-    );
+    assert_eq!(journal.packet(pn).unwrap().content, qbase::packet::PacketContent::NonAckEliciting);
     assert!(journal.packet(pn).unwrap().size > 0);
 }
 
@@ -1352,10 +948,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         let path = crate::common::registered_path(
             &paths,
             Path::new(
-                Pathway::new(
-                    "127.0.0.1:30001".parse::<EndpointAddr>().unwrap(),
-                    "127.0.0.1:30002".parse().unwrap(),
-                ),
+                Pathway::new("127.0.0.1:30001".parse::<EndpointAddr>().unwrap(), "127.0.0.1:30002".parse().unwrap()),
                 paths.progress.facts(),
                 ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
                 paths.loss_resender.clone(),
@@ -1364,9 +957,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         );
         path.validation.enter_validated().unwrap();
         paths.progress.on_path_selected(&paths, &path);
-        path.heartbeat
-            .on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now())
-            .unwrap();
+        path.heartbeat.on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
 
         if epoch == Epoch::Data {
             super::confirm_handshake(&paths);
@@ -1380,19 +971,11 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         if epoch == Epoch::Data {
             // Consume the CID advertisement queued by the fixture before testing idleness.
-            assert!(matches!(
-                collector.poll_collect(&mut cx),
-                Poll::Ready(Ok(1))
-            ));
+            assert!(matches!(collector.poll_collect(&mut cx), Poll::Ready(Ok(1))));
             for slots in &mut *collector.packets {
                 if let Some(meta) = packet_metadata(slots, Epoch::Data) {
                     slots.retain(|meta| meta.epoch() != Epoch::Data);
-                    mature.spaces.data.on_sent(
-                        meta.pn,
-                        meta.in_flight,
-                        Duration::from_secs(1),
-                        Duration::from_secs(3),
-                    );
+                    mature.spaces.data.on_sent(meta.pn, meta.in_flight, Duration::from_secs(1), Duration::from_secs(3));
                 }
             }
             // Finish the simulated submission before collecting another batch.
@@ -1406,24 +989,12 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
         tokio::task::yield_now().await;
         assert!(counter.0.load(Ordering::Relaxed) > before);
         let result = collector.poll_collect(&mut cx);
-        assert!(
-            matches!(result, Poll::Ready(Ok(1))),
-            "{epoch:?}: {result:?}"
-        );
+        assert!(matches!(result, Poll::Ready(Ok(1))), "{epoch:?}: {result:?}");
         drop(collector);
         assert_eq!(pns_for(&pns, epoch).count(), 1);
         let pn = pns_for(&pns, epoch).next().unwrap().1;
         assert_eq!(
-            paths
-                .spaces
-                .read_guard()
-                .get(epoch as u64)
-                .unwrap()
-                .sent_journal()
-                .lock_guard()
-                .packet(pn)
-                .unwrap()
-                .content,
+            paths.spaces.read_guard().get(epoch as u64).unwrap().sent_journal().lock_guard().packet(pn).unwrap().content,
             PacketContent::JustPing
         );
         path.close();
@@ -1450,13 +1021,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
             );
             paths.progress.on_path_selected(&paths, &selected);
             let trackers = paths.loss_resender.clone();
-            let epochs = || {
-                trackers
-                    .read_guard()
-                    .enumerate()
-                    .map(|(epoch, _)| epoch)
-                    .collect::<Vec<_>>()
-            };
+            let epochs = || trackers.read_guard().enumerate().map(|(epoch, _)| epoch).collect::<Vec<_>>();
             let retire_initial = || {
                 if role == Role::Client {
                     paths.progress.on_handshake_sent();
@@ -1497,9 +1062,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
 }
 
 fn pns_for(pns: &BurstPackets, epoch: Epoch) -> impl Iterator<Item = (usize, u64)> + '_ {
-    pns.iter().enumerate().filter_map(move |(index, slots)| {
-        packet_metadata(slots, epoch).map(|meta| (index, meta.pn))
-    })
+    pns.iter().enumerate().filter_map(move |(index, slots)| packet_metadata(slots, epoch).map(|meta| (index, meta.pn)))
 }
 
 #[tokio::test(start_paused = true)]
@@ -1512,10 +1075,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    for (epoch, validated) in Epoch::EPOCHS
-        .into_iter()
-        .flat_map(|epoch| [(epoch, false), (epoch, true)])
-    {
+    for (epoch, validated) in Epoch::EPOCHS.into_iter().flat_map(|epoch| [(epoch, false), (epoch, true)]) {
         let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
         match epoch {
             Epoch::Initial => {}
@@ -1547,14 +1107,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         path.cc.on_pkt_sent(epoch, 0, true, quota, true, None);
         assert_eq!(path.cc.send_quota(), 0);
         if epoch == Epoch::Data {
-            let (_, mut writer) = mature
-                .spaces
-                .data
-                .streams
-                .open_uni()
-                .await
-                .unwrap()
-                .unwrap();
+            let (_, mut writer) = mature.spaces.data.streams.open_uni().await.unwrap().unwrap();
             writer.write_all(&[7; 4000]).await.unwrap();
         }
         let base = path.cc.get_pto(epoch);
@@ -1593,10 +1146,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
             assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
             path.validation.on_received(379);
         }
-        assert!(
-            matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))),
-            "{epoch:?} PTO did not resume when its probe fitted"
-        );
+        assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(1))), "{epoch:?} PTO did not resume when its probe fitted");
         let meta = packet_metadata(&burst.packets[0], epoch).unwrap();
         assert!(meta.content.is_ack_eliciting());
         assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
@@ -1619,18 +1169,13 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
 
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    QuicProtocol::global()
-        .register(EndpointAddr::direct(socket.local_addr().unwrap()), &socket)
-        .unwrap();
+    QuicProtocol::global().register(EndpointAddr::direct(socket.local_addr().unwrap()), &socket).unwrap();
     let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
     super::install_handshake(&paths, mature.spaces.handshake.clone());
     let path = crate::common::registered_path(
         &paths,
         Path::new(
-            Pathway::new(
-                EndpointAddr::direct(socket.local_addr().unwrap()),
-                EndpointAddr::direct(peer.local_addr().unwrap()),
-            ),
+            Pathway::new(EndpointAddr::direct(socket.local_addr().unwrap()), EndpointAddr::direct(peer.local_addr().unwrap())),
             paths.progress.facts(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             paths.loss_resender.clone(),
@@ -1639,23 +1184,15 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     );
     paths.progress.on_path_selected(&paths, &path);
     path.validation.on_received(20);
-    path.cc
-        .on_pkt_sent(Epoch::Handshake, 0, true, 1200, true, None);
-    mature
-        .spaces
-        .handshake
-        .rcvd_journal
-        .on_rcvd_pn(42, true, path.cc.pto_base(Epoch::Handshake));
+    path.cc.on_pkt_sent(Epoch::Handshake, 0, true, 1200, true, None);
+    mature.spaces.handshake.rcvd_journal.on_rcvd_pn(42, true, path.cc.pto_base(Epoch::Handshake));
     path.cc.on_pkt_rcvd(Epoch::Handshake, 42, true);
     let base = path.cc.get_pto(Epoch::Handshake);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
     let mut pns: BurstPackets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
-    assert!(matches!(
-        burst.poll_collect(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(1))
-    ));
+    assert!(matches!(burst.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
     let meta = packet_metadata(&burst.packets[0], Epoch::Handshake).unwrap();
     assert!(!meta.content.is_ack_eliciting());
     assert!(!meta.in_flight);
@@ -1668,10 +1205,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
     assert_eq!(path.cc.get_pto(Epoch::Handshake), base);
     path.validation.enter_validated().unwrap();
-    assert!(matches!(
-        burst.poll_collect(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(1))
-    ));
+    assert!(matches!(burst.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
     burst.cancel();
     task::cancel_waiters(&paths, &path);
@@ -1721,10 +1255,7 @@ async fn path_validation_respects_small_amplification_credit() {
                 assert!(result.is_pending());
                 assert!(pns_for(&pns, Epoch::Data).next().is_none());
             } else {
-                assert!(
-                    matches!(result, Poll::Ready(Ok(1))),
-                    "received={received}, reply={reply}, result={result:?}"
-                );
+                assert!(matches!(result, Poll::Ready(Ok(1))), "received={received}, reply={reply}, result={result:?}");
                 let size = datagrams[0].len();
                 assert!(size <= credit, "validation exceeded amplification credit");
                 if credit < 1200 {
@@ -1733,16 +1264,8 @@ async fn path_validation_respects_small_amplification_credit() {
                     assert_eq!(size, 1200);
                 }
                 let journal = mature.spaces.data.sent_journal.lock_guard();
-                assert!(
-                    journal
-                        .packet(packet_metadata(&pns[0], Epoch::Data).unwrap().pn)
-                        .unwrap()
-                        .in_flight
-                );
-                assert!(
-                    super::take_validation_frames(&path).is_empty(),
-                    "validation frame was not encoded"
-                );
+                assert!(journal.packet(packet_metadata(&pns[0], Epoch::Data).unwrap().pn).unwrap().in_flight);
+                assert!(super::take_validation_frames(&path).is_empty(), "validation frame was not encoded");
             }
             assert!(!path.validation.is_validated());
             path.close();
@@ -1780,8 +1303,7 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
             ),
         );
         if blocked {
-            path.cc
-                .on_pkt_sent(Epoch::Initial, 0, true, 12000, true, None);
+            path.cc.on_pkt_sent(Epoch::Initial, 0, true, 12000, true, None);
         } else {
             path.validation.exempt().unwrap();
         }
@@ -1791,11 +1313,7 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
         let mut frames = Vec::new();
         let mut packets = std::array::from_fn(|_| Default::default());
         let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
-        assert!(
-            burst
-                .poll_collect(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        assert!(burst.poll_collect(&mut Context::from_waker(&waker)).is_pending());
         counter.0.store(0, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(counter.0.load(Ordering::Relaxed), 0, "blocked={blocked}");
@@ -1846,10 +1364,7 @@ async fn burst_uses_its_budget_across_multiple_udp_batches() {
     let (next, _) = space.next_pn();
     let journal = space.sent_journal.lock_guard();
     let sent = (0..next).filter(|&pn| journal.packet(pn).is_some()).count();
-    assert!(
-        sent > MAX_BURST_PACKETS,
-        "burst stopped after {sent} datagrams"
-    );
+    assert!(sent > MAX_BURST_PACKETS, "burst stopped after {sent} datagrams");
     drop(journal);
     burst.cancel();
     task::cancel_waiters(&paths, &path);
@@ -1868,10 +1383,7 @@ async fn burst_bounds_each_datagram_and_charges_envelopes_once() {
             super::install_data(&paths, &mature);
             let local = EndpointAddr::direct("127.0.0.1:35501".parse().unwrap());
             let remote = if mediate {
-                EndpointAddr::mediate(
-                    "127.0.0.1:35502".parse().unwrap(),
-                    "127.0.0.1:35503".parse().unwrap(),
-                )
+                EndpointAddr::mediate("127.0.0.1:35502".parse().unwrap(), "127.0.0.1:35503".parse().unwrap())
             } else {
                 EndpointAddr::direct("127.0.0.1:35502".parse().unwrap())
             };
@@ -1894,8 +1406,7 @@ async fn burst_bounds_each_datagram_and_charges_envelopes_once() {
             } else {
                 path.validation.exempt().unwrap();
                 let used = path.cc.send_quota() - budget;
-                path.cc
-                    .on_pkt_sent(Epoch::Data, 999, true, used, true, None);
+                path.cc.on_pkt_sent(Epoch::Data, 999, true, used, true, None);
                 assert_eq!(path.cc.send_quota(), budget);
             }
             let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
@@ -1906,29 +1417,14 @@ async fn burst_bounds_each_datagram_and_charges_envelopes_once() {
             let result = burst.poll_collect(&mut cx);
             assert!(result.is_pending(), "{result:?}: {:?}", burst.packets);
             assert!(burst.packets.iter().all(|packets| packets.is_empty()));
-            let (_, mut writer) = mature
-                .spaces
-                .data
-                .streams
-                .open_uni()
-                .await
-                .unwrap()
-                .unwrap();
+            let (_, mut writer) = mature.spaces.data.streams.open_uni().await.unwrap().unwrap();
             writer.write_all(&[7; 4000]).await.unwrap();
             assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(2))));
             assert_eq!(burst.datagrams[0].len(), 1200);
             assert_eq!(burst.datagrams[1].len(), budget - 2 * overhead - 1200);
-            let charged: usize = burst.datagrams[..2]
-                .iter()
-                .map(|bytes| bytes.len() + overhead)
-                .sum();
+            let charged: usize = burst.datagrams[..2].iter().map(|bytes| bytes.len() + overhead).sum();
             assert_eq!(charged, budget);
-            assert!(
-                burst.packets[..2]
-                    .iter()
-                    .flatten()
-                    .all(|meta| meta.in_flight)
-            );
+            assert!(burst.packets[..2].iter().flatten().all(|meta| meta.in_flight));
             burst.cancel();
             task::cancel_waiters(&paths, &path);
             path.close();
@@ -1952,12 +1448,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         keys(false),
     );
     let space = crate::common::initial_space(&paths.spaces);
-    space
-        .crypto
-        .writer()
-        .write_all(&vec![42; 2400])
-        .await
-        .unwrap();
+    space.crypto.writer().write_all(&vec![42; 2400]).await.unwrap();
     let path = crate::common::registered_path(
         &paths,
         Path::new(
@@ -1969,9 +1460,7 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         ),
     );
     path.validation.exempt().unwrap();
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
 
     let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
@@ -2001,14 +1490,8 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(burst.packets[0].is_empty());
     assert_eq!(
-        burst.packets[1]
-            .iter()
-            .map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))
-            .collect::<Vec<_>>(),
-        pending[1]
-            .iter()
-            .map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack))
-            .collect::<Vec<_>>(),
+        burst.packets[1].iter().map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
+        pending[1].iter().map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
     );
     burst.cancel();
     assert!(burst.packets.iter().all(|packets| packets.is_empty()));
@@ -2016,25 +1499,17 @@ async fn burst_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         let journal = space.sent_journal.lock_guard();
         assert!(journal.packet(first).is_some());
         for slots in &pending[1..count] {
-            assert!(
-                journal
-                    .packet(packet_metadata(slots, Epoch::Initial).unwrap().pn)
-                    .is_none()
-            );
+            assert!(journal.packet(packet_metadata(slots, Epoch::Initial).unwrap().pn).is_none());
         }
     }
     let count = burst.collect().await.unwrap();
-    let retransmit = packet_metadata(&burst.packets[0], Epoch::Initial)
-        .unwrap()
-        .pn;
+    let retransmit = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap().pn;
     assert!(
         space
             .sent_journal
             .lock_guard()
             .frames(retransmit)
-            .any(|frame| {
-                matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == offset)
-            })
+            .any(|frame| { matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == offset) })
     );
     burst.submit(count).await.unwrap();
     assert!(burst.packets.iter().all(|packets| packets.is_empty()));
@@ -2069,18 +1544,14 @@ async fn retired_path_rejects_a_collected_burst_before_udp_submission() {
         ),
     );
     path.validation.exempt().unwrap();
-    paths.progress.on_initial_received(crate::common::cid_value(
-        &paths.cid_registry.remote.apply_dcid(),
-    ));
+    paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = [BytesMut::with_capacity(1200)];
     let mut frames = Vec::new();
     let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     let count = burst.collect().await.unwrap();
-    let pn = packet_metadata(&burst.packets[0], Epoch::Initial)
-        .unwrap()
-        .pn;
+    let pn = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap().pn;
     path.close();
 
     let error = burst.submit(count).await.unwrap_err();
@@ -2109,18 +1580,9 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         keys(true),
     );
     let initial = crate::common::initial_space(&paths.spaces);
-    let handshake = Arc::new(HandshakeSpace::new(
-        Default::default(),
-        initial.keys.clone(),
-        paths.progress.facts(),
-    ));
+    let handshake = Arc::new(HandshakeSpace::new(Default::default(), initial.keys.clone(), paths.progress.facts()));
     initial.crypto.writer().write_all(b"initial").await.unwrap();
-    handshake
-        .crypto
-        .writer()
-        .write_all(b"handshake")
-        .await
-        .unwrap();
+    handshake.crypto.writer().write_all(b"handshake").await.unwrap();
     super::install_handshake(&paths, handshake.clone());
     let path = crate::common::registered_path(
         &paths,
@@ -2147,23 +1609,17 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         journal.on_tick(Instant::now(), |_| panic!("unsubmitted packet timed out"));
     }
     assert_eq!(crate::common::path_credit(&path), 3600);
-    let delays =
-        [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
+    let delays = [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
     burst.submit(1).await.unwrap();
     let submitted_at = Instant::now();
     assert!(burst.packets[0].is_empty());
     assert_eq!(crate::common::path_credit(&path), 2400);
     burst.cancel();
     for (journal, delay) in journals.into_iter().zip(delays) {
-        journal.on_tick(submitted_at + delay - Duration::from_nanos(1), |_| {
-            panic!("timer started before submission")
-        });
+        journal.on_tick(submitted_at + delay - Duration::from_nanos(1), |_| panic!("timer started before submission"));
         let mut recovered = 0;
         journal.on_tick(submitted_at + delay, |_| recovered += 1);
-        assert_eq!(
-            recovered, 1,
-            "each space starts its submitted packet's journal timer"
-        );
+        assert_eq!(recovered, 1, "each space starts its submitted packet's journal timer");
     }
     task::cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
@@ -2181,19 +1637,9 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     async fn received_dcid(peer: &UdpSocket) -> ConnectionId {
         let mut received = [BytesMut::zeroed(1500)];
         let mut lines = [Line::default()];
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            peer.receive(&mut received, &mut lines),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut received, &mut lines)).await.unwrap().unwrap();
         received[0].truncate(lines[0].seg_size as usize);
-        let ParsedPacket::Data(packet) = PacketReader::new(received[0].clone(), 8)
-            .next()
-            .unwrap()
-            .unwrap()
-        else {
+        let ParsedPacket::Data(packet) = PacketReader::new(received[0].clone(), 8).next().unwrap().unwrap() else {
             panic!("expected an encrypted Data packet");
         };
         *packet.header.dcid()
@@ -2225,66 +1671,32 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     super::confirm_handshake(&paths);
     let remote = &paths.cid_registry.remote;
     let old = ConnectionId::from_slice(b"client01");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(old, 1u32.into(), 0u32.into()))
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(old, 1u32.into(), 0u32.into())).unwrap();
     assert!(matches!(super::borrow(&other), Poll::Ready(Some(cid)) if cid == old));
     // Only the selected path gets CID 2. This path must keep sending with CID 1.
-    remote
-        .recv_frame(NewConnectionIdFrame::new(
-            ConnectionId::from_slice(b"client02"),
-            2u32.into(),
-            2u32.into(),
-        ))
-        .unwrap();
-    mature
-        .spaces
-        .data
-        .crypto
-        .writer()
-        .write_all(b"old CID still sends")
-        .await
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(ConnectionId::from_slice(b"client02"), 2u32.into(), 2u32.into())).unwrap();
+    mature.spaces.data.crypto.writer().write_all(b"old CID still sends").await.unwrap();
     let mut datagrams = [BytesMut::new()];
     let mut frames = Vec::new();
     let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &other, &mut datagrams, &mut frames, &mut packets);
-    let count = burst
-        .collect()
-        .now_or_never()
-        .expect("missing replacement must not suspend this sender")
-        .unwrap();
+    let count = burst.collect().now_or_never().expect("missing replacement must not suspend this sender").unwrap();
     assert_eq!(burst.dcid, Some(old));
     burst.submit(count).await.unwrap();
     assert_eq!(received_dcid(&peer).await, old);
     assert!(other.validation.is_validated());
 
     let replacement = ConnectionId::from_slice(b"client03");
-    remote
-        .recv_frame(NewConnectionIdFrame::new(
-            replacement,
-            3u32.into(),
-            2u32.into(),
-        ))
-        .unwrap();
-    mature
-        .spaces
-        .data
-        .crypto
-        .writer()
-        .write_all(b"replacement CID sends")
-        .await
-        .unwrap();
+    remote.recv_frame(NewConnectionIdFrame::new(replacement, 3u32.into(), 2u32.into())).unwrap();
+    mature.spaces.data.crypto.writer().write_all(b"replacement CID sends").await.unwrap();
     let count = burst.collect().now_or_never().unwrap().unwrap();
     assert_eq!(burst.dcid, Some(replacement));
     burst.submit(count).await.unwrap();
     assert_eq!(received_dcid(&peer).await, replacement);
     burst.cancel();
     other.close();
-    assert!(
-        matches!(burst.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(error))
-        if error.kind() == ErrorKind::NoViablePath && error.to_string().contains("path CID binding retired"))
-    );
+    assert!(matches!(burst.poll_collect(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(error))
+        if error.kind() == ErrorKind::NoViablePath && error.to_string().contains("path CID binding retired")));
     paths.retire_all();
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }

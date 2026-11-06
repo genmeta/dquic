@@ -29,13 +29,7 @@ struct SendControler<TX> {
 
 impl<TX> SendControler<TX> {
     fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self {
-            sent_data: 0,
-            max_data: initial_max_data,
-            flow_limited: false,
-            broker,
-            tx_wakers: ArcSendWakers::default(),
-        }
+        Self { sent_data: 0, max_data: initial_max_data, flow_limited: false, broker, tx_wakers: ArcSendWakers::default() }
     }
 
     fn increase_limit(&mut self, max_data: u64) {
@@ -59,8 +53,7 @@ impl<TX> SendControler<TX> {
         if self.avaliable() == 0 && !self.flow_limited {
             self.flow_limited = true;
             self.broker.send_frame([DataBlockedFrame::new(
-                VarInt::from_u64(self.max_data)
-                    .expect("max_data of flow controller is very very hard to exceed 2^62 - 1"),
+                VarInt::from_u64(self.max_data).expect("max_data of flow controller is very very hard to exceed 2^62 - 1"),
             )]);
         }
     }
@@ -116,10 +109,7 @@ impl<TX> ArcSendControler<TX> {
     /// `initial_max_data` is allowed to be 0, which is reasonable when creating a
     /// connection without knowing the peer's `iniitial_max_data` setting.
     pub fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self(Arc::new(Mutex::new(SendControler::new(
-            initial_max_data,
-            broker,
-        ))))
+        Self(Arc::new(Mutex::new(SendControler::new(initial_max_data, broker))))
     }
 
     fn increase_limit(&self, max_data: u64) {
@@ -142,10 +132,7 @@ impl<TX> ArcSendControler<TX> {
         let mut inner = self.0.lock().unwrap();
         let avaliable = inner.avaliable().min(quota as u64);
         inner.commit(avaliable);
-        Credit {
-            available: avaliable as usize,
-            controller: self,
-        }
+        Credit { available: avaliable as usize, controller: self }
     }
 
     pub fn poll_credit(&self, cx: &mut Context<'_>, quota: usize) -> Poll<Credit<'_, TX>>
@@ -161,10 +148,7 @@ impl<TX> ArcSendControler<TX> {
     }
 
     pub fn revise_max_data(&self, zero_rtt_rejected: bool, max_data: u64) {
-        self.0
-            .lock()
-            .unwrap()
-            .revise_max_data(zero_rtt_rejected, max_data);
+        self.0.lock().unwrap().revise_max_data(zero_rtt_rejected, max_data);
     }
 }
 
@@ -211,11 +195,7 @@ impl<TX> Drop for Credit<'_, TX> {
         if self.available == 0 {
             return;
         }
-        self.controller
-            .0
-            .lock()
-            .unwrap()
-            .return_back(self.available as u64);
+        self.controller.0.lock().unwrap().return_back(self.available as u64);
     }
 }
 
@@ -231,12 +211,7 @@ struct RecvController<TX> {
 impl<TX> RecvController<TX> {
     /// Creates a new [`RecvController`] with the specified `initial_max_data`.
     fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self {
-            rcvd_data: 0,
-            max_data: initial_max_data,
-            step: initial_max_data / 2,
-            broker,
-        }
+        Self { rcvd_data: 0, max_data: initial_max_data, step: initial_max_data / 2, broker }
     }
 }
 
@@ -254,10 +229,9 @@ where
         if self.rcvd_data <= self.max_data {
             if self.rcvd_data + self.step >= self.max_data {
                 self.max_data += self.step;
-                self.broker
-                    .send_frame([MaxDataFrame::new(VarInt::from_u64(self.max_data).expect(
-                        "max_data of flow controller is very very hard to exceed 2^62 - 1",
-                    ))])
+                self.broker.send_frame([MaxDataFrame::new(
+                    VarInt::from_u64(self.max_data).expect("max_data of flow controller is very very hard to exceed 2^62 - 1"),
+                )])
             }
             Ok(amount)
         } else {
@@ -294,10 +268,7 @@ pub struct ArcRecvController<TX>(Arc<Mutex<RecvController<TX>>>);
 impl<TX> ArcRecvController<TX> {
     /// Creates a new [`ArcRecvController`] with local `initial_max_data` transport parameter.
     pub fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self(Arc::new(Mutex::new(RecvController::new(
-            initial_max_data,
-            broker,
-        ))))
+        Self(Arc::new(Mutex::new(RecvController::new(initial_max_data, broker))))
     }
 }
 

@@ -66,10 +66,7 @@ pub fn be_connection_id(input: &[u8]) -> IResult<&[u8], ConnectionId> {
 /// The connection ID length is limited to 20 bytes, or it will return an error.
 pub fn be_connection_id_with_len(input: &[u8], len: usize) -> IResult<&[u8], ConnectionId> {
     if len > MAX_CID_SIZE {
-        return Err(nom::Err::Error(nom::error::make_error(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
+        return Err(nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::TooLarge)));
     }
     let (remain, bytes) = take(len)(input)?;
     Ok((remain, ConnectionId::from_slice(bytes)))
@@ -92,10 +89,7 @@ impl ConnectionId {
     /// Create a new connection ID from a given bytes slice.
     pub fn from_slice(bytes: &[u8]) -> Self {
         debug_assert!(bytes.len() <= MAX_CID_SIZE);
-        let mut res = Self {
-            len: bytes.len() as u8,
-            bytes: [0; MAX_CID_SIZE],
-        };
+        let mut res = Self { len: bytes.len() as u8, bytes: [0; MAX_CID_SIZE] };
         res.bytes[..bytes.len()].copy_from_slice(bytes);
         res
     }
@@ -106,10 +100,7 @@ impl ConnectionId {
         debug_assert!(len <= MAX_CID_SIZE);
         let mut bytes = [0; MAX_CID_SIZE];
         rand::rng().fill(&mut bytes[..len]);
-        Self {
-            len: len as u8,
-            bytes,
-        }
+        Self { len: len as u8, bytes }
     }
 
     /// Generates a random connection ID like [`Self::random_gen`].
@@ -119,10 +110,7 @@ impl ConnectionId {
         let mut bytes = [0; MAX_CID_SIZE];
         rand::rng().fill(&mut bytes[..len]);
         bytes[0] = (bytes[0] & mask) | mark;
-        Self {
-            len: len as u8,
-            bytes,
-        }
+        Self { len: len as u8, bytes }
     }
 
     /// Get the encoding size of the connection ID.

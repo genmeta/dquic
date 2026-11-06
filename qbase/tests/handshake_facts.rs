@@ -44,11 +44,7 @@ fn concurrent_updates_claim_each_fact_once() {
                     })
                 })
                 .collect::<Vec<_>>();
-            workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .filter(|first| *first)
-                .count()
+            workers.into_iter().map(|worker| worker.join().unwrap()).filter(|first| *first).count()
         });
         assert_eq!(winners, 1);
         assert!(!event(&facts));

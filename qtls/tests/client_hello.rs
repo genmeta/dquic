@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use qtls::{
-    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch, LocalAuthority,
-    PrivateKeyDer, QuicVersion, RootCerts, ServerName, ServerResumptionConfig, ServerTlsConfig,
-    TlsClient, TlsEvent, TlsServer, default_provider, incoming,
+    CertificateDer, ClientResumptionConfig, ClientStart, ClientTlsConfig, Epoch, LocalAuthority, PrivateKeyDer, QuicVersion, RootCerts,
+    ServerName, ServerResumptionConfig, ServerTlsConfig, TlsClient, TlsEvent, TlsServer, default_provider, incoming,
 };
 use rustls::pki_types::pem::PemObject;
 
@@ -30,11 +29,7 @@ fn client_hello() -> Bytes {
             local_transport_parameters: Bytes::from_static(b"client-parameters"),
         })
         .unwrap();
-    let Some(TlsEvent::WriteCrypto {
-        epoch: level,
-        bytes,
-    }) = tls.next_event()
-    else {
+    let Some(TlsEvent::WriteCrypto { epoch: level, bytes }) = tls.next_event() else {
         panic!("client must emit ClientHello first")
     };
     assert_eq!(level, Epoch::Initial);
@@ -45,15 +40,9 @@ fn client_hello() -> Bytes {
 fn fragmented_client_hello_is_preparsed_and_preserved() {
     let encoded = client_hello();
     for end in 0..encoded.len() {
-        assert!(
-            incoming::client_hello(&encoded[..end], encoded.len())
-                .unwrap()
-                .is_none()
-        );
+        assert!(incoming::client_hello(&encoded[..end], encoded.len()).unwrap().is_none());
     }
-    let parsed = incoming::client_hello(&encoded, encoded.len())
-        .unwrap()
-        .unwrap();
+    let parsed = incoming::client_hello(&encoded, encoded.len()).unwrap().unwrap();
     assert_eq!(parsed.server_name(), Some("one.example"));
     assert_eq!(parsed.transport_parameters(), b"client-parameters");
     assert_eq!(parsed.encoded(), &encoded);
@@ -62,9 +51,7 @@ fn fragmented_client_hello_is_preparsed_and_preserved() {
 #[test]
 fn encoded_client_hello_starts_the_selected_server() {
     let encoded = client_hello();
-    let parsed = incoming::client_hello(&encoded, encoded.len())
-        .unwrap()
-        .unwrap();
+    let parsed = incoming::client_hello(&encoded, encoded.len()).unwrap().unwrap();
 
     let provider = Arc::new(default_provider());
     let authority = LocalAuthority::new(
@@ -83,21 +70,11 @@ fn encoded_client_hello_starts_the_selected_server() {
         limits: Default::default(),
     })
     .unwrap();
-    let mut server = endpoint
-        .start(
-            QuicVersion::V1,
-            Bytes::from_static(b"selected-server-parameters"),
-        )
-        .unwrap();
-    server
-        .receive_crypto(Epoch::Initial, parsed.encoded())
-        .unwrap();
+    let mut server = endpoint.start(QuicVersion::V1, Bytes::from_static(b"selected-server-parameters")).unwrap();
+    server.receive_crypto(Epoch::Initial, parsed.encoded()).unwrap();
 
     let observed = std::iter::from_fn(|| server.next_event()).find_map(|event| match event {
-        TlsEvent::ClientHello {
-            server_name,
-            transport_parameters,
-        } => Some((server_name, transport_parameters)),
+        TlsEvent::ClientHello { server_name, transport_parameters } => Some((server_name, transport_parameters)),
         _ => None,
     });
     let (server_name, transport_parameters) = observed.unwrap();
@@ -109,36 +86,18 @@ fn encoded_client_hello_starts_the_selected_server() {
 fn declared_or_received_client_hello_cannot_exceed_the_limit() {
     let encoded = client_hello();
 
-    assert!(
-        incoming::client_hello(&encoded, encoded.len() - 1)
-            .unwrap_err()
-            .to_string()
-            .contains("limit")
-    );
+    assert!(incoming::client_hello(&encoded, encoded.len() - 1).unwrap_err().to_string().contains("limit"));
 
-    assert!(
-        incoming::client_hello(&encoded[..4], 4)
-            .unwrap_err()
-            .to_string()
-            .contains("limit")
-    );
+    assert!(incoming::client_hello(&encoded[..4], 4).unwrap_err().to_string().contains("limit"));
 }
 
 #[test]
 fn quic_transport_parameters_are_required() {
     let mut encoded = client_hello().to_vec();
     let parameters = b"client-parameters";
-    let offset = encoded
-        .windows(parameters.len())
-        .position(|window| window == parameters)
-        .unwrap();
+    let offset = encoded.windows(parameters.len()).position(|window| window == parameters).unwrap();
     assert_eq!(&encoded[offset - 4..offset - 2], &[0x00, 0x39]);
     encoded[offset - 4..offset - 2].copy_from_slice(&[0x12, 0x34]);
 
-    assert!(
-        incoming::client_hello(&encoded, encoded.len())
-            .unwrap_err()
-            .to_string()
-            .contains("transport parameters")
-    );
+    assert!(incoming::client_hello(&encoded, encoded.len()).unwrap_err().to_string().contains("transport parameters"));
 }

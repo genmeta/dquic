@@ -14,18 +14,11 @@ pub(crate) fn data() -> Arc<DataSpace> {
     let ([keys, _], _) = handshake();
     let client = ClientParameters::default();
     let mut server = ServerParameters::default();
-    server
-        .set(ParameterId::InitialMaxStreamsBidi, 1u32)
-        .unwrap();
+    server.set(ParameterId::InitialMaxStreamsBidi, 1u32).unwrap();
     server.set(ParameterId::InitialMaxStreamsUni, 1u32).unwrap();
     let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = DataStreams::new(
-        parameters.clone(),
-        Box::new(DemandConcurrency),
-        reliable.clone(),
-        Default::default(),
-    );
+    let streams = DataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
     let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
     facts.quit_mp_handshaking();
     Arc::new(DataSpace::new(

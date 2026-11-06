@@ -9,16 +9,9 @@ use qbase::{
 use qtransport::packet::channel::new;
 
 fn initial_packet() -> Packet {
-    let header = LongHeaderBuilder::with_cid(
-        ConnectionId::from_slice(b"destination"),
-        ConnectionId::from_slice(b"source"),
-    )
-    .initial(Vec::new());
-    Packet::Data(DataPacket {
-        header: DataHeader::Long(long::DataHeader::Initial(header)),
-        bytes: BytesMut::new(),
-        offset: 0,
-    })
+    let header =
+        LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"destination"), ConnectionId::from_slice(b"source")).initial(Vec::new());
+    Packet::Data(DataPacket { header: DataHeader::Long(long::DataHeader::Initial(header)), bytes: BytesMut::new(), offset: 0 })
 }
 
 fn way() -> (Pathway, Link) {

@@ -19,9 +19,7 @@ impl<const N: usize> Default for WakerGroup<N> {
 
 impl<const N: usize> WakerGroup<N> {
     pub const fn new() -> Self {
-        Self {
-            wakers: SmallVec::new_const(),
-        }
+        Self { wakers: SmallVec::new_const() }
     }
 
     pub fn add(&mut self, waker: &Waker) {
@@ -31,8 +29,7 @@ impl<const N: usize> WakerGroup<N> {
     }
 
     pub fn remove(&mut self, waker: &Waker) {
-        self.wakers
-            .retain(|registered| !registered.will_wake(waker));
+        self.wakers.retain(|registered| !registered.will_wake(waker));
     }
 
     pub fn wake_all(&mut self) {
@@ -71,9 +68,7 @@ impl<const N: usize> Default for Wakers<N> {
 
 impl<const N: usize> Wakers<N> {
     pub const fn new() -> Self {
-        Self {
-            inner: Mutex::new(WakerGroup::new()),
-        }
+        Self { inner: Mutex::new(WakerGroup::new()) }
     }
 
     fn lock_guard(&self) -> MutexGuard<'_, WakerGroup<N>> {
@@ -102,11 +97,7 @@ impl<const N: usize> Wakers<N> {
         Waker::from(self.clone())
     }
 
-    pub fn combine_with<T>(
-        self: &Arc<Self>,
-        cx: &mut Context<'_>,
-        poll: impl FnOnce(&mut Context<'_>) -> Poll<T>,
-    ) -> Poll<T> {
+    pub fn combine_with<T>(self: &Arc<Self>, cx: &mut Context<'_>, poll: impl FnOnce(&mut Context<'_>) -> Poll<T>) -> Poll<T> {
         self.add(cx.waker());
         let result = poll(&mut Context::from_waker(&self.to_waker()));
         if result.is_ready() {

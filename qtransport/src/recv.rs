@@ -16,19 +16,10 @@ use crate::{
 /// Data ACK pipe target. Capture the original components when wiring reception.
 /// Lock the receiving path CC before the journal, so ACK observes committed sends.
 /// Report the highest acknowledged generation to the receive task's ArcOneRttKeys.
-pub fn acknowledge(
-    data: &DataSpace,
-    ack: &AckFrame,
-    received_on: &Arc<Path>,
-    on_ack: impl Fn(u64),
-) -> Result<(), Error> {
+pub fn acknowledge(data: &DataSpace, ack: &AckFrame, received_on: &Arc<Path>, on_ack: impl Fn(u64)) -> Result<(), Error> {
     let acknowledged = {
         let mut congestion = received_on.cc.lock();
-        let delay = ack
-            .delay()
-            .checked_shl(data.peer_ack_delay_exponent)
-            .unwrap_or(VARINT_MAX)
-            .min(VARINT_MAX);
+        let delay = ack.delay().checked_shl(data.peer_ack_delay_exponent).unwrap_or(VARINT_MAX).min(VARINT_MAX);
         let acknowledged = data.on_acked(ack)?;
         let ack = AckFrame::new(
             VarInt::from_u64(ack.largest()).unwrap(),

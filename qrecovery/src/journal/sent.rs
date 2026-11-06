@@ -68,11 +68,7 @@ impl SentJournal {
     pub fn next_pn(&mut self) -> Result<(u64, PacketNumber), Error> {
         let pn = self.next_pn;
         if pn > VARINT_MAX {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::AeadLimitReached,
-                "packet numbers exhausted",
-            )
-            .into());
+            return Err(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet numbers exhausted").into());
         }
         self.next_pn += 1;
         let start = self.frames.largest();
@@ -92,10 +88,7 @@ impl SentJournal {
     }
 
     pub fn frames(&self, pn: u64) -> impl Iterator<Item = &GuaranteedFrame> {
-        self.packets[&pn]
-            .frame_range
-            .clone()
-            .map(|index| self.frames[index].as_ref().unwrap())
+        self.packets[&pn].frame_range.clone().map(|index| self.frames[index].as_ref().unwrap())
     }
 
     pub fn packet(&self, pn: u64) -> Option<&SentPacket> {
@@ -103,13 +96,7 @@ impl SentJournal {
     }
 
     /// Fix the retention deadline at successful submission; loss never restarts it.
-    pub fn on_sent(
-        &mut self,
-        pn: u64,
-        in_flight: bool,
-        retransmit_after: Duration,
-        retention: Duration,
-    ) {
+    pub fn on_sent(&mut self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
         let sent_at = Instant::now();
         // An early ACK retains metadata until the socket result is processed.
         let Some(record) = self.packets.get_mut(&pn) else {
@@ -124,10 +111,7 @@ impl SentJournal {
         }
         if in_flight {
             let retrans_at = sent_at + retransmit_after;
-            record.state = SentPacketState::Flighting {
-                retrans_at,
-                expire_after: sent_at + retention,
-            };
+            record.state = SentPacketState::Flighting { retrans_at, expire_after: sent_at + retention };
             self.deadlines.insert((retrans_at, pn));
         } else {
             let record = self.remove_packet(pn, SentPacketState::Retired).unwrap();
@@ -144,10 +128,7 @@ impl SentJournal {
 
     fn resend(&mut self, pn: u64, mut on_frame: impl FnMut(&GuaranteedFrame)) {
         if let Some(record) = self.packets.get_mut(&pn)
-            && let SentPacketState::Flighting {
-                retrans_at,
-                expire_after,
-            } = record.state
+            && let SentPacketState::Flighting { retrans_at, expire_after } = record.state
         {
             self.deadlines.remove(&(retrans_at, pn));
             record.state = SentPacketState::Retransmitted { expire_after };
@@ -214,11 +195,7 @@ impl ArcSentJournal {
     /// Abandon a sealed but unsubmitted packet and return its reliable data.
     pub fn cancel(&self, pn: u64, on_frame: impl FnMut(GuaranteedFrame)) {
         let mut records = self.0.lock().unwrap();
-        if records
-            .packets
-            .get(&pn)
-            .is_some_and(|packet| matches!(packet.state, SentPacketState::Acked))
-        {
+        if records.packets.get(&pn).is_some_and(|packet| matches!(packet.state, SentPacketState::Acked)) {
             records.packets.remove(&pn);
             return;
         }
@@ -252,9 +229,7 @@ impl ArcSentJournal {
     ) {
         let mut records = self.lock_guard();
         assert!(
-            records.packets.get(&pn).is_some_and(
-                |p| matches!(p.state, SentPacketState::Pending) && p.frame_range.is_empty()
-            ),
+            records.packets.get(&pn).is_some_and(|p| matches!(p.state, SentPacketState::Pending) && p.frame_range.is_empty()),
             "packet number must be reserved once"
         );
         let start = records.frames.largest();
@@ -277,24 +252,13 @@ impl ArcSentJournal {
     }
 
     /// Fix the retention deadline at successful submission; loss never restarts it.
-    pub fn on_sent(
-        &self,
-        pn: u64,
-        in_flight: bool,
-        retransmit_after: Duration,
-        retention: Duration,
-    ) {
-        self.lock_guard()
-            .on_sent(pn, in_flight, retransmit_after, retention);
+    pub fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
+        self.lock_guard().on_sent(pn, in_flight, retransmit_after, retention);
     }
 
     /// Report loss directly to frame owners while retaining the original for late ACKs.
     /// Like acknowledge, callbacks must not call back into CC or this journal.
-    pub fn resend(
-        &self,
-        pns: &mut dyn Iterator<Item = u64>,
-        mut on_frame: impl FnMut(&GuaranteedFrame),
-    ) {
+    pub fn resend(&self, pns: &mut dyn Iterator<Item = u64>, mut on_frame: impl FnMut(&GuaranteedFrame)) {
         let mut records = self.0.lock().unwrap();
         for pn in pns {
             records.resend(pn, &mut on_frame);
@@ -312,39 +276,21 @@ impl ArcSentJournal {
     /// Remove acknowledged records, notify frame owners, then reclaim the queue prefix.
     /// Return the highest newly acknowledged key generation, if any.
     /// The callback must not call back into CC or this journal.
-    pub fn on_acked(
-        &self,
-        ack: &AckFrame,
-        mut on_frame: impl FnMut(&GuaranteedFrame),
-    ) -> Result<Option<u64>, Error> {
+    pub fn on_acked(&self, ack: &AckFrame, mut on_frame: impl FnMut(&GuaranteedFrame)) -> Result<Option<u64>, Error> {
         let mut records = self.0.lock().unwrap();
         // qbase's decoder reads ACK fields; validate range arithmetic before its
         // iterators or CC can see an authenticated but malformed ACK.
         let invalid = || QuicError::with_default_fty(ErrorKind::FrameEncoding, "invalid ACK range");
-        let mut start = ack
-            .largest()
-            .checked_sub(ack.first_range())
-            .ok_or_else(invalid)?;
+        let mut start = ack.largest().checked_sub(ack.first_range()).ok_or_else(invalid)?;
         let mut ranges = Vec::with_capacity(ack.ranges().len() + 1);
         ranges.push(start..=ack.largest());
         for (gap, range) in ack.ranges() {
-            let end = start
-                .checked_sub(gap.into_u64())
-                .and_then(|pn| pn.checked_sub(2))
-                .ok_or_else(invalid)?;
+            let end = start.checked_sub(gap.into_u64()).and_then(|pn| pn.checked_sub(2)).ok_or_else(invalid)?;
             start = end.checked_sub(range.into_u64()).ok_or_else(invalid)?;
             ranges.push(start..=end);
         }
-        if ack.largest() >= records.next_pn
-            || ranges
-                .iter()
-                .any(|range| records.skipped_pns.range(range.clone()).next().is_some())
-        {
-            return Err(QuicError::with_default_fty(
-                ErrorKind::ProtocolViolation,
-                "ACK acknowledges an unsent packet",
-            )
-            .into());
+        if ack.largest() >= records.next_pn || ranges.iter().any(|range| records.skipped_pns.range(range.clone()).next().is_some()) {
+            return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "ACK acknowledges an unsent packet").into());
         }
         records.largest_acked = records.largest_acked.max(ack.largest());
         let mut acknowledged = None;
@@ -356,10 +302,7 @@ impl ArcSentJournal {
                     break;
                 };
                 start = pn + 1;
-                let pending = matches!(
-                    records.packets[&pn].state,
-                    SentPacketState::Pending | SentPacketState::Acked
-                );
+                let pending = matches!(records.packets[&pn].state, SentPacketState::Pending | SentPacketState::Acked);
                 let mut record = records.remove_packet(pn, SentPacketState::Acked).unwrap();
                 for index in record.frame_range.clone() {
                     on_frame(&records.frames[index].take().unwrap());
@@ -382,12 +325,7 @@ mod tests {
 
     #[test]
     fn inspecting_pn_length_does_not_reserve_packet_numbers() {
-        for (pn, largest_acked, expected_len) in [
-            (0, 0, 2),
-            (1 << 15, 0, 3),
-            (1 << 23, 0, 4),
-            (1 << 23, (1 << 23) - 1, 2),
-        ] {
+        for (pn, largest_acked, expected_len) in [(0, 0, 2), (1 << 15, 0, 3), (1 << 23, 0, 4), (1 << 23, (1 << 23) - 1, 2)] {
             let records = ArcSentJournal::default();
             // Reach encoding-length boundaries without allocating millions of packets.
             let mut journal = records.lock_guard();
@@ -411,15 +349,9 @@ mod tests {
             journal.next_pn = VARINT_MAX;
             journal.largest_acked = VARINT_MAX - 1;
         }
-        assert_eq!(
-            records.next_pn().unwrap(),
-            (VARINT_MAX, PacketNumber::U16(VARINT_MAX as u16))
-        );
+        assert_eq!(records.next_pn().unwrap(), (VARINT_MAX, PacketNumber::U16(VARINT_MAX as u16)));
         for _ in 0..2 {
-            assert_eq!(
-                records.next_pn().unwrap_err().kind(),
-                ErrorKind::AeadLimitReached
-            );
+            assert_eq!(records.next_pn().unwrap_err().kind(), ErrorKind::AeadLimitReached);
             assert_eq!(records.lock_guard().next_pn, VARINT_MAX + 1);
         }
     }

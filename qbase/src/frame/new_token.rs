@@ -47,9 +47,7 @@ impl NewTokenFrame {
 
     /// Create a new [`NewTokenFrame`] from the given token slice.
     pub fn from_slice(token: &[u8]) -> Self {
-        Self {
-            token: token.to_vec(),
-        }
+        Self { token: token.to_vec() }
     }
 
     /// Return the token of the frame.
@@ -66,10 +64,7 @@ pub fn be_new_token_frame(input: &[u8]) -> nom::IResult<&[u8], NewTokenFrame> {
         bytes::streaming::take,
         combinator::{flat_map, map},
     };
-    flat_map(be_varint, |length| {
-        map(take(length.into_u64() as usize), NewTokenFrame::from_slice)
-    })
-    .parse(input)
+    flat_map(be_varint, |length| map(take(length.into_u64() as usize), NewTokenFrame::from_slice)).parse(input)
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<NewTokenFrame> for T {

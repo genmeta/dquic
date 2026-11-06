@@ -24,18 +24,12 @@ impl<T> SendFrame<T> for Broker {
 
 pub(super) fn stream(window: u64) -> (DataStreams<Broker>, Writer<Ext<Broker>>) {
     let streams = DataStreams::new(
-        ArcParameters::new(
-            Role::Client,
-            Arc::new(ClientParameters::default()),
-            Arc::new(ServerParameters::default()),
-        ),
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         Broker,
         Default::default(),
     );
-    let Poll::Ready(Ok(Some((_, (_, writer))))) =
-        streams.poll_open_bi_with_limit(&mut Context::from_waker(Waker::noop()), window)
-    else {
+    let Poll::Ready(Ok(Some((_, (_, writer))))) = streams.poll_open_bi_with_limit(&mut Context::from_waker(Waker::noop()), window) else {
         panic!("stream should open")
     };
     (streams, writer)
@@ -49,10 +43,7 @@ fn send(streams: &mut DataStreams<Broker>) -> Vec<GuaranteedFrame> {
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let _ = streams
-        .poll_dump(
-            &mut Context::from_waker(Waker::noop()),
-            &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
-        )
+        .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0))
         .map(Result::unwrap);
     frames
 }
@@ -84,15 +75,9 @@ fn test_ready_sender_poll_write() {
     let (streams, mut writer) = stream(10);
     writer.write(Bytes::from_static(b"test")).unwrap();
     let mut params = ServerParameters::default();
-    params
-        .set(ParameterId::InitialMaxStreamDataBidiRemote, 0u32)
-        .unwrap();
+    params.set(ParameterId::InitialMaxStreamDataBidiRemote, 0u32).unwrap();
     streams.revise_params(true, &params);
-    assert!(
-        writer
-            .poll_ready(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    assert!(writer.poll_ready(&mut Context::from_waker(Waker::noop())).is_pending());
     writer.cancel(0);
 }
 
@@ -123,12 +108,7 @@ fn test_sender_state_transitions() {
 fn test_arc_sender() {
     let (streams, mut writer) = stream(1000);
     let sid = StreamId::new(Role::Client, Dir::Bi, 0);
-    streams
-        .recv_stream_control(StreamCtlFrame::MaxStreamData(MaxStreamDataFrame::new(
-            sid,
-            2000u32.into(),
-        )))
-        .unwrap();
+    streams.recv_stream_control(StreamCtlFrame::MaxStreamData(MaxStreamDataFrame::new(sid, 2000u32.into()))).unwrap();
     writer.write(Bytes::from(vec![0; 1000])).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(writer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
@@ -140,15 +120,9 @@ fn test_arc_sender() {
 #[test]
 fn test_data_sent_sender() {
     let (mut streams, mut writer) = stream(1000);
-    assert!(
-        writer
-            .poll_shutdown(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    assert!(writer.poll_shutdown(&mut Context::from_waker(Waker::noop())).is_pending());
     let frames = send(&mut streams);
-    assert!(
-        matches!(&frames[..], [GuaranteedFrame::Stream(frame)] if frame.is_fin() && frame.is_empty())
-    );
+    assert!(matches!(&frames[..], [GuaranteedFrame::Stream(frame)] if frame.is_fin() && frame.is_empty()));
     assert!(send(&mut streams).is_empty());
     writer.cancel(0);
 }
@@ -164,11 +138,7 @@ fn test_data_sent_sender_polling() {
         }
     }
     let (mut streams, mut writer) = stream(1000);
-    assert!(
-        writer
-            .poll_shutdown(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    assert!(writer.poll_shutdown(&mut Context::from_waker(Waker::noop())).is_pending());
     let frames = send(&mut streams);
     let GuaranteedFrame::Stream(fin) = frames[0] else {
         panic!("expected FIN")

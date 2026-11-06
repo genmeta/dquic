@@ -25,19 +25,9 @@ async fn initial_crypto_receives_close_before_any_path_is_added() {
     assert!(futures::poll!(&mut read).is_pending());
 
     paths.terminator.close(
-        CloseReason::Internal(QuicError::with_default_fty(
-            ErrorKind::Internal,
-            "closed before any path was added",
-        )),
+        CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed before any path was added")),
         Duration::from_secs(1),
     );
     assert!(matches!(futures::poll!(&mut read), Poll::Ready(Err(_))));
-    assert!(
-        crate::common::initial_space(&paths.spaces)
-            .crypto
-            .writer()
-            .write_all(b"after close")
-            .await
-            .is_err()
-    );
+    assert!(crate::common::initial_space(&paths.spaces).crypto.writer().write_all(b"after close").await.is_err());
 }

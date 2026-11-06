@@ -12,10 +12,7 @@ use qbase::{
 fn pathway() -> Pathway {
     Pathway::new(
         EndpointAddr::direct("203.0.113.1:4433".parse().unwrap()),
-        EndpointAddr::mediate(
-            "198.51.100.1:3478".parse().unwrap(),
-            "192.0.2.1:50000".parse().unwrap(),
-        ),
+        EndpointAddr::mediate("198.51.100.1:3478".parse().unwrap(), "192.0.2.1:50000".parse().unwrap()),
     )
 }
 
@@ -34,29 +31,19 @@ fn forward_payload(pathway: &Pathway, raw: &[u8]) -> forward::Payload {
 
 #[test]
 fn stun_request_round_trips() {
-    round_trip(Datagram::Stun(
-        TransactionId::random(),
-        Message::Request(BindingRequest::change_ip_and_port()),
-    ));
+    round_trip(Datagram::Stun(TransactionId::random(), Message::Request(BindingRequest::change_ip_and_port())));
 }
 
 #[test]
 fn stun_response_round_trips() {
     let mapped = "203.0.113.1:4433".parse().unwrap();
-    round_trip(Datagram::Stun(
-        TransactionId::random(),
-        Message::Response(BindingResponse::with(vec![Attribute::MappedAddress(
-            mapped,
-        )])),
-    ));
+    round_trip(Datagram::Stun(TransactionId::random(), Message::Response(BindingResponse::with(vec![Attribute::MappedAddress(mapped)]))));
 }
 
 fn forward_round_trip(pathway: Pathway, raw: &[u8]) {
     let payload = forward_payload(&pathway, raw);
     let mut bytes = BytesMut::new();
-    bytes
-        .put_datagram(&Datagram::Forward(pathway, payload))
-        .unwrap();
+    bytes.put_datagram(&Datagram::Forward(pathway, payload)).unwrap();
 
     let Datagram::Forward(decoded_pathway, decoded_payload) = be_datagram(bytes).unwrap() else {
         panic!("expected Forward datagram");
@@ -80,16 +67,12 @@ fn forward_round_trips_raw_short_datagram() {
 #[test]
 fn forward_writer_uses_the_datagram_pathway() {
     let payload_pathway = pathway();
-    let datagram_pathway = Pathway::new(
-        EndpointAddr::direct("192.0.2.10:50000".parse().unwrap()),
-        EndpointAddr::direct("192.0.2.20:4433".parse().unwrap()),
-    );
+    let datagram_pathway =
+        Pathway::new(EndpointAddr::direct("192.0.2.10:50000".parse().unwrap()), EndpointAddr::direct("192.0.2.20:4433".parse().unwrap()));
     let raw = [0x45, 1, 2, 3];
     let payload = forward_payload(&payload_pathway, &raw);
     let mut bytes = BytesMut::new();
-    bytes
-        .put_datagram(&Datagram::Forward(datagram_pathway, payload))
-        .unwrap();
+    bytes.put_datagram(&Datagram::Forward(datagram_pathway, payload)).unwrap();
 
     let Datagram::Forward(decoded_pathway, decoded_payload) = be_datagram(bytes).unwrap() else {
         panic!("expected Forward datagram");
@@ -105,10 +88,7 @@ fn raw_round_trips() {
 
 #[test]
 fn raw_long_datagrams_are_preserved() {
-    for input in [
-        &[0xc0, 0, 0, 0, 0, 0xaa, 0xbb][..],
-        &[0xe0, 0, 0, 0, 1, 0xaa, 0xbb][..],
-    ] {
+    for input in [&[0xc0, 0, 0, 0, 0, 0xaa, 0xbb][..], &[0xe0, 0, 0, 0, 1, 0xaa, 0xbb][..]] {
         let bytes = BytesMut::from(input);
         assert_eq!(be_datagram(bytes.clone()), Ok(Datagram::Raw(bytes)));
     }
@@ -116,14 +96,8 @@ fn raw_long_datagrams_are_preserved() {
 
 #[test]
 fn invalid_type_is_rejected_before_payload_parsing() {
-    assert_eq!(
-        be_datagram(BytesMut::from(&[0x20, 0][..])),
-        Err(Error::InvalidDatagramType)
-    );
-    assert_eq!(
-        be_datagram(BytesMut::from(&[0xe2, 0, 0, 0, 0, 0, 0, 0, 0][..])),
-        Err(Error::InvalidDatagramType)
-    );
+    assert_eq!(be_datagram(BytesMut::from(&[0x20, 0][..])), Err(Error::InvalidDatagramType));
+    assert_eq!(be_datagram(BytesMut::from(&[0xe2, 0, 0, 0, 0, 0, 0, 0, 0][..])), Err(Error::InvalidDatagramType));
 }
 
 #[test]

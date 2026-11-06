@@ -22,21 +22,14 @@ struct Args {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-        .init();
+    tracing_subscriber::fmt().with_max_level(tracing::level_filters::LevelFilter::TRACE).init();
 
     let args = Args::parse();
     let addr = args.src.parse().unwrap();
     let socket = UdpSocket::bind(addr).expect("failed to create socket");
     let dst = args.dst.parse().unwrap();
 
-    let send_hdr = Line::new(
-        Link::new(socket.local_addr().expect("failed to get local addr"), dst),
-        64,
-        None,
-        args.msg_size as u16,
-    );
+    let send_hdr = Line::new(Link::new(socket.local_addr().expect("failed to get local addr"), dst), 64, None, args.msg_size as u16);
 
     let payload = vec![8u8; args.msg_size];
     let payloads = vec![IoSlice::new(&payload[..]); args.msg_count];

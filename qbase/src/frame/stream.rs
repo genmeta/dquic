@@ -143,9 +143,7 @@ impl super::EncodeSize for StreamFrame {
                 0
             }
             + if self.len_bit == Len::Explicit {
-                VarInt::from_u64(self.length as u64)
-                    .expect("msg length must be less than 2^62")
-                    .encoding_size()
+                VarInt::from_u64(self.length as u64).expect("msg length must be less than 2^62").encoding_size()
             } else {
                 0
             }
@@ -177,8 +175,7 @@ impl StreamFrame {
         assert!(offset <= VARINT_MAX);
         Self {
             id,
-            offset: VarInt::from_u64(offset)
-                .expect("offset of stream frame must be less than 2^62"),
+            offset: VarInt::from_u64(offset).expect("offset of stream frame must be less than 2^62"),
             length,
             len_bit: Len::Omit,
             fin_bit: Fin::No,
@@ -246,9 +243,7 @@ impl StreamFrame {
         let encoding_size_without_length = self.encoding_size() + self.length;
         assert!(encoding_size_without_length <= capacity);
 
-        let len_encoding_size = VarInt::try_from(self.length)
-            .expect("length of stream frame must be less than 2^62")
-            .encoding_size();
+        let len_encoding_size = VarInt::try_from(self.length).expect("length of stream frame must be less than 2^62").encoding_size();
 
         let remaining = capacity - encoding_size_without_length;
         if remaining >= len_encoding_size {
@@ -257,21 +252,12 @@ impl StreamFrame {
             // but the minium stream size can be as small as 3 bytes
             // with stream id less than 64 and offset 0 and without length
             if remaining < STREAM_FRAME_MAX_ENCODING_SIZE {
-                EncodingStrategy {
-                    len_bit: Len::Explicit,
-                    pre_padding: remaining,
-                }
+                EncodingStrategy { len_bit: Len::Explicit, pre_padding: remaining }
             } else {
-                EncodingStrategy {
-                    len_bit: Len::Explicit,
-                    pre_padding: 0,
-                }
+                EncodingStrategy { len_bit: Len::Explicit, pre_padding: 0 }
             }
         } else {
-            EncodingStrategy {
-                len_bit: Len::Omit,
-                pre_padding: remaining,
-            }
+            EncodingStrategy { len_bit: Len::Omit, pre_padding: remaining }
         }
     }
 
@@ -293,11 +279,7 @@ impl StreamFrame {
 
 /// Return a parser for a stream frame with the given flag,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn stream_frame_with_flag(
-    offset: Offset,
-    len: Len,
-    fin: Fin,
-) -> impl Fn(&[u8]) -> nom::IResult<&[u8], StreamFrame> {
+pub fn stream_frame_with_flag(offset: Offset, len: Len, fin: Fin) -> impl Fn(&[u8]) -> nom::IResult<&[u8], StreamFrame> {
     move |input| {
         let (remain, id) = be_streamid(input)?;
         let (remain, offset) = if offset == Offset::NonZero {
@@ -312,21 +294,9 @@ pub fn stream_frame_with_flag(
             (remain, remain.len())
         };
         if offset.into_u64() + length as u64 > VARINT_MAX {
-            return Err(nom::Err::Error(nom::error::make_error(
-                input,
-                nom::error::ErrorKind::TooLarge,
-            )));
+            return Err(nom::Err::Error(nom::error::make_error(input, nom::error::ErrorKind::TooLarge)));
         }
-        Ok((
-            remain,
-            StreamFrame {
-                id,
-                offset,
-                length,
-                len_bit: len,
-                fin_bit: fin,
-            },
-        ))
+        Ok((remain, StreamFrame { id, offset, length, len_bit: len, fin_bit: fin }))
     }
 }
 

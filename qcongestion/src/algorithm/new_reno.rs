@@ -25,10 +25,7 @@ pub(crate) struct NewReno {
 
 impl From<&NewReno> for RecoveryMetricsUpdated {
     fn from(reno: &NewReno) -> Self {
-        qevent::build!(RecoveryMetricsUpdated {
-            congestion_window: reno.congestion_window as u64,
-            ssthresh: reno.ssthresh as u64,
-        })
+        qevent::build!(RecoveryMetricsUpdated { congestion_window: reno.congestion_window as u64, ssthresh: reno.ssthresh as u64 })
     }
 }
 
@@ -61,9 +58,7 @@ impl NewReno {
     /// InCongestionRecovery(sent_time):
     ///   return sent_time <= congestion_recovery_start_time
     fn in_congestion_recovery(&self, sent_time: &Instant) -> bool {
-        self.congestion_recovery_start_time
-            .map(|recovery_start_time| *sent_time <= recovery_start_time)
-            .unwrap_or(false)
+        self.congestion_recovery_start_time.map(|recovery_start_time| *sent_time <= recovery_start_time).unwrap_or(false)
     }
 
     /// OnPacketAcked(acked_packet):
@@ -102,8 +97,7 @@ impl NewReno {
         if self.congestion_window < self.ssthresh {
             self.congestion_window += acked_packet.sent_bytes;
         } else {
-            self.congestion_window +=
-                self.max_datagram_size() * acked_packet.sent_bytes / self.congestion_window;
+            self.congestion_window += self.max_datagram_size() * acked_packet.sent_bytes / self.congestion_window;
         }
         qevent::event!({ RecoveryMetricsUpdated::from(&*self) });
     }
@@ -177,18 +171,12 @@ impl NewReno {
     ///   if (InPersistentCongestion(pc_lost)):
     ///     congestion_window = kMinimumWindow
     ///     congestion_recovery_start_time = 0
-    fn on_packets_lost(
-        &mut self,
-        lost_packets: &mut dyn Iterator<Item = &SentPacket>,
-        persistent_lost: bool,
-    ) {
+    fn on_packets_lost(&mut self, lost_packets: &mut dyn Iterator<Item = &SentPacket>, persistent_lost: bool) {
         let mut sent_time_last_loss: Option<Instant> = None;
         for lost_packet in lost_packets {
             if lost_packet.count_for_cc {
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(lost_packet.sent_bytes);
-                sent_time_last_loss = sent_time_last_loss
-                    .map(|t| t.max(lost_packet.time_sent))
-                    .or(Some(lost_packet.time_sent));
+                sent_time_last_loss = sent_time_last_loss.map(|t| t.max(lost_packet.time_sent)).or(Some(lost_packet.time_sent));
             }
         }
         if let Some(time) = sent_time_last_loss {
@@ -208,10 +196,7 @@ impl NewReno {
     ///  foreach packet in discarded_packets:
     ///    if packet.in_flight
     ///      bytes_in_flight -= size
-    fn remove_from_bytes_in_flight(
-        &mut self,
-        discard_packets: &mut dyn Iterator<Item = &SentPacket>,
-    ) {
+    fn remove_from_bytes_in_flight(&mut self, discard_packets: &mut dyn Iterator<Item = &SentPacket>) {
         for packet in discard_packets {
             if packet.count_for_cc && packet.state != State::Retransmitted {
                 self.bytes_in_flight -= packet.sent_bytes;
@@ -233,11 +218,7 @@ impl Control for NewReno {
         self.on_packet_acked(acked_packet);
     }
 
-    fn on_packets_lost(
-        &mut self,
-        lost_packets: &mut dyn Iterator<Item = &SentPacket>,
-        persistent_lost: bool,
-    ) {
+    fn on_packets_lost(&mut self, lost_packets: &mut dyn Iterator<Item = &SentPacket>, persistent_lost: bool) {
         self.on_packets_lost(lost_packets, persistent_lost);
     }
 

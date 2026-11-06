@@ -65,10 +65,7 @@ pub struct MemoryResumptionStore {
 
 impl MemoryResumptionStore {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: Mutex::new(VecDeque::new()),
-        }
+        Self { capacity, entries: Mutex::new(VecDeque::new()) }
     }
 }
 
@@ -77,10 +74,7 @@ impl ResumptionStore for MemoryResumptionStore {
         if self.capacity == 0 {
             return Ok(());
         }
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| StoreError::Backend("memory store lock poisoned".into()))?;
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Backend("memory store lock poisoned".into()))?;
         entries.push_back((key, session));
         while entries.len() > self.capacity {
             entries.pop_front();
@@ -90,14 +84,8 @@ impl ResumptionStore for MemoryResumptionStore {
 
     fn take(&self, key: &ResumptionKey) -> Result<Option<StoredSession>, StoreError> {
         let now = UnixTime::now();
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| StoreError::Backend("memory store lock poisoned".into()))?;
-        while let Some(index) = entries
-            .iter()
-            .rposition(|(stored_key, _)| stored_key == key)
-        {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Backend("memory store lock poisoned".into()))?;
+        while let Some(index) = entries.iter().rposition(|(stored_key, _)| stored_key == key) {
             let Some((_, session)) = entries.remove(index) else {
                 return Ok(None);
             };
@@ -120,10 +108,7 @@ pub struct SessionSealKeyRing {
 
 impl SessionSealKeyRing {
     pub fn new(key_id: u32, key: [u8; 32]) -> Self {
-        Self {
-            current: RecordKey::new(key_id, key),
-            previous: Vec::new(),
-        }
+        Self { current: RecordKey::new(key_id, key), previous: Vec::new() }
     }
 
     pub fn with_previous(mut self, key_id: u32, key: [u8; 32]) -> Self {
@@ -133,20 +118,13 @@ impl SessionSealKeyRing {
         self
     }
 
-    fn seal(
-        &self,
-        store_key: &ResumptionKey,
-        not_after: UnixTime,
-        plaintext: &mut Vec<u8>,
-    ) -> Option<Bytes> {
+    fn seal(&self, store_key: &ResumptionKey, not_after: UnixTime, plaintext: &mut Vec<u8>) -> Option<Bytes> {
         #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
         {
             use record_crypto::rand::SecureRandom;
 
             let mut nonce = [0u8; NONCE_LEN];
-            record_crypto::rand::SystemRandom::new()
-                .fill(&mut nonce)
-                .ok()?;
+            record_crypto::rand::SystemRandom::new().fill(&mut nonce).ok()?;
             let mut header = Vec::with_capacity(RECORD_MAGIC.len() + 1 + 4 + NONCE_LEN);
             header.extend_from_slice(RECORD_MAGIC);
             header.push(RECORD_SCHEMA);
@@ -171,11 +149,7 @@ impl SessionSealKeyRing {
         }
     }
 
-    fn open(
-        &self,
-        store_key: &ResumptionKey,
-        session: &StoredSession,
-    ) -> Option<Zeroizing<Vec<u8>>> {
+    fn open(&self, store_key: &ResumptionKey, session: &StoredSession) -> Option<Zeroizing<Vec<u8>>> {
         #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
         {
             let header_len = RECORD_MAGIC.len() + 1 + 4 + NONCE_LEN;
@@ -185,9 +159,7 @@ impl SessionSealKeyRing {
             }
             let id = u32::from_be_bytes(header.get(5..9)?.try_into().ok()?);
             let nonce: [u8; NONCE_LEN] = header.get(9..header_len)?.try_into().ok()?;
-            let record_key = std::iter::once(&self.current)
-                .chain(self.previous.iter())
-                .find(|item| item.id == id)?;
+            let record_key = std::iter::once(&self.current).chain(self.previous.iter()).find(|item| item.id == id)?;
             let aad = record_aad(header, store_key, session.not_after);
             let mut ciphertext = Zeroizing::new(session.sealed.get(header_len..)?.to_vec());
             let plaintext = record_key
@@ -230,8 +202,7 @@ impl RecordKey {
     fn new(id: u32, key: [u8; 32]) -> Self {
         #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
         let key = record_crypto::aead::LessSafeKey::new(
-            record_crypto::aead::UnboundKey::new(&record_crypto::aead::AES_256_GCM, &key)
-                .expect("AES-256-GCM accepts a 32-byte key"),
+            record_crypto::aead::UnboundKey::new(&record_crypto::aead::AES_256_GCM, &key).expect("AES-256-GCM accepts a 32-byte key"),
         );
         #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
         let _ = key;
@@ -256,23 +227,13 @@ impl TicketKeyRing {
 
 pub enum ClientResumptionConfig {
     Disabled,
-    Enabled {
-        namespace: Arc<str>,
-        store: Arc<dyn ResumptionStore>,
-        seal_keys: Arc<SessionSealKeyRing>,
-    },
+    Enabled { namespace: Arc<str>, store: Arc<dyn ResumptionStore>, seal_keys: Arc<SessionSealKeyRing> },
 }
 
 pub enum ServerResumptionConfig {
     Disabled,
-    Stateful {
-        namespace: Arc<str>,
-        store: Arc<dyn ResumptionStore>,
-        seal_keys: Arc<SessionSealKeyRing>,
-    },
-    Stateless {
-        ticket_keys: Arc<TicketKeyRing>,
-    },
+    Stateful { namespace: Arc<str>, store: Arc<dyn ResumptionStore>, seal_keys: Arc<SessionSealKeyRing> },
+    Stateless { ticket_keys: Arc<TicketKeyRing> },
 }
 
 pub(crate) struct ClientStoreAdapter {
@@ -301,38 +262,20 @@ impl ClientStoreAdapter {
         peer: PeerState,
         limits: TlsLimits,
     ) -> Self {
-        Self {
-            namespace,
-            version,
-            provider,
-            store,
-            seal_keys,
-            verifier,
-            client_cert,
-            peer,
-            limits,
-            kx_hints: Mutex::new(Vec::new()),
-        }
+        Self { namespace, version, provider, store, seal_keys, verifier, client_cert, peer, limits, kx_hints: Mutex::new(Vec::new()) }
     }
 
     fn key(&self, server_name: &ServerName<'_>) -> Option<ResumptionKey> {
         let ServerName::DnsName(server_name) = server_name else {
             return None;
         };
-        Some(derive_store_key(
-            b"client",
-            &self.namespace,
-            self.version,
-            server_name.as_ref().as_bytes(),
-        ))
+        Some(derive_store_key(b"client", &self.namespace, self.version, server_name.as_ref().as_bytes()))
     }
 }
 
 impl fmt::Debug for ClientStoreAdapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClientStoreAdapter")
-            .finish_non_exhaustive()
+        formatter.debug_struct("ClientStoreAdapter").finish_non_exhaustive()
     }
 }
 
@@ -349,35 +292,18 @@ impl ClientSessionStore for ClientStoreAdapter {
     }
 
     fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup> {
-        self.kx_hints
-            .lock()
-            .ok()?
-            .iter()
-            .find(|(name, _)| name == server_name)
-            .map(|(_, group)| *group)
+        self.kx_hints.lock().ok()?.iter().find(|(name, _)| name == server_name).map(|(_, group)| *group)
     }
 
-    fn set_tls12_session(
-        &self,
-        _server_name: ServerName<'static>,
-        _value: rustls::client::Tls12ClientSessionValue,
-    ) {
-    }
+    fn set_tls12_session(&self, _server_name: ServerName<'static>, _value: rustls::client::Tls12ClientSessionValue) {}
 
-    fn tls12_session(
-        &self,
-        _server_name: &ServerName<'_>,
-    ) -> Option<rustls::client::Tls12ClientSessionValue> {
+    fn tls12_session(&self, _server_name: &ServerName<'_>) -> Option<rustls::client::Tls12ClientSessionValue> {
         None
     }
 
     fn remove_tls12_session(&self, _server_name: &ServerName<'static>) {}
 
-    fn insert_tls13_ticket(
-        &self,
-        server_name: ServerName<'static>,
-        value: Tls13ClientSessionValue,
-    ) {
+    fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue) {
         let Some(key) = self.key(&server_name) else {
             return;
         };
@@ -397,31 +323,16 @@ impl ClientSessionStore for ClientStoreAdapter {
         let _ = self.store.put(key, StoredSession { not_after, sealed });
     }
 
-    fn take_tls13_ticket(
-        &self,
-        server_name: &ServerName<'static>,
-    ) -> Option<Tls13ClientSessionValue> {
+    fn take_tls13_ticket(&self, server_name: &ServerName<'static>) -> Option<Tls13ClientSessionValue> {
         let key = self.key(server_name)?;
         let session = self.store.take(&key).ok()??;
-        if session.not_after <= UnixTime::now()
-            || session.sealed.len()
-                > self
-                    .limits
-                    .max_session_bytes
-                    .saturating_add(RECORD_OVERHEAD)
-        {
+        if session.not_after <= UnixTime::now() || session.sealed.len() > self.limits.max_session_bytes.saturating_add(RECORD_OVERHEAD) {
             return None;
         }
         let plaintext = self.seal_keys.open(&key, &session)?;
         let (context, encoded) = SessionContext::decode(&plaintext, self.limits)?;
         context.restore_client(&self.peer, &self.client_cert)?;
-        Tls13ClientSessionValue::decode_resumption_state(
-            encoded,
-            &self.provider,
-            self.verifier.clone(),
-            self.client_cert.clone(),
-        )
-        .ok()
+        Tls13ClientSessionValue::decode_resumption_state(encoded, &self.provider, self.verifier.clone(), self.client_cert.clone()).ok()
     }
 }
 
@@ -442,19 +353,13 @@ pub(crate) struct StatelessTicketAdapter {
 
 impl StatelessTicketAdapter {
     pub(crate) fn new(inner: Arc<dyn ProducesTickets>, peer: PeerState, limits: TlsLimits) -> Self {
-        Self {
-            inner,
-            peer,
-            limits,
-        }
+        Self { inner, peer, limits }
     }
 }
 
 impl fmt::Debug for StatelessTicketAdapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StatelessTicketAdapter")
-            .finish_non_exhaustive()
+        formatter.debug_struct("StatelessTicketAdapter").finish_non_exhaustive()
     }
 }
 
@@ -469,11 +374,8 @@ impl ProducesTickets for StatelessTicketAdapter {
 
     fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>> {
         let context = SessionContext::capture(&self.peer)?;
-        let ticket_not_after = UnixTime::since_unix_epoch(Duration::from_secs(
-            UnixTime::now()
-                .as_secs()
-                .saturating_add(u64::from(self.inner.lifetime())),
-        ));
+        let ticket_not_after =
+            UnixTime::since_unix_epoch(Duration::from_secs(UnixTime::now().as_secs().saturating_add(u64::from(self.inner.lifetime()))));
         let not_after = context.not_after(ticket_not_after)?;
         let context = context.encode(plain, self.limits.max_session_bytes)?;
         let mut plaintext = Zeroizing::new(Vec::with_capacity(8 + context.len()));
@@ -503,14 +405,7 @@ impl ServerStoreAdapter {
         peer: PeerState,
         limits: TlsLimits,
     ) -> Self {
-        Self {
-            namespace,
-            version,
-            store,
-            seal_keys,
-            peer,
-            limits,
-        }
+        Self { namespace, version, store, seal_keys, peer, limits }
     }
 
     fn key(&self, ticket: &[u8]) -> ResumptionKey {
@@ -520,9 +415,7 @@ impl ServerStoreAdapter {
 
 impl fmt::Debug for ServerStoreAdapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ServerStoreAdapter")
-            .finish_non_exhaustive()
+        formatter.debug_struct("ServerStoreAdapter").finish_non_exhaustive()
     }
 }
 
@@ -532,11 +425,8 @@ impl StoresServerSessions for ServerStoreAdapter {
         let Some(context) = SessionContext::capture(&self.peer) else {
             return false;
         };
-        let ticket_not_after = UnixTime::since_unix_epoch(Duration::from_secs(
-            UnixTime::now()
-                .as_secs()
-                .saturating_add(STATEFUL_TICKET_LIFETIME_SECS),
-        ));
+        let ticket_not_after =
+            UnixTime::since_unix_epoch(Duration::from_secs(UnixTime::now().as_secs().saturating_add(STATEFUL_TICKET_LIFETIME_SECS)));
         let Some(not_after) = context.not_after(ticket_not_after) else {
             return false;
         };
@@ -546,9 +436,7 @@ impl StoresServerSessions for ServerStoreAdapter {
         let Some(sealed) = self.seal_keys.seal(&store_key, not_after, &mut plaintext) else {
             return false;
         };
-        self.store
-            .put(store_key, StoredSession { not_after, sealed })
-            .is_ok()
+        self.store.put(store_key, StoredSession { not_after, sealed }).is_ok()
     }
 
     fn get(&self, _key: &[u8]) -> Option<Vec<u8>> {
@@ -558,13 +446,7 @@ impl StoresServerSessions for ServerStoreAdapter {
     fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
         let store_key = self.key(key);
         let session = self.store.take(&store_key).ok()??;
-        if session.not_after <= UnixTime::now()
-            || session.sealed.len()
-                > self
-                    .limits
-                    .max_session_bytes
-                    .saturating_add(RECORD_OVERHEAD)
-        {
+        if session.not_after <= UnixTime::now() || session.sealed.len() > self.limits.max_session_bytes.saturating_add(RECORD_OVERHEAD) {
             return None;
         }
         let plaintext = self.seal_keys.open(&store_key, &session)?;
@@ -586,22 +468,15 @@ pub(crate) struct AuthorityProjection {
 
 impl AuthorityProjection {
     fn local(authority: &LocalAuthority) -> Self {
-        Self {
-            name: Arc::from(authority.name()),
-            certificates: authority.certificates().to_vec(),
-        }
+        Self { name: Arc::from(authority.name()), certificates: authority.certificates().to_vec() }
     }
 
     fn remote(authority: &RemoteAuthority) -> Self {
-        Self {
-            name: Arc::from(authority.name()),
-            certificates: authority.certificates().to_vec(),
-        }
+        Self { name: Arc::from(authority.name()), certificates: authority.certificates().to_vec() }
     }
 
     pub(crate) fn matches(&self, authority: &LocalAuthority) -> bool {
-        self.name.as_ref() == authority.name()
-            && self.certificates.as_slice() == authority.certificates()
+        self.name.as_ref() == authority.name() && self.certificates.as_slice() == authority.certificates()
     }
 
     fn into_remote(self) -> Option<RemoteAuthority> {
@@ -617,41 +492,18 @@ struct SessionContext {
 impl SessionContext {
     fn capture(peer: &PeerState) -> Option<Self> {
         let authorities = peer.authorities.lock().ok()?;
-        let local = authorities
-            .local
-            .clone()
-            .or_else(|| authorities.resumed_local.clone())
-            .as_ref()
-            .map(AuthorityProjection::local);
-        let remote = authorities
-            .remote
-            .clone()
-            .or_else(|| authorities.resumed_remote.clone())
-            .as_ref()
-            .map(AuthorityProjection::remote);
+        let local = authorities.local.clone().or_else(|| authorities.resumed_local.clone()).as_ref().map(AuthorityProjection::local);
+        let remote = authorities.remote.clone().or_else(|| authorities.resumed_remote.clone()).as_ref().map(AuthorityProjection::remote);
         Some(Self { local, remote })
     }
 
     fn not_after(&self, ticket_not_after: UnixTime) -> Option<UnixTime> {
-        self.local.iter().chain(self.remote.iter()).try_fold(
-            ticket_not_after,
-            |not_after, authority| {
-                let certificate = authority.certificates.first()?;
-                let (_, certificate) =
-                    x509_parser::certificate::X509Certificate::from_der(certificate.as_ref())
-                        .ok()?;
-                let timestamp: u64 = certificate
-                    .validity()
-                    .not_after
-                    .timestamp()
-                    .try_into()
-                    .ok()?;
-                Some(std::cmp::min(
-                    not_after,
-                    UnixTime::since_unix_epoch(Duration::from_secs(timestamp)),
-                ))
-            },
-        )
+        self.local.iter().chain(self.remote.iter()).try_fold(ticket_not_after, |not_after, authority| {
+            let certificate = authority.certificates.first()?;
+            let (_, certificate) = x509_parser::certificate::X509Certificate::from_der(certificate.as_ref()).ok()?;
+            let timestamp: u64 = certificate.validity().not_after.timestamp().try_into().ok()?;
+            Some(std::cmp::min(not_after, UnixTime::since_unix_epoch(Duration::from_secs(timestamp))))
+        })
     }
 
     fn restore_client(self, peer: &PeerState, client_cert: &OptionalClientCert) -> Option<()> {
@@ -697,9 +549,7 @@ impl SessionContext {
         let local = decode_projection(&mut cursor, limits)?;
         let remote = decode_projection(&mut cursor, limits)?;
         let tls_state = cursor.bytes()?;
-        cursor
-            .is_empty()
-            .then_some((Self { local, remote }, tls_state))
+        cursor.is_empty().then_some((Self { local, remote }, tls_state))
     }
 }
 
@@ -718,10 +568,7 @@ fn encode_projection(output: &mut Vec<u8>, authority: Option<&AuthorityProjectio
     Some(())
 }
 
-fn decode_projection(
-    cursor: &mut Cursor<'_>,
-    limits: TlsLimits,
-) -> Option<Option<AuthorityProjection>> {
+fn decode_projection(cursor: &mut Cursor<'_>, limits: TlsLimits) -> Option<Option<AuthorityProjection>> {
     match cursor.u8()? {
         0 => Some(None),
         1 => {
@@ -741,10 +588,7 @@ fn decode_projection(
                 }
                 certificates.push(CertificateDer::from(certificate.to_vec()));
             }
-            Some(Some(AuthorityProjection {
-                name: Arc::from(name),
-                certificates,
-            }))
+            Some(Some(AuthorityProjection { name: Arc::from(name), certificates }))
         }
         _ => None,
     }
@@ -799,12 +643,7 @@ fn record_aad(header: &[u8], store_key: &ResumptionKey, not_after: UnixTime) -> 
     aad
 }
 
-fn derive_store_key(
-    role: &[u8],
-    namespace: &str,
-    version: crate::QuicVersion,
-    context: &[u8],
-) -> ResumptionKey {
+fn derive_store_key(role: &[u8], namespace: &str, version: crate::QuicVersion, context: &[u8]) -> ResumptionKey {
     let mut input = Vec::with_capacity(role.len() + namespace.len() + context.len() + 24);
     input.extend_from_slice(b"qtls-resumption-v1\0");
     input.extend_from_slice(role);
@@ -817,11 +656,7 @@ fn derive_store_key(
     });
     input.extend_from_slice(context);
     #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
-    return ResumptionKey::from_bytes(
-        record_crypto::digest::digest(&record_crypto::digest::SHA256, &input)
-            .as_ref()
-            .to_vec(),
-    );
+    return ResumptionKey::from_bytes(record_crypto::digest::digest(&record_crypto::digest::SHA256, &input).as_ref().to_vec());
     #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
     ResumptionKey::from_bytes(input)
 }

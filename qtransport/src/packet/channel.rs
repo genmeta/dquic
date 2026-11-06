@@ -34,28 +34,13 @@ pub fn new() -> (Inbox, RcvdPacket) {
     let (zero_rtt_tx, zero_rtt_rx) = mpsc::channel(8);
     let (one_rtt_tx, one_rtt_rx) = mpsc::channel(128);
     (
-        Inbox {
-            initial: initial_tx,
-            handshake: handshake_tx,
-            zero_rtt: zero_rtt_tx,
-            one_rtt: one_rtt_tx,
-        },
-        RcvdPacket {
-            initial: initial_rx,
-            handshake: handshake_rx,
-            zero_rtt: zero_rtt_rx,
-            one_rtt: one_rtt_rx,
-        },
+        Inbox { initial: initial_tx, handshake: handshake_tx, zero_rtt: zero_rtt_tx, one_rtt: one_rtt_tx },
+        RcvdPacket { initial: initial_rx, handshake: handshake_rx, zero_rtt: zero_rtt_rx, one_rtt: one_rtt_rx },
     )
 }
 
 impl Inbox {
-    pub fn try_send_initial(
-        &self,
-        packet: CipherPacket<long::InitialHeader>,
-        pathway: Pathway,
-        link: Link,
-    ) -> bool {
+    pub fn try_send_initial(&self, packet: CipherPacket<long::InitialHeader>, pathway: Pathway, link: Link) -> bool {
         self.initial.try_send((packet, pathway, link)).is_ok()
     }
 
@@ -67,38 +52,18 @@ impl Inbox {
     pub fn try_send(&self, packet: Packet, pathway: Pathway, link: Link) -> bool {
         match packet {
             Packet::Data(packet) => match packet.header {
-                DataHeader::Long(long::DataHeader::Initial(header)) => self
-                    .initial
-                    .try_send((
-                        CipherPacket::new(header, packet.bytes, packet.offset),
-                        pathway,
-                        link,
-                    ))
-                    .is_ok(),
-                DataHeader::Long(long::DataHeader::Handshake(header)) => self
-                    .handshake
-                    .try_send((
-                        CipherPacket::new(header, packet.bytes, packet.offset),
-                        pathway,
-                        link,
-                    ))
-                    .is_ok(),
-                DataHeader::Long(long::DataHeader::ZeroRtt(header)) => self
-                    .zero_rtt
-                    .try_send((
-                        CipherPacket::new(header, packet.bytes, packet.offset),
-                        pathway,
-                        link,
-                    ))
-                    .is_ok(),
-                DataHeader::Short(header) => self
-                    .one_rtt
-                    .try_send((
-                        CipherPacket::new(header, packet.bytes, packet.offset),
-                        pathway,
-                        link,
-                    ))
-                    .is_ok(),
+                DataHeader::Long(long::DataHeader::Initial(header)) => {
+                    self.initial.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                }
+                DataHeader::Long(long::DataHeader::Handshake(header)) => {
+                    self.handshake.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                }
+                DataHeader::Long(long::DataHeader::ZeroRtt(header)) => {
+                    self.zero_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                }
+                DataHeader::Short(header) => {
+                    self.one_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                }
             },
             Packet::VN(_) | Packet::Retry(_) => false,
         }

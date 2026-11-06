@@ -43,8 +43,7 @@ pub fn be_stun_type(input: &[u8], first: u8) -> IResult<&[u8], Type> {
     if first & STUN_HEADER_MASK != STUN_HEADER_BITS {
         return Err(Err::Error(Error::new(input, ErrorKind::Verify)));
     }
-    let ty =
-        Type::try_from(first & 1).map_err(|_| Err::Error(Error::new(input, ErrorKind::Verify)))?;
+    let ty = Type::try_from(first & 1).map_err(|_| Err::Error(Error::new(input, ErrorKind::Verify)))?;
     let (input, reserved) = be_u16(input)?;
     let (input, datagram_version) = be_u16(input)?;
     if reserved != 0 || datagram_version != 0 {

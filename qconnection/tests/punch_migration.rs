@@ -13,14 +13,10 @@ use qbase::{
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
 use qconnection::{
-    ArcConnection, ArcLocalCids, ArcReliableFrames, Error, Paths, Scope, ServerRegistry,
-    TlsContext, client_growing, server_growing,
+    ArcConnection, ArcLocalCids, ArcReliableFrames, Error, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
 };
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
-use qtransport::{
-    StreamReader, StreamWriter, keys::ArcKeys, packet::channel, router::QuicRouter,
-    space::InitialSpace,
-};
+use qtransport::{StreamReader, StreamWriter, keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
@@ -44,9 +40,7 @@ impl Socket {
     }
 
     fn publish(&self) {
-        AddressBook::global()
-            .insert_inner(&self.0, self.endpoint())
-            .unwrap();
+        AddressBook::global().insert_inner(&self.0, self.endpoint()).unwrap();
     }
 
     fn withdraw(&self) {
@@ -80,9 +74,7 @@ impl Peer {
 impl Drop for Peer {
     fn drop(&mut self) {
         // Test cleanup also runs after a failed stage; none of this drives migration.
-        self.connection
-            .clone()
-            .close(0u32.into(), "migration test finished");
+        self.connection.clone().close(0u32.into(), "migration test finished");
         self.paths.cid_registry.local.clear();
         common::retire_all(&self.paths);
         self.growing.abort();
@@ -110,22 +102,14 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         let facts = common::handshake_facts(Role::Server, true);
         let initial_space = Arc::new(InitialSpace::new(
             scid,
-            ArcKeys::new(Arc::new(
-                server
-                    .tls_server
-                    .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-                    .unwrap(),
-            )),
+            ArcKeys::new(Arc::new(server.tls_server.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap())),
             None,
             facts.clone(),
         ));
         let paths = Paths::new(
             initial_space.clone(),
             facts,
-            qconnection::CidRegistry::new(
-                local_cids,
-                qconnection::ArcRemoteCids::server(*packet.scid(), reliable.clone()),
-            ),
+            qconnection::CidRegistry::new(local_cids, qconnection::ArcRemoteCids::server(*packet.scid(), reliable.clone())),
             reliable,
             Duration::ZERO,
             Duration::ZERO,
@@ -133,12 +117,7 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
 
         assert!(inbox.try_send_initial(packet, pathway, link));
         let tick = qconnection::recv::tick(paths.clone());
-        let growing = server_growing(
-            initial_space,
-            received,
-            paths.clone(),
-            ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)),
-        );
+        let growing = server_growing(initial_space, received, paths.clone(), ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)));
         let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
         created.send((paths, growing)).unwrap();
     });
@@ -150,29 +129,20 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
     let registry = QuicRouter::global().registry_on_issuing_scid(inbox, reliable.clone());
     let scid = registry.gen_unique_cid();
     let (mut parameters, _) = common::parameters();
-    parameters
-        .set(ParameterId::InitialSourceConnectionId, scid)
-        .unwrap();
+    parameters.set(ParameterId::InitialSourceConnectionId, scid).unwrap();
     let tls = TlsContext::client(&client, "localhost".try_into().unwrap(), &parameters).unwrap();
     let local_cids = ArcLocalCids::new(Role::Client, odcid, scid, registry);
     let facts = common::handshake_facts(Role::Client, true);
     let initial_space = Arc::new(InitialSpace::new(
         scid,
-        ArcKeys::new(Arc::new(
-            client
-                .initial_keys(qtls::QuicVersion::V1, odcid.as_ref())
-                .unwrap(),
-        )),
+        ArcKeys::new(Arc::new(client.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap())),
         None,
         facts.clone(),
     ));
     let paths = Paths::new(
         initial_space.clone(),
         facts,
-        qconnection::CidRegistry::new(
-            local_cids,
-            qconnection::ArcRemoteCids::client(odcid, reliable.clone()),
-        ),
+        qconnection::CidRegistry::new(local_cids, qconnection::ArcRemoteCids::client(odcid, reliable.clone())),
         reliable,
         Duration::ZERO,
         Duration::ZERO,
@@ -193,29 +163,12 @@ async fn connect(server_socket: &Socket) -> (Peer, Peer) {
         },
     );
     let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });
-    let client_connection = timeout(STEP_TIMEOUT, connected)
-        .await
-        .expect("stage 1: client handshake timed out")
-        .unwrap()
-        .unwrap()
-        .2;
-    let server_connection = timeout(STEP_TIMEOUT, incoming.recv())
-        .await
-        .expect("stage 1: server handshake timed out")
-        .unwrap()
-        .2;
+    let client_connection = timeout(STEP_TIMEOUT, connected).await.expect("stage 1: client handshake timed out").unwrap().unwrap().2;
+    let server_connection = timeout(STEP_TIMEOUT, incoming.recv()).await.expect("stage 1: server handshake timed out").unwrap().2;
     let (server_paths, server_growing) = server_state.recv().await.unwrap();
     (
-        Peer {
-            connection: client_connection,
-            paths,
-            growing,
-        },
-        Peer {
-            connection: server_connection,
-            paths: server_paths,
-            growing: server_growing,
-        },
+        Peer { connection: client_connection, paths, growing },
+        Peer { connection: server_connection, paths: server_paths, growing: server_growing },
     )
 }
 
@@ -235,23 +188,12 @@ fn describe(paths: &Paths) -> String {
         .lock()
         .unwrap()
         .values()
-        .map(|path| {
-            format!(
-                "{:?}: validated={}, retired={}",
-                path.pathway,
-                path.validation.is_validated(),
-                path.validation.is_cancelled()
-            )
-        })
+        .map(|path| format!("{:?}: validated={}, retired={}", path.pathway, path.validation.is_validated(), path.validation.is_cancelled()))
         .collect::<Vec<_>>()
         .join("; ")
 }
 
-async fn write_counted(
-    writer: &mut StreamWriter,
-    bytes: &[u8],
-    count: &mut usize,
-) -> std::io::Result<()> {
+async fn write_counted(writer: &mut StreamWriter, bytes: &[u8], count: &mut usize) -> std::io::Result<()> {
     while *count < bytes.len() {
         let n = AsyncWriteExt::write(writer, &bytes[*count..]).await?;
         if n == 0 {
@@ -262,11 +204,7 @@ async fn write_counted(
     Ok(())
 }
 
-async fn read_counted(
-    reader: &mut StreamReader,
-    bytes: &mut [u8],
-    count: &mut usize,
-) -> std::io::Result<()> {
+async fn read_counted(reader: &mut StreamReader, bytes: &mut [u8], count: &mut usize) -> std::io::Result<()> {
     while *count < bytes.len() {
         let n = reader.read(&mut bytes[*count..]).await?;
         if n == 0 {
@@ -277,11 +215,7 @@ async fn read_counted(
     Ok(())
 }
 
-async fn echo(
-    client: &mut (StreamReader, StreamWriter),
-    server: &mut (StreamReader, StreamWriter),
-    payload: &[u8],
-) -> Result<(), String> {
+async fn echo(client: &mut (StreamReader, StreamWriter), server: &mut (StreamReader, StreamWriter), payload: &[u8]) -> Result<(), String> {
     let (mut client_written, mut server_read, mut server_written, mut client_read) = (0, 0, 0, 0);
     let result = timeout(STEP_TIMEOUT, async {
         let request = async {
@@ -315,44 +249,19 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let old_route = Pathway::new(old_socket.endpoint(), server_socket.endpoint());
     assert!(
         wait_for(|| client.paths.progress.facts().is_handshake_done()
-            && client
-                .paths
-                .entries
-                .lock()
-                .unwrap()
-                .get(&old_route)
-                .is_some_and(|p| p.validation.is_validated()))
+            && client.paths.entries.lock().unwrap().get(&old_route).is_some_and(|p| p.validation.is_validated()))
         .await,
         "stage 1: handshake confirmation missing"
     );
-    let old_client_path = client
-        .paths
-        .entries
-        .lock()
-        .unwrap()
-        .get(&old_route)
-        .cloned()
-        .unwrap();
-    let old_server_path = server
-        .paths
-        .entries
-        .lock()
-        .unwrap()
-        .get(&old_route.flip())
-        .cloned()
-        .unwrap();
+    let old_client_path = client.paths.entries.lock().unwrap().get(&old_route).cloned().unwrap();
+    let old_server_path = server.paths.entries.lock().unwrap().get(&old_route.flip()).cloned().unwrap();
     let (_, mut client_stream) = client.connection.open_bi_stream().await.unwrap().unwrap();
     client_stream.1.write_all(b"open").await.unwrap();
-    let (_, mut server_stream) = timeout(STEP_TIMEOUT, server.connection.accept_bi_stream())
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, mut server_stream) = timeout(STEP_TIMEOUT, server.connection.accept_bi_stream()).await.unwrap().unwrap();
     let mut opening = [0; 4];
     server_stream.0.read_exact(&mut opening).await.unwrap();
     assert_eq!(&opening, b"open");
-    echo(&mut client_stream, &mut server_stream, b"before migration")
-        .await
-        .unwrap();
+    echo(&mut client_stream, &mut server_stream, b"before migration").await.unwrap();
 
     // Only publish a new address. The test must not manually wire observe_endpoints,
     // call on_local_added/start_validation, or mark the new Path as validated.
@@ -360,18 +269,8 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     let new_route = Pathway::new(new_socket.endpoint(), server_socket.endpoint());
     new_socket.publish();
     let punched = wait_for(|| {
-        client
-            .paths
-            .entries
-            .lock()
-            .unwrap()
-            .contains_key(&new_route)
-            && server
-                .paths
-                .entries
-                .lock()
-                .unwrap()
-                .contains_key(&new_route.flip())
+        client.paths.entries.lock().unwrap().contains_key(&new_route)
+            && server.paths.entries.lock().unwrap().contains_key(&new_route.flip())
     })
     .await;
     if !punched {
@@ -384,20 +283,8 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
         );
     }
     assert!(
-        wait_for(|| client
-            .paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&new_route)
-            .is_some_and(|p| p.validation.is_validated())
-            && server
-                .paths
-                .entries
-                .lock()
-                .unwrap()
-                .get(&new_route.flip())
-                .is_some_and(|p| p.validation.is_validated()))
+        wait_for(|| client.paths.entries.lock().unwrap().get(&new_route).is_some_and(|p| p.validation.is_validated())
+            && server.paths.entries.lock().unwrap().get(&new_route.flip()).is_some_and(|p| p.validation.is_validated()))
         .await,
         "stage 3: new path validation did not complete\nclient: {}\nserver: {}",
         describe(&client.paths),
@@ -406,16 +293,8 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
 
     // Remove the old socket, not the Path. Its sender must detect the failure itself.
     old_socket.withdraw();
-    assert!(
-        QuicProtocol::global()
-            .find_socket(old_socket.endpoint())
-            .is_none()
-    );
-    assert!(
-        Dock::global()
-            .find_socket(old_socket.0.local_addr().unwrap())
-            .is_none()
-    );
+    assert!(QuicProtocol::global().find_socket(old_socket.endpoint()).is_none());
+    assert!(Dock::global().find_socket(old_socket.0.local_addr().unwrap()).is_none());
     let payload: Vec<_> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
     if let Err(error) = echo(&mut client_stream, &mut server_stream, &payload).await {
         panic!(
@@ -430,23 +309,7 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
         wait_for(|| old_client_path.validation.is_cancelled()).await,
         "stage 4: the old client sender did not retire its unusable path"
     );
-    assert!(
-        client
-            .paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&new_route)
-            .is_some_and(|p| p.validation.is_validated())
-    );
-    assert!(
-        server
-            .paths
-            .entries
-            .lock()
-            .unwrap()
-            .get(&new_route.flip())
-            .is_some_and(|p| p.validation.is_validated())
-    );
+    assert!(client.paths.entries.lock().unwrap().get(&new_route).is_some_and(|p| p.validation.is_validated()));
+    assert!(server.paths.entries.lock().unwrap().get(&new_route.flip()).is_some_and(|p| p.validation.is_validated()));
     ServerRegistry::global().remove("localhost");
 }

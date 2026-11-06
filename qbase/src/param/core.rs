@@ -118,11 +118,7 @@ impl TryFrom<ParameterValue> for PreferredAddress {
     fn try_from(value: ParameterValue) -> Result<Self, TryIntoError<ParameterValue>> {
         match value {
             ParameterValue::PreferredAddress(v) => Ok(v),
-            _ => Err(TryIntoError::new(
-                value,
-                "PreferredAddress",
-                "PreferredAddress",
-            )),
+            _ => Err(TryIntoError::new(value, "PreferredAddress", "PreferredAddress")),
         }
     }
 }
@@ -231,9 +227,7 @@ impl ParameterId {
             {
                 Err(Error::InvalidParameterId(self, role))
             }
-            ParameterId::ClientName if role != Role::Client => {
-                Err(Error::InvalidParameterId(self, role))
-            }
+            ParameterId::ClientName if role != Role::Client => Err(Error::InvalidParameterId(self, role)),
             _ => Ok(()),
         }
     }
@@ -263,8 +257,7 @@ impl<Role> Parameters<Role> {
     where
         V: TryFrom<ParameterValue>,
     {
-        self.try_get(id)
-            .unwrap_or_else(|| panic!("{id:?} has neither a configured value nor a default"))
+        self.try_get(id).unwrap_or_else(|| panic!("{id:?} has neither a configured value nor a default"))
     }
 
     /// Return an optional parameter, still applying its protocol default when one exists.
@@ -272,11 +265,7 @@ impl<Role> Parameters<Role> {
     where
         V: TryFrom<ParameterValue>,
     {
-        self.map
-            .get(&id)
-            .cloned()
-            .or_else(|| id.default_value())
-            .and_then(|value| value.try_into().ok())
+        self.map.get(&id).cloned().or_else(|| id.default_value()).and_then(|value| value.try_into().ok())
     }
 
     pub fn contains(&self, id: ParameterId) -> bool {
@@ -291,10 +280,7 @@ impl<Role> Parameters<Role> {
 impl<R: IntoRole + Default> Parameters<R> {
     /// An empty parameter set whose missing values use protocol defaults.
     pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            _role: PhantomData,
-        }
+        Self { map: HashMap::new(), _role: PhantomData }
     }
 
     pub fn set(&mut self, id: ParameterId, value: impl Into<ParameterValue>) -> Result<(), Error> {
@@ -326,9 +312,7 @@ impl Default for ClientParameters {
             params.set(id, value).expect("unreachable");
         }
 
-        params
-            .set(ParameterId::MaxIdleTimeout, Duration::from_secs(20))
-            .expect("unreachable");
+        params.set(ParameterId::MaxIdleTimeout, Duration::from_secs(20)).expect("unreachable");
 
         params
     }
@@ -349,9 +333,7 @@ impl Default for ServerParameters {
         ] {
             params.set(id, value).expect("unreachable");
         }
-        params
-            .set(ParameterId::MaxIdleTimeout, Duration::from_secs(30))
-            .expect("unreachable");
+        params.set(ParameterId::MaxIdleTimeout, Duration::from_secs(30)).expect("unreachable");
 
         params
     }

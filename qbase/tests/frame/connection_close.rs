@@ -20,11 +20,8 @@ fn test_connection_close_frame() {
 fn test_write_connection_close_frame() {
     use qbase::frame::FrameType;
     let mut buf = Vec::<u8>::new();
-    let frame = ConnectionCloseFrame::new_quic(
-        ErrorKind::FlowControl,
-        FrameType::Stream(Offset::NonZero, Len::Explicit, Fin::No).into(),
-        "wrong",
-    );
+    let frame =
+        ConnectionCloseFrame::new_quic(ErrorKind::FlowControl, FrameType::Stream(Offset::NonZero, Len::Explicit, Fin::No).into(), "wrong");
     buf.put_frame(&frame);
     let mut expected = Vec::new();
     expected.put_frame_type(FrameType::ConnectionClose(Layer::Quic));
@@ -35,13 +32,7 @@ fn test_write_connection_close_frame() {
 #[test]
 fn test_read_connection_close_frame() {
     assert_eq!(
-        super::parse_frame(
-            &[0x1d, 0x0c, 5, b'w', b'r', b'o', b'n', b'g'],
-            FrameType::ConnectionClose(Layer::App)
-        ),
-        qbase::frame::Frame::Close(ConnectionCloseFrame::new_app(
-            VarInt::from_u32(0x0c),
-            "wrong"
-        ))
+        super::parse_frame(&[0x1d, 0x0c, 5, b'w', b'r', b'o', b'n', b'g'], FrameType::ConnectionClose(Layer::App)),
+        qbase::frame::Frame::Close(ConnectionCloseFrame::new_app(VarInt::from_u32(0x0c), "wrong"))
     );
 }

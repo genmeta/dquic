@@ -25,10 +25,7 @@ pub struct StopSendingFrame {
 impl StopSendingFrame {
     /// Create a new [`StopSendingFrame`].
     pub fn new(stream_id: StreamId, app_err_code: VarInt) -> Self {
-        Self {
-            stream_id,
-            app_err_code,
-        }
+        Self { stream_id, app_err_code }
     }
 
     /// Return the stream ID of the frame.
@@ -67,13 +64,7 @@ impl super::EncodeSize for StopSendingFrame {
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
 pub fn be_stop_sending_frame(input: &[u8]) -> nom::IResult<&[u8], StopSendingFrame> {
     use nom::{Parser, combinator::map};
-    map((be_streamid, be_varint), |(stream_id, app_err_code)| {
-        StopSendingFrame {
-            stream_id,
-            app_err_code,
-        }
-    })
-    .parse(input)
+    map((be_streamid, be_varint), |(stream_id, app_err_code)| StopSendingFrame { stream_id, app_err_code }).parse(input)
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {

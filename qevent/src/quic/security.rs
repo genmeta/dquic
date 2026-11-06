@@ -117,9 +117,7 @@ mod rollback {
         fn from(value: KeyDiscardedTrigger) -> Self {
             match value {
                 KeyDiscardedTrigger::Tls => legacy::SecurityKeyRetiredTrigger::Tls,
-                KeyDiscardedTrigger::RemoteUpdate => {
-                    legacy::SecurityKeyRetiredTrigger::RemoteUpdate
-                }
+                KeyDiscardedTrigger::RemoteUpdate => legacy::SecurityKeyRetiredTrigger::RemoteUpdate,
                 KeyDiscardedTrigger::LocalUpdate => legacy::SecurityKeyRetiredTrigger::LocalUpdate,
             }
         }

@@ -107,12 +107,7 @@ where
         ctrl_frames: TX,
         metrics: ArcConnectionMetrics,
     ) -> Self {
-        Self(Arc::new(raw::DataStreams::new(
-            parameters,
-            ctrl,
-            ctrl_frames,
-            metrics,
-        )))
+        Self(Arc::new(raw::DataStreams::new(parameters, ctrl, ctrl_frames, metrics)))
     }
 
     /// Create a bidirectional stream, see the method of the same name on `QuicConnection` for more.
@@ -219,11 +214,7 @@ impl<TX, B: bytes::BufMut + ?Sized> Package<B> for DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    fn poll_dump(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
         self.0.poll_dump(cx, buffer)
     }
 }

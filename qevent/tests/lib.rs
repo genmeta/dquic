@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use qbase::cid::ConnectionId;
 use qevent::{
-    BeEventData, CommonFields, Event, EventData, EventImportance, GroupID, ProtocolType,
-    ProtocolTypeList, ReferenceTime, TimeFormat, build, event, legacy,
+    BeEventData, CommonFields, Event, EventData, EventImportance, GroupID, ProtocolType, ProtocolTypeList, ReferenceTime, TimeFormat,
+    build, event, legacy,
     loglevel::Warning,
     quic::{ConnectionID, connectivity::ConnectionStarted},
     span,
@@ -12,9 +12,7 @@ use qevent::{
 
 #[test]
 fn custom_fields() {
-    let odcid = ConnectionID::from(ConnectionId::from_slice(&[
-        0x61, 0xb6, 0x91, 0x78, 0x80, 0xf7, 0x95, 0xee,
-    ]));
+    let odcid = ConnectionID::from(ConnectionId::from_slice(&[0x61, 0xb6, 0x91, 0x78, 0x80, 0xf7, 0x95, 0xee]));
     let common_fields = build!(CommonFields {
         path: "".to_owned(),
         time_format: TimeFormat::default(),
@@ -34,10 +32,7 @@ fn custom_fields() {
   ],
   "group_id": "61b6917880f795ee"
 }"#;
-    assert_eq!(
-        serde_json::to_string_pretty(&common_fields).unwrap(),
-        expect
-    );
+    assert_eq!(serde_json::to_string_pretty(&common_fields).unwrap(), expect);
     let with_custom_fields = r#"{
   "path": "",
   "time_format": "relative_to_epoch",
@@ -61,13 +56,9 @@ fn custom_fields() {
 #[test]
 fn event_data() {
     let data = EventData::from(build!(Warning {
-        message: "deepseek（已深度思考（用时0秒））：服务器繁忙，请稍后再试。",
-        code: 255u64,
+        message: "deepseek（已深度思考（用时0秒））：服务器繁忙，请稍后再试。", code: 255u64
     }));
-    let event = build!(Event {
-        time: 1.0,
-        data: data.clone(),
-    });
+    let event = build!(Event { time: 1.0, data: data.clone() });
     let expect = r#"{
   "time": 1.0,
   "name": "loglevel:warning",
@@ -83,9 +74,7 @@ fn event_data() {
 #[test]
 fn rollback() {
     fn group_id() -> GroupID {
-        GroupID::from(ConnectionID::from(ConnectionId::from_slice(&[
-            0xfe, 0xdc, 0xba, 0x09, 0x87, 0x65, 0x43, 0x32,
-        ])))
+        GroupID::from(ConnectionID::from(ConnectionId::from_slice(&[0xfe, 0xdc, 0xba, 0x09, 0x87, 0x65, 0x43, 0x32])))
     }
 
     fn protocol_types() -> Vec<String> {
@@ -117,12 +106,7 @@ fn rollback() {
         }
     }
 
-    span!(
-        Arc::new(TestBroker),
-        group_id = group_id(),
-        protocol_types = protocol_types()
-    )
-    .in_scope(|| {
+    span!(Arc::new(TestBroker), group_id = group_id(), protocol_types = protocol_types()).in_scope(|| {
         let src = "127.0.0.1:23456".parse().unwrap();
         let dst = "192.168.31.1:21".parse().unwrap();
         event!(ConnectionStarted { socket: (src, dst) }, to_router = true)
