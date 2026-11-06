@@ -84,7 +84,7 @@ impl GetType for DataPacket {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PacketContent {
     #[default]
     NonAckEliciting,

@@ -19,7 +19,8 @@ use qbase::{
         route::{Link, Pathway},
     },
     packet::{
-        DataHeader, DataPacket, OneRttHeader, Packet, PacketNumber, PacketReader, assemble::Package,
+        DataHeader, DataPacket, OneRttHeader, Packet, PacketContent, PacketNumber, PacketReader,
+        assemble::Package,
     },
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::{Dir, handy::DemandConcurrency},
@@ -382,6 +383,7 @@ fn encode_packet<const N: usize>(
         &mut Context::from_waker(std::task::Waker::noop()),
         &mut std::io::Cursor::new(bytes.as_mut()),
         quota,
+        PacketContent::EffectivePayload,
         frames,
         &mut sources.map(|source| source as &mut dyn Package<&mut [u8]>),
     );
@@ -455,6 +457,7 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
 
     assert!(matches!(packet.assemble(
         &mut Context::from_waker(std::task::Waker::noop()), &mut std::io::Cursor::new(bytes.as_mut()), 1200,
+        PacketContent::EffectivePayload,
         &mut frames, &mut [&mut datagram, &mut PingFrame],
     ), Poll::Ready((n, _)) if n > 0));
     bytes.resize(packet.len(), 0);

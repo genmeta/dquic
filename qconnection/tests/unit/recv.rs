@@ -10,7 +10,7 @@ use qbase::{
         addr::EndpointAddr,
         route::{Link, Pathway},
     },
-    packet::{DataHeader, LongHeaderBuilder, Packet, PacketReader, long},
+    packet::{DataHeader, LongHeaderBuilder, Packet, PacketContent, PacketReader, long},
     role::Role,
 };
 use qrecovery::journal::ArcSentJournal;
@@ -44,7 +44,7 @@ where
         crate::send::Packet::new(qbase::packet::DataHeader::Long(header.into()), pn, keys);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), Poll::Ready((n, _)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut std::io::Cursor::new(buffer.as_mut()), 1200, PacketContent::EffectivePayload, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut [u8]>)), Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
     packet.padding(&mut buffer, 1200 - packet.len());

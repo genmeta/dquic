@@ -95,6 +95,10 @@ impl Heartbeat {
 pub struct ArcHeartbeat(Arc<Mutex<Result<Heartbeat, Cancelled>>>);
 
 impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
+    fn content(&self) -> PacketContent {
+        PacketContent::JustPing
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
@@ -188,6 +192,10 @@ impl ArcHeartbeat {
 }
 
 impl<B: BufMut + ?Sized> Package<B> for ArcHeartbeat {
+    fn content(&self) -> PacketContent {
+        PacketContent::JustPing
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,

@@ -9,7 +9,7 @@ use qbase::{
     error::Error,
     frame::{AckFrame, Ecn, FrameType},
     net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::{InvalidPacketNumber, Package, PacketBuffer, PacketNumber},
+    packet::{InvalidPacketNumber, Package, PacketBuffer, PacketContent, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
 use tokio::time::{Duration, Instant};
@@ -279,6 +279,10 @@ pub struct AckPackege<'r> {
 }
 
 impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
+    fn content(&self) -> PacketContent {
+        PacketContent::NonAckEliciting
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,
@@ -322,6 +326,10 @@ impl UnregisterWaker for AckPackege<'_> {
     }
 }
 impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
+    fn content(&self) -> PacketContent {
+        PacketContent::NonAckEliciting
+    }
+
     fn poll_dump(
         &mut self,
         cx: &mut Context<'_>,

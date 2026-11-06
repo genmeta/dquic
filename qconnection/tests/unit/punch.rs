@@ -14,7 +14,7 @@ use qbase::{
         addr::EndpointAddr,
         route::{Line, Link, Pathway},
     },
-    packet::{DataHeader, OneRttHeader, Packet, PacketNumber, PacketReader},
+    packet::{DataHeader, OneRttHeader, Packet, PacketContent, PacketNumber, PacketReader},
     role::Role,
     time::heartbeat::ArcHeartbeat,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
@@ -95,7 +95,7 @@ fn encode_frames<const N: usize>(
     assert!(matches!(
         sending.assemble(
             &mut std::task::Context::from_waker(std::task::Waker::noop()),
-            &mut std::io::Cursor::new(bytes.as_mut()), 1200, &mut recorded,
+            &mut std::io::Cursor::new(bytes.as_mut()), 1200, PacketContent::EffectivePayload, &mut recorded,
             &mut frames.map(|frame| frame as &mut dyn qbase::packet::Package<&mut [u8]>),
         ),
         std::task::Poll::Ready((n, _)) if n > 0

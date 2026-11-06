@@ -13,7 +13,7 @@ use qbase::{
     frame::{AckFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
-    packet::{DataHeader, OneRttHeader, PacketNumber, assemble::Package},
+    packet::{DataHeader, OneRttHeader, PacketContent, PacketNumber, assemble::Package},
 };
 use qcongestion::{ArcCC, Transport as _};
 use qevent::quic::recovery::PacketLostTrigger;
@@ -183,6 +183,7 @@ impl Encapsulate for DataSpace {
         cc: &ArcCC,
         dcid: ConnectionId,
         datagram: &mut Cursor<&mut [u8]>,
+        packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
@@ -211,7 +212,7 @@ impl Encapsulate for DataSpace {
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);
-        let result = packet.assemble(cx, datagram, quota, frames, &mut sources);
+        let result = packet.assemble(cx, datagram, quota, packet_content, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((mut size, min_size)) if size > 0 => {

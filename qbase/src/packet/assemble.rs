@@ -9,7 +9,7 @@ use crate::{
         ContainSpec, EncodeSize, Frame, FrameFeature, FrameType, GetFrameType, Len, Spec,
         io::WriteFrame, *,
     },
-    packet::Type,
+    packet::{PacketContent, Type},
 };
 
 /// Packet metadata collected during assembly and finalized after sealing.
@@ -74,6 +74,11 @@ pub struct PacketBuffer<'a, B: ?Sized> {
 }
 
 pub trait Package<B: BufMut + ?Sized> {
+    /// Content class of this source, used to filter it before polling.
+    fn content(&self) -> PacketContent {
+        PacketContent::EffectivePayload
+    }
+
     fn belongs_to(&self, _packet_type: Type) -> bool {
         true
     }
@@ -95,9 +100,11 @@ pub trait Package<B: BufMut + ?Sized> {
 
 pub trait Assemble {
     type Buffer: BufMut + ?Sized;
+    /// Poll sources up to `packet_content`; metadata records only the frames actually written.
     fn assemble(
         &mut self,
         cx: &mut Context<'_>,
+        packet_content: PacketContent,
         sources: &mut [&mut dyn Package<Self::Buffer>],
     ) -> Poll<Result<usize, Error>>;
 }
@@ -108,24 +115,22 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
     fn assemble(
         &mut self,
         cx: &mut Context<'_>,
+        packet_content: PacketContent,
         sources: &mut [&mut dyn Package<B>],
     ) -> Poll<Result<usize, Error>> {
         if self.finished {
             return Poll::Ready(Ok(0));
         }
         let packet_type = self.meta.pktype;
-        // Keep applicable sources first, preserving input order at equal priority.
-        sources.sort_by_key(|source| {
-            if source.belongs_to(packet_type) {
-                (false, std::cmp::Reverse(source.priority()))
-            } else {
-                (true, std::cmp::Reverse(0))
-            }
-        });
+        // Preserve input order at equal priority.
+        sources.sort_by_key(|source| std::cmp::Reverse(source.priority()));
         let start = self.meta.nframes;
         let mut result = Poll::Pending;
-        for source in sources {
-            if self.finished || !source.belongs_to(packet_type) {
+        for source in sources
+            .iter_mut()
+            .filter(|source| source.belongs_to(packet_type) && source.content() <= packet_content)
+        {
+            if self.finished {
                 break;
             }
             if let Poll::Ready(value) = source.poll_dump(cx, self) {
@@ -305,6 +310,10 @@ unsafe impl<B: BufMut + ?Sized> BufMut for PacketBuffer<'_, B> {
 /// TODO: trait From<&[Frame]>
 /// Submission properties are derived from exactly the frames written in this packet.
 impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
+    fn content(&self) -> PacketContent {
+        (**self).content()
+    }
+
     fn belongs_to(&self, packet_type: Type) -> bool {
         (**self).belongs_to(packet_type)
     }
@@ -323,6 +332,11 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
 }
 
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
+    fn content(&self) -> PacketContent {
+        self.as_ref()
+            .map_or(PacketContent::default(), Package::content)
+    }
+
     fn belongs_to(&self, packet_type: Type) -> bool {
         self.as_ref()
             .is_some_and(|source| source.belongs_to(packet_type))
@@ -350,6 +364,10 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
 
 /// Restrict a source to one packet-number space without duplicating its state.
 impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for (crate::Epoch, P) {
+    fn content(&self) -> PacketContent {
+        self.1.content()
+    }
+
     fn belongs_to(&self, packet_type: Type) -> bool {
         use super::r#type::long::{Type as Long, Ver1};
         let epoch = match packet_type {
@@ -377,6 +395,9 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for (crate::Epoch, P) {
 macro_rules! frame_packages {
     ($($ty:ty),* $(,)?) => {$ (
         impl<B: BufMut + ?Sized> Package<B> for $ty {
+            fn content(&self) -> PacketContent {
+                self.frame_type().into()
+            }
             fn belongs_to(&self, packet_type: Type) -> bool {
                 self.frame_type().belongs_to(packet_type)
             }

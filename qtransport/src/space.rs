@@ -15,16 +15,15 @@ use qbase::{
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
-        GetType, HeaderSize, PacketNumber, Type,
+        GetType, HeaderSize, PacketContent, PacketNumber, Type,
         assemble::{Metadata, Package},
     },
-    time::heartbeat::ArcHeartbeat,
 };
 use qcongestion::{ArcCC, Transport as _};
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
-    journal::{AckPackege, ArcRcvdJournal, ArcSentJournal},
+    journal::{ArcRcvdJournal, ArcSentJournal},
 };
 use smallvec::SmallVec;
 use tokio::time::Instant;
@@ -81,7 +80,7 @@ impl<K> Space<K> {
     pub fn next_pn(&self) -> (u64, PacketNumber) {
         self.sent_journal
             .next_pn()
-            .expect("不可能达到上限，忽略这种错误就行了")
+            .expect("packet number space is impossible to be exhausted")
     }
 
     /// Start recovery timers after successful submission, under the path's CC lock.
@@ -306,6 +305,7 @@ pub trait Encapsulate: Transmit {
         cc: &ArcCC,
         dcid: ConnectionId,
         datagram: &mut Cursor<&mut [u8]>,
+        packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
@@ -333,52 +333,11 @@ pub trait Encapsulate: Transmit {
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .collect();
         sources.push(&mut crypto);
-        let result = packet.assemble(cx, datagram, quota, frames, &mut sources);
+        let result = packet.assemble(cx, datagram, quota, packet_content, frames, &mut sources);
         drop(sources);
         match result {
             Poll::Ready((size, _)) if size > 0 => {
                 datagram.set_position((offset + size) as u64);
-                Poll::Ready((Some(packet), size))
-            }
-            result => {
-                self.cancel(packet.pn.0, &mut frames.drain(start..));
-                result.map(|_| (None, 0))
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn poll_ping(
-        &self,
-        cx: &mut Context<'_>,
-        dcid: ConnectionId,
-        cc: &ArcCC,
-        bytes: &mut Cursor<&mut [u8]>,
-        frames: &mut Vec<GuaranteedFrame>,
-        heartbeat: &mut ArcHeartbeat,
-        ack: &mut Option<AckPackege<'_>>,
-    ) -> Poll<(Option<Packet>, usize)> {
-        if !self.sent_journal().has_capacity() {
-            return Poll::Ready((None, 0));
-        }
-        let quota = cc
-            .send_quota()
-            .max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
-                1200
-            } else {
-                0
-            });
-        if self.epoch() == Epoch::Initial && (bytes.get_ref().len() < 1200 || quota < 1200) {
-            return Poll::Ready((None, 0));
-        }
-        let Some(mut packet) = self.packet(dcid) else {
-            return Poll::Ready((None, 0));
-        };
-        let start = frames.len();
-        let offset = bytes.position() as usize;
-        match packet.assemble(cx, bytes, quota, frames, &mut [ack, heartbeat]) {
-            Poll::Ready((size, _)) if size > 0 => {
-                bytes.set_position((offset + size) as u64);
                 Poll::Ready((Some(packet), size))
             }
             result => {

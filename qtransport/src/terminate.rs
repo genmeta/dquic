@@ -13,7 +13,7 @@ use qbase::{
     frame::ConnectionCloseFrame,
     net::tx::ArcSendWakers,
     packet::{
-        Package, PacketBuffer, Type,
+        Package, PacketBuffer, PacketContent, Type,
         r#type::long::{Type::V1, Ver1},
     },
     util::Wakers,
@@ -356,6 +356,10 @@ impl Future for ArcTerminator {
 }
 
 impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
+    fn content(&self) -> PacketContent {
+        PacketContent::NonAckEliciting
+    }
+
     fn priority(&self) -> u32 {
         u32::MAX
     }
