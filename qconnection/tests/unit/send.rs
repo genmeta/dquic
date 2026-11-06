@@ -534,7 +534,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
 }
 
 #[tokio::test]
-async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() {
+async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_data() {
     for epoch in [Epoch::Initial, Epoch::Handshake] {
         let paths = crate::common::initial_paths(
             Role::Server,
@@ -633,10 +633,10 @@ async fn closing_is_collected_before_failed_crypto_and_draining_returns_error() 
         let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
         assert!(collector.poll_collect(&mut cx).is_pending());
         terminator.terminate();
-        assert!(matches!(
-            collector.poll_collect(&mut cx),
-            Poll::Ready(Err(_))
-        ));
+        assert!(collector.poll_collect(&mut cx).is_pending());
+        assert!(collector.packets.iter().all(|packets| packets.is_empty()));
+        drop(collector);
+        assert!(frames.is_empty());
     }
 }
 
@@ -1823,7 +1823,7 @@ async fn burst_uses_its_budget_across_multiple_udp_batches() {
     let mut packets = std::array::from_fn(|_| Default::default());
     let mut burst = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut packets);
     burst.batch().await.unwrap();
-    let (next, _) = space.next_pn().unwrap();
+    let (next, _) = space.next_pn();
     let journal = space.sent_journal.lock_guard();
     let sent = (0..next).filter(|&pn| journal.packet(pn).is_some()).count();
     assert!(

@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    io::Cursor,
     sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -58,7 +59,7 @@ fn packet_continues_after_pending_and_no_space_sources() {
     let mut ping = PingFrame;
     assert!(matches!(
         packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut bytes[..], &mut limits, &mut frames, &mut [&mut absent, &mut large, &mut ping]),
-        Poll::Ready(Ok(n)) if n > 0
+        Poll::Ready((n, _)) if n > 0
     ));
     assert_eq!(packet.meta.content, qbase::packet::PacketContent::JustPing);
     assert!(frames.is_empty());
@@ -84,7 +85,7 @@ fn repeated_assembly_does_not_append_after_close() {
     let mut close = qbase::frame::ConnectionCloseFrame::new_app(0u32.into(), "closed");
     let mut cx = Context::from_waker(Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut bytes, &mut limits, &mut frames, &mut [&mut close]), Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut &mut bytes, &mut limits, &mut frames, &mut [&mut close]), Poll::Ready((n, _)) if n > 0)
     );
     let size = bytes.len();
     assert_eq!(
@@ -95,7 +96,7 @@ fn repeated_assembly_does_not_append_after_close() {
             &mut frames,
             &mut [&mut PingFrame]
         ),
-        Poll::Ready(Ok(0))
+        Poll::Ready((0, 0))
     );
     assert_eq!(bytes.len(), size);
     assert_eq!(packet.meta.nframes, 1);
@@ -136,16 +137,15 @@ async fn mixed_packets_consume_shared_budget_once() {
     let mut bytes = [0; 1200];
     let mut frames = Vec::new();
     let mut cx = Context::from_waker(Waker::noop());
-    let (size, pns) = spaces
-        .poll_dump(
-            &mut cx,
-            Default::default(),
-            &mut bytes,
-            &mut limits,
-            &mut frames,
-            &mut [],
-        )
-        .unwrap();
+    let (size, pns) = spaces.poll_dump(
+        &mut cx,
+        Default::default(),
+        &common::send_cc(),
+        &mut Cursor::new(&mut bytes[..]),
+        &mut limits,
+        &mut frames,
+        &mut [],
+    );
     assert_eq!(size, 1200);
     assert_eq!((limits.send_quota, limits.credit), (1200, 1200));
     let a = initial.sent_journal.lock_guard();
@@ -244,14 +244,14 @@ fn probe_uses_credit_without_replenishing_congestion_budget() {
             &mut [&mut PingFrame],
         );
         if pn == 0 {
-            assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
+            assert!(matches!(result, Poll::Ready((n, _)) if n > 0));
             bytes.resize(1160, 0);
-            packet.padding(&mut bytes, 1160 - packet.len()).unwrap();
-            packet.seal(&mut bytes).unwrap();
+            packet.padding(&mut bytes, 1160 - packet.len());
+            packet.seal(&mut bytes);
             limits.take(packet.len(), packet.len());
             assert_eq!(bytes.len(), 1160);
         } else {
-            assert!(matches!(result, Poll::Ready(Ok(0))));
+            assert!(matches!(result, Poll::Ready((0, 0))));
         }
         assert_eq!(limits.credit, 1200);
         assert_eq!(limits.send_quota, 0);
@@ -283,11 +283,11 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     );
     let mut bytes = Vec::new();
     assert!(
-        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut bytes, &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut bytes, &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
     );
     bytes.resize(1200, 0);
-    packet.padding(&mut bytes, 1200 - packet.len()).unwrap();
-    packet.seal(&mut bytes).unwrap();
+    packet.padding(&mut bytes, 1200 - packet.len());
+    packet.seal(&mut bytes);
     limits.take(packet.len(), packet.len());
     assert_eq!(packet.meta.pn, 7);
     assert_eq!(packet.meta.pktlen, 1200);
@@ -328,7 +328,7 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
         ..Default::default()
     };
     assert!(
-        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut io[..], &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut Context::from_waker(Waker::noop()), &mut &mut io[..], &mut limits, &mut frames, &mut [&mut PingFrame]), Poll::Ready((n, _)) if n > 0)
     );
     assert_eq!(&io[pn_offset..pn_offset + 2], &[0, 7]);
     assert_eq!(io[pn_offset + 2], 1);
@@ -407,16 +407,17 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             ..Default::default()
         };
         let mut frames = Vec::new();
-        let (size, pns) = spaces
-            .poll_dump(
-                &mut Context::from_waker(Waker::noop()),
-                sender.peer_cid(),
-                &mut bytes[..1200],
-                &mut limits,
-                &mut frames,
-                &mut external,
-            )
-            .unwrap();
+        let mut datagram = Cursor::new(&mut bytes[..1200]);
+        let (size, pns) = spaces.poll_dump(
+            &mut Context::from_waker(Waker::noop()),
+            sender.peer_cid(),
+            &common::send_cc(),
+            &mut datagram,
+            &mut limits,
+            &mut frames,
+            &mut external,
+        );
+        assert_eq!(datagram.position() as usize, size);
         assert_eq!(size, expected.iter().sum::<usize>());
         assert_eq!(
             pns.iter().map(|meta| meta.epoch()).collect::<Vec<_>>(),
@@ -551,16 +552,17 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
             ..Default::default()
         };
         let mut frames = Vec::new();
-        let (size, pns) = spaces
-            .poll_dump(
-                &mut Context::from_waker(Waker::noop()),
-                sender.peer_cid(),
-                &mut bytes[..capacity],
-                &mut limits,
-                &mut frames,
-                &mut external,
-            )
-            .unwrap();
+        let mut datagram = Cursor::new(&mut bytes[..capacity]);
+        let (size, pns) = spaces.poll_dump(
+            &mut Context::from_waker(Waker::noop()),
+            sender.peer_cid(),
+            &common::send_cc(),
+            &mut datagram,
+            &mut limits,
+            &mut frames,
+            &mut external,
+        );
+        assert_eq!(datagram.position() as usize, size);
         assert!(packet_metadata(&pns, Epoch::Initial).is_none());
         assert!(packet_metadata(&pns, Epoch::Handshake).is_some());
         assert_eq!(
@@ -575,26 +577,25 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         spaces.0.pop_front();
         assert_eq!(spaces.0.offset(), 2);
         let mut ping = Some(PingFrame);
-        let (size, _) = spaces
-            .poll_dump(
-                &mut Context::from_waker(Waker::noop()),
-                sender.peer_cid(),
-                &mut bytes[..1200],
-                &mut Constraints {
-                    send_quota: 1200,
-                    credit: 1200,
-                    ..Default::default()
-                },
-                &mut frames,
-                &mut [&mut (Epoch::Data, &mut ping)],
-            )
-            .unwrap();
+        let (size, _) = spaces.poll_dump(
+            &mut Context::from_waker(Waker::noop()),
+            sender.peer_cid(),
+            &common::send_cc(),
+            &mut Cursor::new(&mut bytes[..1200]),
+            &mut Constraints {
+                send_quota: 1200,
+                credit: 1200,
+                ..Default::default()
+            },
+            &mut frames,
+            &mut [&mut (Epoch::Data, &mut ping)],
+        );
         assert!(size > 0 && size < 1200);
     }
 }
 
 #[test]
-fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
+fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     use qbase::packet::{GetDcid, GetScid, GetType, Package};
     use qtransport::space::{InitialSpace, Spaces, assemble::Constraints};
     let scid = ConnectionId::from_slice(b"local000");
@@ -619,20 +620,19 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
     for cid in [b"remote00", b"remote01"] {
         let dcid = ConnectionId::from_slice(cid);
         let mut ping = Some(PingFrame);
-        let (_, pns) = spaces
-            .poll_dump(
-                &mut cx,
-                dcid,
-                &mut bytes,
-                &mut Constraints {
-                    send_quota: 1200,
-                    credit: 1200,
-                    ..Default::default()
-                },
-                &mut frames,
-                &mut [&mut (Epoch::Initial, &mut ping)],
-            )
-            .unwrap();
+        let (_, pns) = spaces.poll_dump(
+            &mut cx,
+            dcid,
+            &common::send_cc(),
+            &mut Cursor::new(&mut bytes[..]),
+            &mut Constraints {
+                send_quota: 1200,
+                credit: 1200,
+                ..Default::default()
+            },
+            &mut frames,
+            &mut [&mut (Epoch::Initial, &mut ping)],
+        );
         let ParsedPacket::Data(packet) = PacketReader::new(BytesMut::from(bytes.as_slice()), 8)
             .next()
             .unwrap()
@@ -678,6 +678,14 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         .now_or_never()
         .unwrap()
         .unwrap();
+    handshake
+        .crypto
+        .writer()
+        .write_all(b"later")
+        .now_or_never()
+        .unwrap()
+        .unwrap();
+    let mut crypto = handshake.crypto.outgoing();
     let mut ping = Some(PingFrame);
     let mut limits = Constraints {
         send_quota: 1232,
@@ -685,31 +693,38 @@ fn recursive_packing_retains_initial_token_and_cancels_ancestors_on_error() {
         credit: 1232,
         ..Default::default()
     };
-    let result = spaces.poll_dump(
+    let (size, pns) = spaces.poll_dump(
         &mut cx,
         Default::default(),
-        &mut bytes,
+        &common::send_cc(),
+        &mut Cursor::new(&mut bytes[..]),
         &mut limits,
         &mut frames,
         &mut [
             &mut (Epoch::Initial, &mut ping),
+            &mut (Epoch::Handshake, &mut crypto),
             &mut (Epoch::Handshake, Failed),
         ],
     );
-    assert!(result.is_err());
+    assert_eq!(size, 1200);
+    assert!(packet_metadata(&pns, Epoch::Handshake).is_none());
     assert!(frames.is_empty());
-    assert_eq!((limits.send_quota, limits.credit), (1232, 1232));
-    let (_, pns) = spaces
-        .poll_dump(
-            &mut cx,
-            Default::default(),
-            &mut bytes,
-            &mut limits,
-            &mut frames,
-            &mut [],
-        )
-        .unwrap();
+    assert_eq!((limits.send_quota, limits.credit), (0, 0));
     assert!(initial.sent_journal.lock_guard().frames(packet_metadata(&pns, Epoch::Initial).unwrap().pn)
+        .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5)));
+    limits.credit = 1232;
+    limits.send_quota = 1232;
+    let (_, pns) = spaces.poll_dump(
+        &mut cx,
+        Default::default(),
+        &common::send_cc(),
+        &mut Cursor::new(&mut bytes[..]),
+        &mut limits,
+        &mut frames,
+        &mut [],
+    );
+    assert!(packet_metadata(&pns, Epoch::Initial).is_none());
+    assert!(handshake.sent_journal.lock_guard().frames(packet_metadata(&pns, Epoch::Handshake).unwrap().pn)
         .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5)));
 }
 
@@ -748,16 +763,15 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         let mut bytes = [0; 1200];
         let mut frames = Vec::new();
         let mut cx = Context::from_waker(Waker::noop());
-        let (size, pns) = spaces
-            .poll_dump(
-                &mut cx,
-                Default::default(),
-                &mut bytes,
-                &mut limits,
-                &mut frames,
-                &mut sources,
-            )
-            .unwrap();
+        let (size, pns) = spaces.poll_dump(
+            &mut cx,
+            Default::default(),
+            &common::send_cc(),
+            &mut Cursor::new(&mut bytes[..]),
+            &mut limits,
+            &mut frames,
+            &mut sources,
+        );
         assert!(size > 0);
         assert_eq!(pns.len(), 1);
         assert_eq!(pns[0].epoch(), Epoch::Handshake);
@@ -765,16 +779,15 @@ fn datagram_overhead_is_charged_once_and_empty_attempts_preserve_budgets() {
         assert_eq!(limits.send_quota, 2400 - if flight { size + 32 } else { 0 });
         assert_eq!(limits.probe_quota, [1200, 0, 1200]);
         let before = limits.clone();
-        let (size, pns) = spaces
-            .poll_dump(
-                &mut cx,
-                Default::default(),
-                &mut bytes,
-                &mut limits,
-                &mut frames,
-                &mut sources,
-            )
-            .unwrap();
+        let (size, pns) = spaces.poll_dump(
+            &mut cx,
+            Default::default(),
+            &common::send_cc(),
+            &mut Cursor::new(&mut bytes[..]),
+            &mut limits,
+            &mut frames,
+            &mut sources,
+        );
         assert_eq!(size, 0);
         assert!(pns.is_empty());
         assert_eq!(limits.credit, before.credit);
@@ -809,16 +822,15 @@ async fn datagram_windows_bound_payload_and_keep_ack_and_probe_progress() {
         credit: 2400,
         ..Default::default()
     };
-    let (size, packets) = spaces
-        .poll_dump(
-            &mut cx,
-            sender.peer_cid(),
-            &mut bytes,
-            &mut limits,
-            &mut frames,
-            &mut [],
-        )
-        .unwrap();
+    let (size, packets) = spaces.poll_dump(
+        &mut cx,
+        sender.peer_cid(),
+        &common::send_cc(),
+        &mut Cursor::new(&mut bytes[..]),
+        &mut limits,
+        &mut frames,
+        &mut [],
+    );
     assert_eq!(size, 278);
     assert_eq!(&bytes[278..], &[0xa5; 922]);
     assert_eq!(limits.send_quota, 0);
@@ -838,16 +850,15 @@ async fn datagram_windows_bound_payload_and_keep_ack_and_probe_progress() {
             credit: 2400,
             ..Default::default()
         };
-        let (size, packets) = spaces
-            .poll_dump(
-                &mut cx,
-                sender.peer_cid(),
-                &mut bytes,
-                &mut limits,
-                &mut frames,
-                &mut [&mut ack],
-            )
-            .unwrap();
+        let (size, packets) = spaces.poll_dump(
+            &mut cx,
+            sender.peer_cid(),
+            &common::send_cc(),
+            &mut Cursor::new(&mut bytes[..]),
+            &mut limits,
+            &mut frames,
+            &mut [&mut ack],
+        );
         assert!(size > 0);
         assert_eq!(packets[0].ack, Some(0));
         assert!(!packets[0].in_flight);
@@ -861,16 +872,15 @@ async fn datagram_windows_bound_payload_and_keep_ack_and_probe_progress() {
         probe_quota: [0, 0, 1200],
         ..Default::default()
     };
-    let (size, packets) = spaces
-        .poll_dump(
-            &mut cx,
-            sender.peer_cid(),
-            &mut bytes,
-            &mut limits,
-            &mut frames,
-            &mut [],
-        )
-        .unwrap();
+    let (size, packets) = spaces.poll_dump(
+        &mut cx,
+        sender.peer_cid(),
+        &common::send_cc(),
+        &mut Cursor::new(&mut bytes[..]),
+        &mut limits,
+        &mut frames,
+        &mut [],
+    );
     assert!(size > 1 && size <= 1200);
     assert!(packets[0].in_flight);
     assert_eq!(limits.probe_quota[Epoch::Data], 0);
@@ -1161,5 +1171,48 @@ async fn collected_burst_cancels_on_deactivation_and_completes_when_cid_source_c
         common::wait_for_sender_exit(&first).await;
         common::wait_for_sender_exit(&second).await;
         QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn data_space_uses_cursor_to_pad_validation_without_touching_the_prefix() {
+    use qbase::frame::PathChallengeFrame;
+    use qtransport::space::{Encapsulate, Recover, assemble::Constraints};
+
+    for probe in [false, true] {
+        let [sender, _] = common::spaces::pair();
+        let data = &sender.spaces.data;
+        let mut bytes = [0xa5; 1216];
+        let mut datagram = Cursor::new(&mut bytes[..1200]);
+        datagram.set_position(300);
+        let mut frames = Vec::new();
+        let mut challenge = probe.then_some(PathChallengeFrame::random());
+        let mut ping = Some(PingFrame);
+        let Poll::Ready((Some(packet), size)) = data.poll_dump(
+            &mut Context::from_waker(Waker::noop()),
+            sender.peer_cid(),
+            &common::send_cc(),
+            &mut datagram,
+            &Constraints {
+                send_quota: 1200,
+                credit: 1200,
+                ..Default::default()
+            },
+            &mut frames,
+            &mut [&mut challenge, &mut ping],
+        ) else {
+            panic!("queued frames must produce a packet");
+        };
+        assert_eq!(datagram.position() as usize, 300 + size);
+        assert_eq!(packet.len(), size);
+        if probe {
+            assert_eq!(size, 900);
+        } else {
+            assert!(size < 900);
+        }
+        assert!(challenge.is_none());
+        assert_eq!(&bytes[..300], &[0xa5; 300]);
+        assert_eq!(&bytes[1200..], &[0xa5; 16]);
+        Recover::cancel(data.as_ref(), packet.pn.0, &mut frames.drain(..));
     }
 }

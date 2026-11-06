@@ -61,11 +61,12 @@ impl Sender {
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
             ConnectionId::from_slice(b"original"),
-            &mut self.bytes,
+            &self.path.cc,
+            &mut std::io::Cursor::new(self.bytes.as_mut()),
             &mut limits,
             &mut Vec::new(),
             &mut [&mut ack, &mut validation, &mut ping],
-        )?;
+        );
         self.bytes.truncate(size);
         self.pending = packets.into_iter().next();
         if size > 0 {

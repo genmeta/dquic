@@ -16,10 +16,11 @@ use qbase::{
     net::tx::UnregisterWaker,
     packet::{
         GetType, HeaderSize, PacketNumber, Type,
-        assemble::{Constraints, Metadata, Package},
+        assemble::{Metadata, Package},
     },
     time::heartbeat::ArcHeartbeat,
 };
+use qcongestion::ArcCC;
 use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
@@ -31,6 +32,7 @@ use tokio::time::Instant;
 use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 pub mod assemble;
+mod budget;
 pub mod data;
 pub mod handshake;
 pub mod initial;
@@ -77,8 +79,10 @@ impl<K> Space<K> {
     }
 
     /// Reserve a packet number before assembly.
-    pub fn next_pn(&self) -> Result<(u64, PacketNumber), Error> {
-        self.sent_journal.next_pn()
+    pub fn next_pn(&self) -> (u64, PacketNumber) {
+        self.sent_journal
+            .next_pn()
+            .expect("不可能达到上限，忽略这种错误就行了")
     }
 
     /// Start recovery timers after successful submission, under the path's CC lock.
@@ -143,11 +147,9 @@ impl<K: Clone + Send> qcongestion::Resend for Space<ArcKeys<K>> {
 }
 
 impl Allocate for Space<ArcKeys> {
-    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
-        let Ok(keys) = self.keys.get() else {
-            return Ok(None);
-        };
-        Ok(Some((self.next_pn()?, Keys::Long(keys))))
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
+        let keys = self.keys.get().ok()?;
+        Some((self.next_pn(), Keys::Long(keys)))
     }
 }
 
@@ -201,14 +203,14 @@ pub trait Recover {
 pub trait Allocate {
     /// Returns `None` when the space's keys have been retired.
     #[allow(clippy::type_complexity)]
-    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error>;
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)>;
 }
 
 impl<T: Deref> Allocate for T
 where
     T::Target: Allocate,
 {
-    fn pn_and_keys(&self) -> Result<Option<((u64, PacketNumber), Keys)>, Error> {
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
         self.deref().pn_and_keys()
     }
 }
@@ -296,72 +298,85 @@ where
 pub trait Encapsulate: Transmit {
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize>;
 
-    fn packet(&self, dcid: ConnectionId) -> Result<Option<Packet>, Error>;
+    fn packet(&self, dcid: ConnectionId) -> Option<Packet>;
 
+    #[allow(clippy::too_many_arguments)]
     fn poll_dump(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        limits: &Constraints,
+        cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
+        limits: &assemble::Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
+    ) -> Poll<(Option<Packet>, usize)> {
         if !self.sent_journal().has_capacity() {
-            return Poll::Ready(Ok((None, 0)));
+            return Poll::Ready((None, 0));
         }
-        let Some(mut packet) = self.packet(dcid)? else {
-            return Poll::Ready(Ok((None, 0)));
+        let Some(mut packet) = self.packet(dcid) else {
+            return Poll::Ready((None, 0));
         };
         let start = frames.len();
+        let offset = bytes.position() as usize;
+        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
         let mut crypto = self.crypto().outgoing();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> = external
             .iter_mut()
             .map(|source| &mut **source as &mut dyn Package<&mut [u8]>)
             .collect();
         sources.push(&mut crypto);
-        let offset = bytes.position() as usize;
-        let mut limits = limits.clone();
-        limits.max_size = limits.max_size.saturating_sub(offset);
         let mut writer = &mut bytes.get_mut()[offset..];
-        match packet.assemble(cx, &mut writer, &mut limits, frames, &mut sources) {
-            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+        let result = packet.assemble(cx, &mut writer, &mut packet_limits, frames, &mut sources);
+        drop(sources);
+        match result {
+            Poll::Ready((size, _)) if size > 0 => {
+                bytes.set_position((offset + size) as u64);
+                Poll::Ready((Some(packet), size))
+            }
             result => {
                 self.cancel(packet.pn.0, &mut frames.drain(start..));
-                result.map(|result| result.map(|_| (None, 0)))
+                result.map(|_| (None, 0))
             }
         }
     }
 
-    /// Assemble only the space ACK and the path heartbeat.
     #[allow(clippy::too_many_arguments)]
     fn poll_ping(
         &self,
         cx: &mut Context<'_>,
         dcid: ConnectionId,
-        limits: &Constraints,
+        cc: &ArcCC,
         bytes: &mut Cursor<&mut [u8]>,
+        limits: &assemble::Constraints,
+        frames: &mut Vec<GuaranteedFrame>,
         heartbeat: &mut ArcHeartbeat,
         ack: &mut Option<AckPackege<'_>>,
-        frames: &mut Vec<GuaranteedFrame>,
-    ) -> Poll<Result<(Option<Packet>, usize), Error>> {
+    ) -> Poll<(Option<Packet>, usize)> {
         if !self.sent_journal().has_capacity() {
-            return Poll::Ready(Ok((None, 0)));
+            return Poll::Ready((None, 0));
         }
-        let Some(mut packet) = self.packet(dcid)? else {
-            return Poll::Ready(Ok((None, 0)));
+        let Some(mut packet) = self.packet(dcid) else {
+            return Poll::Ready((None, 0));
         };
         let start = frames.len();
-        let mut sources: [&mut dyn Package<&mut [u8]>; 2] = [ack, heartbeat];
         let offset = bytes.position() as usize;
-        let mut limits = limits.clone();
-        limits.max_size = limits.max_size.saturating_sub(offset);
+        let mut packet_limits = limits.packet(self.epoch(), cc, bytes);
         let mut writer = &mut bytes.get_mut()[offset..];
-        match packet.assemble(cx, &mut writer, &mut limits, frames, &mut sources) {
-            Poll::Ready(Ok(size)) if size > 0 => Poll::Ready(Ok((Some(packet), size))),
+        match packet.assemble(
+            cx,
+            &mut writer,
+            &mut packet_limits,
+            frames,
+            &mut [ack, heartbeat],
+        ) {
+            Poll::Ready((size, _)) if size > 0 => {
+                bytes.set_position((offset + size) as u64);
+                Poll::Ready((Some(packet), size))
+            }
             result => {
                 self.cancel(packet.pn.0, &mut frames.drain(start..));
-                result.map(|result| result.map(|_| (None, 0)))
+                result.map(|_| (None, 0))
             }
         }
     }
@@ -371,15 +386,4 @@ fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usiz
     let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
     // A PING occupies one byte. Header protection also needs a full sample.
     (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
-}
-
-fn packet_error(error: crate::keys::PacketError) -> Error {
-    match error {
-        crate::keys::PacketError::Connection(error) => error,
-        error => qbase::error::QuicError::with_default_fty(
-            qbase::error::ErrorKind::Internal,
-            error.to_string(),
-        )
-        .into(),
-    }
 }

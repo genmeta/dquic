@@ -2,7 +2,7 @@ pub use qtransport::packet::encrypt as packet;
 pub(crate) mod task;
 use std::{
     future::poll_fn,
-    io::IoSlice,
+    io::{Cursor, IoSlice},
     sync::Arc,
     task::{Context, Poll, ready},
 };
@@ -234,9 +234,7 @@ impl Burst<'_, '_> {
             }),
             overhead,
         };
-        let result = self.collect_spaces(cx, cid, &mut limits);
-        // On assembly errors a prefix can already be sealed; cancel() returns it.
-        result
+        self.collect_spaces(cx, cid, &mut limits).map(Ok)
     }
 
     fn collect_spaces(
@@ -244,7 +242,7 @@ impl Burst<'_, '_> {
         cx: &mut Context<'_>,
         dcid: ConnectionId,
         limits: &mut Constraints,
-    ) -> Poll<Result<usize, Error>> {
+    ) -> Poll<usize> {
         let path = self.path;
         let spaces = self.spaces.as_ref().unwrap();
         let mut acks = Epoch::EPOCHS.map(|epoch| {
@@ -279,17 +277,26 @@ impl Burst<'_, '_> {
                     p1,
                     p2,
                 ];
-                spaces.poll_dump(cx, dcid, buffer, limits, self.frames, &mut sources)?
+                spaces.poll_dump(
+                    cx,
+                    dcid,
+                    &path.cc,
+                    &mut Cursor::new(buffer.as_mut()),
+                    limits,
+                    self.frames,
+                    &mut sources,
+                )
             } else {
                 spaces.poll_ping(
                     cx,
                     dcid,
-                    buffer,
+                    &path.cc,
+                    &mut Cursor::new(buffer.as_mut()),
                     limits,
                     self.frames,
                     &mut heartbeat,
                     &mut acks,
-                )?
+                )
             };
             *packets = collected;
             buffer.truncate(size);
@@ -301,7 +308,7 @@ impl Burst<'_, '_> {
         if count == 0 {
             Poll::Pending
         } else {
-            Poll::Ready(Ok(count))
+            Poll::Ready(count)
         }
     }
 }

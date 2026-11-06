@@ -52,11 +52,11 @@ where
     };
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
-        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), Poll::Ready(Ok(n)) if n > 0)
+        matches!(packet.assemble(&mut cx, &mut &mut buffer, &mut limits, &mut frames, &mut sources.map(|source| source as &mut dyn qbase::packet::Package<&mut BytesMut>)), Poll::Ready((n, _)) if n > 0)
     );
     buffer.resize(1200, 0);
-    packet.padding(&mut buffer, 1200 - packet.len())?;
-    packet.seal(&mut buffer)?;
+    packet.padding(&mut buffer, 1200 - packet.len());
+    packet.seal(&mut buffer);
     journal.on_sealed(pn.0, None, buffer.len(), packet.meta, frames.drain(..));
     Ok(buffer)
 }
@@ -929,7 +929,7 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
                 ArcKeys::new(Arc::new(keys(true))),
                 paths.progress.facts(),
             ));
-            let pn = space.next_pn().unwrap().0;
+            let pn = space.next_pn().0;
             let header = LongHeaderBuilder::with_cid(Default::default(), Default::default());
             let packet_type = if epoch == Epoch::Initial {
                 header.initial(vec![]).get_type()

@@ -180,11 +180,11 @@ fn reserved_packet_keys_stay_bound_across_updates_and_reverse_encryption() {
     use qtransport::space::{Allocate, Keys};
     let mut data = support::data::data();
     Arc::get_mut(&mut data).unwrap().space.keys = keys.clone();
-    let ((earlier, _), Keys::Short(old)) = data.pn_and_keys().unwrap().unwrap() else {
+    let ((earlier, _), Keys::Short(old)) = data.pn_and_keys().unwrap() else {
         unreachable!();
     };
     keys.update().unwrap();
-    let ((later, _), Keys::Short(new)) = data.pn_and_keys().unwrap().unwrap() else {
+    let ((later, _), Keys::Short(new)) = data.pn_and_keys().unwrap() else {
         unreachable!();
     };
     assert_eq!((earlier, later), (0, 1));
@@ -489,8 +489,7 @@ fn data_space_serializes_packet_numbers_with_key_generations() {
                             // Model handshake/ACK permission arriving between allocations.
                             data.keys.allow_update();
                             let _ = data.keys.update();
-                            let (pn, Keys::Short(keys)) = data.pn_and_keys().unwrap().unwrap()
-                            else {
+                            let (pn, Keys::Short(keys)) = data.pn_and_keys().unwrap() else {
                                 unreachable!();
                             };
                             (pn.0, keys.generation)
@@ -511,7 +510,7 @@ fn data_space_serializes_packet_numbers_with_key_generations() {
     assert!(allocated.windows(2).all(|pair| pair[0].1 <= pair[1].1));
     assert!(allocated.last().unwrap().1 > 0);
     data.keys.retire();
-    assert!(data.pn_and_keys().unwrap().is_none());
+    assert!(data.pn_and_keys().is_none());
     assert_eq!(
         data.sent_journal.next_pn().unwrap().0,
         allocated.len() as u64

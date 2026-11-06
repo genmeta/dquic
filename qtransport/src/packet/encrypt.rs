@@ -2,7 +2,6 @@ use std::task::{Context, Poll};
 
 use bytes::BufMut;
 use qbase::{
-    error::{Error, ErrorKind, QuicError},
     frame::{Frame, GuaranteedFrame, PaddingFrame},
     packet::{
         DataHeader, GetType, HeaderSize, LongSpecificBits, PacketNumber, ShortSpecificBits, Type,
@@ -45,9 +44,9 @@ impl<K: Seal> Packet<K> {
         limits: &mut Constraints,
         frames: &mut Vec<GuaranteedFrame>,
         sources: &mut [&mut dyn Package<B>],
-    ) -> Poll<Result<usize, Error>> {
+    ) -> Poll<(usize, usize)> {
         if self.finished {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready((0, 0));
         }
         let tag = self.keys.tag_len();
         let max_size = limits.max_size.saturating_sub(limits.overhead);
@@ -67,28 +66,35 @@ impl<K: Seal> Packet<K> {
         buffer.meta = self.meta;
         buffer.scope(validation_size);
         if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1, None) {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready((0, 0));
         }
-        let result = buffer.assemble(cx, sources);
-        if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
-            let required = if matches!(self.header.get_type(), Type::Short(_)) {
-                buffer.min_size()
-            } else {
-                buffer.pn_offset() + 4 + 16
-            };
+        // Source owners handle connection errors; this packet has no content to send.
+        let result = buffer
+            .assemble(cx, sources)
+            .map(|result| result.unwrap_or(0));
+        if matches!(result, Poll::Ready(n) if n > 0) {
+            let required = buffer.pn_offset() + 4 + 16;
             let padding = required.saturating_sub(buffer.written() + tag);
-            if padding > buffer.remaining_mut() {
-                return Poll::Ready(Err(layout_error()));
-            }
+            assert!(
+                padding <= buffer.remaining_mut(),
+                "packet padding exceeds write window"
+            );
             if padding > 0 {
                 buffer.put_bytes(0, padding);
                 buffer.meta.record(&Frame::Padding(PaddingFrame));
             }
         }
+        let min_size = buffer.min_size();
         self.cursor = buffer.written();
         self.meta = buffer.meta;
         self.finished = buffer.is_finished();
-        result.map(|result| result.map(|n| if n > 0 { self.len() } else { 0 }))
+        result.map(|n| {
+            if n > 0 {
+                (self.len(), min_size)
+            } else {
+                (0, 0)
+            }
+        })
     }
 
     // Encoded wire size; Packet does not expose a collection API.
@@ -101,24 +107,26 @@ impl<K: Seal> Packet<K> {
         }
     }
 
-    pub fn padding(&mut self, bytes: &mut [u8], amount: usize) -> Result<usize, Error> {
-        if self.len().saturating_add(amount) > bytes.len() {
-            return Err(layout_error());
-        }
+    pub fn padding(&mut self, bytes: &mut [u8], amount: usize) -> usize {
+        assert!(
+            self.len().saturating_add(amount) <= bytes.len(),
+            "packet padding exceeds write window"
+        );
         if amount > 0 {
             bytes[self.cursor..self.cursor + amount].fill(0);
             self.cursor += amount;
             self.meta.record(&Frame::Padding(PaddingFrame));
         }
-        Ok(amount)
+        amount
     }
 
-    pub fn seal(&mut self, bytes: &mut [u8]) -> Result<K::Output, Error> {
+    pub fn seal(&mut self, bytes: &mut [u8]) -> K::Output {
         let long = matches!(self.header.get_type(), Type::Long(_));
         let pn_offset = self.header.size() + if long { 2 } else { 0 };
-        if self.meta.nframes == 0 || bytes.len() != self.len() || bytes.len() < pn_offset + 4 + 16 {
-            return Err(layout_error());
-        }
+        assert!(
+            self.meta.nframes > 0 && bytes.len() == self.len() && bytes.len() >= pn_offset + 4 + 16,
+            "invalid packet layout"
+        );
         bytes[0] |= if long {
             *LongSpecificBits::from_pn(&self.pn.1)
         } else {
@@ -126,9 +134,10 @@ impl<K: Seal> Packet<K> {
         };
         if long {
             let length = bytes.len() - pn_offset;
-            if length >= 16384 {
-                return Err(layout_error());
-            }
+            assert!(
+                length < 16384,
+                "packet length exceeds reserved length field"
+            );
             (&mut bytes[pn_offset - 2..pn_offset]).put_u16(0x4000 | length as u16);
         }
         let generation = self
@@ -140,19 +149,8 @@ impl<K: Seal> Packet<K> {
                 pn_offset + self.pn.1.size(),
                 self.keys.tag_len(),
             )
-            .map_err(packet_error)?;
+            .expect("不可能达到上限，忽略这种错误就行了");
         self.meta.pktlen = bytes.len();
-        Ok(generation)
-    }
-}
-
-fn layout_error() -> Error {
-    QuicError::with_default_fty(ErrorKind::Internal, "invalid packet layout or send limits").into()
-}
-
-fn packet_error(error: crate::keys::PacketError) -> Error {
-    match error {
-        crate::keys::PacketError::Connection(error) => error,
-        error => QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
+        generation
     }
 }
