@@ -537,17 +537,6 @@ impl SendBuf {
         self.max_data
     }
 
-    /// Forget all state of data that has been sent.
-    ///
-    /// This is usually called when the zero rtt is rejected by server.
-    ///
-    /// All data sent should be resent as fresh data,
-    /// and for the subsequent correction of max_data, max_data is also reset to 0.
-    pub fn forget_sent_state(&mut self) {
-        self.state = BufMap::default();
-        self.max_data = 0;
-    }
-
     /// Extend the [`Self::max_data`] limit.
     pub fn extend(&mut self, max_data: u64) {
         debug_assert!(max_data >= self.max_data, "Cannot reduce sndbuf size");

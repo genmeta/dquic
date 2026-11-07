@@ -17,7 +17,7 @@ use qbase::{
     role::Role,
     sid::handy::DemandConcurrency,
 };
-use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::DataStreams};
+use qrecovery::{crypto::CryptoStream, journal::ArcRcvdJournal, send::CancelStream, streams::ArcDataStreams};
 use tokio::io::AsyncWriteExt;
 
 fn handshake_facts(multipath: bool) -> Arc<HandshakeFacts> {
@@ -79,7 +79,7 @@ impl<T> SendFrame<T> for Broker {
 #[tokio::test]
 async fn stream_ready_and_blocked_polls_do_not_subscribe() {
     for quota in [0, 128] {
-        let mut source = DataStreams::new(
+        let mut source = ArcDataStreams::new(
             ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
             Box::new(DemandConcurrency),
             Broker,
@@ -130,7 +130,7 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
         frame::{StopSendingFrame, StreamCtlFrame, StreamFrame, io::ReceiveFrame},
         sid::{Dir, StreamId},
     };
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         Broker,

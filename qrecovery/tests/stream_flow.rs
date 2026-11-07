@@ -19,7 +19,7 @@ use qbase::{
     role::Role,
     sid::{Dir, StreamId, handy::DemandConcurrency},
 };
-use qrecovery::{send::CancelStream, streams::DataStreams};
+use qrecovery::{send::CancelStream, streams::ArcDataStreams};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Clone, Default)]
@@ -31,12 +31,12 @@ impl SendFrame<StreamCtlFrame> for Broker {
     }
 }
 
-fn streams(send_window: u32, recv_window: u32) -> DataStreams<Broker> {
+fn streams(send_window: u32, recv_window: u32) -> ArcDataStreams<Broker> {
     let mut local = ClientParameters::default();
     let mut peer = ServerParameters::default();
     local.set(ParameterId::InitialMaxData, recv_window).unwrap();
     peer.set(ParameterId::InitialMaxData, send_window).unwrap();
-    DataStreams::new(
+    ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(local), Arc::new(peer)),
         Box::new(DemandConcurrency),
         Broker::default(),
@@ -44,11 +44,11 @@ fn streams(send_window: u32, recv_window: u32) -> DataStreams<Broker> {
     )
 }
 
-fn collect(streams: DataStreams<Broker>, waker: &Waker) -> Vec<GuaranteedFrame> {
+fn collect(streams: ArcDataStreams<Broker>, waker: &Waker) -> Vec<GuaranteedFrame> {
     collect_with_quota(streams, waker, 128)
 }
 
-fn collect_with_quota(mut streams: DataStreams<Broker>, waker: &Waker, quota: usize) -> Vec<GuaranteedFrame> {
+fn collect_with_quota(mut streams: ArcDataStreams<Broker>, waker: &Waker, quota: usize) -> Vec<GuaranteedFrame> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = quota;
@@ -152,7 +152,7 @@ async fn connection_flow_frames_use_the_stream_control_broker() {
     let mut peer = ServerParameters::default();
     local.set(ParameterId::InitialMaxData, 8u32).unwrap();
     peer.set(ParameterId::InitialMaxData, 0u32).unwrap();
-    let streams = DataStreams::new(
+    let streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(local), Arc::new(peer)),
         Box::new(DemandConcurrency),
         broker.clone(),

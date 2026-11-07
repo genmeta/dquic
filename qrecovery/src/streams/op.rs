@@ -15,7 +15,7 @@ use qbase::{
 };
 
 use super::{
-    DataStreams, Ext, RawDataStreams,
+    ArcDataStreams, Ext, DataStreams,
     io::IOState,
     listener::{AcceptBiStream, AcceptUniStream},
 };
@@ -24,7 +24,7 @@ use crate::{
     send::{ArcSender, Outgoing, Writer},
 };
 
-impl<TX> DataStreams<TX>
+impl<TX> ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -53,7 +53,7 @@ where
     }
 }
 
-impl<TX> RawDataStreams<TX>
+impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -202,7 +202,7 @@ pub struct OpenBiStream<'d, TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    streams: &'d RawDataStreams<TX>,
+    streams: &'d DataStreams<TX>,
 }
 
 impl<TX> Future for OpenBiStream<'_, TX>
@@ -228,7 +228,7 @@ pub struct OpenUniStream<'a, TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    streams: &'a RawDataStreams<TX>,
+    streams: &'a DataStreams<TX>,
 }
 
 impl<TX> Future for OpenUniStream<'_, TX>

@@ -21,15 +21,15 @@ use super::sender::{ArcSender, Sender, SendingSender, StreamData};
 pub struct Outgoing<TX>(ArcSender<TX>);
 
 impl<TX: Clone> Outgoing<TX> {
-    pub(crate) fn poll_dump_with_tokens<B: BufMut + ?Sized>(
+    pub(crate) fn poll_dump_fairly<B: BufMut + ?Sized>(
         &self,
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
-        tokens: usize,
         credit: &mut usize,
+        tokens: usize,
     ) -> Poll<Result<usize, QuicError>> {
         match self.0.sender().as_mut() {
-            Ok(sender) => sender.poll_dump(cx, buffer, tokens, credit),
+            Ok(sender) => sender.poll_dump(cx, buffer, credit, tokens),
             Err(_) => Poll::Ready(Ok(0)),
         }
     }
@@ -40,8 +40,8 @@ impl<TX: Clone> Sender<TX> {
         &mut self,
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
-        tokens: usize,
         credit: &mut usize,
+        tokens: usize,
     ) -> Poll<Result<usize, QuicError>> {
         let Some((sid, _)) = self.source() else {
             return Poll::Pending;
@@ -190,19 +190,6 @@ impl<TX> Outgoing<TX> {
                     s.may_loss_data(frame);
                 }
                 // ignore loss
-                _ => (),
-            }
-        };
-    }
-
-    pub fn revise_max_stream_data(&self, zero_rtt_rejected: bool, max_stream_data: u64) {
-        let mut sender = self.0.sender();
-        let inner = sender.deref_mut();
-        if let Ok(sending_state) = inner {
-            match sending_state {
-                Sender::Ready(s) => s.revise_max_stream_data(zero_rtt_rejected, max_stream_data),
-                Sender::Sending(s) => s.revise_max_stream_data(zero_rtt_rejected, max_stream_data),
-                Sender::DataSent(s) => s.revise_max_stream_data(zero_rtt_rejected, max_stream_data),
                 _ => (),
             }
         };

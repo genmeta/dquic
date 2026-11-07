@@ -13,14 +13,14 @@ use qbase::{
     varint::VarInt,
 };
 
-use super::{DataStreams, Ext, RawDataStreams, io::IOState};
+use super::{ArcDataStreams, DataStreams, Ext, io::IOState};
 use crate::send::Outgoing;
 
 fn wrapper_error(fty: FrameType) -> impl FnOnce(ExceedLimitError) -> QuicError {
     move |e| QuicError::new(ErrorKind::StreamLimit, fty.into(), e.to_string())
 }
 
-impl<TX> RawDataStreams<TX>
+impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -42,7 +42,7 @@ where
             for (sid, (outgoing, _), tokens) in streams {
                 let start = buffer.frames.len();
                 let available = *credit;
-                match outgoing.poll_dump_with_tokens(cx, buffer, tokens, credit) {
+                match outgoing.poll_dump_fairly(cx, buffer, credit, tokens) {
                     Poll::Ready(Ok(n)) if n > 0 => {
                         let length = buffer.frames[start..]
                             .iter()
@@ -343,7 +343,7 @@ where
     }
 }
 
-impl<TX> RawDataStreams<TX>
+impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -443,7 +443,7 @@ where
     }
 }
 
-impl<TX> ReceiveFrame<StreamCtlFrame> for DataStreams<TX>
+impl<TX> ReceiveFrame<StreamCtlFrame> for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -454,7 +454,7 @@ where
     }
 }
 
-impl<TX> ReceiveFrame<(StreamFrame, Bytes)> for DataStreams<TX>
+impl<TX> ReceiveFrame<(StreamFrame, Bytes)> for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -465,7 +465,7 @@ where
     }
 }
 
-impl<TX, B: bytes::BufMut + ?Sized> Package<B> for DataStreams<TX>
+impl<TX, B: bytes::BufMut + ?Sized> Package<B> for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -474,7 +474,7 @@ where
     }
 }
 
-impl<TX> UnregisterWaker for DataStreams<TX>
+impl<TX> UnregisterWaker for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {

@@ -20,7 +20,7 @@ use qevent::quic::recovery::PacketLostTrigger;
 use qrecovery::{
     crypto::CryptoStream,
     journal::{ArcRcvdJournal, ArcSentJournal},
-    streams::DataStreams,
+    streams::ArcDataStreams,
 };
 use smallvec::SmallVec;
 use tokio::time::Instant;
@@ -33,7 +33,7 @@ use crate::{ArcReliableFrames, Error, GuaranteedFrame, keys::ArcOneRttKeys, pack
 pub struct DataSpace {
     #[deref]
     pub space: Space<ArcOneRttKeys>,
-    pub streams: DataStreams<ArcReliableFrames>,
+    pub streams: ArcDataStreams<ArcReliableFrames>,
     pub reliable_frames: ArcReliableFrames,
     pub peer_ack_delay_exponent: u32,
 }
@@ -42,7 +42,7 @@ impl DataSpace {
     pub fn new(
         initial_scid: ConnectionId,
         keys: ArcOneRttKeys,
-        streams: DataStreams<ArcReliableFrames>,
+        streams: ArcDataStreams<ArcReliableFrames>,
         reliable_frames: ArcReliableFrames,
         local_ack_delay_exponent: u32,
         peer_ack_delay_exponent: u32,

@@ -104,14 +104,6 @@ where
             Poll::Pending
         }
     }
-
-    pub fn revise_max_streams(&mut self, zero_rtt_rejected: bool, max_stream_bidi: u64, max_stream_uni: u64) {
-        if zero_rtt_rejected {
-            self.max = [0, 0];
-        }
-        self.increase_limit(Dir::Bi, max_stream_bidi);
-        self.increase_limit(Dir::Uni, max_stream_uni);
-    }
 }
 
 /// Management of stream IDs that can ben allowed to use locally.
@@ -194,10 +186,6 @@ where
         for waker in guard.wakers.iter_mut().flat_map(|queue| queue.drain(..)) {
             waker.wake();
         }
-    }
-
-    pub fn revise_max_streams(&self, zero_rtt_rejected: bool, max_stream_bidi: u64, max_stream_uni: u64) {
-        self.0.lock().unwrap().revise_max_streams(zero_rtt_rejected, max_stream_bidi, max_stream_uni);
     }
 }
 
