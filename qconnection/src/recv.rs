@@ -6,14 +6,14 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{Frame, FrameReader, io::ReceiveFrame},
     net::route::Scopes,
-    packet::{GetScid, GetType, OneRttHeader, PacketContent},
+    packet::{GetPacketNumberLength, GetScid, GetType, LongSpecificBits, OneRttHeader, PacketContent, ShortSpecificBits},
     role::Role,
     token::ArcTokenRegistry,
 };
 use qcongestion::Transport as _;
 use qtransport::{
-    keys::ArcKeys,
-    packet::LogPacketHeader,
+    keys::{ArcKeys, Open, PacketError, open},
+    packet::{CipherPacket, LogPacketHeader, PlainPacket},
     recv,
     space::{DataSpace, Space},
 };
@@ -22,6 +22,17 @@ use tokio::time::Instant;
 use crate::{ArcHandshakeDone, Paths};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
+
+fn drop_packet(header: impl LogPacketHeader, buffer: bytes::BytesMut, pn_offset: usize, pn: Option<u64>, error: impl ToString) {
+    CipherPacket::new(header, buffer, pn_offset).drop_on_decryption_failure(pn, error);
+}
+
+fn key_error(error: PacketError) -> crate::Error {
+    match error {
+        PacketError::Connection(error) => error,
+        error => QuicError::with_default_fty(ErrorKind::Internal, error.to_string()).into(),
+    }
+}
 
 pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     (mut packets, scopes): (PacketReceiver<H>, Option<Scopes>),
@@ -52,9 +63,41 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
         }
         let result = (|| -> Result<(), crate::Error> {
             let scid = (epoch == Epoch::Initial).then(|| *packet.scid());
-            let Some(packet) = packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose()? else {
-                return Ok(());
+            let (header, mut buffer, pn_offset) = packet.split();
+            let encoded = match open::header(&keys.opening.header, &mut buffer, pn_offset) {
+                Ok(pn) => pn,
+                Err(error) => {
+                    drop_packet(header, buffer, pn_offset, None, error);
+                    return Ok(());
+                }
             };
+            let pn = match space.rcvd_journal.decode_pn(encoded) {
+                Ok(pn) => pn,
+                Err(error) => {
+                    CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(None, error);
+                    return Ok(());
+                }
+            };
+            let body_offset = pn_offset + encoded.size();
+            let plain_len = match keys.opening.open(pn, &mut buffer, body_offset) {
+                Ok(len) => len,
+                Err(error) => {
+                    if matches!(error, PacketError::AuthenticationFailed) {
+                        paths.on_authentication_failed(keys.opening.integrity_limit());
+                    }
+                    drop_packet(header, buffer, pn_offset, Some(pn), error);
+                    return Ok(());
+                }
+            };
+            space.rcvd_journal.on_authenticated(pn);
+            if let Err(error) = LongSpecificBits::from(buffer[0]).pn_len() {
+                CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(Some(pn), &error);
+                return Err(QuicError::from(error).into());
+            }
+            if plain_len == 0 {
+                return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "empty packet payload").into());
+            }
+            let packet = PlainPacket::new(header, pn, encoded, buffer.freeze(), pn_offset, plain_len);
             if let Some(scid) = scid {
                 if initial_scid.is_some_and(|cid| cid != scid) {
                     return Ok(());
@@ -154,9 +197,47 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             continue;
         }
         let result = (|| -> Result<(), crate::Error> {
-            let Some(packet) = keys.open_packet(packet, |pn| data.rcvd_journal.decode_pn(pn), paths.pto_for(&pathway, Epoch::Data))? else {
+            let (header, mut buffer, pn_offset) = packet.split();
+            let encoded = match open::header(keys.opening_header(), &mut buffer, pn_offset) {
+                Ok(pn) => pn,
+                Err(error) => {
+                    drop_packet(header, buffer, pn_offset, None, error);
+                    return Ok(());
+                }
+            };
+            let pn = match data.rcvd_journal.decode_pn(encoded) {
+                Ok(pn) => pn,
+                Err(error) => {
+                    CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(None, error);
+                    return Ok(());
+                }
+            };
+            let specific_bits = ShortSpecificBits::from(buffer[0]);
+            let Some(opening) = keys.opening_packet(pn, specific_bits.key_phase()).map_err(key_error)? else {
+                drop_packet(header, buffer, pn_offset, Some(pn), "no acceptable opening generation");
                 return Ok(());
             };
+            let body_offset = pn_offset + encoded.size();
+            let plain_len = match opening.open(pn, &mut buffer, body_offset) {
+                Ok(len) => len,
+                Err(error) => {
+                    if matches!(error, PacketError::AuthenticationFailed) {
+                        paths.on_authentication_failed(opening.integrity_limit());
+                    }
+                    drop_packet(header, buffer, pn_offset, Some(pn), error);
+                    return Ok(());
+                }
+            };
+            data.rcvd_journal.on_authenticated(pn);
+            keys.on_opened(pn, &opening, paths.pto_for(&pathway, Epoch::Data)).map_err(key_error)?;
+            if let Err(error) = specific_bits.pn_len() {
+                CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(Some(pn), &error);
+                return Err(QuicError::from(error).into());
+            }
+            if plain_len == 0 {
+                return Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "empty packet payload").into());
+            }
+            let packet = PlainPacket::new(header, pn, encoded, buffer.freeze(), pn_offset, plain_len);
             let pn = packet.pn();
             let mut content = PacketContent::default();
             for frame in FrameReader::new(packet.body(), packet.get_type()) {

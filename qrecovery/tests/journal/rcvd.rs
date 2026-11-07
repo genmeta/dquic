@@ -14,6 +14,26 @@ use tokio::time::Instant;
 
 const MAX_TRACKED_ACK_RANGES: usize = 256;
 
+#[test]
+fn decoded_packet_number_must_fit_the_quic_range() {
+    let records = ArcRcvdJournal::default();
+    let max = qbase::varint::VARINT_MAX;
+    records.on_rcvd_pn(max - 1, false, Duration::ZERO);
+    assert_eq!(records.decode_pn(PacketNumber::U32(u32::MAX)), Ok(max));
+    assert_eq!(records.decode_pn(PacketNumber::U32(0)), Err(InvalidPacketNumber::TooLarge));
+}
+
+#[test]
+fn authentication_advances_decoding_without_acknowledging() {
+    let records = ArcRcvdJournal::default();
+    records.on_rcvd_pn(1, false, Duration::ZERO);
+    records.on_authenticated(0x10000);
+    records.on_authenticated(100);
+    assert_eq!(records.decode_pn(PacketNumber::U16(1)), Ok(0x10001));
+    assert_eq!(records.gen_ack_frame_util(1, Instant::now(), 1200).unwrap().iter().collect::<Vec<_>>(), [1..=1]);
+    assert!(records.gen_ack_frame_util(0x10000, Instant::now(), 1200).is_err());
+}
+
 fn ack_package(records: &ArcRcvdJournal, pn: u64) -> AckFrame {
     ack_package_at(records, pn, Instant::now())
 }

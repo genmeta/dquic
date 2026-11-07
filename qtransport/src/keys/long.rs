@@ -1,15 +1,6 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
-use qbase::{
-    frame::FrameReader,
-    packet::{DataPacket, InvalidPacketNumber, PacketNumber},
-};
-
-use super::{KeyRetired, Open, PacketError, Seal, open_with};
-use crate::Error;
+use super::{KeyRetired, Open, PacketError, Seal, open, seal};
 
 pub struct ArcKeys<K = Arc<qtls::BidirectionalKeys>>(Arc<Mutex<Result<K, KeyRetired>>>);
 
@@ -45,15 +36,12 @@ impl From<qtls::InstalledKeys> for ArcKeys {
 }
 
 impl Open for qtls::DirectionalKeys {
-    fn open(
-        &self,
-        packet: DataPacket,
-        decode_pn: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
-        _pto: Duration,
-    ) -> Result<Option<(u64, FrameReader)>, Error> {
-        open_with(packet, &self.header, decode_pn, |pn, _, header, body| {
-            Ok(self.packet.open(pn, header, body).ok().map(|plain| plain.len()))
-        })
+    fn integrity_limit(&self) -> u64 {
+        self.packet.integrity_limit()
+    }
+
+    fn open(&self, pn: u64, buffer: &mut [u8], body_offset: usize) -> Result<usize, PacketError> {
+        open::body(&self.packet, pn, buffer, body_offset)
     }
 }
 
@@ -65,13 +53,11 @@ impl Seal for qtls::DirectionalKeys {
     }
 
     fn seal(&self, pn: u64, buffer: &mut [u8], pn_offset: usize, body_offset: usize, tag_len: usize) -> Result<Self::Output, PacketError> {
-        let tag_offset = buffer.len() - tag_len;
-        let (header, body_tag) = buffer.split_at_mut(body_offset);
-        let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
-        self.packet.seal(pn, header, body, tag)?;
-        let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
-        let sample_offset = 4 - pn_bytes.len();
-        self.header.protect(&body_tag[sample_offset..sample_offset + self.header.sample_len()], &mut prefix[0], pn_bytes)?;
-        Ok(())
+        if tag_len != self.tag_len() {
+            return Err(PacketError::Layout);
+        }
+        let pn_len = body_offset.checked_sub(pn_offset).ok_or(PacketError::Layout)?;
+        seal::body(&self.packet, pn, buffer, body_offset)?;
+        seal::header(&self.header, buffer, pn_offset, pn_len)
     }
 }

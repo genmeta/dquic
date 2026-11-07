@@ -4,13 +4,14 @@ use qrecovery::journal::ArcRcvdJournal;
 mod support {
     pub mod crypto;
     pub mod data;
+    pub mod open;
     pub mod tls;
 }
 use std::{sync::Arc, time::Duration};
 
 use qbase::{error::ErrorKind, packet::KeyPhaseBit};
 use qtransport::keys::*;
-use support::crypto;
+use support::{crypto, open::DataOpen};
 
 fn ready() -> ArcOneRttKeys {
     let ([client, _], _) = support::tls::handshake();
@@ -29,7 +30,7 @@ impl Packet {
 }
 
 fn packet(pn: u64, keys: &ArcOneRttKeys) -> Result<Packet, PacketError> {
-    let key = keys.get()?;
+    let key = keys.sealing_keys()?;
     let tag_len = key.tag_len();
     let mut bytes = bytes::BytesMut::zeroed(6 + tag_len);
     bytes[0] = 0x43;
@@ -37,6 +38,104 @@ fn packet(pn: u64, keys: &ArcOneRttKeys) -> Result<Packet, PacketError> {
     bytes[5] = 1; // PING
     let (generation, _) = key.seal(pn, &mut bytes, 1, 5, tag_len)?;
     Ok(Packet { bytes, generation: Some(generation) })
+}
+
+#[test]
+fn staged_protection_round_trips_every_packet_number_length_in_place() {
+    for long in [false, true] {
+        for pn_len in 1..=4 {
+            let ([client, server], _) = support::tls::handshake();
+            let sending = qtls::DirectionalKeys { header: client.sealing_header, packet: client.packet.sealing };
+            let receiving = qtls::DirectionalKeys { header: server.opening_header, packet: server.packet.opening };
+            let pn = 42;
+            let offset = 7;
+            let body_offset = offset + pn_len;
+            let mut buffer = vec![0; body_offset + 20 + 16];
+            buffer[0] = (if long { 0xc0 } else { 0x40 }) | (pn_len - 1) as u8;
+            buffer[body_offset - 1] = pn as u8;
+            buffer[body_offset..body_offset + 20].copy_from_slice(b"in-place packet body");
+            let pointer = buffer.as_ptr();
+            let original_header = buffer[..body_offset].to_vec();
+            seal::body(&sending.packet, pn, &mut buffer, body_offset).unwrap();
+            seal::header(&sending.header, &mut buffer, offset, pn_len).unwrap();
+            let encoded = open::header(&receiving.header, &mut buffer, offset).unwrap();
+            assert_eq!(encoded.size(), pn_len);
+            assert_eq!(encoded.decode(0), pn);
+            assert_eq!(&buffer[..body_offset], original_header);
+            let len = receiving.open(pn, &mut buffer, body_offset).unwrap();
+            assert_eq!(len, 20);
+            assert_eq!(&buffer[body_offset..body_offset + len], b"in-place packet body");
+            assert_eq!(buffer.as_ptr(), pointer);
+        }
+    }
+}
+
+#[test]
+fn invalid_layout_is_rejected_before_an_aead_attempt() {
+    let ([client, server], _) = support::tls::handshake_with(crypto::provider());
+    let sending = qtls::DirectionalKeys { header: client.sealing_header, packet: client.packet.sealing };
+    let receiving = qtls::DirectionalKeys { header: server.opening_header, packet: server.packet.opening };
+    for offset in [0, 23, usize::MAX] {
+        let mut buffer = [0; 22];
+        assert!(matches!(open::header(&receiving.header, &mut buffer, offset), Err(PacketError::Layout)));
+        assert!(matches!(seal::header(&sending.header, &mut buffer, offset, 4), Err(PacketError::Layout)));
+    }
+    let before = crypto::opened();
+    for body_offset in [0, 7, 23, usize::MAX] {
+        let mut buffer = [0; 22];
+        assert!(matches!(receiving.open(0, &mut buffer, body_offset), Err(PacketError::Layout)));
+        assert!(matches!(seal::body(&sending.packet, 0, &mut buffer, body_offset), Err(PacketError::Layout)));
+    }
+    assert_eq!(crypto::opened(), before);
+}
+
+#[test]
+fn peer_candidate_and_local_update_share_the_installed_generation_and_usage_count() {
+    let ([client, server], _) = support::tls::handshake_with(crypto::provider());
+    let sending = ArcOneRttKeys::from(client);
+    let receiving = ArcOneRttKeys::from(server);
+    sending.allow_update();
+    sending.update().unwrap();
+    let mut bytes = packet(0, &sending).unwrap().into_buffer();
+    let encoded = open::header(receiving.opening_header(), &mut bytes, 1).unwrap();
+    let phase = qbase::packet::ShortSpecificBits::from(bytes[0]).key_phase();
+    let selected = receiving.opening_packet(0, phase).unwrap().unwrap();
+    // Install locally between selection and authentication, as a concurrent sender can.
+    receiving.allow_update();
+    receiving.update().unwrap();
+    selected.open(0, &mut bytes, 1 + encoded.size()).unwrap();
+    receiving.on_opened(0, &selected, Duration::from_secs(1)).unwrap();
+    let mut reply = [0; 22];
+    reply[0] = 0x43;
+    assert_eq!(selected.seal(0, &mut reply, 1, 5, 16).unwrap().0, 1);
+    for pn in 1..crypto::LIMIT {
+        assert_eq!(packet(pn, &receiving).unwrap().generation, Some(1));
+    }
+    assert!(matches!(receiving.sealing_keys(), Err(PacketError::Connection(error)) if error.kind() == ErrorKind::AeadLimitReached));
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_retained_generation_obeys_its_own_expiry_when_pto_shrinks() {
+    let ([client, server], _) = support::tls::handshake();
+    let sending = ArcOneRttKeys::from(client);
+    let receiving = ArcOneRttKeys::from(server);
+    let journal = ArcRcvdJournal::default();
+    let open = |bytes, pto| {
+        let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0).next().unwrap().unwrap() else {
+            panic!()
+        };
+        receiving.open_data(packet, |pn| journal.decode_pn(pn), pto).unwrap().map(|(pn, _)| pn)
+    };
+    assert_eq!(open(packet(0, &sending).unwrap().into_buffer(), Duration::from_secs(10)), Some(0));
+    sending.allow_update();
+    sending.update().unwrap();
+    assert_eq!(open(packet(10, &sending).unwrap().into_buffer(), Duration::from_secs(10)), Some(10));
+    let delayed = packet(11, &sending).unwrap().into_buffer();
+    sending.on_ack(1);
+    sending.update().unwrap();
+    assert_eq!(open(packet(20, &sending).unwrap().into_buffer(), Duration::from_secs(1)), Some(20));
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert_eq!(open(delayed, Duration::from_secs(1)), None);
 }
 
 #[test]
@@ -72,13 +171,13 @@ fn seal_reports_the_phase_authenticated_in_the_header() {
         (!expected_phase).imply(&mut buffer[0]);
         buffer[1..5].copy_from_slice(&(pn as u32).to_be_bytes());
         buffer[5] = 0x01; // PING
-        let sealed = sending.get().unwrap().seal(pn, &mut buffer, 1, 5, tag_len).unwrap();
+        let sealed = sending.sealing_keys().unwrap().seal(pn, &mut buffer, 1, 5, tag_len).unwrap();
         assert_eq!(sealed, (generation, expected_phase));
 
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(buffer, 0).next().unwrap().unwrap() else {
             panic!()
         };
-        let (opened_pn, mut frames) = receiving.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
+        let (opened_pn, mut frames) = receiving.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
         assert_eq!(opened_pn, pn);
         assert!(matches!(frames.next().unwrap().unwrap().0, qbase::frame::Frame::Ping(_)));
     }
@@ -96,7 +195,7 @@ fn duplicate_packet_skips_aead() {
     let journal = ArcRcvdJournal::with_capacity(0, None);
     journal.on_rcvd_pn(0, true, Duration::ZERO);
     let before = crypto::opened();
-    let opened = receiving.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap();
+    let opened = receiving.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap();
     assert!(opened.is_none());
     assert_eq!(crypto::opened(), before);
 }
@@ -114,7 +213,7 @@ fn reserved_packet_keys_stay_bound_across_updates_and_reverse_encryption() {
         else {
             panic!()
         };
-        peer.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap().0
+        peer.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap().0
     };
     keys.allow_update();
     use qtransport::space::{Allocate, Keys};
@@ -172,7 +271,7 @@ async fn key_updates_preserve_reordering_and_do_not_double_advance_sealing() {
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0).next().unwrap().unwrap() else {
             panic!()
         };
-        keys.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
+        keys.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
     };
     for generation in 1..=3 {
         let old = packet(generation * 10 - 1, &sending).unwrap().into_buffer();
@@ -189,6 +288,12 @@ async fn key_updates_preserve_reordering_and_do_not_double_advance_sealing() {
         let mut forged = high.bytes.clone();
         *forged.last_mut().unwrap() ^= 1;
         assert_eq!(open(&server, forged, &server_journal), None);
+        let expected = if generation == 2 {
+            generation
+        } else {
+            generation - 1
+        };
+        assert_eq!(packet(0, &receiving).unwrap().generation, Some(expected), "forgery must not install a peer candidate");
         assert_eq!(open(&server, high.into_buffer(), &server_journal), Some(generation * 10 + 1));
         assert_eq!(open(&server, low.into_buffer(), &server_journal), Some(generation * 10));
         assert_eq!(open(&server, old, &server_journal), Some(generation * 10 - 1));
@@ -214,7 +319,7 @@ async fn peer_can_update_again_while_local_update_is_disallowed() {
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0).next().unwrap().unwrap() else {
             panic!()
         };
-        keys.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
+        keys.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
     };
     let oldest = packet(98, &sending).unwrap().into_buffer();
     assert_eq!(open(&server, packet(99, &sending).unwrap().into_buffer()), Some(99));
@@ -260,7 +365,7 @@ async fn local_update_keeps_old_opening_until_peer_uses_the_new_pair() {
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(bytes, 0).next().unwrap().unwrap() else {
             panic!()
         };
-        keys.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
+        keys.open_data(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1)).unwrap().map(|(pn, _)| pn)
     };
     let old = packet(0, &sending).unwrap().into_buffer();
     let late_old = packet(1, &sending).unwrap().into_buffer();
@@ -287,10 +392,10 @@ fn unused_keys_do_not_consume_the_last_aead_use() {
         packet(pn, &keys).unwrap();
     }
     for _ in 0..crypto::LIMIT {
-        drop(keys.get().unwrap());
+        drop(keys.sealing_keys().unwrap());
     }
     packet(crypto::LIMIT - 1, &keys).unwrap();
-    assert!(matches!(keys.get(), Err(PacketError::Connection(error))
+    assert!(matches!(keys.sealing_keys(), Err(PacketError::Connection(error))
         if error.kind() == ErrorKind::AeadLimitReached));
 }
 
@@ -310,7 +415,7 @@ fn confidentiality_limit_updates_when_permitted_and_fails_when_not() {
 }
 
 #[test]
-fn authentication_failures_enforce_the_integrity_limit() {
+fn authentication_failure_is_reported_without_advancing_keys() {
     let ([client, server], _) = support::tls::handshake_with(crypto::provider());
     let sending = ArcOneRttKeys::from(client);
     let receiving = ArcOneRttKeys::from(server);
@@ -318,17 +423,16 @@ fn authentication_failures_enforce_the_integrity_limit() {
     let last = forged.len() - 1;
     forged[last] ^= 1;
     let journal = ArcRcvdJournal::with_capacity(0, None);
-    for attempt in 1..=crypto::LIMIT {
-        let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(forged.clone(), 0).next().unwrap().unwrap() else {
-            panic!()
-        };
-        let result = receiving.open(packet, |pn| journal.decode_pn(pn), Duration::from_secs(1));
-        if attempt < crypto::LIMIT {
-            assert!(result.unwrap().is_none());
-        } else {
-            assert!(matches!(result, Err(error) if error.kind() == ErrorKind::AeadLimitReached));
-        }
+    for _ in 0..=crypto::LIMIT {
+        let mut buffer = forged.clone();
+        let encoded = open::header(receiving.opening_header(), &mut buffer, 1).unwrap();
+        let pn = journal.decode_pn(encoded).unwrap();
+        let phase = qbase::packet::ShortSpecificBits::from(buffer[0]).key_phase();
+        let keys = receiving.opening_packet(pn, phase).unwrap().unwrap();
+        assert_eq!(keys.integrity_limit(), crypto::LIMIT);
+        assert!(matches!(keys.open(pn, &mut buffer, 1 + encoded.size()), Err(PacketError::AuthenticationFailed)));
     }
+    assert_eq!(packet(1, &receiving).unwrap().generation, Some(0));
     assert_eq!(journal.decode_pn(PacketNumber::encode(0, 0)), Ok(0));
 }
 
@@ -336,7 +440,7 @@ fn authentication_failures_enforce_the_integrity_limit() {
 fn concurrent_encryption_enforces_each_generations_limit() {
     let keys = limited_keys();
     // Select all handles before encryption so get() cannot enforce this limit.
-    let fixed: Vec<_> = (0..crypto::LIMIT * 2).map(|_| keys.get().unwrap()).collect();
+    let fixed: Vec<_> = (0..crypto::LIMIT * 2).map(|_| keys.sealing_keys().unwrap()).collect();
     let start = std::sync::Barrier::new(fixed.len());
     let succeeded = std::thread::scope(|scope| {
         let tasks: Vec<_> = fixed

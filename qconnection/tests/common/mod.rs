@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "../../../qtransport/tests/support/open.rs"]
+pub mod opening;
+
 use std::sync::Arc;
 
 use bytes::BytesMut;

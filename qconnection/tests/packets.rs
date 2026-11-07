@@ -301,7 +301,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         let (_, remote, connected) = (&mut delivery).await.unwrap().unwrap();
         connection = Some(connected);
         assert_eq!(remote.name(), "localhost");
-        assert!(paths.spaces.get_as::<qtransport::space::DataSpace>(qbase::Epoch::Data).unwrap().keys.get().is_ok());
+        assert!(paths.spaces.get_as::<qtransport::space::DataSpace>(qbase::Epoch::Data).unwrap().keys.sealing_keys().is_ok());
         assert!(matches!(handshake.crypto.reader().read(&mut [0; 1]).now_or_never(), Some(Err(_))));
         assert!(matches!(handshake.crypto.writer().write(&[]).now_or_never(), Some(Ok(0))));
     }

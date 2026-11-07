@@ -23,6 +23,39 @@ fn local_reason() -> CloseReason {
     CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "local"))
 }
 
+#[tokio::test(start_paused = true)]
+async fn aead_abort_is_terminal_without_a_close_flight_and_preserves_the_first_error() {
+    use std::sync::{Arc, Mutex};
+
+    struct Component(Mutex<Vec<Error>>);
+    impl qbase::Close for Component {
+        fn close_with_error(&self, error: Error) {
+            self.0.lock().unwrap().push(error);
+        }
+    }
+    for closing in [false, true] {
+        let terminator = ArcTerminator::no_error();
+        let component = Arc::new(Component(Mutex::new(Vec::new())));
+        terminator.register(component.clone());
+        let limit_error = Error::from(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "integrity limit"));
+        let expected = if closing {
+            terminator.close(local_reason(), Duration::from_secs(1));
+            Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))
+        } else {
+            limit_error.clone()
+        };
+        let waiter = tokio::spawn(terminator.clone());
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        terminator.abort(limit_error);
+        assert_eq!(terminator.clone().now_or_never(), Some(expected.clone()));
+        assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Err(expected.clone())));
+        assert_eq!(waiter.await.unwrap(), expected);
+        assert_eq!(Instant::now(), start);
+        assert_eq!(component.0.lock().unwrap().as_slice(), &[expected]);
+    }
+}
+
 fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, Error>> {
     let limits_quota = 2400;
     let limits_length = 1200;

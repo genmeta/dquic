@@ -58,7 +58,7 @@ impl Allocate for DataSpace {
     fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
         // Serialize generation selection and PN allocation across every sending path.
         let mut journal = self.sent_journal.lock_guard();
-        let keys = self.keys.get().expect("data packet keys would be updated automatically");
+        let keys = self.keys.sealing_keys().expect("data packet keys would be updated automatically");
         let pn = journal.next_pn().expect("packet number space is hard to be exhausted");
         Some((pn, Keys::Short(keys)))
     }

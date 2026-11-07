@@ -1,13 +1,6 @@
 use bytes::{Bytes, BytesMut};
 use derive_more::Deref;
-use qbase::{
-    error::QuicError,
-    packet::{
-        GetPacketNumberLength, KeyPhaseBit, LongSpecificBits, ShortSpecificBits,
-        header::long::InitialHeader,
-        number::{InvalidPacketNumber, PacketNumber, take_pn_len},
-    },
-};
+use qbase::packet::{PacketNumber, header::long::InitialHeader};
 use qevent::quic::{
     PacketHeader, PacketHeaderBuilder, QuicFrame,
     transport::{PacketDropped, PacketDroppedTrigger, PacketReceived},
@@ -36,7 +29,7 @@ pub struct CipherPacket<H> {
     #[deref]
     header: H,
     payload: BytesMut,
-    payload_offset: usize,
+    offset: usize,
 }
 
 impl<H> CipherPacket<H> {
@@ -44,14 +37,9 @@ impl<H> CipherPacket<H> {
         self.payload.len()
     }
 
-    fn remove_header_protection(&mut self, key: &qtls::HeaderProtectionKey) -> bool {
-        let sample_offset = self.payload_offset.saturating_add(4);
-        if self.payload_offset == 0 || sample_offset.saturating_add(key.sample_len()) > self.payload.len() {
-            return false;
-        }
-        let (header, sample) = self.payload.split_at_mut(sample_offset);
-        let (prefix, packet_number) = header.split_at_mut(self.payload_offset);
-        key.unprotect(&sample[..key.sample_len()], &mut prefix[0], packet_number).is_ok()
+    /// Transfer the header and packet bytes to the receiving pipeline.
+    pub fn split(self) -> (H, BytesMut, usize) {
+        (self.header, self.payload, self.offset)
     }
 }
 
@@ -59,8 +47,8 @@ impl<H> CipherPacket<H>
 where
     H: LogPacketHeader,
 {
-    pub fn new(header: H, payload: BytesMut, payload_offset: usize) -> Self {
-        Self { header, payload, payload_offset }
+    pub fn new(header: H, payload: BytesMut, offset: usize) -> Self {
+        Self { header, payload, offset }
     }
 
     pub fn header(&self) -> &H {
@@ -79,124 +67,23 @@ where
         })
     }
 
-    fn drop_on_remove_header_protection_failure(self) {
-        qevent::event!(
-            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::DecryptionFailure },
-            details = Map { reason: "remove header protection failure" }
-        );
+    pub fn drop_on_decryption_failure(self, pn: Option<u64>, error: impl ToString) {
+        self.drop_with_error(pn, error, PacketDroppedTrigger::DecryptionFailure);
     }
 
-    fn drop_on_decryption_failure(self, error: impl ToString, pn: u64) {
+    pub fn drop_on_invalid(self, pn: Option<u64>, error: impl ToString) {
+        self.drop_with_error(pn, error, PacketDroppedTrigger::Invalid);
+    }
+
+    fn drop_with_error(self, pn: Option<u64>, error: impl ToString, trigger: PacketDroppedTrigger) {
         qevent::event!(
             PacketDropped {
-                header: { self.header.qlog_header_with_pn(pn) },
+                header: pn.map_or_else(|| self.header.qlog_header(), |pn| self.header.qlog_header_with_pn(pn)),
                 raw: self.payload.freeze(),
-                trigger: PacketDroppedTrigger::DecryptionFailure
+                trigger,
             },
-            details = Map { reason: "decryption failure", error: error.to_string() },
+            details = Map { reason: error.to_string() },
         )
-    }
-
-    fn drop_on_reverse_bit_error(self, error: &qbase::packet::error::Error) {
-        qevent::event!(
-            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::Invalid },
-            details = Map { reason: "reverse bit error", error: error.to_string() },
-        )
-    }
-
-    fn drop_on_invalid_pn(self, invalid_pn: InvalidPacketNumber) {
-        qevent::event!(
-            PacketDropped { header: self.qlog_header(), raw: self.payload.freeze(), trigger: PacketDroppedTrigger::Invalid },
-            details = Map { reason: "invalid packet number", invalid_pn: invalid_pn.to_string() },
-        )
-    }
-
-    pub fn decrypt_long_packet(
-        mut self,
-        keys: &qtls::DirectionalKeys,
-        pn_decoder: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
-    ) -> Option<Result<PlainPacket<H>, QuicError>> {
-        if !self.remove_header_protection(&keys.header) {
-            self.drop_on_remove_header_protection_failure();
-            return None;
-        }
-        let first = self.payload[0];
-        let pn_len = (first & 3) + 1;
-        let (_, undecoded_pn) = take_pn_len(pn_len)(&self.payload[self.payload_offset..]).ok()?;
-        let decoded_pn = match pn_decoder(undecoded_pn) {
-            Ok(pn) => pn,
-            Err(invalid_packet_number) => {
-                self.drop_on_invalid_pn(invalid_packet_number);
-                return None;
-            }
-        };
-        let body_offset = self.payload_offset + undecoded_pn.size();
-        let (header, body) = self.payload.split_at_mut(body_offset);
-        let body_length = match keys.packet.open(decoded_pn, header, body) {
-            Ok(plain) => plain.len(),
-            Err(error) => {
-                self.drop_on_decryption_failure(error, decoded_pn);
-                return None;
-            }
-        };
-        if let Err(error) = LongSpecificBits::from(first).pn_len() {
-            self.drop_on_reverse_bit_error(&error);
-            return Some(Err(error.into()));
-        }
-
-        Some(Ok(PlainPacket {
-            header: self.header,
-            plain: self.payload.freeze(),
-            payload_offset: self.payload_offset,
-            undecoded_pn,
-            decoded_pn,
-            body_len: body_length,
-        }))
-    }
-
-    pub fn decrypt_short_packet(
-        mut self,
-        header_key: &qtls::HeaderProtectionKey,
-        pn_decoder: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
-        decrypt: impl FnOnce(u64, KeyPhaseBit, &[u8], &mut [u8]) -> Result<Option<usize>, crate::Error>,
-    ) -> Result<Option<PlainPacket<H>>, crate::Error> {
-        if !self.remove_header_protection(header_key) {
-            self.drop_on_remove_header_protection_failure();
-            return Ok(None);
-        }
-        let first = self.payload[0];
-        let specific_bits = ShortSpecificBits::from(first);
-        let pn_len = (first & 3) + 1;
-        let Some((_, undecoded_pn)) = take_pn_len(pn_len)(&self.payload[self.payload_offset..]).ok() else {
-            self.drop_on_remove_header_protection_failure();
-            return Ok(None);
-        };
-        let decoded_pn = match pn_decoder(undecoded_pn) {
-            Ok(pn) => pn,
-            Err(invalid_pn) => {
-                self.drop_on_invalid_pn(invalid_pn);
-                return Ok(None);
-            }
-        };
-        let body_offset = self.payload_offset + undecoded_pn.size();
-        let (header, body) = self.payload.split_at_mut(body_offset);
-        let Some(body_length) = decrypt(decoded_pn, specific_bits.key_phase(), header, body)? else {
-            self.drop_on_decryption_failure("packet authentication failed", decoded_pn);
-            return Ok(None);
-        };
-        if let Err(error) = specific_bits.pn_len() {
-            self.drop_on_reverse_bit_error(&error);
-            return Err(QuicError::from(error).into());
-        }
-
-        Ok(Some(PlainPacket {
-            header: self.header,
-            plain: self.payload.freeze(),
-            payload_offset: self.payload_offset,
-            undecoded_pn,
-            decoded_pn,
-            body_len: body_length,
-        }))
     }
 }
 
@@ -216,11 +103,16 @@ pub struct PlainPacket<H> {
     decoded_pn: u64,
     undecoded_pn: PacketNumber,
     plain: Bytes,
-    payload_offset: usize,
+    offset: usize,
     body_len: usize,
 }
 
 impl<H> PlainPacket<H> {
+    /// Assemble an authenticated packet after in-place opening and validation.
+    pub fn new(header: H, decoded_pn: u64, undecoded_pn: PacketNumber, plain: Bytes, offset: usize, body_len: usize) -> Self {
+        Self { header, decoded_pn, undecoded_pn, plain, offset, body_len }
+    }
+
     pub fn size(&self) -> usize {
         self.plain.len()
     }
@@ -234,7 +126,7 @@ impl<H> PlainPacket<H> {
     }
 
     pub fn body(&self) -> Bytes {
-        let packet_offset = self.payload_offset + self.undecoded_pn.size();
+        let packet_offset = self.offset + self.undecoded_pn.size();
         self.plain.slice(packet_offset..packet_offset + self.body_len)
     }
 

@@ -22,6 +22,8 @@ use qconnection::send::{Burst, MAX_BURST_PACKETS, Packet};
 use qtransport::{keys::ArcKeys, packet::CipherPacket, space::HandshakeSpace};
 use tokio::io::AsyncWriteExt;
 
+use crate::common::opening::{PacketOpen as _, ShortOpen as _};
+
 mod common;
 mod send {
     mod task;
@@ -116,12 +118,12 @@ async fn mixed_packets_record_each_space() {
         };
         let opened = match packet.header {
             DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
-                .decrypt_long_packet(&keys(true).opening, |_| Ok(pns[index].pn))
+                .open_long(&keys(true).opening, |_| Ok(pns[index].pn))
                 .unwrap()
                 .unwrap()
                 .body(),
             DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
-                .decrypt_long_packet(&keys(true).opening, |_| Ok(pns[index].pn))
+                .open_long(&keys(true).opening, |_| Ok(pns[index].pn))
                 .unwrap()
                 .unwrap()
                 .body(),
@@ -194,7 +196,7 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
     };
     let ty = parsed_header.get_type();
     let opened = CipherPacket::new(parsed_header, parsed.bytes, parsed.offset)
-        .decrypt_long_packet(&common::initial_keys(true).opening, |_| Ok(7))
+        .open_long(&common::initial_keys(true).opening, |_| Ok(7))
         .unwrap()
         .unwrap();
     assert!(FrameReader::new(opened.body(), ty).any(|frame| matches!(frame.unwrap().0, Frame::Ping(_))));
@@ -301,14 +303,14 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             let (epoch, plaintext) = match packet.header {
                 DataHeader::Long(long::DataHeader::Initial(header)) => {
                     let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-                        .decrypt_long_packet(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
+                        .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
                         .unwrap()
                         .unwrap();
                     (Epoch::Initial, FrameReader::new(opened.body(), opened.get_type()).collect::<Result<Vec<_>, _>>().unwrap())
                 }
                 DataHeader::Long(long::DataHeader::Handshake(header)) => {
                     let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-                        .decrypt_long_packet(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Handshake).unwrap().pn))
+                        .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Handshake).unwrap().pn))
                         .unwrap()
                         .unwrap();
                     (Epoch::Handshake, FrameReader::new(opened.body(), opened.get_type()).collect::<Result<Vec<_>, _>>().unwrap())
@@ -427,7 +429,7 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
         assert_eq!(*header.scid(), scid);
         assert_eq!(*header.dcid(), dcid);
         let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-            .decrypt_long_packet(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
+            .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
             .unwrap()
             .unwrap();
         assert!(FrameReader::new(opened.body(), opened.get_type()).any(|f| matches!(f.unwrap().0, Frame::Ping(_))));
@@ -782,7 +784,7 @@ async fn collected_burst_cancels_on_deactivation_and_completes_when_cid_source_c
                     panic!("expected Initial header");
                 };
                 let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-                    .decrypt_long_packet(&keys(true).opening, |pn| Ok(pn.decode(0)))
+                    .open_long(&keys(true).opening, |pn| Ok(pn.decode(0)))
                     .unwrap()
                     .unwrap();
                 assert!(journal.packet(opened.pn()).unwrap().size > 0);
