@@ -1,5 +1,7 @@
 #[path = "../support/open.rs"]
 mod opening;
+#[path = "../support/path.rs"]
+mod path_fixture;
 use std::{
     sync::{
         Arc,
@@ -209,12 +211,14 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         (5500 + index, 4400 + index)
     };
     let pathway = Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], local).into()), EndpointAddr::direct(([127, 0, 0, 1], remote).into()));
-    let path = Arc::new(Path::new(
+    let path = Arc::new(path_fixture::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         pathway,
         confirmed_handshake(transport.parameters.role()),
-        path_heartbeat(),
+        Default::default(),
         data_trackers(transport),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        path_heartbeat(),
+        Default::default(),
     ));
     path.validation.enter_validated().unwrap();
     path
@@ -1261,12 +1265,14 @@ async fn udp_submission_delivers_an_encrypted_stream() {
     let pathway = Pathway::new(local, EndpointAddr::direct(remote.local_addr().unwrap()));
     let protocol = QuicProtocol::new();
     protocol.register(local, &socket).unwrap();
-    let path = Arc::new(Path::new(
+    let path = Arc::new(path_fixture::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         pathway,
         confirmed_handshake(Role::Client),
-        path_heartbeat(),
+        Default::default(),
         data_trackers(&ct),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        path_heartbeat(),
+        Default::default(),
     ));
     path.validation.enter_validated().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
@@ -1315,12 +1321,14 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
 async fn path_validation_replies_on_ingress_and_allows_data_within_credit() {
     let [(client, ct, cp), (server, st, sp)] = pair(2);
     let paths = [(&ct, cp.pathway), (&st, sp.pathway)].map(|(transport, pathway)| {
-        Arc::new(Path::new(
+        Arc::new(path_fixture::path(
+            qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
             pathway,
             confirmed_handshake(transport.parameters.role()),
-            path_heartbeat(),
+            Default::default(),
             data_trackers(transport),
-            qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+            path_heartbeat(),
+            Default::default(),
         ))
     });
     let [cp, sp] = paths;

@@ -14,6 +14,7 @@ qcongestion.workspace = true
 qevent.workspace = true
 qtls.workspace = true
 qprotocol.workspace = true
+qtraversal.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
 derive_more.workspace = true

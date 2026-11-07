@@ -24,11 +24,14 @@ fn path(paths: &Paths, port: u16) -> Arc<Path> {
     crate::common::registered_path(
         paths,
         Path::new(
+            paths.cid_registry.remote.apply_dcid(),
             pathway(port),
             paths.progress.facts(),
+            paths.spaces.clone(),
+            paths.resenders.clone(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.loss_resender.clone(),
-            paths.cid_registry.remote.apply_dcid(),
+            paths.terminator.clone(),
+            paths.progress.clone(),
         ),
     )
 }
@@ -292,52 +295,42 @@ fn take_retired(mature: &super::DataFixture) -> Vec<u64> {
 }
 
 #[tokio::test]
-async fn bursts_refresh_empty_polls_explicit_cancellation_and_drop_without_retiring_early() {
-    use bytes::BytesMut;
+async fn collect_releases_idle_cids_and_refresh_releases_collected_cids_once() {
+    use futures::FutureExt;
     use tokio::io::AsyncWriteExt;
 
-    use crate::send::{Burst, MAX_BURST_PACKETS};
+    use crate::send::Datagram;
 
-    for finish in ["pending", "cancel", "drop"] {
+    for collected in [false, true] {
         let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
         let selected = path(&paths, 4001);
         paths.progress.on_path_selected(&paths, &selected);
         super::install_data(&paths, &mature);
         selected.validation.enter_validated().unwrap();
         take_retired(&mature);
-        if finish != "pending" {
-            mature.spaces.data.crypto.writer().write_all(b"batch snapshot").await.unwrap();
+        if collected {
+            mature.spaces.data.crypto.writer().write_all(b"CID snapshot").await.unwrap();
         }
-        let mut datagrams = [BytesMut::new()];
+        let mut datagrams = [Datagram::default()];
         let mut frames = Vec::new();
-        let mut packets = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| Default::default());
-        let mut burst = Burst::new(&paths, &selected, &mut datagrams, &mut frames, &mut packets);
-        let result = burst.poll_collect(&mut Context::from_waker(Waker::noop()));
-        assert_eq!(result.is_pending(), finish == "pending");
-        if finish == "pending" {
-            assert!(burst.dcid.is_none());
-        } else {
-            assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
-            assert_eq!(burst.dcid, Some(mature.peer_cid()));
+        let result = selected.collect(&mut datagrams, &mut frames).now_or_never();
+        assert_eq!(result.is_some(), collected);
+        if collected {
+            let (count, dcid) = result.unwrap().unwrap();
+            assert!(count > 0);
+            assert_eq!(dcid, mature.peer_cid());
         }
         let next = ConnectionId::from_slice(b"client01");
         paths.cid_registry.remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 1u32.into())).unwrap();
-        if finish == "pending" {
-            assert_eq!(take_retired(&mature), [0]);
+        if collected {
+            assert!(take_retired(&mature).is_empty(), "sealed datagrams still use CID 0");
         } else {
-            assert!(take_retired(&mature).is_empty(), "a sealed batch still uses CID 0");
-        }
-        if finish == "cancel" {
-            burst.cancel();
-            burst.cancel();
             assert_eq!(take_retired(&mature), [0]);
         }
-        drop(burst);
-        if finish == "drop" {
-            assert_eq!(take_retired(&mature), [0]);
-        } else {
-            assert!(take_retired(&mature).is_empty());
-        }
+        selected.refresh(&mut datagrams, &mut frames);
+        assert_eq!(take_retired(&mature), if collected { vec![0] } else { vec![] });
+        selected.refresh(&mut datagrams, &mut frames);
+        assert!(take_retired(&mature).is_empty());
         assert_eq!(ready(&selected), next);
         paths.retire_all();
     }

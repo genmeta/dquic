@@ -1,5 +1,6 @@
 mod support {
     pub mod data;
+    pub mod path;
     pub mod tls;
 }
 use std::sync::Arc;
@@ -13,17 +14,18 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
     use std::time::Duration;
 
     use qbase::{Epoch, handshake::HandshakeFacts, net::route::Pathway, role::Role, time::heartbeat::ArcHeartbeat};
-    use qtransport::path::Path;
     use tokio::time::Instant;
 
     let cid = Default::default();
     let paths = Arc::new([4401, 4402, 4403].map(|port| {
-        Arc::new(Path::new(
+        Arc::new(support::path::path(
+            qbase::cid::ArcRemoteCids::client(cid, qtransport::ArcReliableFrames::with_capacity(0)),
             Pathway::new("127.0.0.1:4400".parse().unwrap(), format!("127.0.0.1:{port}").parse().unwrap()),
             Arc::new(HandshakeFacts::with_role(Role::Client)),
+            Default::default(),
+            Default::default(),
             ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
             Default::default(),
-            qbase::cid::ArcRemoteCids::client(cid, qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
         ))
     }));
     paths[0].validation.enter_validated().unwrap();

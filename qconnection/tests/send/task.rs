@@ -207,7 +207,7 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
 }
 
 #[tokio::test(start_paused = true)]
-async fn sending_runs_two_woken_bursts_and_exits_on_path_failure() {
+async fn sending_runs_again_when_woken_and_exits_on_path_failure() {
     use qbase::{
         net::route::{Line, Link},
         packet::GetType,

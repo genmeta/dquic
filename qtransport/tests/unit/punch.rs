@@ -19,14 +19,14 @@ use qbase::{
     time::heartbeat::ArcHeartbeat,
     token::{ArcTokenRegistry, handy::NoopTokenRegistry},
 };
-use qtransport::path::Path;
-use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
+use qtransport::{path::Path, punch::ProbeEncoder};
+use qtraversal::punch::PunchPacketEncoder;
 
 pub(super) use crate::common::spaces::pair;
 use crate::{
     ArcHandshakeDone, Paths, Scopes, common,
     common::{opening::ShortOpen as _, spaces::take_reliable},
-    recv::receive_1rtt_pkt_and_deliver_frames,
+    receiving::receive_1rtt_pkt_and_deliver_frames,
 };
 
 fn encoder(phase: &super::DataFixture) -> ProbeEncoder {
@@ -117,11 +117,14 @@ async fn receive(phase: &Arc<super::DataFixture>, packets: Vec<BytesMut>, pathwa
     let paths = empty_paths(phase);
     // Preinstall a path without a sender so responses stay inspectable in the queue.
     let path = Arc::new(Path::new(
+        paths.cid_registry.remote.apply_dcid(),
         pathway,
         paths.progress.facts(),
+        paths.spaces.clone(),
+        paths.resenders.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.loss_resender.clone(),
-        paths.cid_registry.remote.apply_dcid(),
+        paths.terminator.clone(),
+        paths.progress.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     receive_on_paths(phase, &paths, packets, pathway, link, Scopes::ALL).await;
@@ -206,11 +209,14 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     let link = Link::new("127.0.0.1:47011".parse().unwrap(), "127.0.0.1:47012".parse().unwrap());
     let pathway = link.into();
     let path = Arc::new(Path::new(
+        paths.cid_registry.remote.apply_dcid(),
         pathway,
         paths.progress.facts(),
+        paths.spaces.clone(),
+        paths.resenders.clone(),
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        paths.loss_resender.clone(),
-        paths.cid_registry.remote.apply_dcid(),
+        paths.terminator.clone(),
+        paths.progress.clone(),
     ));
     paths.entries.lock().unwrap().insert(pathway, path);
     let terminator = paths.terminator.clone();
@@ -516,11 +522,14 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         paths.update_max_idle_timeout(Duration::from_secs(5));
         let link = Link::new("127.0.0.1:47001".parse().unwrap(), "127.0.0.1:47002".parse().unwrap());
         let path = Arc::new(Path::new(
+            paths.cid_registry.remote.apply_dcid(),
             link.into(),
             paths.progress.facts(),
+            paths.spaces.clone(),
+            paths.resenders.clone(),
             ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-            paths.loss_resender.clone(),
-            paths.cid_registry.remote.apply_dcid(),
+            paths.terminator.clone(),
+            paths.progress.clone(),
         ));
         paths.entries.lock().unwrap().insert(path.pathway, path.clone());
         let data = &receiver.spaces.data;

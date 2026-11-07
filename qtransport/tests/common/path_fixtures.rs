@@ -5,7 +5,7 @@ use qbase::{
     net::{addr::EndpointAddr, route::Pathway},
     role::Role,
 };
-use qconnection::Paths;
+use qtransport::Paths;
 
 pub fn paths(role: Role) -> Arc<Paths> {
     paths_with_timeouts(role, Duration::ZERO, Duration::ZERO)

@@ -15,10 +15,10 @@ use qtransport::{
     space::DataSpace,
 };
 
-#[path = "../../../qtransport/tests/support/crypto.rs"]
+#[path = "../support/crypto.rs"]
 mod crypto;
 #[allow(dead_code)]
-#[path = "../../../qtransport/tests/support/tls.rs"]
+#[path = "../support/tls.rs"]
 mod material;
 
 fn packet(keys: &ArcOneRttKeys, pn: u64, reserved: bool, payload: &[u8]) -> BytesMut {
@@ -55,7 +55,7 @@ async fn receive(data: Arc<DataSpace>, paths: Arc<crate::Paths>, buffers: Vec<By
         tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
     }
     drop(tx);
-    crate::recv::receive_1rtt_pkt_and_deliver_frames(
+    crate::receiving::receive_1rtt_pkt_and_deliver_frames(
         (rx, None),
         data,
         paths,
@@ -133,13 +133,13 @@ async fn authentication_budget_spans_levels_paths_and_generations_and_stops_queu
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
                 tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
                 drop(tx);
-                crate::recv::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
+                crate::receiving::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
             }
             DataHeader::Long(qbase::packet::long::DataHeader::Handshake(header)) => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
                 tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
                 drop(tx);
-                crate::recv::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
+                crate::receiving::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
             }
             _ => panic!(),
         }

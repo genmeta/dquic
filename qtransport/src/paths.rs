@@ -18,31 +18,29 @@ use qbase::{
     util::IndexDeque,
 };
 use qcongestion::Transport;
-use qtransport::{
+
+use crate::{
+    ArcProgress, ArcPuncher, ArcReliableFrames, ArcResend, CidRegistry, CloseReason,
     path::Path,
+    punch::ProbeEncoder,
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
 };
-use qtraversal::punch::{ArcPuncher, ProbeEncoder};
-
-use super::progress::ArcProgress;
-use crate::{ArcReliableFrames, ArcResend, CidRegistry, CloseReason};
 
 /// Manages the path collection and holds shared resources for path sending tasks.
-/// Call components such as `progress` directly for their own operations.
 /// Every path has exactly one sending task.
 pub struct Paths {
     pub cid_registry: CidRegistry,
-    pub puncher: ArcPuncher<ArcReliableFrames, ProbeEncoder>,
+    pub puncher: ArcPuncher,
     pub spaces: ArcSpaces,
     pub reliable_frames: ArcReliableFrames,
-    pub(crate) loss_resender: ArcResend,
+    pub(crate) resenders: ArcResend,
     pub terminator: ArcTerminator,
     pub progress: ArcProgress,
     pub entries: Mutex<BTreeMap<Pathway, Arc<Path>>>,
     pub validations: ArcValidations,
     role: Role,
-    idle: ArcIdleTimer,
+    idle_timer: ArcIdleTimer,
     max_idle_timeout: Mutex<Duration>,
     defer_idle_timeout: Duration,
     failed_opened: AtomicU64,
@@ -67,26 +65,26 @@ impl Paths {
         spaces.add(initial_space);
         let puncher = ArcPuncher::new(reliable_frames.clone(), ProbeEncoder::new(spaces.clone(), cid_registry.remote.apply_dcid()));
         let loss_resender = ArcResend::from(loss_resender);
-        let progress = ArcProgress::new(facts, cid_registry.clone(), spaces.clone(), loss_resender.clone(), terminator.clone());
+        let progress = ArcProgress::new(facts, cid_registry.remote.clone(), spaces.clone(), loss_resender.clone(), terminator.clone());
         let paths = Arc::new(Self {
             cid_registry,
             puncher,
             spaces,
             reliable_frames,
-            loss_resender,
+            resenders: loss_resender,
             terminator: terminator.clone(),
             progress,
             entries: Mutex::new(BTreeMap::new()),
             validations: ArcValidations::default(),
             role,
-            idle,
+            idle_timer: idle,
             max_idle_timeout: Mutex::new(max_idle_timeout),
             defer_idle_timeout,
             failed_opened: AtomicU64::new(0),
         });
         tokio::spawn({
             let weak = Arc::downgrade(&paths);
-            let idle = paths.idle.clone();
+            let idle = paths.idle_timer.clone();
             let terminator = terminator.clone();
             async move {
                 tokio::select! {
@@ -142,7 +140,7 @@ impl Paths {
 
     /// Opening-key retention needs a PTO before an unknown path is admitted.
     /// Use existing path measurements without allocating a path or sender.
-    pub(crate) fn pto_for(&self, pathway: &Pathway, epoch: Epoch) -> Duration {
+    pub fn pto_for(&self, pathway: &Pathway, epoch: Epoch) -> Duration {
         let entries = self.entries.lock().unwrap();
         if let Some(path) = entries.get(pathway) {
             return path.cc.get_pto(epoch);
@@ -153,11 +151,14 @@ impl Paths {
     fn create_path(self: &Arc<Self>, pathway: Pathway, facts: Arc<HandshakeFacts>) -> Arc<Path> {
         let confirmed = facts.is_handshake_done();
         let path = Arc::new(Path::new(
+            self.cid_registry.remote.apply_dcid(),
             pathway,
             facts,
+            self.spaces.clone(),
+            self.resenders.clone(),
             ArcHeartbeat::new(self.defer_idle_timeout, *self.max_idle_timeout.lock().unwrap()),
-            self.loss_resender.clone(),
-            self.cid_registry.remote.apply_dcid(),
+            self.terminator.clone(),
+            self.progress.clone(),
         ));
         if self.role == Role::Client {
             let _ = path.validation.exempt();
@@ -172,15 +173,15 @@ impl Paths {
         path
     }
 
-    pub(crate) fn role(&self) -> Role {
+    pub fn role(&self) -> Role {
         self.role
     }
 
-    pub(crate) fn idle(&self) -> ArcIdleTimer {
-        self.idle.clone()
+    pub fn idle_timer(&self) -> ArcIdleTimer {
+        self.idle_timer.clone()
     }
 
-    pub(crate) fn update_max_idle_timeout(&self, timeout: Duration) {
+    pub fn update_max_idle_timeout(&self, timeout: Duration) {
         // Parameters use MAX for disabled expiry; IdleTimer uses ZERO.
         let timeout = if timeout == Duration::MAX {
             Duration::ZERO
@@ -189,18 +190,18 @@ impl Paths {
         };
         let entries = self.entries.lock().unwrap();
         *self.max_idle_timeout.lock().unwrap() = timeout;
-        self.idle.update_max_idle_timeout(timeout);
+        self.idle_timer.update_max_idle_timeout(timeout);
         for path in entries.values() {
             path.heartbeat.adapt_max_idle_timeout(timeout);
         }
     }
 
-    pub(crate) fn closing_pto(&self) -> Duration {
+    pub fn closing_pto(&self) -> Duration {
         self.entries.lock().unwrap().values().map(|path| path.cc.pto_base(Epoch::Data)).max().unwrap_or(Duration::from_secs(1))
     }
 
     /// Share the authentication failure budget across paths and encryption levels.
-    pub(crate) fn on_authentication_failed(&self, limit: u64) {
+    pub fn on_authentication_failed(&self, limit: u64) {
         if self.failed_opened.fetch_add(1, Ordering::Relaxed) >= limit.saturating_sub(1) {
             self.terminator.abort(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection integrity limit").into());
         }
@@ -267,7 +268,7 @@ impl Paths {
 
     /// Stop idle expiry and release paths, packet spaces and recovery trackers.
     pub fn clean(&self) {
-        self.idle.cancel();
+        self.idle_timer.cancel();
         self.puncher.abort_transactions();
         self.puncher.release_temporary_sockets();
         {
@@ -289,6 +290,6 @@ impl Paths {
 
 impl Drop for Paths {
     fn drop(&mut self) {
-        self.idle.cancel();
+        self.idle_timer.cancel();
     }
 }

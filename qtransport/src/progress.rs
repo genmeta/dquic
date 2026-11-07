@@ -2,27 +2,27 @@
 use std::sync::{Arc, Mutex};
 
 use qbase::{Epoch, cid::ConnectionId, handshake::HandshakeFacts, role::Role};
-use qtransport::{
+
+use crate::{
+    ArcRemoteCids, ArcResend, Paths,
     path::Path,
     space::{ArcSpaces, DataSpace, Encapsulate, HandshakeSpace},
     terminate::ArcTerminator,
 };
-
-use crate::{ArcResend, CidRegistry, Paths};
 
 /// Serializes edge-triggered lifecycle effects for the shared handshake facts.
 #[derive(Clone)]
 pub struct ArcProgress(Arc<Mutex<Progress>>);
 
 impl ArcProgress {
-    pub(crate) fn new(
+    pub fn new(
         facts: Arc<HandshakeFacts>,
-        cid_registry: CidRegistry,
+        remote_cids: ArcRemoteCids,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self(Arc::new(Mutex::new(Progress::new(facts, cid_registry, spaces, loss_resender, terminator))))
+        Self(Arc::new(Mutex::new(Progress::new(facts, remote_cids, spaces, loss_resender, terminator))))
     }
 
     pub fn facts(&self) -> Arc<HandshakeFacts> {
@@ -34,35 +34,37 @@ impl ArcProgress {
         self.0.lock().unwrap().on_initial_received(peer_scid)
     }
 
-    pub(crate) fn install_handshake(&self, space: Arc<HandshakeSpace>) -> bool {
+    pub fn install_handshake(&self, space: Arc<HandshakeSpace>) -> bool {
         self.0.lock().unwrap().install_handshake(space)
     }
 
-    pub(crate) fn install_data(&self, space: Arc<DataSpace>) {
+    pub fn install_data(&self, space: Arc<DataSpace>) {
         self.0.lock().unwrap().install(space);
     }
 
-    pub(crate) fn on_tls_finished(&self) {
+    pub fn on_tls_finished(&self) {
         self.0.lock().unwrap().on_tls_finished();
     }
 
-    pub(crate) fn on_handshake_sent(&self) {
+    pub fn on_handshake_sent(&self) {
         self.0.lock().unwrap().on_handshake_sent();
     }
 
-    pub(crate) fn on_handshake_received(&self) {
+    pub fn on_handshake_received(&self) {
         self.0.lock().unwrap().on_handshake_received();
     }
 
+    /// Select the handshake path and suspend payload on the other paths.
     pub fn on_path_selected(&self, paths: &Paths, path: &Arc<Path>) -> bool {
         self.0.lock().unwrap().on_path_selected(paths, path)
     }
 
-    pub(crate) fn on_handshake_done(&self, paths: &Arc<Paths>) {
+    /// Confirm the handshake and enable and validate the registered paths.
+    pub fn on_handshake_done(&self, paths: &Arc<Paths>) {
         self.0.lock().unwrap().on_handshake_done(paths);
     }
 
-    pub(crate) fn clean(&self) {
+    pub fn clean(&self) {
         self.0.lock().unwrap().clean();
     }
 }
@@ -71,7 +73,7 @@ impl ArcProgress {
 struct Progress {
     facts: Arc<HandshakeFacts>,
     role: Role,
-    cid_registry: CidRegistry,
+    remote_cids: ArcRemoteCids,
     spaces: ArcSpaces,
     loss_resender: ArcResend,
     terminator: ArcTerminator,
@@ -80,12 +82,12 @@ struct Progress {
 impl Progress {
     fn new(
         facts: Arc<HandshakeFacts>,
-        cid_registry: CidRegistry,
+        remote_cids: ArcRemoteCids,
         spaces: ArcSpaces,
         loss_resender: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self { role: facts.role(), facts, cid_registry, spaces, loss_resender, terminator }
+        Self { role: facts.role(), facts, remote_cids, spaces, loss_resender, terminator }
     }
 
     fn on_initial_received(&mut self, peer_scid: ConnectionId) -> bool {
@@ -93,7 +95,7 @@ impl Progress {
             return false;
         }
         // Assigning sequence zero wakes only the path waiting for that CID cell.
-        self.cid_registry.remote.on_receive_from(peer_scid);
+        self.remote_cids.on_receive_from(peer_scid);
         true
     }
 
@@ -154,17 +156,17 @@ impl Progress {
     }
 
     fn on_handshake_done(&mut self, paths: &Arc<Paths>) {
+        let entries = paths.entries.lock().unwrap();
         let Some(data) = self.spaces.get_as::<DataSpace>(Epoch::Data) else {
             // Cleanup may have removed Data before this confirmation was handled.
             return;
         };
-        let entries = paths.entries.lock().unwrap();
         if !self.facts.on_handshake_done() {
             return;
         }
         data.keys.allow_update();
         self.retire(Epoch::Handshake);
-        self.cid_registry.remote.upgrade();
+        self.remote_cids.upgrade();
         for path in entries.values() {
             if path.dcid.is_allocated() {
                 let _ = path.validation.enter_validated();

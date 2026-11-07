@@ -53,12 +53,21 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let scid = ConnectionId::from_slice(b"client00");
     let keys = client.initial_keys(qtls::QuicVersion::V1, odcid.as_ref()).unwrap();
     let pathway = Pathway::new(EndpointAddr::direct(client_addr), local);
+    let remote_cids = qconnection::ArcRemoteCids::client(Default::default(), qconnection::ArcReliableFrames::with_capacity(0));
+    let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Client));
+    let spaces = qtransport::space::ArcSpaces::default();
+    let resenders = qconnection::ArcResend::default();
+    let terminator = qtransport::terminate::ArcTerminator::no_error();
+    let progress = qconnection::ArcProgress::new(facts.clone(), remote_cids.clone(), spaces.clone(), resenders.clone(), terminator.clone());
     let path = Path::new(
+        remote_cids.apply_dcid(),
         pathway,
-        Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Client)),
+        facts,
+        spaces,
+        resenders,
         ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-        Default::default(),
-        qconnection::ArcRemoteCids::client(Default::default(), qconnection::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        terminator,
+        progress,
     );
     path.validation.exempt().unwrap();
     // Only the TLS handshake header: SNI and the rest of ClientHello are still missing.

@@ -1,4 +1,3 @@
-mod packet;
 mod predictor;
 mod puncher;
 mod scheduler;
@@ -6,7 +5,6 @@ mod tx;
 
 use std::future::Future;
 
-pub use packet::ProbeEncoder;
 pub use puncher::{ArcPuncher, PunchPacketEncoder};
 use qbase::{
     frame::{ReliableFrame, io::SendFrame},

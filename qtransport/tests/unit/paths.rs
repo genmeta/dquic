@@ -20,11 +20,14 @@ async fn selection_disables_other_paths_and_confirmation_enables_them_for_valida
             crate::common::registered_path(
                 &paths,
                 qtransport::path::Path::new(
+                    paths.cid_registry.remote.apply_dcid(),
                     pathway(port),
                     paths.progress.facts(),
+                    paths.spaces.clone(),
+                    paths.resenders.clone(),
                     qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                    paths.loss_resender.clone(),
-                    paths.cid_registry.remote.apply_dcid(),
+                    paths.terminator.clone(),
+                    paths.progress.clone(),
                 ),
             )
         };
@@ -114,9 +117,9 @@ async fn clean_stops_idle_expiry_and_releases_paths_spaces_and_recovery() {
 
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(crate::common::space_epochs(&paths.spaces).is_empty());
-    assert!(paths.loss_resender.read_guard().is_empty());
+    assert!(paths.resenders.read_guard().is_empty());
     assert!(initial.keys.get().is_err());
-    assert!(paths.idle().timeout().await.is_err());
+    assert!(paths.idle_timer().timeout().await.is_err());
     assert!(response.await.is_err());
     tokio::time::advance(Duration::from_secs(10)).await;
     for path in [&first, &second] {
@@ -137,7 +140,7 @@ async fn clean_stops_idle_expiry_and_releases_paths_spaces_and_recovery() {
 async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
     let start = tokio::time::Instant::now();
-    paths.idle().on_rcvd_at(start).unwrap().unwrap();
+    paths.idle_timer().on_rcvd_at(start).unwrap().unwrap();
     let reason = paths.terminator.clone().await;
     assert!(matches!(reason, crate::Error::Quic(error)
         if error.kind() == ErrorKind::None && error.reason() == "connection idle timeout"));
@@ -148,7 +151,7 @@ async fn idle_timeout_notifies_close_without_a_path_or_tick_task() {
 async fn cancelled_idle_timer_does_not_request_close() {
     let paths = paths_with_timeouts(Role::Server, Duration::from_secs(5), Duration::ZERO);
     let notification = crate::common::observe_close(&paths.terminator.clone());
-    let idle = paths.idle();
+    let idle = paths.idle_timer();
     idle.on_rcvd_at(tokio::time::Instant::now()).unwrap().unwrap();
     tokio::task::yield_now().await;
     idle.cancel();
@@ -425,11 +428,11 @@ async fn old_validation_and_sending_tasks_cannot_remove_a_replacement_at_the_sam
 async fn disabled_negotiated_timeout_remains_cancellable_after_activity() {
     let paths = paths(Role::Server);
     paths.update_max_idle_timeout(Duration::MAX);
-    paths.idle().on_rcvd_at(tokio::time::Instant::now()).unwrap().unwrap();
-    let waiting = paths.idle().timeout();
+    paths.idle_timer().on_rcvd_at(tokio::time::Instant::now()).unwrap().unwrap();
+    let waiting = paths.idle_timer().timeout();
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    paths.idle().cancel();
+    paths.idle_timer().cancel();
     assert!(tokio::time::timeout(Duration::from_millis(200), waiting).await.unwrap().is_err());
 }
 
@@ -439,11 +442,14 @@ fn confirm_validation(paths: &Arc<Paths>) {
     let selected = crate::common::registered_path(
         paths,
         qtransport::path::Path::new(
+            paths.cid_registry.remote.apply_dcid(),
             pathway(39999),
             paths.progress.facts(),
+            paths.spaces.clone(),
+            paths.resenders.clone(),
             qbase::time::heartbeat::ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-            paths.loss_resender.clone(),
-            paths.cid_registry.remote.apply_dcid(),
+            paths.terminator.clone(),
+            paths.progress.clone(),
         ),
     );
     paths.progress.on_path_selected(paths, &selected);

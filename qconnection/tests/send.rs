@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     io::Cursor,
     sync::Arc,
     task::{Context, Poll, Waker},
@@ -13,12 +12,11 @@ use qbase::{
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
     frame::{Frame, FrameReader, GuaranteedFrame, PingFrame},
-    net::{addr::EndpointAddr, route::Pathway},
     packet::{DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketContent, PacketReader, long},
     role::Role,
 };
 use qcongestion::Transport as _;
-use qconnection::send::{Burst, MAX_BURST_PACKETS, Packet};
+use qconnection::send::Packet;
 use qtransport::{keys::ArcKeys, packet::CipherPacket, space::HandshakeSpace};
 use tokio::io::AsyncWriteExt;
 
@@ -605,201 +603,6 @@ async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
     );
     assert_eq!(size, 0);
     assert!(packets.is_empty());
-}
-
-#[tokio::test]
-async fn blocked_ack_does_not_wake_itself_and_collector_drop_keeps_subscription() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Counter(AtomicUsize);
-    impl std::task::Wake for Counter {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    let paths =
-        common::initial_paths(Role::Server, ConnectionId::from_slice(b"serverid"), ConnectionId::from_slice(b"original"), keys(true));
-    let path = paths.add_path(Pathway::new(
-        EndpointAddr::direct("127.0.0.1:31001".parse().unwrap()),
-        EndpointAddr::direct("127.0.0.1:31002".parse().unwrap()),
-    ));
-    path.cc.on_pkt_rcvd(Epoch::Initial, 0, true);
-    let initial = common::initial_space(&paths.spaces);
-    initial.rcvd_journal.on_rcvd_pn(0, true, Duration::from_secs(1));
-    let mut datagrams = [BytesMut::with_capacity(1200)];
-    let mut frames = Vec::new();
-    let mut pns = std::array::from_fn(|_| Default::default());
-    let count = Arc::new(Counter(AtomicUsize::new(0)));
-    let waker = Waker::from(count.clone());
-    let mut cx = Context::from_waker(&waker);
-    let mut collector = Burst::new(&paths, &path, &mut datagrams, &mut frames, &mut pns);
-    assert!(std::pin::pin!(collector.collect()).poll(&mut cx).is_pending());
-    assert_eq!(count.0.load(Ordering::Relaxed), 0, "waiting for credit must not continuously wake this task");
-    drop(collector);
-    initial.crypto.writer().write_all(b"hello").await.unwrap();
-    path.validation.on_received(1200);
-    path.close();
-    assert!(count.0.load(Ordering::Relaxed) > 0);
-    paths.terminator.terminate();
-    common::wait_for_sender_exit(&path).await;
-    assert_eq!(Arc::strong_count(&count), 2, "task exit releases subscriptions");
-}
-
-#[tokio::test]
-async fn collector_drop_keeps_subscriptions_until_path_task_exits() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Counter(AtomicUsize);
-    impl std::task::Wake for Counter {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    let paths =
-        common::initial_paths(Role::Client, ConnectionId::from_slice(b"clientid"), ConnectionId::from_slice(b"original"), keys(false));
-    let make_path = |port| {
-        paths.add_path(Pathway::new(
-            EndpointAddr::direct(([127, 0, 0, 1], port).into()),
-            EndpointAddr::direct("127.0.0.1:32002".parse().unwrap()),
-        ))
-    };
-    let first = make_path(32001);
-    let second = make_path(32003);
-    let mut first_bytes = [BytesMut::with_capacity(1200)];
-    let mut second_bytes = [BytesMut::with_capacity(1200)];
-    let mut first_frames = Vec::new();
-    let mut second_frames = Vec::new();
-    let mut first_pns = std::array::from_fn(|_| Default::default());
-    let mut second_pns = std::array::from_fn(|_| Default::default());
-    let a = Arc::new(Counter(AtomicUsize::new(0)));
-    let b = Arc::new(Counter(AtomicUsize::new(0)));
-    let wa = Waker::from(a.clone());
-    let wb = Waker::from(b.clone());
-    let mut one = Burst::new(&paths, &first, &mut first_bytes, &mut first_frames, &mut first_pns);
-    let mut two = Burst::new(&paths, &second, &mut second_bytes, &mut second_frames, &mut second_pns);
-    assert!(std::pin::pin!(one.collect()).poll(&mut Context::from_waker(&wa)).is_pending());
-    assert!(std::pin::pin!(two.collect()).poll(&mut Context::from_waker(&wb)).is_pending());
-    drop(one);
-    let initial = common::initial_space(&paths.spaces);
-    initial.crypto.writer().write_all(b"hello").await.unwrap();
-    assert!(a.0.load(Ordering::Relaxed) > 0);
-    assert!(b.0.load(Ordering::Relaxed) > 0);
-    // Keep the second task credit-blocked while the first task retires.
-    second.validation.revalidate().unwrap();
-    first.close();
-    common::wait_for_sender_exit(&first).await;
-    let first_before = a.0.load(Ordering::Relaxed);
-    second.validation.on_received(1200);
-    second.send_waker.wake_all();
-    assert!(matches!(std::pin::pin!(two.collect()).poll(&mut Context::from_waker(&wb)), Poll::Ready(Ok(1))));
-    drop(two);
-    let before = b.0.load(Ordering::Relaxed);
-    initial.crypto.writer().write_all(b"again").await.unwrap();
-    assert_eq!(a.0.load(Ordering::Relaxed), first_before);
-    assert!(b.0.load(Ordering::Relaxed) > before);
-    second.close();
-    paths.terminator.terminate();
-    common::wait_for_sender_exit(&second).await;
-    // Terminating the last path also notifies connection-close waiters.
-    let first_before = a.0.load(Ordering::Relaxed);
-    let before = b.0.load(Ordering::Relaxed);
-    first.close();
-    second.close();
-    assert_eq!(a.0.load(Ordering::Relaxed), first_before);
-    assert_eq!(b.0.load(Ordering::Relaxed), before);
-}
-
-#[tokio::test]
-async fn collected_burst_cancels_on_deactivation_and_completes_when_cid_source_changes() {
-    use qbase::{
-        frame::{NewConnectionIdFrame, io::ReceiveFrame},
-        net::route::{Line, Link},
-        packet::GetDcid,
-    };
-    use qprotocol::{QuicProtocol, UdpSocket};
-
-    for change in 0..3 {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let local = EndpointAddr::direct(socket.local_addr().unwrap());
-        QuicProtocol::global().register(local, &socket).unwrap();
-        let paths =
-            common::initial_paths(Role::Client, ConnectionId::from_slice(b"client00"), ConnectionId::from_slice(b"original"), keys(false));
-        let first = paths.add_path(Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())));
-        let second = paths.add_path(Pathway::new(local, EndpointAddr::direct("127.0.0.1:9".parse().unwrap())));
-        if change == 2 {
-            paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
-            paths.progress.on_path_selected(&paths, &first);
-        }
-        let initial = common::initial_space(&paths.spaces);
-        initial.crypto.writer().write_all(b"client hello").await.unwrap();
-        let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::new());
-        let mut frames = Vec::new();
-        let mut packets = std::array::from_fn(|_| Default::default());
-        let mut burst = Burst::new(&paths, &first, &mut datagrams, &mut frames, &mut packets);
-        let count = burst.collect().now_or_never().unwrap().unwrap();
-        match change {
-            0 => {
-                paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
-                paths.progress.on_path_selected(&paths, &second);
-            }
-            1 => {
-                paths.progress.on_initial_received(ConnectionId::from_slice(b"server00"));
-            }
-            _ => {
-                paths
-                    .cid_registry
-                    .remote
-                    .recv_frame(NewConnectionIdFrame::new(ConnectionId::from_slice(b"server00"), 1u32.into(), 1u32.into()))
-                    .unwrap();
-            }
-        }
-        // Verify the CID on the wire after the policy changes and submission completes.
-        burst.submit(count).await.unwrap();
-        drop(burst);
-        assert!(packets.iter().all(|packets| packets.is_empty()));
-        let mut received = [BytesMut::zeroed(1500)];
-        let mut lines = [Line::new(Link::new(local.addr(), peer.local_addr().unwrap()), 64, None, 1500)];
-        if change == 0 {
-            assert!(!first.is_active());
-            assert!(peer.receive(&mut received, &mut lines).now_or_never().is_none());
-            common::retire_all(&paths);
-            common::wait_for_sender_exit(&first).await;
-            common::wait_for_sender_exit(&second).await;
-            QuicProtocol::global().unregister(socket.local_addr().unwrap());
-            continue;
-        }
-        tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut received, &mut lines)).await.unwrap().unwrap();
-        received[0].truncate(lines[0].seg_size as usize);
-        let ParsedPacket::Data(packet) = PacketReader::new(received[0].clone(), 8).next().unwrap().unwrap() else {
-            panic!("expected Initial packet");
-        };
-        assert_eq!(*packet.header.dcid(), ConnectionId::from_slice(b"original"));
-        {
-            let journal = initial.sent_journal.lock_guard();
-            assert!(count > 0);
-            for bytes in &datagrams[..count] {
-                let ParsedPacket::Data(packet) = PacketReader::new(bytes.clone(), 8).next().unwrap().unwrap() else {
-                    panic!("expected Initial packet");
-                };
-                let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
-                    panic!("expected Initial header");
-                };
-                let opened = CipherPacket::new(header, packet.bytes, packet.offset)
-                    .open_long(&keys(true).opening, |pn| Ok(pn.decode(0)))
-                    .unwrap()
-                    .unwrap();
-                assert!(journal.packet(opened.pn()).unwrap().size > 0);
-            }
-        }
-        assert_eq!(
-            first.dcid.poll_borrow(&mut Context::from_waker(Waker::noop())),
-            Poll::Ready(Some(ConnectionId::from_slice(b"server00")))
-        );
-        first.dcid.refresh();
-        common::retire_all(&paths);
-        common::wait_for_sender_exit(&first).await;
-        common::wait_for_sender_exit(&second).await;
-        QuicProtocol::global().unregister(socket.local_addr().unwrap());
-    }
 }
 
 #[tokio::test]

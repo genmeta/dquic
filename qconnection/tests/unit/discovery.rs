@@ -73,7 +73,7 @@ async fn dns_records_are_consumed_in_order_without_delaying_relays() {
     assert_eq!(paths.entries.lock().unwrap().len(), 2);
     drop(send);
     discovery.await.unwrap();
-    paths.retire_all();
+    crate::common::retire_all(&paths);
 }
 
 #[tokio::test(start_paused = true)]
@@ -95,7 +95,7 @@ async fn relay_only_dns_creates_a_path_without_waiting() {
     assert!(paths.entries.lock().unwrap().contains_key(&Pathway::new(local_relay, relay)));
     assert!(!paths.entries.lock().unwrap().contains_key(&Pathway::new(public, relay)));
     assert_eq!(paths.entries.lock().unwrap().len(), 1);
-    paths.retire_all();
+    crate::common::retire_all(&paths);
 }
 
 #[tokio::test(start_paused = true)]
@@ -186,7 +186,7 @@ async fn streaming_dns_pairs_each_record_with_the_current_book_and_deduplicates_
     assert!(paths.entries.lock().unwrap().contains_key(&Pathway::new(second.endpoint(), peer)));
     drop(send);
     discovery.await.unwrap();
-    paths.retire_all();
+    crate::common::retire_all(&paths);
 }
 
 #[tokio::test]
@@ -231,7 +231,7 @@ async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     assert_eq!(paths.entries.lock().unwrap().len(), 1);
     drop(send);
     discovery.await.unwrap();
-    paths.retire_all();
+    crate::common::retire_all(&paths);
 }
 
 #[tokio::test(start_paused = true)]
@@ -252,5 +252,5 @@ async fn loopback_dns_excludes_non_loopback_local_endpoints() {
     assert_eq!(paths.entries.lock().unwrap().len(), 1);
     assert!(paths.entries.lock().unwrap().contains_key(&Pathway::new(local.endpoint(), peer)));
     assert!(!paths.entries.lock().unwrap().contains_key(&Pathway::new(bridge, peer)));
-    paths.retire_all();
+    crate::common::retire_all(&paths);
 }
