@@ -30,7 +30,10 @@ fn authentication_advances_decoding_without_acknowledging() {
     records.on_authenticated(0x10000);
     records.on_authenticated(100);
     assert_eq!(records.decode_pn(PacketNumber::U16(1)), Ok(0x10001));
-    assert_eq!(records.gen_ack_frame_util(1, Instant::now(), 1200).unwrap().iter().collect::<Vec<_>>(), [1..=1]);
+    let ack = records.gen_ack_frame_util(1, Instant::now(), 1200).unwrap();
+    let mut ranges = ack.iter();
+    assert_eq!(ranges.next(), Some(1..=1));
+    assert_eq!(ranges.next(), None);
     assert!(records.gen_ack_frame_util(0x10000, Instant::now(), 1200).is_err());
 }
 
