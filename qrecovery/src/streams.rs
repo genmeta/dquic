@@ -37,11 +37,12 @@ use self::{
     io::{ArcInput, ArcOutput},
     listener::ArcListener,
 };
+mod ctrl;
 pub mod error;
+mod fair;
 mod io;
 mod listener;
 mod op;
-mod tx;
 
 #[derive(Debug, Clone)]
 pub struct Ext<T>(T);
@@ -84,7 +85,7 @@ where
 /// # Receive frames, handle frame loss and acknowledge
 ///
 /// Frames received, frames lost or acknowledgmented will be delivered to the corresponding method.
-/// | method on [`RawDataStreams`]                                | corresponding method                               |
+/// | method on [`DataStreams`]                                | corresponding method                               |
 /// | -------------------------------------------------------- | -------------------------------------------------- |
 /// | [`recv_data`]                                            | [`Incoming::recv_data`]                            |
 /// | [`recv_stream_control`] ([`RESET_STREAM frame`])         | [`Incoming::recv_reset`]                           |
@@ -114,11 +115,11 @@ where
 /// [`SendBuf`]: crate::send::SendBuf
 /// [`send_frame`]: SendFrame::send_frame
 /// [`Package::poll_dump`]: qbase::packet::Package::poll_dump
-/// [`recv_data`]: RawDataStreams::recv_data
-/// [`recv_stream_control`]: RawDataStreams::recv_stream_control
-/// [`on_data_acked`]: RawDataStreams::on_data_acked
-/// [`may_loss_data`]: RawDataStreams::may_loss_data
-/// [`on_reset_acked`]: RawDataStreams::on_reset_acked
+/// [`recv_data`]: DataStreams::recv_data
+/// [`recv_stream_control`]: DataStreams::recv_stream_control
+/// [`on_data_acked`]: DataStreams::on_data_acked
+/// [`may_loss_data`]: DataStreams::may_loss_data
+/// [`on_reset_acked`]: DataStreams::on_reset_acked
 /// [`RESET_STREAM frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-reset_stream-frame
 /// [`STOP_SENDING frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-stop_sending-frames
 /// [`MAX_STREAM_DATA frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-max_stream_data-frame
@@ -232,7 +233,7 @@ where
 ///
 /// Connection flow control and its MAX_DATA/DATA_BLOCKED frames are handled internally.
 ///
-/// See [`RawDataStreams`] for more details.
+/// See [`DataStreams`] for more details.
 #[derive(Debug, Clone, Deref)]
 pub struct ArcDataStreams<TX>(Arc<DataStreams<TX>>)
 where
@@ -251,9 +252,9 @@ impl<TX> ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    /// Creates a new instance of [`DataStreams`].
+    /// Creates a new instance of [`ArcDataStreams`].
     ///
-    /// The `ctrl_frames` is the frame sender, read [`RawDataStreams`] for more details.
+    /// The `ctrl_frames` is the frame sender, read [`DataStreams`] for more details.
     pub fn new(
         parameters: ArcParameters,
         ctrl_streams: Box<dyn ControlStreamsConcurrency>,
