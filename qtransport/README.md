@@ -48,19 +48,20 @@ Initial/Handshake 实例、TLS、角色淘汰规则、关闭发送与定时器�
 
 路由保留 `Signpost` 和 `QuicRouterRegistry`，不包含 `QuicRouterComponent`、admissibility 或 handler。`Way = (Pathway, Link)`。`receive` 解析 datagram 并为同一连接的 CID 别名只记一次字节数；未知包直接 `try_send` 到 connectless channel。`packet::channel::Inbox` 将 Data packet 按 header 类型投递，满 channel 时直接丢包。
 
-1-RTT 的 `OneRttKeys` 保存固定一代的双向密钥、代次和共享的加密次数；头保护
-`HeaderKeys { opening, sealing }` 在更新时保持不变。`ArcOneRttKeys` 管理各代密钥、
-更新权限和淘汰，`get()` 返回 `Result<Arc<OneRttKeys>, PacketError>`，接近使用上限时
-在允许的情况下更新。淘汰返回 `PacketError::Retired`。
+1-RTT 的 `PacketKeys` 只保存固定一代的双向包密钥、代次和共享的加密次数；头保护
+`HeaderKeys { opening, sealing }` 在更新时保持不变，由 `ArcOneRttKeys` 共享持有。
+`ArcOneRttKeys` 管理 `PacketKeyRing` 中各个 `PacketKeyState` 的代次记录、更新权限和淘汰，
+`get()` 返回 `Result<keys::short::ArcKeys, PacketError>`，组合固定的头保护密钥和选定的 `Arc<PacketKeys>`，接近使用上限时
+在允许的情况下更新。Data 密钥随最后一个持有者释放，不维护独立的退役状态；收发与恢复任务由连接生命周期停止。
 `qtls::DirectionalKeys` 实现 `Open`、`Seal`；`ArcOneRttKeys` 实现 `Open`，负责接收时
-选择旧代、当前代或验证下一代；固定的 `OneRttKeys` 实现 `Seal`，返回 `(u64, KeyPhaseBit)`。
+选择旧代、当前代或验证下一代；固定的 `keys::short::ArcKeys` 实现 `Seal`，返回 `(u64, KeyPhaseBit)`。
 Data 接收使用 `ArcOneRttKeys::open_packet` 产出 `PlainPacket<OneRttHeader>`，ACK 通过
 管理器的 `on_ack` 授权后续更新。密钥层不接收 journal，也不分配包号。
 `DataSpace::pn_and_keys()` 持有发送 journal 的 guard，先取得固定代次密钥，再调用
 `SentJournal::next_pn()`；普通发送和打洞共用这一入口。组帧和加密不持有 journal 锁。
-AEAD 用量在 `OneRttKeys::seal` 中以原子计数限制，未使用的密钥句柄不消耗加密次数；
+AEAD 用量在 `keys::short::ArcKeys::seal` 中以 `PacketKeys` 内的原子计数限制，未使用的密钥句柄不消耗加密次数；
 同代的所有句柄共享限制，已经取得的旧代句柄也不能超限。
-包密钥用一个 `VecDeque` 保存成对的 opening/sealing，发送取得队尾的 `Arc<OneRttKeys>`，
+包密钥用一个 `VecDeque` 保存成对的 opening/sealing，发送快照持有队尾的 `Arc<PacketKeys>`，
 `next_secret` 独立保存后续派生材料。主动更新直接派生一对入队；被动更新先临时派生，
 认证成功才入队并推进 secret，失败不改变正式状态。双方同时更新时使用已有队尾 opening，
 不重复入队。队列最多三对；收到新代认证包后，旧对按 3 PTO 淘汰。已领取包的密钥和相位固定，旧密文可以晚于新代包提交。

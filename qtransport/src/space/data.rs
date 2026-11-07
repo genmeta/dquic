@@ -58,12 +58,8 @@ impl Allocate for DataSpace {
     fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
         // Serialize generation selection and PN allocation across every sending path.
         let mut journal = self.sent_journal.lock_guard();
-        let keys = match self.keys.get() {
-            Ok(keys) => keys,
-            Err(crate::keys::PacketError::Retired(_)) => return None,
-            result => result.expect("不可能达到上限，忽略这种错误就行了"),
-        };
-        let pn = journal.next_pn().expect("不可能达到上限，忽略这种错误就行了");
+        let keys = self.keys.get().expect("data packet keys would be updated automatically");
+        let pn = journal.next_pn().expect("packet number space is hard to be exhausted");
         Some((pn, Keys::Short(keys)))
     }
 }
@@ -92,9 +88,7 @@ impl Transmit for DataSpace {
 
 impl qcongestion::Resend for DataSpace {
     fn resend(&self, _: PacketLostTrigger, pns: &mut dyn Iterator<Item = u64>) {
-        if !self.keys.is_retired() {
-            self.sent_journal.resend(pns, |frame| self.recover(frame));
-        }
+        self.sent_journal.resend(pns, |frame| self.recover(frame));
     }
 }
 
@@ -117,14 +111,11 @@ impl Recover for DataSpace {
         }
     }
 
-    fn retire(&self) {
-        self.keys.retire();
-    }
+    // Data keys remain usable until their last handle is dropped.
+    fn retire(&self) {}
 
     fn on_tick(&self, now: Instant) {
-        if !self.keys.is_retired() {
-            self.sent_journal.on_tick(now, |frame| self.recover(frame));
-        }
+        self.sent_journal.on_tick(now, |frame| self.recover(frame));
     }
 
     fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>) {
@@ -145,9 +136,6 @@ impl UnregisterWaker for DataSpace {
 
 impl Encapsulate for DataSpace {
     fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
-        if self.keys.is_retired() {
-            return None;
-        }
         let header = OneRttHeader::new(Default::default(), dcid);
         Some(super::probe_size(&header, self.sent_journal.lock_guard().next_pn_len(), self.keys.tag_len()))
     }

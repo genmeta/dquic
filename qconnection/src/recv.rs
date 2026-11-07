@@ -150,9 +150,6 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
         parsed_frames.clear();
         let received_bytes = packet.payload_len();
         let keys = &data.keys;
-        if keys.is_retired() {
-            break;
-        }
         if scopes.is_some_and(|scopes| !pathway.belongs_to(scopes)) {
             continue;
         }

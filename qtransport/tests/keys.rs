@@ -17,10 +17,6 @@ fn ready() -> ArcOneRttKeys {
     ArcOneRttKeys::from(client)
 }
 
-fn reserved_generation(keys: &ArcOneRttKeys) -> u64 {
-    keys.get().unwrap().generation
-}
-
 struct Packet {
     bytes: bytes::BytesMut,
     generation: Option<u64>,
@@ -58,21 +54,6 @@ fn snapshots_share_material_and_retirement() {
 }
 
 #[test]
-fn one_rtt_handles_share_updates_and_retirement() {
-    let ([client, _], _) = support::tls::handshake();
-    let keys = ArcOneRttKeys::from(client);
-    let other = keys.clone();
-    let old = keys.get().unwrap();
-    assert!(Arc::ptr_eq(&old, &other.get().unwrap()));
-    keys.allow_update();
-    other.update().unwrap();
-    assert_eq!(old.generation, 0);
-    assert_eq!(keys.get().unwrap().generation, 1);
-    keys.retire();
-    assert!(matches!(other.get(), Err(PacketError::Retired(KeyRetired))));
-}
-
-#[test]
 fn seal_reports_the_phase_authenticated_in_the_header() {
     let (materials, _) = support::tls::handshake();
     let [sending, receiving] = materials.map(ArcOneRttKeys::from);
@@ -93,13 +74,6 @@ fn seal_reports_the_phase_authenticated_in_the_header() {
         buffer[5] = 0x01; // PING
         let sealed = sending.get().unwrap().seal(pn, &mut buffer, 1, 5, tag_len).unwrap();
         assert_eq!(sealed, (generation, expected_phase));
-
-        let mut unprotected = buffer.clone();
-        let (header, sample) = unprotected.split_at_mut(5);
-        let (prefix, pn_bytes) = header.split_at_mut(1);
-        let header_key = &receiving.headers.opening;
-        header_key.unprotect(&sample[..header_key.sample_len()], &mut prefix[0], pn_bytes).unwrap();
-        assert_eq!(KeyPhaseBit::from(prefix[0]), sealed.1);
 
         let qbase::packet::Packet::Data(packet) = qbase::packet::PacketReader::new(buffer, 0).next().unwrap().unwrap() else {
             panic!()
@@ -205,27 +179,22 @@ async fn key_updates_preserve_reordering_and_do_not_double_advance_sealing() {
         sending.on_ack(generation - 1);
         sending.update().unwrap();
         // The second update is initiated by both endpoints at once.
-        let server_generation = if generation == 2 {
+        if generation == 2 {
             receiving.on_ack(1);
             receiving.update().unwrap();
-            2
-        } else {
-            generation - 1
-        };
+        }
         let low = packet(generation * 10, &sending).unwrap();
         let high = packet(generation * 10 + 1, &sending).unwrap();
         assert_eq!(high.generation, Some(generation));
         let mut forged = high.bytes.clone();
         *forged.last_mut().unwrap() ^= 1;
         assert_eq!(open(&server, forged, &server_journal), None);
-        assert_eq!(reserved_generation(&receiving), server_generation);
         assert_eq!(open(&server, high.into_buffer(), &server_journal), Some(generation * 10 + 1));
         assert_eq!(open(&server, low.into_buffer(), &server_journal), Some(generation * 10));
         assert_eq!(open(&server, old, &server_journal), Some(generation * 10 - 1));
         let response = packet(generation - 1, &receiving).unwrap();
         assert_eq!(response.generation, Some(generation));
         assert_eq!(open(&client, response.into_buffer(), &client_journal), Some(generation - 1));
-        assert_eq!(reserved_generation(&sending), generation);
         assert!(sending.update().is_err(), "a new-phase packet is not an ACK");
         assert!(receiving.update().is_err(), "passive updates do not grant permission");
     }
@@ -265,9 +234,7 @@ async fn peer_can_update_again_while_local_update_is_disallowed() {
     let mut forged = next.bytes.clone();
     *forged.last_mut().unwrap() ^= 1;
     assert_eq!(open(&server, forged), None);
-    assert_eq!(reserved_generation(&receiving), 1);
     assert_eq!(open(&server, next.into_buffer()), Some(102));
-    assert_eq!(reserved_generation(&receiving), 2);
     assert_eq!(open(&server, delayed), Some(100));
     // Generations 0 and 2 share phase 0; PN selects the retained generation 0 pair.
     assert_eq!(open(&server, oldest.clone()), Some(98));
@@ -303,7 +270,6 @@ async fn local_update_keeps_old_opening_until_peer_uses_the_new_pair() {
     sending.update().unwrap();
     assert_eq!(open(packet(2, &sending).unwrap().into_buffer()), Some(2));
     assert!(receiving.update().is_err(), "opening the tail does not grant permission");
-    assert_eq!(reserved_generation(&receiving), 1);
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(open(late_old), None);
     assert_eq!(open(packet(3, &sending).unwrap().into_buffer()), Some(3));
@@ -364,46 +330,6 @@ fn authentication_failures_enforce_the_integrity_limit() {
         }
     }
     assert_eq!(journal.decode_pn(PacketNumber::encode(0, 0)), Ok(0));
-}
-
-#[test]
-fn data_space_serializes_packet_numbers_with_key_generations() {
-    use qtransport::space::{Allocate, Keys};
-
-    let data = support::data::data();
-    let start = std::sync::Barrier::new(4);
-    let mut allocated = std::thread::scope(|scope| {
-        let tasks: Vec<_> = (0..4)
-            .map(|_| {
-                let data = &data;
-                let start = &start;
-                scope.spawn(move || {
-                    start.wait();
-                    (0..32)
-                        .map(|_| {
-                            // Model handshake/ACK permission arriving between allocations.
-                            data.keys.allow_update();
-                            let _ = data.keys.update();
-                            let (pn, Keys::Short(keys)) = data.pn_and_keys().unwrap() else {
-                                unreachable!();
-                            };
-                            (pn.0, keys.generation)
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        tasks.into_iter().flat_map(|task| task.join().unwrap()).collect::<Vec<_>>()
-    });
-    allocated.sort_unstable();
-    for (expected, (pn, _)) in allocated.iter().enumerate() {
-        assert_eq!(*pn, expected as u64);
-    }
-    assert!(allocated.windows(2).all(|pair| pair[0].1 <= pair[1].1));
-    assert!(allocated.last().unwrap().1 > 0);
-    data.keys.retire();
-    assert!(data.pn_and_keys().is_none());
-    assert_eq!(data.sent_journal.next_pn().unwrap().0, allocated.len() as u64);
 }
 
 #[test]

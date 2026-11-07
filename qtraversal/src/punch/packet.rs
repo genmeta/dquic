@@ -54,7 +54,7 @@ impl PunchPacketEncoder for ProbeEncoder {
         let mut bytes = BytesMut::zeroed(MAX_PUNCH_PACKET_SIZE);
         let header = OneRttHeader::new(Default::default(), peer_cid);
         let mut frames = Vec::<GuaranteedFrame>::with_capacity(1);
-        let mut sending = Packet::new(DataHeader::Short(header), pn, key.as_ref());
+        let mut sending = Packet::new(DataHeader::Short(header), pn, &key);
         match sending.assemble(
             &mut Context::from_waker(Waker::noop()),
             &mut std::io::Cursor::new(bytes.as_mut()),
