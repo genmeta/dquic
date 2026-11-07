@@ -70,11 +70,8 @@ fn encode_frames<const N: usize>(
     };
     let mut bytes = BytesMut::zeroed(1200);
     let mut recorded = Vec::new();
-    let mut sending = crate::send::Packet::new(
-        qbase::packet::DataHeader::Short(OneRttHeader::new(Default::default(), phase.peer_cid())),
-        pn,
-        key.as_ref(),
-    );
+    let mut sending =
+        crate::send::Packet::new(qbase::packet::DataHeader::Short(OneRttHeader::new(Default::default(), phase.peer_cid())), pn, &key);
     assert!(matches!(
         sending.assemble(
             &mut std::task::Context::from_waker(std::task::Waker::noop()),

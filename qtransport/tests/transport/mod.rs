@@ -266,7 +266,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
         Epoch::Data,
         {
             let keys = transport.data.keys.clone();
-            move || (!keys.is_retired()).then(|| keys.clone())
+            move || Some(keys.clone())
         },
         transport.data.rcvd_journal.clone(),
         |_, _| Some(path.clone()),
@@ -303,7 +303,7 @@ fn encode_packet<const N: usize>(
     let mut packet = SendingPacket::new(
         DataHeader::Short(OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"))),
         (pn, PacketNumber::encode(pn, 0)),
-        key.as_ref(),
+        &key,
     );
     let mut bytes = BytesMut::zeroed(length);
     let result = packet.assemble(
@@ -576,7 +576,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
         Epoch::Data,
         {
             let keys = st.data.keys.clone();
-            move || (!keys.is_retired()).then(|| keys.clone())
+            move || Some(keys.clone())
         },
         st.data.rcvd_journal.clone(),
         {
@@ -638,7 +638,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
         Epoch::Data,
         {
             let keys = st.data.keys.clone();
-            move || (!keys.is_retired()).then(|| keys.clone())
+            move || Some(keys.clone())
         },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),
@@ -1003,7 +1003,7 @@ async fn receiving_starts_with_ready_keys() {
         Epoch::Data,
         {
             let keys = data.keys.clone();
-            move || (!keys.is_retired()).then(|| keys.clone())
+            move || Some(keys.clone())
         },
         data.rcvd_journal.clone(),
         {
@@ -1040,7 +1040,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
         Epoch::Data,
         {
             let keys = st.data.keys.clone();
-            move || (!keys.is_retired()).then(|| keys.clone())
+            move || Some(keys.clone())
         },
         st.data.rcvd_journal.clone(),
         |_, _| Some(sp.clone()),

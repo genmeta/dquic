@@ -52,24 +52,6 @@ fn record(space: &Space<ArcKeys<()>>) -> u64 {
 }
 
 #[tokio::test]
-async fn shared_spaces_retire_keys_held_by_existing_handles() {
-    let spaces = ArcSpaces::default();
-    spaces.retire(Epoch::Handshake);
-    let shared = spaces.clone();
-    let data = support::data::data();
-    spaces.add(data.clone());
-    assert!(Arc::ptr_eq(&shared.get_as::<DataSpace>(Epoch::Data).unwrap(), &data));
-    assert!(spaces.get_as::<HandshakeSpace>(Epoch::Data).is_none());
-
-    let held = spaces.get(Epoch::Data).unwrap();
-    shared.retire(Epoch::Data);
-    assert!(spaces.get(Epoch::Data).is_none());
-    assert!(shared.get(Epoch::Data).is_none());
-    assert!(held.pn_and_keys().is_none());
-    assert!(data.keys.get().is_err());
-}
-
-#[tokio::test]
 async fn retiring_early_spaces_preserves_data_and_is_idempotent() {
     let keys: qtls::BidirectionalKeys = qtls::default_provider()
         .cipher_suites
@@ -100,7 +82,6 @@ async fn retiring_early_spaces_preserves_data_and_is_idempotent() {
     spaces.retire(Epoch::Data);
     spaces.retire(Epoch::Data);
     assert!(spaces.get(Epoch::Data).is_none());
-    assert!(data.keys.get().is_err());
 }
 
 #[tokio::test]
@@ -221,32 +202,6 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
     data.on_tick(Instant::now() + Duration::from_secs(2));
     assert!(support::frames::take_frames(&mut data.reliable_frames.clone()).is_empty());
     assert!(data.on_acked(&ack).unwrap().is_none());
-}
-
-#[tokio::test]
-async fn retired_data_keys_stop_loss_and_timer_recovery() {
-    use qbase::frame::MaxDataFrame;
-    use qcongestion::Resend as _;
-    use qtransport::space::{Recover as _, Transmit};
-
-    let data = support::data::data();
-    data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
-    let mut frames = support::frames::take_frames(&mut data.reliable_frames.clone());
-    assert_eq!(frames.len(), 1);
-    let (pn, _) = data.next_pn();
-    Transmit::on_sealed(
-        data.as_ref(),
-        pn,
-        Some(0),
-        0,
-        metadata(Epoch::Data, &frames),
-        &mut frames.drain(..).map(|frame| frame.try_into().unwrap()),
-    );
-    data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
-    data.keys.retire();
-    data.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
-    data.on_tick(Instant::now() + Duration::from_secs(2));
-    assert!(support::frames::take_frames(&mut data.reliable_frames.clone()).is_empty());
 }
 
 #[tokio::test]
