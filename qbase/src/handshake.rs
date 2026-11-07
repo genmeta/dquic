@@ -1,5 +1,5 @@
 mod facts;
 pub use facts::HandshakeFacts;
 
-mod status;
-pub use status::{ArcHandshake, ClientHandshake, Handshake, ServerHandshake};
+mod done;
+pub use done::{ArcHandshakeDone, ClientHandshakeDone, HandshakeDone, ServerHandshakeDone};

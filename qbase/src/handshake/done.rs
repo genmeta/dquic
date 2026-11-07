@@ -19,14 +19,14 @@ use crate::{
 
 /// Client handshake confirmation, with at most one pending waiter.
 #[derive(Debug, Default)]
-pub enum ClientHandshake {
+pub enum ClientHandshakeDone {
     #[default]
     Pending,
     Waiting(Waker),
     Done,
 }
 
-impl ClientHandshake {
+impl ClientHandshakeDone {
     /// Check if the client handshake is confirmed.
     pub fn is_handshake_done(&self) -> bool {
         matches!(self, Self::Done)
@@ -78,7 +78,7 @@ impl ClientHandshake {
 /// Once TLS reports handshake completion, the server considers the handshake
 /// confirmed and sends a [`HandshakeDoneFrame`] immediately.
 #[derive(Debug, Clone)]
-pub struct ServerHandshake<T>
+pub struct ServerHandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
@@ -86,7 +86,7 @@ where
     output: T,
 }
 
-impl<T> ServerHandshake<T>
+impl<T> ServerHandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
@@ -95,7 +95,7 @@ where
     /// The `output` is responsible for sending the [`HandshakeDoneFrame`] to the client,
     /// see [`ServerHandshake`].
     pub fn new(output: T) -> Self {
-        ServerHandshake { is_done: Arc::new(AtomicBool::new(false)), output }
+        ServerHandshakeDone { is_done: Arc::new(AtomicBool::new(false)), output }
     }
 
     /// Check if the server handshake is complete.
@@ -127,45 +127,45 @@ where
 ///
 /// Use [`ArcHandshake`] to share this state and await client confirmation.
 #[derive(Debug)]
-pub enum Handshake<T>
+pub enum HandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
     /// The client's handshake state if the endpoint is a client.
-    Client(ClientHandshake),
+    Client(ClientHandshakeDone),
     /// The server's handshake state if the endpoint is a server.
-    Server(ServerHandshake<T>),
+    Server(ServerHandshakeDone<T>),
 }
 
-impl<T> Handshake<T>
+impl<T> HandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
     /// Create a new handshake state, based on the role.
     pub fn new(role: Role, output: T) -> Self {
         match role {
-            Role::Client => Handshake::Client(ClientHandshake::default()),
-            Role::Server => Handshake::Server(ServerHandshake::new(output)),
+            Role::Client => HandshakeDone::Client(ClientHandshakeDone::default()),
+            Role::Server => HandshakeDone::Server(ServerHandshakeDone::new(output)),
         }
     }
 
     /// Create a new client handshake state.
     pub fn new_client() -> Self {
-        Handshake::Client(ClientHandshake::default())
+        HandshakeDone::Client(ClientHandshakeDone::default())
     }
 
     /// Create a new server handshake state.
     /// The `output` is responsible for sending the [`HandshakeDoneFrame`] to the client,
     /// see [`ServerHandshake::new`].
     pub fn new_server(output: T) -> Self {
-        Handshake::Server(ServerHandshake::new(output))
+        HandshakeDone::Server(ServerHandshakeDone::new(output))
     }
 
     /// Check if the handshake is complete.
     pub fn is_handshake_done(&self) -> bool {
         match self {
-            Handshake::Client(h) => h.is_handshake_done(),
-            Handshake::Server(h) => h.is_handshake_done(),
+            HandshakeDone::Client(h) => h.is_handshake_done(),
+            HandshakeDone::Server(h) => h.is_handshake_done(),
         }
     }
 
@@ -176,16 +176,16 @@ where
     /// This method return [`true`] when it first time set the handshake status to complete.
     pub fn done(&self) -> bool {
         match self {
-            Handshake::Client(..) => false, /* for client, do nothing */
-            Handshake::Server(h) => h.done(),
+            HandshakeDone::Client(..) => false, /* for client, do nothing */
+            HandshakeDone::Server(h) => h.done(),
         }
     }
 
     /// Return the role of this handshake signal.
     pub fn role(&self) -> Role {
         match self {
-            Handshake::Client(_) => Role::Client,
-            Handshake::Server(_) => Role::Server,
+            HandshakeDone::Client(_) => Role::Client,
+            HandshakeDone::Server(_) => Role::Server,
         }
     }
 }
@@ -193,24 +193,24 @@ where
 /// Shared handshake state. Only one task may wait for client confirmation at a time.
 /// Waiting on the server panics.
 #[derive(Debug, Clone)]
-pub struct ArcHandshake<T>(Arc<Mutex<Handshake<T>>>)
+pub struct ArcHandshakeDone<T>(Arc<Mutex<HandshakeDone<T>>>)
 where
     T: SendFrame<HandshakeDoneFrame> + Clone;
 
-impl<T> ArcHandshake<T>
+impl<T> ArcHandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
     pub fn new(role: Role, output: T) -> Self {
-        Self(Arc::new(Mutex::new(Handshake::new(role, output))))
+        Self(Arc::new(Mutex::new(HandshakeDone::new(role, output))))
     }
 
     pub fn new_client() -> Self {
-        Self(Arc::new(Mutex::new(Handshake::new_client())))
+        Self(Arc::new(Mutex::new(HandshakeDone::new_client())))
     }
 
     pub fn new_server(output: T) -> Self {
-        Self(Arc::new(Mutex::new(Handshake::new_server(output))))
+        Self(Arc::new(Mutex::new(HandshakeDone::new_server(output))))
     }
 
     pub fn is_handshake_done(&self) -> bool {
@@ -227,7 +227,7 @@ where
     }
 }
 
-impl<T> Future for ArcHandshake<T>
+impl<T> Future for ArcHandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
@@ -235,15 +235,15 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self.0.lock().unwrap() {
-            Handshake::Client(handshake) => handshake.poll_done(cx),
-            Handshake::Server(_) => {
+            HandshakeDone::Client(handshake) => handshake.poll_done(cx),
+            HandshakeDone::Server(_) => {
                 unreachable!("server handshake confirmation cannot be awaited",)
             }
         }
     }
 }
 
-impl<T> ReceiveFrame<HandshakeDoneFrame> for ArcHandshake<T>
+impl<T> ReceiveFrame<HandshakeDoneFrame> for ArcHandshakeDone<T>
 where
     T: SendFrame<HandshakeDoneFrame> + Clone,
 {
@@ -260,7 +260,7 @@ where
     /// Return whether it is the first time to receive the HANDSHAKE_DONE frame(for client).
     fn recv_frame(&self, frame: HandshakeDoneFrame) -> Result<bool, Error> {
         match &mut *self.0.lock().unwrap() {
-            Handshake::Client(h) => Ok(h.recv_handshake_done_frame(frame)),
+            HandshakeDone::Client(h) => Ok(h.recv_handshake_done_frame(frame)),
             _ => Err(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "Server received a HANDSHAKE_DONE frame").into()),
         }
     }

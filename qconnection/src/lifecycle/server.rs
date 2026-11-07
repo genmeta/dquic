@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::future::poll_fn;
 use qbase::{
     error::{ErrorKind, QuicError},
-    handshake::ArcHandshake,
+    handshake::ArcHandshakeDone,
     param::{ParameterId, Requirements},
     role::Role,
     sid::handy::ConsistentConcurrency,
@@ -125,16 +125,16 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
             let summary = tls_ctx.finished().await?;
             progress.on_tls_finished();
             progress.install_data(data_space.clone());
-            let handshake = ArcHandshake::new_server(reliable_frames.clone());
+            let hs_done = ArcHandshakeDone::new_server(reliable_frames.clone());
             tokio::spawn(read_space_to_tls(tls_ctx.clone(), data_space.as_ref(), paths.clone()));
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, Some(scopes)),
                 data_space.clone(),
                 paths.clone(),
                 token,
-                handshake.clone(),
+                hs_done.clone(),
             ));
-            handshake.done();
+            hs_done.done();
 
             let local = summary.local.ok_or_else(|| QuicError::with_default_fty(ErrorKind::Crypto(120), "server identity is missing"))?;
             progress.on_handshake_done(&paths);
