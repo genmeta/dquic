@@ -12,14 +12,16 @@ use qbase::{
     handshake::HandshakeFacts,
     net::{route::Pathway, tx::ArcSendWakers, validate::ArcValidation},
     packet::assemble::Metadata,
-    time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
-    util::ArcIndexDeque,
+    time::heartbeat::ArcHeartbeat,
 };
-use qcongestion::{Algorithm, ArcCC, CongestionController, MSS, Resend};
+use qcongestion::{Algorithm, ArcCC, CongestionController, MSS};
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
-use crate::ArcDcid;
+use crate::{ArcDcid, ArcProgress, ArcResend, space::ArcSpaces, terminate::ArcTerminator};
+
+mod send;
+pub use send::{Datagram, update_amplification_blocked};
 
 pub struct Path {
     pub pathway: Pathway,
@@ -28,6 +30,12 @@ pub struct Path {
     pub send_waker: ArcSendWakers,
     pub validation: ArcValidation,
     pub heartbeat: ArcHeartbeat,
+    /// Connection-wide packet sources shared by every path.
+    pub spaces: ArcSpaces,
+    /// Connection-wide termination and CLOSE source.
+    pub terminator: ArcTerminator,
+    /// Connection-wide handshake transitions shared by every path.
+    pub progress: ArcProgress,
     /// Payload eligibility; ACKs and heartbeats remain available while inactive.
     is_active: AtomicBool,
 }
@@ -35,12 +43,16 @@ pub struct Path {
 impl Path {
     /// Construct a path using the connection's shared handshake lifecycle.
     /// New paths stay inactive between handshake path selection and confirmation.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        dcid: ArcDcid,
         pathway: Pathway,
         hs_facts: Arc<HandshakeFacts>,
+        spaces: ArcSpaces,
+        resenders: ArcResend,
         heartbeat: ArcHeartbeat,
-        resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        dcid: ArcDcid,
+        terminator: ArcTerminator,
+        progress: ArcProgress,
     ) -> Self {
         let is_active = !hs_facts.has_selected_path() || hs_facts.is_handshake_done();
         let send_waker = ArcSendWakers::default();
@@ -53,7 +65,7 @@ impl Path {
             Arc::new(AtomicU16::new(MSS as u16)),
             send_waker.clone(),
         );
-        Self { pathway, dcid, cc, send_waker, validation, heartbeat, is_active: AtomicBool::new(is_active) }
+        Self { pathway, dcid, cc, send_waker, validation, heartbeat, spaces, terminator, progress, is_active: AtomicBool::new(is_active) }
     }
 
     /// Allow payload collection and wake this path's sender.
@@ -75,13 +87,12 @@ impl Path {
     }
 
     /// Account one successfully submitted datagram under the submission's CC lock.
-    pub fn on_sent(&self, cc: &mut CongestionController, bytes: usize, packets: [Option<Metadata>; 3], idle: &ArcIdleTimer) {
+    pub fn on_sent(&self, cc: &mut CongestionController, bytes: usize, packets: [Option<Metadata>; 3]) {
         let overhead = QuicProtocol::packet_overhead(self.pathway);
         let charged =
             packets.iter().position(|p| p.as_ref().is_some_and(|meta| meta.in_flight)).or_else(|| packets.iter().position(Option::is_some));
         let now = Instant::now();
         self.validation.on_sent(bytes + overhead);
-        let _ = idle.on_sent_at(now);
         for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
             let Some(meta) = packet else { continue };
             let sent_bytes = meta.pktlen

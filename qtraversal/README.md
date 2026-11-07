@@ -74,9 +74,10 @@ aborting punch transactions and releasing retained temporary sockets.
 
 ## Connection integration
 
-The caller provides a reliable frame sender and a `ProbeEncoder` constructed from
-its shared `qtransport::DataSpace` and peer CID. `qtraversal` owns probe assembly
-and protection, reusing `qtransport::packet::encrypt`.
+The caller provides a reliable frame sender and a `PunchPacketEncoder`.
+`qtransport::punch::ProbeEncoder` implements this interface using the connection's
+shared packet spaces and peer CID. Packet assembly and protection live in
+`qtransport`; `qtraversal` manages traversal without depending on it.
 
 Direct `PUNCH_HELLO` and `PUNCH_DONE` probes are sent on UDP sockets without a
 Path. `qconnection::MaturePhase` now creates and retains a Puncher for both roles,

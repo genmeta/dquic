@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use qbase::{cid::ConnectionId, frame::Frame, packet::OneRttHeader, role::Role};
-use qconnection::{ArcParameters, Paths};
-use qtransport::{keys::ArcKeys, space::HandshakeSpace};
+use qtransport::{ArcParameters, Paths, keys::ArcKeys, space::HandshakeSpace};
 
 /// Concrete handles owned by the receive side, including already retired spaces.
 pub struct SpaceFixture {
@@ -81,7 +80,7 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 facts.clone(),
             ));
             let reliable_frames = paths.reliable_frames.clone();
-            let streams = qconnection::DataStreams::new(
+            let streams = qtransport::DataStreams::new(
                 parameters.clone(),
                 Box::new(qbase::sid::handy::ConsistentConcurrency::new(
                     parameters.local(qbase::param::ParameterId::InitialMaxStreamsBidi),

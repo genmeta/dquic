@@ -7,17 +7,16 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     Epoch,
-    cid::ArcDcid,
     frame::GuaranteedFrame,
     packet::{DataHeader, OneRttHeader, PacketContent, assemble::Package},
 };
-use qtransport::{
-    ArcReliableFrames,
+use qtraversal::punch::PunchPacketEncoder;
+
+use crate::{
+    ArcDcid,
     packet::encrypt::Packet,
     space::{Allocate, ArcSpaces, DataSpace, Keys, Recover},
 };
-
-use super::PunchPacketEncoder;
 
 const MAX_PUNCH_PACKET_SIZE: usize = 128;
 
@@ -25,12 +24,12 @@ const MAX_PUNCH_PACKET_SIZE: usize = 128;
 #[derive(Clone)]
 pub struct ProbeEncoder {
     spaces: ArcSpaces,
-    peer_cid: ArcDcid<ArcReliableFrames>,
+    peer_cid: ArcDcid,
 }
 
 impl ProbeEncoder {
     /// Retain a handshake CID handle so probes follow the initial peer SCID.
-    pub fn new(spaces: ArcSpaces, peer_cid: ArcDcid<ArcReliableFrames>) -> Self {
+    pub fn new(spaces: ArcSpaces, peer_cid: ArcDcid) -> Self {
         Self { spaces, peer_cid }
     }
 }

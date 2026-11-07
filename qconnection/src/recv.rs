@@ -45,7 +45,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
     let epoch = space.epoch;
     let role = paths.role();
     let terminator = paths.terminator.clone();
-    let idle = paths.idle();
+    let idle = paths.idle_timer();
     let mut initial_scid = None;
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, _)) = tokio::select! {
@@ -183,7 +183,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     hs_done: ArcHandshakeDone,
 ) {
     let terminator = paths.terminator.clone();
-    let idle = paths.idle();
+    let idle = paths.idle_timer();
     let mut parsed_frames = Vec::with_capacity(8);
     while let Some((packet, pathway, link)) = tokio::select! {
         biased;

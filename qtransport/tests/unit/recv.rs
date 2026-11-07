@@ -21,11 +21,7 @@ use qtransport::{
     space::{HandshakeSpace, Space},
 };
 
-use crate::{
-    Paths,
-    common::{initial_keys as keys, packet_metadata},
-    recv::recv_ih_pkt_and_deliver_frames,
-};
+use crate::{Paths, common::initial_keys as keys, receiving::recv_ih_pkt_and_deliver_frames};
 
 fn seal<H, const N: usize>(
     header: H,
@@ -454,7 +450,8 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     use qbase::time::heartbeat::ArcHeartbeat;
     use tokio::io::AsyncWriteExt;
 
-    use crate::send::{Burst, MAX_BURST_PACKETS};
+    use super::send::{datagram_metadata, poll_collect};
+    use crate::send::Datagram;
 
     let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
     paths.progress.on_initial_received(mature.peer_cid());
@@ -463,11 +460,14 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         let path = crate::common::registered_path(
             &paths,
             Path::new(
+                paths.cid_registry.remote.apply_dcid(),
                 Pathway::new(EndpointAddr::direct(([127, 0, 0, 1], port).into()), "127.0.0.1:34300".parse().unwrap()),
                 paths.progress.facts(),
+                paths.spaces.clone(),
+                paths.resenders.clone(),
                 ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
-                paths.loss_resender.clone(),
-                paths.cid_registry.remote.apply_dcid(),
+                paths.terminator.clone(),
+                paths.progress.clone(),
             ),
         );
         path.validation.enter_validated().unwrap();
@@ -484,17 +484,15 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
 
     mature.spaces.initial.crypto.writer().write_all(b"server hello").await.unwrap();
-    let mut datagrams = std::array::from_fn::<_, MAX_BURST_PACKETS, _>(|_| BytesMut::with_capacity(1200));
+    let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
     let mut frames = Vec::new();
-    let mut packets = std::array::from_fn(|_| Default::default());
     let mut cx = Context::from_waker(Waker::noop());
-    let mut burst = Burst::new(&paths, &second, &mut datagrams, &mut frames, &mut packets);
-    assert!(matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0));
-    assert!(burst.packets.iter().all(|p| packet_metadata(p, Epoch::Data).is_none()));
-    let initial = packet_metadata(&burst.packets[0], Epoch::Initial).unwrap();
-    burst.packets[0].retain(|meta| meta.epoch() != Epoch::Initial);
+    assert!(matches!(poll_collect(&second, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(n)) if n > 0));
+    assert!(datagrams.iter().all(|p| datagram_metadata(p, Epoch::Data).is_none()));
+    let initial = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap();
+    datagrams[0].packets.retain(|(_, meta)| meta.epoch() != Epoch::Initial);
     mature.spaces.initial.on_sent(initial.pn, initial.in_flight, Duration::from_secs(1), Duration::from_secs(3));
-    burst.cancel();
+    second.refresh(&mut datagrams, &mut frames);
 
     // The client's ACK of that CRYPTO flight selects the second path.
     let mut ack = AckFrame::new(initial.pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
@@ -517,12 +515,12 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
         Poll::Ready(Some(cid)) if cid == mature.peer_cid()));
     mature.spaces.handshake.crypto.writer().write_all(b"remaining handshake").await.unwrap();
     assert!(
-        matches!(burst.poll_collect(&mut cx), Poll::Ready(Ok(n)) if n > 0),
+        matches!(poll_collect(&second, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(n)) if n > 0),
         "the selected path must have its CID before Data is published"
     );
-    assert!(burst.packets.iter().any(|p| packet_metadata(p, Epoch::Handshake).is_some()));
-    assert!(burst.packets.iter().any(|p| packet_metadata(p, Epoch::Data).is_some()));
-    burst.cancel();
+    assert!(datagrams.iter().any(|p| datagram_metadata(p, Epoch::Handshake).is_some()));
+    assert!(datagrams.iter().any(|p| datagram_metadata(p, Epoch::Data).is_some()));
+    second.refresh(&mut datagrams, &mut frames);
     paths.retire_all();
 }
 
@@ -550,11 +548,14 @@ async fn handshake_packets_update_shared_idle_and_only_effective_payload_starts_
             let path = crate::common::registered_path(
                 &paths,
                 Path::new(
+                    paths.cid_registry.remote.apply_dcid(),
                     link.into(),
                     paths.progress.facts(),
+                    paths.spaces.clone(),
+                    paths.resenders.clone(),
                     ArcHeartbeat::new(Duration::from_secs(60), Duration::ZERO),
-                    paths.loss_resender.clone(),
-                    paths.cid_registry.remote.apply_dcid(),
+                    paths.terminator.clone(),
+                    paths.progress.clone(),
                 ),
             );
             paths.entries.lock().unwrap().insert(path.pathway, path.clone());
@@ -614,7 +615,7 @@ async fn blocked_receivers_and_tick_wait_until_termination() {
         tokio::spawn(recv_ih_pkt_and_deliver_frames::<qbase::packet::InitialHeader>((initial_rx, None), space.clone(), paths.clone()));
     let second =
         tokio::spawn(recv_ih_pkt_and_deliver_frames::<qbase::packet::HandshakeHeader>((handshake_rx, None), space.clone(), paths.clone()));
-    let tick = tokio::spawn(crate::recv::tick(paths));
+    let tick = tokio::spawn(crate::receiving::tick(paths));
     terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")), Duration::from_secs(1));
     tokio::task::yield_now().await;
     assert!(!first.is_finished());

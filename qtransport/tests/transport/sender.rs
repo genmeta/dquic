@@ -1,5 +1,5 @@
 //! One-datagram fixture for receive and recovery tests, using production assembly.
-use qbase::{packet::assemble::Metadata, time::timer::ArcIdleTimer};
+use qbase::packet::assemble::Metadata;
 use qprotocol::protocol::quic::QuicProtocol;
 use qtransport::space::{ArcSpaces, Recover, Transmit};
 
@@ -73,7 +73,7 @@ impl Sender {
         std::task::ready!(submit(cx, self.path.pathway, &self.bytes))
             .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
         Transmit::on_sent(self.transport.data.as_ref(), meta.pn, meta.in_flight, delay, retention);
-        self.path.on_sent(&mut cc, self.bytes.len(), [None, None, self.pending.take()], &ArcIdleTimer::new(Duration::ZERO));
+        self.path.on_sent(&mut cc, self.bytes.len(), [None, None, self.pending.take()]);
         Poll::Ready(Ok(true))
     }
 

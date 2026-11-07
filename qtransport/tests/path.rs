@@ -1,3 +1,7 @@
+mod support {
+    pub mod path;
+}
+
 use std::{
     sync::{
         Arc,
@@ -17,7 +21,6 @@ use qbase::{
     util::{ArcIndexDeque, IndexDeque},
 };
 use qcongestion::Transport as _;
-use qtransport::path::Path;
 
 struct Counter(AtomicUsize);
 impl std::task::Wake for Counter {
@@ -28,12 +31,14 @@ impl std::task::Wake for Counter {
 
 #[tokio::test]
 async fn activation_changes_wake_the_sender_without_retiring_the_path() {
-    let path = Path::new(
+    let path = support::path::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         Pathway::new("127.0.0.1:4400".parse::<EndpointAddr>().unwrap(), "127.0.0.1:5500".parse().unwrap()),
         Arc::new(HandshakeFacts::with_role(Role::Client)),
-        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
     );
     let counter = Arc::new(Counter(AtomicUsize::new(0)));
     path.send_waker.register(&Waker::from(counter.clone()));
@@ -57,12 +62,14 @@ async fn activation_changes_wake_the_sender_without_retiring_the_path() {
 async fn handshake_events_stop_early_epoch_pto() {
     use qbase::Epoch;
     let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
-    let path = Path::new(
+    let path = support::path::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         handshake.clone(),
-        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
         ArcIndexDeque::from(IndexDeque::with_capacity(3)),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
     );
     path.validation.exempt().unwrap();
     handshake.install_handshake_key();
@@ -83,12 +90,14 @@ async fn handshake_events_stop_early_epoch_pto() {
 async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
     use qbase::Epoch;
 
-    let path = Path::new(
+    let path = support::path::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Client)),
-        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
     );
     path.validation.exempt().unwrap();
     let step = path.cc.get_pto(Epoch::Initial) / 10;
@@ -102,12 +111,14 @@ async fn repeatedly_polling_unlimited_credit_does_not_postpone_handshake_pto() {
 
 #[tokio::test(start_paused = true)]
 async fn cancelling_shared_validation_retires_the_path() {
-    let path = Path::new(
+    let path = support::path::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Server)),
-        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
     );
     assert!(path.validation.credit().is_ok());
     path.validation.cancel();
@@ -122,15 +133,17 @@ async fn cancelling_shared_validation_retires_the_path() {
 async fn validation_registers_only_when_both_sources_are_empty() {
     for queued in [false, true] {
         for quota in [0, 128] {
-            let path = Path::new(
+            let path = support::path::path(
+                qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
                 Pathway::new(
                     EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()),
                     EndpointAddr::direct("127.0.0.1:5500".parse().unwrap()),
                 ),
                 Arc::new(HandshakeFacts::with_role(Role::Server)),
-                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                Default::default(),
                 ArcIndexDeque::default(),
-                qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                Default::default(),
             );
             if queued {
                 path.validation.recv_frame(PathChallengeFrame::from_slice(&[1; 8])).unwrap();
@@ -160,12 +173,14 @@ async fn validation_registers_only_when_both_sources_are_empty() {
 
 #[tokio::test]
 async fn every_duplicate_challenge_is_packaged_as_a_response() {
-    let path = Path::new(
+    let path = support::path::path(
+        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)),
         Pathway::new(EndpointAddr::direct("127.0.0.1:4400".parse().unwrap()), EndpointAddr::direct("127.0.0.1:5500".parse().unwrap())),
         Arc::new(HandshakeFacts::with_role(Role::Server)),
-        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
         ArcIndexDeque::default(),
-        qbase::cid::ArcRemoteCids::client(Default::default(), qtransport::ArcReliableFrames::with_capacity(0)).apply_dcid(),
+        ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+        Default::default(),
     );
     for _ in 0..10 {
         path.validation.recv_frame(PathChallengeFrame::from_slice(&[1; 8])).unwrap();
