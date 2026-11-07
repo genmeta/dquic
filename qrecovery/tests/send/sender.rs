@@ -7,13 +7,13 @@ use bytes::{Bytes, BytesMut};
 use qbase::{
     frame::{GuaranteedFrame, MaxStreamDataFrame, StreamCtlFrame, io::SendFrame},
     packet::{GetType, OneRttHeader, Package, PacketBuffer},
-    param::{ArcParameters, ClientParameters, ParameterId, ServerParameters},
+    param::{ArcParameters, ClientParameters, ServerParameters},
     role::Role,
     sid::{Dir, StreamId, handy::DemandConcurrency},
 };
 use qrecovery::{
     send::{CancelStream, Writer},
-    streams::{DataStreams, Ext},
+    streams::{ArcDataStreams, Ext},
 };
 
 #[derive(Clone)]
@@ -22,8 +22,8 @@ impl<T> SendFrame<T> for Broker {
     fn send_frame<I: IntoIterator<Item = T>>(&self, _: I) {}
 }
 
-pub(super) fn stream(window: u64) -> (DataStreams<Broker>, Writer<Ext<Broker>>) {
-    let streams = DataStreams::new(
+pub(super) fn stream(window: u64) -> (ArcDataStreams<Broker>, Writer<Ext<Broker>>) {
+    let streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         Broker,
@@ -35,7 +35,7 @@ pub(super) fn stream(window: u64) -> (DataStreams<Broker>, Writer<Ext<Broker>>) 
     (streams, writer)
 }
 
-fn send(streams: &mut DataStreams<Broker>) -> Vec<GuaranteedFrame> {
+fn send(streams: &mut ArcDataStreams<Broker>) -> Vec<GuaranteedFrame> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = 1200;
@@ -67,17 +67,6 @@ fn test_ready_sender_write() {
     let (_, mut writer) = stream(10);
     assert!(writer.write(Bytes::from_static(b"hello")).is_ok());
     assert!(writer.write(Bytes::from(vec![0; 1000])).is_ok());
-    writer.cancel(0);
-}
-
-#[test]
-fn test_ready_sender_poll_write() {
-    let (streams, mut writer) = stream(10);
-    writer.write(Bytes::from_static(b"test")).unwrap();
-    let mut params = ServerParameters::default();
-    params.set(ParameterId::InitialMaxStreamDataBidiRemote, 0u32).unwrap();
-    streams.revise_params(true, &params);
-    assert!(writer.poll_ready(&mut Context::from_waker(Waker::noop())).is_pending());
     writer.cancel(0);
 }
 

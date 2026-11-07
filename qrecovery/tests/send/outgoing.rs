@@ -8,7 +8,7 @@ use qbase::{
     role::Role,
     sid::{Dir, StreamId},
 };
-use qrecovery::{send::CancelStream, streams::DataStreams};
+use qrecovery::{send::CancelStream, streams::ArcDataStreams};
 use tokio::io::AsyncWriteExt;
 
 use super::sender::{Broker, stream};
@@ -57,7 +57,7 @@ async fn streams_own_waiters_across_states_and_cancel_each_path() {
     let wa = Waker::from(a.clone());
     let wb = Waker::from(b.clone());
     let wc = Waker::from(c.clone());
-    let poll = |source: &mut DataStreams<Broker>, waker: &Waker| {
+    let poll = |source: &mut ArcDataStreams<Broker>, waker: &Waker| {
         let mut bytes = BytesMut::new();
         let mut frames = Vec::new();
         let limits_quota = 128;

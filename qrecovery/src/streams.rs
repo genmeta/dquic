@@ -17,13 +17,7 @@
 //!
 //! [`Incoming`]: crate::recv::Incoming
 //! [`Outgoing`]: crate::send::Outgoing
-use std::{
-    fmt::Debug,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering::Release},
-    },
-};
+use std::{fmt::Debug, sync::Arc};
 
 use derive_more::Deref;
 pub use listener::{AcceptBiStream, AcceptUniStream};
@@ -35,8 +29,8 @@ use qbase::{
     frame::{StreamCtlFrame, io::SendFrame},
     metric::ArcConnectionMetrics,
     net::tx::ArcSendWakers,
-    param::{ArcParameters, ParameterId, core::Parameters},
-    sid::{ControlStreamsConcurrency, Dir, StreamIds},
+    param::{ArcParameters, ParameterId},
+    sid::{ControlStreamsConcurrency, StreamIds},
 };
 
 use self::{
@@ -148,7 +142,7 @@ where
 /// [`Outgoing::on_reset_acked`]: crate::send::Outgoing::on_reset_acked
 ///
 #[derive(Debug)]
-pub struct RawDataStreams<TX> {
+pub struct DataStreams<TX> {
     // 该queue与space中的transmitter中的frame_queue共享，为了方便向transmitter中写入帧
     ctrl_frames: TX,
     flow_ctrl: FlowController<Ext<TX>>,
@@ -161,17 +155,21 @@ pub struct RawDataStreams<TX> {
     input: ArcInput<Ext<TX>>,
     // 对方主动创建的流
     listener: ArcListener<Ext<TX>>,
-    tls_fin: AtomicBool,
     tx_wakers: ArcSendWakers,
 
     metrics: ArcConnectionMetrics,
 }
 
-impl<TX> RawDataStreams<TX>
+impl<TX> DataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    fn new(parameters: ArcParameters, ctrl: Box<dyn ControlStreamsConcurrency>, ctrl_frames: TX, metrics: ArcConnectionMetrics) -> Self {
+    fn new(
+        parameters: ArcParameters,
+        ctrl_streams: Box<dyn ControlStreamsConcurrency>,
+        ctrl_frames: TX,
+        metrics: ArcConnectionMetrics,
+    ) -> Self {
         let tx_wakers = ArcSendWakers::default();
         Self {
             flow_ctrl: FlowController::new(
@@ -179,31 +177,14 @@ where
                 parameters.local(ParameterId::InitialMaxData),
                 Ext(ctrl_frames.clone()),
             ),
-            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl, tx_wakers.clone()),
+            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl_streams, tx_wakers.clone()),
             parameters,
             output: ArcOutput::new(),
             input: ArcInput::default(),
             listener: ArcListener::new(),
             ctrl_frames,
-            tls_fin: AtomicBool::new(false),
             tx_wakers,
             metrics,
-        }
-    }
-
-    pub fn revise_params<Role>(&self, zero_rtt_rejected: bool, remote_params: &Parameters<Role>) {
-        if let Ok(output) = self.output.guard() {
-            // enter 1rtt state, old state must be 0rtt
-            self.tls_fin.store(true, Release);
-
-            let opened_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
-            let opened_uni = self.stream_ids.local.opened_streams(Dir::Uni);
-            let opened_bidi_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
-            let opened_uni_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataUni);
-            output.revise_max_stream_data(zero_rtt_rejected, opened_bidi, opened_uni, opened_bidi_snd_wnd_size, opened_uni_snd_wnd_size);
-            let max_streams_bidi = remote_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
-            let max_streams_uni = remote_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
-            self.stream_ids.local.revise_max_streams(zero_rtt_rejected, max_streams_bidi, max_streams_uni);
         }
     }
 
@@ -253,11 +234,11 @@ where
 ///
 /// See [`RawDataStreams`] for more details.
 #[derive(Debug, Clone, Deref)]
-pub struct DataStreams<TX>(Arc<RawDataStreams<TX>>)
+pub struct ArcDataStreams<TX>(Arc<DataStreams<TX>>)
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static;
 
-impl<TX> Close for DataStreams<TX>
+impl<TX> Close for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + Sync + 'static,
 {
@@ -266,7 +247,7 @@ where
     }
 }
 
-impl<TX> DataStreams<TX>
+impl<TX> ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -275,10 +256,10 @@ where
     /// The `ctrl_frames` is the frame sender, read [`RawDataStreams`] for more details.
     pub fn new(
         parameters: ArcParameters,
-        ctrl: Box<dyn ControlStreamsConcurrency>,
+        ctrl_streams: Box<dyn ControlStreamsConcurrency>,
         ctrl_frames: TX,
         metrics: ArcConnectionMetrics,
     ) -> Self {
-        Self(Arc::new(RawDataStreams::new(parameters, ctrl, ctrl_frames, metrics)))
+        Self(Arc::new(DataStreams::new(parameters, ctrl_streams, ctrl_frames, metrics)))
     }
 }

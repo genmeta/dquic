@@ -8,10 +8,7 @@ use std::{
 };
 
 use derive_more::{Deref, DerefMut};
-use qbase::{
-    error::Error as QuicError,
-    sid::{Dir, StreamId},
-};
+use qbase::{error::Error as QuicError, sid::StreamId};
 
 use crate::{recv::Incoming, send::Outgoing};
 
@@ -110,23 +107,6 @@ impl<TX> DerefMut for ArcOutputGuard<'_, TX> {
 impl<TX> ArcOutputGuard<'_, TX> {
     pub(super) fn insert(&mut self, sid: StreamId, outgoing: Outgoing<TX>, io_state: IOState) {
         self.deref_mut().insert(sid, (outgoing, io_state));
-    }
-
-    pub(super) fn revise_max_stream_data(
-        &self,
-        zero_rtt_rejected: bool,
-        opened_bidi: u64,
-        opened_uni: u64,
-        bidi_snd_wnd_size: u64,
-        uni_snd_wnd_size: u64,
-    ) {
-        self.deref()
-            .iter()
-            .filter(|(sid, _)| sid.dir() == Dir::Bi && sid.id() < opened_bidi || sid.dir() == Dir::Uni && sid.id() < opened_uni)
-            .for_each(|(sid, (outgoing, _))| match sid.dir() {
-                Dir::Bi => outgoing.revise_max_stream_data(zero_rtt_rejected, bidi_snd_wnd_size),
-                Dir::Uni => outgoing.revise_max_stream_data(zero_rtt_rejected, uni_snd_wnd_size),
-            });
     }
 
     pub(super) fn on_error(&mut self, error: &QuicError) {

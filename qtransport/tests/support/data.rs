@@ -5,7 +5,7 @@ use qbase::{
     param::{ClientParameters, ParameterId, ServerParameters},
     sid::handy::DemandConcurrency,
 };
-use qrecovery::streams::DataStreams;
+use qrecovery::streams::ArcDataStreams;
 use qtransport::{ArcParameters, ArcReliableFrames, Role, keys::ArcOneRttKeys, space::DataSpace};
 
 use super::tls::handshake;
@@ -18,7 +18,7 @@ pub(crate) fn data() -> Arc<DataSpace> {
     server.set(ParameterId::InitialMaxStreamsUni, 1u32).unwrap();
     let parameters = ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = DataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
+    let streams = ArcDataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
     let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
     facts.quit_mp_handshaking();
     Arc::new(DataSpace::new(

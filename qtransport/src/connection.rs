@@ -5,7 +5,7 @@ use std::{
 
 use bytes::Bytes;
 use qbase::{Epoch, error::AppError, net::route::Pathway};
-use qrecovery::streams::DataStreams;
+use qrecovery::streams::ArcDataStreams;
 
 use crate::{ArcReliableFrames, CloseReason, Error, StreamId, StreamReader, StreamWriter, VarInt, path::Path, terminate::ArcTerminator};
 
@@ -18,7 +18,7 @@ type PathObserver = dyn Fn(&mut dyn FnMut(&Path)) + Send + Sync;
 
 struct Connection {
     alpn: Bytes,
-    streams: DataStreams<ArcReliableFrames>,
+    streams: ArcDataStreams<ArcReliableFrames>,
     terminator: ArcTerminator,
     paths: OnceLock<Box<PathObserver>>,
 }
@@ -27,7 +27,7 @@ impl ArcConnection {
     /// Integration only: TLS and parameters are authenticated. Register streams with
     /// the terminator before constructing this handle; qconnection awaits termination.
     #[doc(hidden)]
-    pub fn new(alpn: Bytes, streams: DataStreams<ArcReliableFrames>, terminator: ArcTerminator) -> Self {
+    pub fn new(alpn: Bytes, streams: ArcDataStreams<ArcReliableFrames>, terminator: ArcTerminator) -> Self {
         Self(Arc::new(Connection { alpn, streams, terminator, paths: OnceLock::new() }))
     }
 

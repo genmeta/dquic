@@ -26,7 +26,7 @@ pub use qbase::{
 };
 pub use qtransport::{ArcConnection, ArcReliableFrames, CloseReason};
 pub use tls::TlsContext;
-pub type DataStreams = qrecovery::streams::DataStreams<ArcReliableFrames>;
+pub type DataStreams = qrecovery::streams::ArcDataStreams<ArcReliableFrames>;
 pub type ArcLocalCids = qbase::cid::ArcLocalCids<qtransport::router::QuicRouterRegistry<ArcReliableFrames>>;
 pub type ArcRemoteCids = qbase::cid::ArcRemoteCids<ArcReliableFrames>;
 pub type ArcDcid = qbase::cid::ArcDcid<ArcReliableFrames>;

@@ -119,7 +119,7 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
 
     use bytes::Bytes;
     use qbase::{param::ArcParameters, role::Role, sid::handy::DemandConcurrency};
-    use qrecovery::streams::DataStreams;
+    use qrecovery::streams::ArcDataStreams;
     use qtransport::{ArcReliableFrames, keys::ArcOneRttKeys, space::DataSpace};
 
     let [client, server] = pair(false);
@@ -135,7 +135,7 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
         let (client, server) = common::parameters();
         let parameters = ArcParameters::new(role, Arc::new(client), Arc::new(server));
         let reliable = ArcReliableFrames::with_capacity(0);
-        let streams = DataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
+        let streams = ArcDataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
         let (paths, closed) = common::paths(role);
         paths.progress.facts().quit_mp_handshaking();
         let space = DataSpace::new(

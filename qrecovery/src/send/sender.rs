@@ -130,13 +130,6 @@ impl<TX> ReadySender<TX> {
         }
     }
 
-    pub(super) fn revise_max_stream_data(&mut self, zero_rtt_rejected: bool, max_stream_data: u64) {
-        if zero_rtt_rejected {
-            self.sndbuf.forget_sent_state();
-        }
-        self.update_window(max_stream_data);
-    }
-
     pub(super) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if self.sndbuf.is_all_rcvd() {
             Poll::Ready(())
@@ -335,13 +328,6 @@ impl<TX> SendingSender<TX> {
         self.sndbuf.may_loss_data(&frame.range())
     }
 
-    pub(super) fn revise_max_stream_data(&mut self, zero_rtt_rejected: bool, max_stream_data: u64) {
-        if zero_rtt_rejected {
-            self.sndbuf.forget_sent_state();
-        }
-        self.update_window(max_stream_data);
-    }
-
     pub(super) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if self.sndbuf.is_all_rcvd() {
             Poll::Ready(())
@@ -508,13 +494,6 @@ impl<TX> DataSentSender<TX> {
             self.fin_state = FinState::Lost;
         }
         self.sndbuf.may_loss_data(&frame.range())
-    }
-
-    pub(super) fn revise_max_stream_data(&mut self, zero_rtt_rejected: bool, max_stream_data: u64) {
-        if zero_rtt_rejected {
-            self.sndbuf.forget_sent_state();
-        }
-        self.sndbuf.extend(max_stream_data);
     }
 
     pub(super) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<()> {

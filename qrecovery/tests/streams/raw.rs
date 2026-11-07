@@ -14,7 +14,7 @@ use qbase::{
     role::Role,
     sid::{Dir, handy::DemandConcurrency},
 };
-use qrecovery::streams::DataStreams;
+use qrecovery::streams::ArcDataStreams;
 use tokio::io::AsyncWrite;
 
 #[derive(Clone, Copy)]
@@ -24,7 +24,7 @@ impl<F> SendFrame<F> for MockFrameSender {
     fn send_frame<I: IntoIterator<Item = F>>(&self, _iter: I) {}
 }
 
-fn packet_frames(streams: &mut DataStreams<MockFrameSender>, waker: &std::task::Waker) -> Vec<GuaranteedFrame> {
+fn packet_frames(streams: &mut ArcDataStreams<MockFrameSender>, waker: &std::task::Waker) -> Vec<GuaranteedFrame> {
     use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
 
     let mut bytes = BytesMut::new();
@@ -51,7 +51,7 @@ fn packet_frames(streams: &mut DataStreams<MockFrameSender>, waker: &std::task::
 fn busy_streams_take_turns_before_either_exhausts_its_window() {
     use qrecovery::send::CancelStream;
 
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -101,7 +101,7 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -133,7 +133,7 @@ fn full_packet_does_not_subscribe_to_idle_streams() {
 #[test]
 fn idle_stream_resumes_for_writes_retransmission_and_fin() {
     let metrics = qbase::metric::ArcConnectionMetrics::default();
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -201,7 +201,7 @@ fn idle_stream_resumes_for_writes_retransmission_and_fin() {
 fn exhausted_connection_credit_keeps_retransmission_available_with_fresh_data_queued() {
     let mut remote = ServerParameters::default();
     remote.set(qbase::param::ParameterId::InitialMaxData, 5u32).unwrap();
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(remote)),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -243,7 +243,7 @@ fn receive_limits_follow_the_local_stream_direction() {
                 client.set(id, if role == Role::Client { value } else { 100 }).unwrap();
                 server.set(id, if role == Role::Server { value } else { 100 }).unwrap();
             }
-            let streams = DataStreams::new(
+            let streams = ArcDataStreams::new(
                 ArcParameters::new(role, Arc::new(client), Arc::new(server)),
                 Box::new(DemandConcurrency),
                 MockFrameSender,
@@ -274,7 +274,7 @@ fn open_uni_uses_the_remote_unidirectional_limit() {
     let mut client = ClientParameters::default();
     client.set(ParameterId::InitialMaxStreamDataUni, 0u32).unwrap();
     let server = ServerParameters::default();
-    let streams = DataStreams::new(
+    let streams = ArcDataStreams::new(
         ArcParameters::new(Role::Server, Arc::new(client), Arc::new(server)),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -298,7 +298,7 @@ fn ready_streams_use_current_parameters_even_with_remembered_limits() {
     // Missing remembered limits prohibit writing; current parameters permit it.
     let parameters =
         ArcParameters::new(Role::Client, Arc::new(client), Arc::new(server)).with_remembered(Some(Arc::new(ServerParameters::new())));
-    let streams = DataStreams::new(parameters, Box::new(DemandConcurrency), MockFrameSender, Default::default());
+    let streams = ArcDataStreams::new(parameters, Box::new(DemandConcurrency), MockFrameSender, Default::default());
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     let Poll::Ready(Ok(Some((_, (_, mut bi))))) = std::pin::pin!(streams.open_bi()).poll(&mut cx) else {
         panic!("ready parameters must allow opening the bidirectional stream");
@@ -328,7 +328,7 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let streams = DataStreams::new(
+    let streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -398,7 +398,7 @@ fn connection_error_preserves_received_but_unread_stream() {
         frame::StreamFrame,
     };
 
-    let streams = DataStreams::new(
+    let streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,
@@ -426,7 +426,7 @@ fn connection_error_preserves_received_but_unread_stream() {
 
 #[test]
 fn empty_stream_fin_is_effective_packet_content() {
-    let mut streams = DataStreams::new(
+    let mut streams = ArcDataStreams::new(
         ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
         Box::new(DemandConcurrency),
         MockFrameSender,

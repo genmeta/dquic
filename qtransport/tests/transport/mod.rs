@@ -28,7 +28,7 @@ use qbase::{
     util::{ArcIndexDeque, IndexDeque},
 };
 use qcongestion::{Resend, Transport as _};
-use qrecovery::streams::DataStreams;
+use qrecovery::streams::ArcDataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
@@ -160,7 +160,7 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
     server.set(ParameterId::InitialMaxStreamsUni, limits).unwrap();
     let params = ArcParameters::new(role, Arc::new(client), Arc::new(server));
     let reliable = ArcReliableFrames::with_capacity(0);
-    let streams = DataStreams::new(params.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
+    let streams = ArcDataStreams::new(params.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
     let data = Arc::new(DataSpace::new(
         Default::default(),
         ArcOneRttKeys::from(keys),
