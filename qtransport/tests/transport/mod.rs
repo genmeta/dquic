@@ -1,3 +1,5 @@
+#[path = "../support/open.rs"]
+mod opening;
 use std::{
     sync::{
         Arc,
@@ -9,6 +11,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
+use opening::{DataOpen, PacketOpen, ShortOpen};
 use qbase::{
     Epoch,
     cid::{ConnectionId, RetireCid},
@@ -29,7 +32,7 @@ use qrecovery::streams::DataStreams;
 use tls_backend::pki_types::pem::PemObject;
 
 use crate::{
-    keys::{ArcOneRttKeys, KeyRetired, Open, Seal},
+    keys::{ArcOneRttKeys, KeyRetired, Seal},
     packet::{channel, encrypt::Packet as SendingPacket},
     path::Path,
     space::{DataSpace, Space},
@@ -299,7 +302,7 @@ fn encode_packet<const N: usize>(
     frames: &mut Vec<GuaranteedFrame>,
     sources: [&mut dyn for<'b> Package<&'b mut [u8]>; N],
 ) -> BytesMut {
-    let key = keys.get().unwrap();
+    let key = keys.sealing_keys().unwrap();
     let mut packet = SendingPacket::new(
         DataHeader::Short(OneRttHeader::new(Default::default(), ConnectionId::from_slice(b"original"))),
         (pn, PacketNumber::encode(pn, 0)),
@@ -339,7 +342,7 @@ fn short_packet_numbers_round_trip_with_header_protection_padding() {
         let packet = parse(&bytes);
         assert!(bytes.len() >= packet.offset + 20);
         let (decoded, frames) = keys(&server)
-            .open(
+            .open_data(
                 packet,
                 |encoded| {
                     assert_eq!(encoded, PacketNumber::encode(pn, 0));
@@ -377,7 +380,7 @@ async fn zero_rtt_and_one_rtt_share_numbers_but_only_one_rtt_ack_confirms_keys()
     let generation = packet.seal(&mut bytes);
     assert_eq!(generation, None);
     assert_eq!(packet.meta.epoch(), Epoch::Data);
-    let (_, received) = material.sealing.open(parse(&bytes), |_| Ok(pn.0), Duration::ZERO).unwrap().unwrap();
+    let (_, received) = material.sealing.open_data(parse(&bytes), |_| Ok(pn.0), Duration::ZERO).unwrap().unwrap();
     let received: Vec<_> = received.map(|frame| frame.unwrap().0).collect();
     assert!(matches!(received.as_slice(), [Frame::Datagram(_, body), Frame::Ping(_)] if body.as_ref() == b"hello"));
     ct.data.sent_journal.on_sealed(pn.0, generation, bytes.len(), packet.meta, frames.drain(..));
@@ -485,7 +488,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                    packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
+                    packet.open_long(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
                 },
                 |_, _| Ok(()),
                 dispatch,
@@ -504,7 +507,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
                 space.rcvd_journal.clone(),
                 move |_, _| Some(received_path.clone()),
                 |keys: &Arc<qtls::BidirectionalKeys>, packet, _| {
-                    packet.decrypt_long_packet(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
+                    packet.open_long(&keys.opening, |pn| space.rcvd_journal.decode_pn(pn)).transpose().map_err(Into::into)
                 },
                 |_, _| Ok(()),
                 dispatch,
@@ -679,7 +682,8 @@ async fn stream_assembly_packs_small_streams_and_uses_remaining_datagram_capacit
     }
     let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
-    let (_, frames) = st.data.keys.open(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
+    let (_, frames) =
+        st.data.keys.open_data(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
     let lengths: Vec<_> = frames
         .map(Result::unwrap)
         .filter_map(|(frame, _)| match frame {
@@ -752,7 +756,7 @@ async fn sender_assembles_ack_path_crypto_reliable_then_streams() {
     writer.write_all(b"stream").await.unwrap();
     let mut sender = Sender::new(ct.clone(), cp);
     let bytes = emit(&mut sender);
-    let (_, frames) = keys(&st).open(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
+    let (_, frames) = keys(&st).open_data(parse(&bytes), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().unwrap();
     let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).filter(|frame| !matches!(frame, Frame::Padding(_))).collect();
     assert!(matches!(
         frames.as_slice(),
@@ -844,7 +848,7 @@ async fn duplicate_skips_authentication_and_forgery_is_not_committed() {
     let mut forged = ping(&keys(&ct), 1);
     let index = forged.len() - 1;
     forged[index] ^= 1;
-    assert!(st.data.keys.open(parse(&forged), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().is_none());
+    assert!(st.data.keys.open_data(parse(&forged), |pn| st.data.rcvd_journal.decode_pn(pn), Duration::from_secs(1)).unwrap().is_none());
     assert_eq!(st.data.rcvd_journal.decode_pn(PacketNumber::encode(1, 0)), Ok(1));
 }
 
@@ -855,7 +859,7 @@ async fn packet_constraints_keep_ack_only_outside_cwnd_but_inside_amplification_
     let mut length = 1200;
     let mut recorded = Vec::new();
     let bytes = encode_packet(&keys(&transport), 0, quota, length, &mut recorded, [&mut ack(0), &mut PingFrame]);
-    let (_, frames) = keys(&peer).open(parse(&bytes), |_| Ok(0), Duration::ZERO).unwrap().unwrap();
+    let (_, frames) = keys(&peer).open_data(parse(&bytes), |_| Ok(0), Duration::ZERO).unwrap().unwrap();
     let frames: Vec<_> = frames.map(|frame| frame.unwrap().0).collect();
     assert!(matches!(frames.as_slice(), [Frame::Ack(_)]));
     quota = 1200;
@@ -896,7 +900,7 @@ async fn data_sources_respect_each_limit_without_consuming_unsent_bytes() {
             }
             assert!(!recorded.is_empty());
             assert!(bytes.len() <= 80);
-            let (_, frames) = opening.open(parse(&bytes), |_| Ok(pn), Duration::from_secs(1)).unwrap().unwrap();
+            let (_, frames) = opening.open_data(parse(&bytes), |_| Ok(pn), Duration::from_secs(1)).unwrap().unwrap();
             for frame in frames {
                 match frame.unwrap().0 {
                     Frame::Crypto(frame, bytes) => {
@@ -962,7 +966,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
 async fn close_fails_business_apis_and_preserves_data_keys() {
     let [(client, ct, _), _] = pair(1);
     client.clone().close(VarInt::from_u32(0), "closed");
-    assert!(ct.data.keys.get().is_ok());
+    assert!(ct.data.keys.sealing_keys().is_ok());
     assert!(client.open_uni_stream().await.is_err());
 }
 

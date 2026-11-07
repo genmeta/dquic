@@ -1,6 +1,7 @@
 mod cids;
 mod discovery;
 mod lifecycle;
+mod opening;
 mod paths;
 mod punch;
 mod recv;

@@ -87,16 +87,23 @@ impl ReceivedPacketRanges {
 #[derive(Debug, Default)]
 struct RcvdJournal {
     packets: ReceivedPacketRanges,
+    largest_authenticated: Option<u64>,
 }
 
 impl RcvdJournal {
     fn with_capacity(capacity: usize, _max_ack_delay: Option<Duration>) -> Self {
-        Self { packets: ReceivedPacketRanges { ranges: Vec::with_capacity(capacity.min(MAX_TRACKED_ACK_RANGES)), ..Default::default() } }
+        Self {
+            packets: ReceivedPacketRanges { ranges: Vec::with_capacity(capacity.min(MAX_TRACKED_ACK_RANGES)), ..Default::default() },
+            largest_authenticated: None,
+        }
     }
 
     fn decode_pn(&self, pkt_number: PacketNumber) -> Result<u64, InvalidPacketNumber> {
-        let expected_pn = self.packets.largest().map_or(0, |(largest, _)| largest.saturating_add(1));
+        let expected_pn = self.largest_authenticated.map_or(0, |largest| largest + 1);
         let pn = pkt_number.decode(expected_pn);
+        if pn > VARINT_MAX {
+            return Err(InvalidPacketNumber::TooLarge);
+        }
         if pn < self.packets.retired_before {
             return Err(InvalidPacketNumber::TooOld);
         }
@@ -107,8 +114,13 @@ impl RcvdJournal {
     }
 
     fn on_rcvd_pn(&mut self, pn: u64, _is_ack_eliciting: bool, _pto: Duration) {
+        self.on_authenticated(pn);
         let now = Instant::now();
         self.packets.insert(pn, now);
+    }
+
+    fn on_authenticated(&mut self, pn: u64) {
+        self.largest_authenticated = Some(self.largest_authenticated.map_or(pn, |largest| largest.max(pn)));
     }
 
     fn gen_ack_frame_util(&self, largest: u64, rcvd_time: Instant, mut capacity: usize) -> Result<AckFrame, Poll<()>> {
@@ -194,6 +206,11 @@ impl ArcRcvdJournal {
 
     pub fn decode_pn(&self, encoded_pn: PacketNumber) -> Result<u64, InvalidPacketNumber> {
         self.inner.read().unwrap().decode_pn(encoded_pn)
+    }
+
+    /// Advance PN reconstruction after authentication, without acknowledging the packet.
+    pub fn on_authenticated(&self, pn: u64) {
+        self.inner.write().unwrap().on_authenticated(pn);
     }
 
     pub fn on_rcvd_pn(&self, pn: u64, is_ack_eliciting: bool, pto: Duration) {

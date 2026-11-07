@@ -284,6 +284,32 @@ impl ArcTerminator {
         }
     }
 
+    /// Stop immediately when continued packet protection would exceed an AEAD limit.
+    /// Preserve the first connection error if closing has already started.
+    pub fn abort(&self, error: Error) {
+        let (error, components, waiters) = {
+            let mut state = self.0.lock().unwrap();
+            let (error, components, waiters) = match &mut *state {
+                Terminator::NoError { components, waiters, tx_wakers } => {
+                    tx_wakers.wake_all();
+                    (error, std::mem::take(components), waiters.clone())
+                }
+                Terminator::Closing { error, waiters, tx_wakers, .. } => {
+                    tx_wakers.wake_all();
+                    (error.clone(), Vec::new(), waiters.clone())
+                }
+                Terminator::Draining { error, waiters, .. } => (error.clone(), Vec::new(), waiters.clone()),
+                Terminator::Terminated(_) => return,
+            };
+            *state = Terminator::Terminated(error.clone());
+            (error, components, waiters)
+        };
+        waiters.wake_all();
+        for component in components {
+            component.close_with_error(error.clone());
+        }
+    }
+
     /// Wait for the terminal error without consuming it.
     pub async fn wait(&self) -> Error {
         self.clone().await

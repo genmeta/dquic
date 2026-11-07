@@ -1,6 +1,9 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -42,6 +45,7 @@ pub struct Paths {
     idle: ArcIdleTimer,
     max_idle_timeout: Mutex<Duration>,
     defer_idle_timeout: Duration,
+    failed_opened: AtomicU64,
 }
 
 impl Paths {
@@ -78,6 +82,7 @@ impl Paths {
             idle,
             max_idle_timeout: Mutex::new(max_idle_timeout),
             defer_idle_timeout,
+            failed_opened: AtomicU64::new(0),
         });
         tokio::spawn({
             let weak = Arc::downgrade(&paths);
@@ -192,6 +197,13 @@ impl Paths {
 
     pub(crate) fn closing_pto(&self) -> Duration {
         self.entries.lock().unwrap().values().map(|path| path.cc.pto_base(Epoch::Data)).max().unwrap_or(Duration::from_secs(1))
+    }
+
+    /// Share the authentication failure budget across paths and encryption levels.
+    pub(crate) fn on_authentication_failed(&self, limit: u64) {
+        if self.failed_opened.fetch_add(1, Ordering::Relaxed) >= limit.saturating_sub(1) {
+            self.terminator.abort(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection integrity limit").into());
+        }
     }
 
     /// Spawn one round at path creation or handshake confirmation.

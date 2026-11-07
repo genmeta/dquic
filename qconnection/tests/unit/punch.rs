@@ -23,7 +23,11 @@ use qtransport::path::Path;
 use qtraversal::punch::{ProbeEncoder, PunchPacketEncoder};
 
 pub(super) use crate::common::spaces::pair;
-use crate::{ArcHandshake, Paths, Scopes, common, common::spaces::take_reliable, recv::receive_1rtt_pkt_and_deliver_frames};
+use crate::{
+    ArcHandshakeDone, Paths, Scopes, common,
+    common::{opening::ShortOpen as _, spaces::take_reliable},
+    recv::receive_1rtt_pkt_and_deliver_frames,
+};
 
 fn encoder(phase: &super::DataFixture) -> ProbeEncoder {
     let spaces = qtransport::space::ArcSpaces::default();
@@ -130,7 +134,7 @@ async fn receive_on_paths(
     pathway: Pathway,
     link: Link,
     scopes: Scopes,
-) -> ArcHandshake {
+) -> ArcHandshakeDone {
     let (tx, rx) = tokio::sync::mpsc::channel(packets.len());
     for bytes in packets {
         let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
@@ -146,7 +150,7 @@ async fn receive_on_paths(
     let notification = crate::common::observe_close(&closed);
     let tokens = ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry));
     let role = phase.parameters.role();
-    let handshake = ArcHandshake::new(role, phase.spaces.data.reliable_frames.clone());
+    let handshake = ArcHandshakeDone::new(role, phase.spaces.data.reliable_frames.clone());
     receive_1rtt_pkt_and_deliver_frames(
         (rx, (role == Role::Server).then_some(scopes)),
         phase.spaces.data.clone(),
@@ -217,7 +221,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         receiver.spaces.data.clone(),
         paths.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
-        ArcHandshake::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
+        ArcHandshakeDone::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
     ));
     let peer_error: crate::Error = QuicError::with_default_fty(ErrorKind::None, "peer close").into();
     let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
@@ -296,7 +300,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
         }
         drop(tx);
-        let handshake = ArcHandshake::new(receiver.parameters.role(), receiver.spaces.data.reliable_frames.clone());
+        let handshake = ArcHandshakeDone::new(receiver.parameters.role(), receiver.spaces.data.reliable_frames.clone());
         receive_1rtt_pkt_and_deliver_frames(
             (rx, Some(Scopes::ALL)),
             receiver.spaces.data.clone(),

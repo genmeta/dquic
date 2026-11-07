@@ -10,12 +10,11 @@ use std::{
 
 use qbase::{
     error::{ErrorKind, QuicError},
-    frame::FrameReader,
-    packet::{DataPacket, InvalidPacketNumber, KeyPhaseBit, PacketNumber, ShortSpecificBits},
+    packet::{KeyPhaseBit, ShortSpecificBits},
 };
 use tokio::time::Instant;
 
-use super::{Open, PacketError, Seal, open_with};
+use super::{Open, PacketError, Seal, open, seal};
 use crate::Error;
 
 /// Header protection does not change during a 1-RTT key update.
@@ -55,12 +54,15 @@ struct PacketKeyState {
 struct PacketKeyRing {
     keys: VecDeque<PacketKeyState>,
     next_secret: qtls::Secrets,
-    failed_opened: u64,
+    next: Option<(Arc<PacketKeys>, qtls::Secrets)>,
     can_update: bool,
 }
 
 impl PacketKeyRing {
-    fn push(&mut self, keys: qtls::PacketKeys, next_secret: qtls::Secrets) -> Result<(), Error> {
+    fn next(&mut self) -> Result<Arc<PacketKeys>, Error> {
+        if let Some((keys, _)) = &self.next {
+            return Ok(keys.clone());
+        }
         let generation = self
             .keys
             .back()
@@ -69,26 +71,30 @@ impl PacketKeyRing {
             .generation
             .checked_add(1)
             .ok_or_else(|| QuicError::with_default_fty(ErrorKind::KeyUpdate, "key generation exhausted"))?;
+        let mut secret = self.next_secret.clone();
+        let keys = secret.next_packet_keys();
+        let keys = Arc::new(PacketKeys { opening: keys.opening, sealing: keys.sealing, generation, sealed_count: AtomicU64::new(0) });
+        self.next = Some((keys.clone(), secret));
+        Ok(keys)
+    }
+
+    fn push_next(&mut self) {
+        let (keys, secret) = self.next.take().unwrap();
         if self.keys.len() == 3 {
             self.keys.pop_front();
         }
-        self.keys.push_back(PacketKeyState {
-            keys: Arc::new(PacketKeys { opening: keys.opening, sealing: keys.sealing, generation, sealed_count: AtomicU64::new(0) }),
-            received: None,
-            expires: None,
-        });
-        self.next_secret = next_secret;
+        self.keys.push_back(PacketKeyState { keys, received: None, expires: None });
+        self.next_secret = secret;
         self.can_update = false;
-        Ok(())
     }
 
     fn update(&mut self) -> Result<(), Error> {
         if !self.can_update {
             return Err(QuicError::with_default_fty(ErrorKind::KeyUpdate, "local key update is not permitted").into());
         }
-        let mut next_secret = self.next_secret.clone();
-        let keys = next_secret.next_packet_keys();
-        self.push(keys, next_secret)
+        self.next()?;
+        self.push_next();
+        Ok(())
     }
 
     fn prepare_sealing(&mut self) -> Result<(), PacketError> {
@@ -106,9 +112,9 @@ impl PacketKeyRing {
         Ok(())
     }
 
-    fn decrypt(&mut self, pn: u64, phase: KeyPhaseBit, header: &[u8], body: &mut [u8], pto: Duration) -> Result<Option<usize>, Error> {
+    fn opening(&mut self, pn: u64, phase: KeyPhaseBit) -> Result<Option<Arc<PacketKeys>>, Error> {
         let now = Instant::now();
-        while self.keys.front().unwrap().expires.is_some_and(|until| now >= until) {
+        while self.keys.len() > 1 && self.keys.front().unwrap().expires.is_some_and(|until| now >= until) {
             self.keys.pop_front();
         }
         // The latest observed generation starting at or before PN determines its lower bound.
@@ -120,30 +126,25 @@ impl PacketKeyRing {
             }
             index += 1;
         }
-        // A peer update is tentative: neither the queue nor the secret advances on forgery.
-        let candidate = (index == self.keys.len()).then(|| {
-            let mut next_secret = self.next_secret.clone();
-            (next_secret.next_packet_keys(), next_secret)
-        });
-        let opening = match &candidate {
-            Some((keys, _)) => &keys.opening,
-            None => &self.keys[index].keys.opening,
-        };
-        let plain_len = match opening.open(pn, header, body) {
-            Ok(plain) => plain.len(),
-            Err(_) => {
-                self.failed_opened += 1;
-                if self.failed_opened >= opening.integrity_limit() {
-                    return Err(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection integrity limit").into());
-                }
-                return Ok(None);
-            }
-        };
-        if let Some((keys, next_secret)) = candidate {
-            self.push(keys, next_secret)?;
-            index = self.keys.len() - 1;
+        if index == self.keys.len() {
+            self.next().map(Some)
+        } else {
+            let state = &self.keys[index];
+            // PTO can shrink between updates, so expiry is not necessarily in queue order.
+            Ok((!state.expires.is_some_and(|until| now >= until)).then(|| state.keys.clone()))
         }
-        // Local updates retain older opening keys until a newer peer generation authenticates.
+    }
+
+    fn on_opened(&mut self, pn: u64, keys: &Arc<PacketKeys>, pto: Duration) {
+        // A concurrent local update may already have installed this same candidate.
+        if self.next.as_ref().is_some_and(|(next, _)| Arc::ptr_eq(next, keys)) {
+            self.push_next();
+        }
+        let Some(index) = self.keys.iter().position(|state| Arc::ptr_eq(&state.keys, keys)) else {
+            // A selected operation can finish after eviction, without restoring old keys.
+            return;
+        };
+        let now = Instant::now();
         for older in self.keys.iter_mut().take(index) {
             older.expires.get_or_insert(now + pto.saturating_mul(3));
         }
@@ -152,7 +153,6 @@ impl PacketKeyRing {
             Some(range) => (*range.start()).min(pn)..=(*range.end()).max(pn),
             None => pn..=pn,
         });
-        Ok(Some(plain_len))
     }
 }
 
@@ -172,12 +172,7 @@ impl From<qtls::OneRttKeyMaterial> for ArcOneRttKeys {
         });
         Self {
             headers,
-            packets: Arc::new(Mutex::new(PacketKeyRing {
-                keys: packets,
-                next_secret: keys.next_secret,
-                failed_opened: 0,
-                can_update: false,
-            })),
+            packets: Arc::new(Mutex::new(PacketKeyRing { keys: packets, next_secret: keys.next_secret, next: None, can_update: false })),
         }
     }
 }
@@ -192,18 +187,23 @@ impl From<qtls::InstalledKeys> for ArcOneRttKeys {
 }
 
 impl ArcOneRttKeys {
-    pub fn open_packet<H>(
-        &self,
-        packet: crate::packet::CipherPacket<H>,
-        decode_pn: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
-        pto: Duration,
-    ) -> Result<Option<crate::packet::PlainPacket<H>>, Error>
-    where
-        H: crate::packet::LogPacketHeader,
-    {
-        packet.decrypt_short_packet(&self.headers.opening, decode_pn, |pn, phase, header, body| {
-            self.packets.lock().unwrap().decrypt(pn, phase, header, body, pto)
-        })
+    /// Header protection is fixed for the lifetime of the Data space.
+    pub fn opening_header(&self) -> &qtls::HeaderProtectionKey {
+        &self.headers.opening
+    }
+
+    /// Select opening keys without advancing the authenticated generation.
+    pub fn opening_packet(&self, pn: u64, phase: KeyPhaseBit) -> Result<Option<ArcKeys>, PacketError> {
+        Ok(self.packets.lock().unwrap().opening(pn, phase)?.map(|packets| ArcKeys { headers: self.headers.clone(), packets }))
+    }
+
+    /// Commit a selected generation only after successful authentication.
+    pub fn on_opened(&self, pn: u64, keys: &ArcKeys, pto: Duration) -> Result<(), PacketError> {
+        if !Arc::ptr_eq(&self.headers, &keys.headers) {
+            return Err(PacketError::Layout);
+        }
+        self.packets.lock().unwrap().on_opened(pn, &keys.packets, pto);
+        Ok(())
     }
 
     /// Allow the first local update when qconnection confirms the handshake.
@@ -225,7 +225,7 @@ impl ArcOneRttKeys {
     }
 
     /// Select a fixed generation. The caller serializes this with PN allocation.
-    pub fn get(&self) -> Result<ArcKeys, PacketError> {
+    pub fn sealing_keys(&self) -> Result<ArcKeys, PacketError> {
         let mut packets = self.packets.lock().unwrap();
         packets.prepare_sealing()?;
         Ok(ArcKeys { headers: self.headers.clone(), packets: packets.keys.back().unwrap().keys.clone() })
@@ -252,31 +252,27 @@ impl Seal for ArcKeys {
             .map_err(|_| {
                 Error::from(QuicError::with_default_fty(ErrorKind::AeadLimitReached, "packet protection confidentiality limit"))
             })?;
-        let tag_offset = buffer.len() - tag_len;
-        let (header, body_tag) = buffer.split_at_mut(body_offset);
-        let (body, tag) = body_tag.split_at_mut(tag_offset - body_offset);
+        if tag_len != self.tag_len() {
+            return Err(PacketError::Layout);
+        }
+        let pn_len = body_offset.checked_sub(pn_offset).ok_or(PacketError::Layout)?;
+        let first = buffer.first_mut().ok_or(PacketError::Layout)?;
         let phase = KeyPhaseBit::from(keys.generation & 1 != 0);
-        let mut specific_bits = ShortSpecificBits::from(header[0]);
+        let mut specific_bits = ShortSpecificBits::from(*first);
         specific_bits.set_key_phase(phase);
-        header[0] = *specific_bits;
-        keys.sealing.seal(pn, header, body, tag)?;
-        let (prefix, pn_bytes) = header.split_at_mut(pn_offset);
-        let header_key = &self.headers.sealing;
-        let sample_offset = 4 - pn_bytes.len();
-        header_key.protect(&body_tag[sample_offset..sample_offset + header_key.sample_len()], &mut prefix[0], pn_bytes)?;
+        *first = *specific_bits;
+        seal::body(&keys.sealing, pn, buffer, body_offset)?;
+        seal::header(&self.headers.sealing, buffer, pn_offset, pn_len)?;
         Ok((keys.generation, phase))
     }
 }
 
-impl Open for ArcOneRttKeys {
-    fn open(
-        &self,
-        packet: DataPacket,
-        decode_pn: impl FnOnce(PacketNumber) -> Result<u64, InvalidPacketNumber>,
-        pto: Duration,
-    ) -> Result<Option<(u64, FrameReader)>, Error> {
-        open_with(packet, &self.headers.opening, decode_pn, |pn, first, header, body| {
-            self.packets.lock().unwrap().decrypt(pn, ShortSpecificBits::from(first).key_phase(), header, body, pto)
-        })
+impl Open for ArcKeys {
+    fn integrity_limit(&self) -> u64 {
+        self.packets.opening.integrity_limit()
+    }
+
+    fn open(&self, pn: u64, buffer: &mut [u8], body_offset: usize) -> Result<usize, PacketError> {
+        open::body(&self.packets.opening, pn, buffer, body_offset)
     }
 }

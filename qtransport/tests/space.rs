@@ -77,7 +77,7 @@ async fn retiring_early_spaces_preserves_data_and_is_idempotent() {
     assert!(Arc::ptr_eq(&spaces.get_as::<DataSpace>(Epoch::Data).unwrap(), &data));
     assert!(initial.keys.get().is_err());
     assert!(handshake.keys.get().is_err());
-    assert!(data.keys.get().is_ok());
+    assert!(data.keys.sealing_keys().is_ok());
 
     spaces.retire(Epoch::Data);
     spaces.retire(Epoch::Data);
