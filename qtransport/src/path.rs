@@ -9,7 +9,6 @@ use std::{
 
 use qbase::{
     Epoch,
-    cid::ArcDcid,
     handshake::HandshakeFacts,
     net::{route::Pathway, tx::ArcSendWakers, validate::ArcValidation},
     packet::assemble::Metadata,
@@ -20,11 +19,11 @@ use qcongestion::{Algorithm, ArcCC, CongestionController, MSS, Resend};
 use qprotocol::QuicProtocol;
 use tokio::time::Instant;
 
-use crate::ArcReliableFrames;
+use crate::ArcDcid;
 
 pub struct Path {
     pub pathway: Pathway,
-    pub dcid: ArcDcid<ArcReliableFrames>,
+    pub dcid: ArcDcid,
     pub cc: ArcCC,
     pub send_waker: ArcSendWakers,
     pub validation: ArcValidation,
@@ -40,8 +39,8 @@ impl Path {
         pathway: Pathway,
         hs_facts: Arc<HandshakeFacts>,
         heartbeat: ArcHeartbeat,
-        trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
-        dcid: ArcDcid<ArcReliableFrames>,
+        resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
+        dcid: ArcDcid,
     ) -> Self {
         let is_active = !hs_facts.has_selected_path() || hs_facts.is_handshake_done();
         let send_waker = ArcSendWakers::default();
@@ -49,7 +48,7 @@ impl Path {
         let cc = ArcCC::new(
             Algorithm::NewReno,
             Duration::from_millis(25),
-            trackers,
+            resenders,
             hs_facts,
             Arc::new(AtomicU16::new(MSS as u16)),
             send_waker.clone(),

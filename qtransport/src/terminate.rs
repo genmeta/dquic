@@ -42,16 +42,16 @@ impl From<Error> for CloseReason {
 /// Owns the monotonic Normal -> Closing/Draining -> Terminated state machine.
 enum Terminator {
     NoError {
+        waiters: Arc<Wakers>,
         tx_wakers: ArcSendWakers,
         components: Vec<Arc<dyn qbase::Close>>,
-        waiters: Arc<Wakers>,
     },
     Closing {
         waiters: Arc<Wakers>,
         tx_wakers: ArcSendWakers,
+        error: Error,
         sync_ccf: bool,
         sent_ccf: bool,
-        error: Error,
         rcvd_packets: u8,
         last_sent: Instant,
         interval: Duration,
@@ -66,7 +66,7 @@ enum Terminator {
 
 impl Terminator {
     fn no_error() -> Self {
-        Self::NoError { tx_wakers: ArcSendWakers::default(), components: Vec::new(), waiters: Arc::new(Wakers::new()) }
+        Self::NoError { waiters: Arc::new(Wakers::new()), tx_wakers: ArcSendWakers::default(), components: Vec::new() }
     }
 
     fn close(&mut self, reason: &CloseReason, pto: Duration) -> Option<Duration> {
@@ -88,9 +88,9 @@ impl Terminator {
                         *self = Self::Closing {
                             waiters: waiters.clone(),
                             tx_wakers: tx_wakers.clone(),
+                            error,
                             sync_ccf: true,
                             sent_ccf: false,
-                            error,
                             rcvd_packets: 0,
                             last_sent: now,
                             interval: pto,

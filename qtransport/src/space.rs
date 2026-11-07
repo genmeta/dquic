@@ -130,10 +130,26 @@ impl<K: Clone + Send> qcongestion::Resend for Space<ArcKeys<K>> {
     }
 }
 
+/// Reserve a packet number together with its fixed key generation.
+pub trait Allocate {
+    /// Returns `None` when the space's keys have been retired.
+    #[allow(clippy::type_complexity)]
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)>;
+}
+
 impl Allocate for Space<ArcKeys> {
     fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
         let keys = self.keys.get().ok()?;
         Some((self.next_pn(), Keys::Long(keys)))
+    }
+}
+
+impl<T: Deref> Allocate for T
+where
+    T::Target: Allocate,
+{
+    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
+        self.deref().pn_and_keys()
     }
 }
 
@@ -142,6 +158,20 @@ impl<K> UnregisterWaker for Space<K> {
         self.crypto.outgoing().unregister(waker);
         self.rcvd_journal.unregister(waker);
     }
+}
+
+/// Recovery and retirement of a space's own frame sources.
+pub trait Recover {
+    /// Release acknowledged frames and return the highest acknowledged key generation.
+    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error>;
+
+    fn recover(&self, frame: &GuaranteedFrame);
+
+    fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>);
+
+    fn on_tick(&self, now: Instant);
+
+    fn retire(&self);
 }
 
 impl<K: Clone> Recover for Space<ArcKeys<K>> {
@@ -173,29 +203,28 @@ impl<K: Clone> Recover for Space<ArcKeys<K>> {
     }
 }
 
-/// Recovery and retirement of a space's own frame sources.
-pub trait Recover {
-    /// Release acknowledged frames and return the highest acknowledged key generation.
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error>;
-    fn recover(&self, frame: &GuaranteedFrame);
-    fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>);
-    fn on_tick(&self, now: Instant);
-    fn retire(&self);
-}
+/// Shared packet-number, key reservation and journal operations.
+pub trait Transmit: Allocate + Recover + UnregisterWaker + Any + Send + Sync {
+    fn epoch(&self) -> Epoch;
 
-/// Reserve a packet number together with its fixed key generation.
-pub trait Allocate {
-    /// Returns `None` when the space's keys have been retired.
-    #[allow(clippy::type_complexity)]
-    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)>;
-}
+    fn crypto(&self) -> &CryptoStream;
 
-impl<T: Deref> Allocate for T
-where
-    T::Target: Allocate,
-{
-    fn pn_and_keys(&self) -> Option<((u64, PacketNumber), Keys)> {
-        self.deref().pn_and_keys()
+    fn sent_journal(&self) -> &ArcSentJournal;
+
+    fn rcvd_journal(&self) -> &ArcRcvdJournal;
+
+    /// Commit one packet under the sending path's CC lock, then account it on that path.
+    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration);
+
+    fn on_sealed(
+        &self,
+        pn: u64,
+        generation: Option<u64>,
+        pktlen: usize,
+        meta: Metadata,
+        frames: &mut dyn Iterator<Item = GuaranteedFrame>,
+    ) {
+        self.sent_journal().on_sealed(pn, generation, pktlen, meta, frames);
     }
 }
 
@@ -222,31 +251,6 @@ where
 
     fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration) {
         Space::on_sent(self, pn, in_flight, retransmit_after, retention)
-    }
-}
-
-/// Shared packet-number, key reservation and journal operations.
-pub trait Transmit: Allocate + Recover + UnregisterWaker + Any + Send + Sync {
-    fn epoch(&self) -> Epoch;
-
-    fn crypto(&self) -> &CryptoStream;
-
-    fn sent_journal(&self) -> &ArcSentJournal;
-
-    fn rcvd_journal(&self) -> &ArcRcvdJournal;
-
-    /// Commit one packet under the sending path's CC lock, then account it on that path.
-    fn on_sent(&self, pn: u64, in_flight: bool, retransmit_after: Duration, retention: Duration);
-
-    fn on_sealed(
-        &self,
-        pn: u64,
-        generation: Option<u64>,
-        pktlen: usize,
-        meta: Metadata,
-        frames: &mut dyn Iterator<Item = GuaranteedFrame>,
-    ) {
-        self.sent_journal().on_sealed(pn, generation, pktlen, meta, frames);
     }
 }
 
@@ -291,7 +295,7 @@ pub trait Encapsulate: Transmit {
         datagram: &mut Cursor<&mut [u8]>,
         packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
@@ -311,7 +315,7 @@ pub trait Encapsulate: Transmit {
         let offset = datagram.position() as usize;
         let mut crypto = self.crypto().outgoing();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
-            external.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
+            sources.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
         sources.push(&mut crypto);
         let result = packet.assemble(cx, datagram, quota, packet_content, frames, &mut sources);
         drop(sources);

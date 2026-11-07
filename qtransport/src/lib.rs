@@ -28,6 +28,7 @@ pub use qbase::{error::Error, param::ArcParameters, role::Role, sid::StreamId, v
 pub use qrecovery::{recv::StopSending, send::CancelStream, streams::error::StreamError};
 pub use terminate::CloseReason;
 pub type ArcReliableFrames = qrecovery::reliable::ArcReliableFrames<qbase::frame::ReliableFrame>;
+pub type ArcDcid = qbase::cid::ArcDcid<ArcReliableFrames>;
 pub type StreamReader = qrecovery::recv::Reader<qrecovery::streams::Ext<ArcReliableFrames>>;
 pub type StreamWriter = qrecovery::send::Writer<qrecovery::streams::Ext<ArcReliableFrames>>;
 

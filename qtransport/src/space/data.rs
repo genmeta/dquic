@@ -167,7 +167,7 @@ impl Encapsulate for DataSpace {
         datagram: &mut Cursor<&mut [u8]>,
         packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> Poll<(Option<Packet>, usize)> {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
@@ -186,7 +186,7 @@ impl Encapsulate for DataSpace {
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
-            external.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
+            sources.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);
