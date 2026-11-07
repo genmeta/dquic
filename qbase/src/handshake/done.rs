@@ -93,7 +93,7 @@ where
     /// Create a new server handshake signal.
     ///
     /// The `output` is responsible for sending the [`HandshakeDoneFrame`] to the client,
-    /// see [`ServerHandshake`].
+    /// see [`ServerHandshakeDone`].
     pub fn new(output: T) -> Self {
         ServerHandshakeDone { is_done: Arc::new(AtomicBool::new(false)), output }
     }
@@ -110,7 +110,7 @@ where
     /// Servers MUST NOT send a [`HandshakeDoneFrame`] before completing the handshake.
     /// and once the server handshake is complete,
     /// servers should send the [`HandshakeDoneFrame`] immediately.
-    /// See [`ServerHandshake`].
+    /// See [`ServerHandshakeDone`].
     ///
     /// This method return [`true`] when it first time set the handshake status to complete.
     pub fn done(&self) -> bool {
@@ -125,7 +125,7 @@ where
 
 /// A merged handshake state that can be used by both the client and the server.
 ///
-/// Use [`ArcHandshake`] to share this state and await client confirmation.
+/// Use [`ArcHandshakeDone`] to share this state and await client confirmation.
 #[derive(Debug)]
 pub enum HandshakeDone<T>
 where
@@ -156,7 +156,7 @@ where
 
     /// Create a new server handshake state.
     /// The `output` is responsible for sending the [`HandshakeDoneFrame`] to the client,
-    /// see [`ServerHandshake::new`].
+    /// see [`ServerHandshakeDone::new`].
     pub fn new_server(output: T) -> Self {
         HandshakeDone::Server(ServerHandshakeDone::new(output))
     }
