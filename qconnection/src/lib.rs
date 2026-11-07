@@ -35,5 +35,4 @@ pub type ArcHandshakeDone = qbase::handshake::ArcHandshakeDone<ArcReliableFrames
 pub type ArcResend = ArcIndexDeque<Arc<dyn qcongestion::Resend>, 2>;
 
 pub type Connected = (Option<qtls::LocalAuthority>, qtls::RemoteAuthority, ArcConnection);
-
 pub type Accepted = (Option<qtls::RemoteAuthority>, qtls::LocalAuthority, ArcConnection);

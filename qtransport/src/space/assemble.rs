@@ -83,10 +83,10 @@ impl ArcSpaces {
         bytes: &mut Cursor<&mut [u8]>,
         packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
         let spaces = self.0.read().unwrap().clone();
-        spaces.poll_dump(cx, cc, dcid, bytes, packet_content, frames, external)
+        spaces.poll_dump(cx, cc, dcid, bytes, packet_content, frames, sources)
     }
 }
 
@@ -108,9 +108,9 @@ impl Spaces {
         bytes: &mut Cursor<&mut [u8]>,
         packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
-        self.poll_dump_at(cx, cc, dcid, Epoch::Initial, bytes, packet_content, None, frames, external)
+        self.poll_dump_at(cx, cc, dcid, Epoch::Initial, bytes, packet_content, None, frames, sources)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -124,27 +124,27 @@ impl Spaces {
         packet_content: PacketContent,
         min_size: Option<usize>,
         frames: &mut Vec<GuaranteedFrame>,
-        external: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
+        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
         match self.0.get(epoch as u64) {
             None if epoch == Epoch::Data => (0, SmallVec::new()),
-            None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external),
+            None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, sources),
             Some(space) => {
                 let start = frames.len();
                 let offset = datagram.position() as usize;
-                let (packet, mut pktlen) = match space.poll_dump(cx, cc, dcid, datagram, packet_content, frames, external) {
+                let (packet, mut pktlen) = match space.poll_dump(cx, cc, dcid, datagram, packet_content, frames, sources) {
                     Poll::Ready(result) => result,
                     Poll::Pending => (None, 0),
                 };
                 let min_size = Self::adjust_min_size(min_size, epoch, pktlen);
                 match packet {
                     None if epoch == Epoch::Data => (0, SmallVec::new()),
-                    None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external),
+                    None => self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, sources),
                     Some(mut packet) => {
                         let (n, mut packets) = if epoch == Epoch::Data {
                             (0, SmallVec::new())
                         } else {
-                            self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, external)
+                            self.poll_dump_at(cx, cc, dcid, epoch.next(), datagram, packet_content, min_size, frames, sources)
                         };
                         if n == 0 {
                             let padlen = min_size.unwrap_or(0);
