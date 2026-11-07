@@ -49,12 +49,13 @@ pub(super) struct Output<TX> {
     #[deref]
     #[deref_mut]
     pub(super) outgoings: BTreeMap<StreamId, (Outgoing<TX>, IOState)>,
-    pub(super) cursor: Option<(StreamId, usize)>,
+    /// Last served stream and the payload bytes remaining in its 4096-byte turn.
+    pub(super) turn: Option<(StreamId, usize)>,
 }
 
 impl<TX> Output<TX> {
     fn new() -> Self {
-        Self { outgoings: BTreeMap::default(), cursor: None }
+        Self { outgoings: BTreeMap::default(), turn: None }
     }
 }
 

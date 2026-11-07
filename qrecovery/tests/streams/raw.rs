@@ -25,12 +25,20 @@ impl<F> SendFrame<F> for MockFrameSender {
 }
 
 fn packet_frames(streams: &mut ArcDataStreams<MockFrameSender>, waker: &std::task::Waker) -> Vec<GuaranteedFrame> {
+    packet_frames_with_capacity(streams, waker, 1200)
+}
+
+fn packet_frames_with_capacity(
+    streams: &mut ArcDataStreams<MockFrameSender>,
+    waker: &std::task::Waker,
+    capacity: usize,
+) -> Vec<GuaranteedFrame> {
     use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
 
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
-    let limits_quota = 1200;
-    let limits_length = 1200;
+    let limits_quota = capacity;
+    let limits_length = capacity;
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result = streams.poll_dump(
         &mut Context::from_waker(waker),
@@ -84,6 +92,132 @@ fn busy_streams_take_turns_before_either_exhausts_its_window() {
     assert_eq!(sent.len(), 2, "one busy stream must not starve the other");
     let bytes = sent.values().copied().collect::<Vec<_>>();
     assert!(bytes[0].abs_diff(bytes[1]) <= 4096, "{sent:?}");
+}
+
+#[test]
+fn busy_streams_share_byte_turns_across_packets_and_paths() {
+    use qrecovery::send::CancelStream;
+
+    let streams = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        MockFrameSender,
+        Default::default(),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let mut writers = Vec::new();
+    let mut sent = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let Poll::Ready(Ok(Some((sid, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
+            panic!("stream should open");
+        };
+        writer.write(bytes::Bytes::from(vec![7; 64 * 1024])).unwrap();
+        sent.insert(sid, 0usize);
+        writers.push(writer);
+    }
+    let mut paths = [streams.clone(), streams];
+    for (index, capacity) in [1200, 9000, 128, 7000, 900, 20000, 1200, 9000].into_iter().enumerate() {
+        for frame in packet_frames_with_capacity(&mut paths[index % 2], cx.waker(), capacity) {
+            if let GuaranteedFrame::Stream(frame) = frame {
+                assert!(frame.len() <= 4096);
+                *sent.get_mut(&frame.stream_id()).unwrap() += frame.len();
+            }
+        }
+        assert!(sent.values().max().unwrap() - sent.values().min().unwrap() <= 4096, "{sent:?}");
+    }
+    assert!(sent.values().all(|&bytes| bytes > 4096), "every busy stream must receive multiple turns");
+    assert_eq!(paths[0].fresh_bytes(), 3 * 64 * 1024 - sent.values().sum::<usize>());
+    for writer in &mut writers {
+        writer.cancel(0);
+    }
+}
+
+#[test]
+fn retransmissions_spend_stream_turn_without_spending_flow_credit() {
+    use qrecovery::send::CancelStream;
+
+    let mut streams = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        MockFrameSender,
+        Default::default(),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let mut writers = Vec::new();
+    for _ in 0..2 {
+        let Poll::Ready(Ok(Some((_, mut writer)))) = std::pin::pin!(streams.open_uni()).poll(&mut cx) else {
+            panic!("stream should open");
+        };
+        writer.write(bytes::Bytes::from(vec![7; 64 * 1024])).unwrap();
+        writers.push(writer);
+    }
+    let first = packet_frames(&mut streams, cx.waker());
+    let [GuaranteedFrame::Stream(frame)] = first.as_slice() else {
+        panic!("expected one STREAM frame");
+    };
+    streams.may_loss_data(frame);
+    let fresh = streams.fresh_bytes();
+    assert_eq!(packet_frames(&mut streams, cx.waker()), first);
+    assert_eq!(streams.fresh_bytes(), fresh);
+
+    let mut current_bytes = 2 * frame.len();
+    let mut other_bytes = 0;
+    for next in packet_frames_with_capacity(&mut streams, cx.waker(), 4096) {
+        if let GuaranteedFrame::Stream(next) = next {
+            if next.stream_id() == frame.stream_id() {
+                current_bytes += next.len();
+            } else {
+                other_bytes += next.len();
+            }
+        }
+    }
+    assert_eq!(current_bytes, 4096, "retransmissions consume the same turn as new data");
+    assert!(other_bytes > 0, "the other stream must run when that turn is exhausted");
+    for writer in &mut writers {
+        writer.cancel(0);
+    }
+}
+
+#[test]
+fn removed_current_stream_and_blocked_stream_do_not_stop_other_streams() {
+    use qbase::frame::{MaxStreamDataFrame, StreamCtlFrame};
+    use qrecovery::send::CancelStream;
+
+    let mut streams = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        MockFrameSender,
+        Default::default(),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let mut writers = Vec::new();
+    for window in [0, 100, 100] {
+        let Poll::Ready(Ok(Some((sid, writer)))) = streams.poll_open_uni_with_limit(&mut cx, window) else {
+            panic!("stream should open");
+        };
+        writers.push((sid, writer));
+    }
+    writers[0].1.write(bytes::Bytes::from_static(b"zero")).unwrap();
+    writers[1].1.write(bytes::Bytes::from_static(b"middle")).unwrap();
+    writers[2].1.write(bytes::Bytes::from_static(b"last")).unwrap();
+    assert!(writers[2].1.poll_shutdown(&mut cx).is_pending());
+
+    let frames = packet_frames_with_capacity(&mut streams, cx.waker(), 6);
+    let [GuaranteedFrame::Stream(frame)] = frames.as_slice() else {
+        panic!("expected one STREAM frame");
+    };
+    assert_eq!(frame.stream_id(), writers[2].0);
+    assert!(frame.is_fin());
+    streams.on_data_acked(*frame);
+    let frames = packet_frames(&mut streams, cx.waker());
+    assert!(frames.iter().all(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.stream_id() == writers[1].0)));
+
+    streams.recv_stream_control(StreamCtlFrame::MaxStreamData(MaxStreamDataFrame::new(writers[0].0, 100u32.into()))).unwrap();
+    let frames = packet_frames(&mut streams, cx.waker());
+    assert!(frames.iter().all(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.stream_id() == writers[0].0)));
+    for (_, writer) in &mut writers {
+        writer.cancel(0);
+    }
 }
 
 #[test]
@@ -389,6 +523,42 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
     use qrecovery::send::CancelStream;
     writer.cancel(0);
     next.cancel(0);
+}
+
+#[test]
+fn closed_collection_releases_cancelled_waiters() {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+
+    struct Waiter(AtomicUsize);
+    impl Wake for Waiter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let mut streams = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        MockFrameSender,
+        Default::default(),
+    );
+    let waiter = Arc::new(Waiter(AtomicUsize::new(0)));
+    let waker = Waker::from(waiter.clone());
+    let mut bytes = BytesMut::new();
+    let mut frames = Vec::new();
+    let mut buffer = bytes::BufMut::limit(&mut bytes, 128);
+    use qbase::packet::{GetType, OneRttHeader, PacketBuffer};
+    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    assert!(
+        streams.poll_dump(&mut Context::from_waker(&waker), &mut PacketBuffer::new(&mut buffer, 128, &mut frames, ty, 0, 0)).is_pending()
+    );
+
+    streams.on_error(&qbase::error::AppError::new(42u32.into(), "closed").into());
+    assert_eq!(waiter.0.load(Ordering::Relaxed), 1, "closing must wake the blocked sender");
+    streams.unregister(&waker);
+    assert_eq!(Arc::strong_count(&waiter), 2, "only the test and its waker may retain the cancelled waiter");
 }
 
 #[test]

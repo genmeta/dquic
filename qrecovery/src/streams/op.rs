@@ -15,7 +15,7 @@ use qbase::{
 };
 
 use super::{
-    ArcDataStreams, Ext, DataStreams,
+    ArcDataStreams, DataStreams, Ext,
     io::IOState,
     listener::{AcceptBiStream, AcceptUniStream},
 };

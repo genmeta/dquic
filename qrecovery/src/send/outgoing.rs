@@ -21,35 +21,26 @@ use super::sender::{ArcSender, Sender, SendingSender, StreamData};
 pub struct Outgoing<TX>(ArcSender<TX>);
 
 impl<TX: Clone> Outgoing<TX> {
-    pub(crate) fn poll_dump_fairly<B: BufMut + ?Sized>(
+    /// Write at most one STREAM frame within the caller's payload budget.
+    pub(crate) fn poll_dump<B: BufMut + ?Sized>(
         &self,
         cx: &mut Context<'_>,
         buffer: &mut PacketBuffer<'_, B>,
         credit: &mut usize,
-        tokens: usize,
+        budget: &mut usize,
     ) -> Poll<Result<usize, QuicError>> {
-        match self.0.sender().as_mut() {
-            Ok(sender) => sender.poll_dump(cx, buffer, credit, tokens),
-            Err(_) => Poll::Ready(Ok(0)),
-        }
-    }
-}
-
-impl<TX: Clone> Sender<TX> {
-    fn poll_dump<B: BufMut + ?Sized>(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-        credit: &mut usize,
-        tokens: usize,
-    ) -> Poll<Result<usize, QuicError>> {
-        let Some((sid, _)) = self.source() else {
+        let mut guard = self.0.sender();
+        let Ok(sender) = guard.as_mut() else {
+            return Poll::Ready(Ok(0));
+        };
+        let Some((sid, _)) = sender.source() else {
             return Poll::Pending;
         };
         buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let capacity = buffer.remaining_mut();
         let flow_limit = *credit;
-        let predicate = |offset| StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(tokens));
+        let allowance = *budget;
+        let predicate = |offset| StreamFrame::estimate_max_capacity(capacity, sid, offset).map(|n| n.min(allowance));
         let start = buffer.meta.nframes;
         let mut write = |(range, fresh, data, eos): StreamData<'_>| {
             let mut frame = StreamFrame::new(sid, range.start, (range.end - range.start) as usize);
@@ -62,11 +53,12 @@ impl<TX: Clone> Sender<TX> {
             }
             let result = (frame, data.as_slice()).poll_dump(cx, buffer);
             debug_assert!(matches!(result, Poll::Ready(Ok(1))));
+            *budget -= frame.len();
             if fresh {
                 *credit -= frame.len();
             }
         };
-        let result = match self {
+        let result = match sender {
             Sender::Ready(s) => {
                 let mut s: SendingSender<TX> = s.upgrade();
                 let (result, finished) = s
@@ -78,9 +70,9 @@ impl<TX: Clone> Sender<TX> {
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
-                    *self = Sender::DataSent(s.upgrade());
+                    *sender = Sender::DataSent(s.upgrade());
                 } else {
-                    *self = Sender::Sending(s);
+                    *sender = Sender::Sending(s);
                 }
                 result
             }
@@ -94,7 +86,7 @@ impl<TX: Clone> Sender<TX> {
                     .map_err(|s| (Err(s), false))
                     .unwrap_or_else(|x| x);
                 if finished {
-                    *self = Sender::DataSent(s.upgrade());
+                    *sender = Sender::DataSent(s.upgrade());
                 }
                 result
             }
@@ -105,7 +97,7 @@ impl<TX: Clone> Sender<TX> {
             Ok(()) => Poll::Ready(Ok(buffer.meta.nframes - start)),
             Err(Poll::Ready(())) => Poll::Ready(Ok(0)),
             Err(Poll::Pending) => {
-                if let Some((_, wakers)) = self.source() {
+                if let Some((_, wakers)) = sender.source() {
                     wakers.register(cx.waker());
                 }
                 Poll::Pending
