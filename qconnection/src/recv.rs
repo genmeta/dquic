@@ -19,7 +19,7 @@ use qtransport::{
 };
 use tokio::time::Instant;
 
-use crate::{ArcHandshake, Paths};
+use crate::{ArcHandshakeDone, Paths};
 
 pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
 
@@ -137,7 +137,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     data: Arc<DataSpace>,
     paths: Arc<Paths>,
     tokens: ArcTokenRegistry,
-    handshake: ArcHandshake,
+    hs_done: ArcHandshakeDone,
 ) {
     let terminator = paths.terminator.clone();
     let idle = paths.idle();
@@ -204,7 +204,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                     Frame::PathChallenge(frame) => paths.validations.recv_frame((pathway, frame))?,
                     Frame::PathResponse(frame) => paths.validations.recv_frame((pathway, frame))?,
                     Frame::HandshakeDone(frame) => {
-                        handshake.recv_frame(frame)?;
+                        hs_done.recv_frame(frame)?;
                     }
                     Frame::Close(frame) => {
                         terminator.recv_conn_close_frame(frame.clone(), path.cc.pto_base(Epoch::Data));

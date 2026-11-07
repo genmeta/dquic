@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{StreamExt, future::poll_fn};
 use qbase::{
     error::{ErrorKind, QuicError},
-    handshake::ArcHandshake,
+    handshake::ArcHandshakeDone,
     param::{ClientParameters, ParameterId, Requirements},
     role::Role,
     sid::handy::ConsistentConcurrency,
@@ -99,13 +99,13 @@ pub async fn client_growing(
             let puncher = paths.puncher.clone();
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
-            let handshake_done = ArcHandshake::new_client();
+            let hs_done = ArcHandshakeDone::new_client();
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
                 (rcvd_pkt.one_rtt, None),
                 data_space.clone(),
                 paths.clone(),
                 token_registry,
-                handshake_done.clone(),
+                hs_done.clone(),
             ));
 
             tokio::spawn(read_tls_to_space(tls_context.clone(), data_space.as_ref(), paths.clone()));
@@ -132,7 +132,7 @@ pub async fn client_growing(
                             }
                         }),
                 ),
-                handshake_done,
+                hs_done,
                 puncher,
             ))
         };

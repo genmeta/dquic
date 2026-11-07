@@ -31,7 +31,7 @@ pub type ArcLocalCids = qbase::cid::ArcLocalCids<qtransport::router::QuicRouterR
 pub type ArcRemoteCids = qbase::cid::ArcRemoteCids<ArcReliableFrames>;
 pub type ArcDcid = qbase::cid::ArcDcid<ArcReliableFrames>;
 pub type CidRegistry = qbase::cid::Registry<ArcLocalCids, ArcRemoteCids>;
-pub type ArcHandshake = qbase::handshake::ArcHandshake<ArcReliableFrames>;
+pub type ArcHandshakeDone = qbase::handshake::ArcHandshakeDone<ArcReliableFrames>;
 pub type ArcResend = ArcIndexDeque<Arc<dyn qcongestion::Resend>, 2>;
 
 pub type Connected = (Option<qtls::LocalAuthority>, qtls::RemoteAuthority, ArcConnection);
