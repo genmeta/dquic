@@ -1,136 +1,26 @@
-use std::{
-    sync::atomic::{AtomicBool, Ordering::*},
-    task::{Context, Poll, Waker, ready},
-};
+use std::task::{Context, Poll, Waker};
 
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use qbase::{
     error::{Error, ErrorKind, QuicError},
-    flow::FlowController,
     frame::{
         Fin, FrameType, GetFrameType, Len, Offset, ResetStreamFrame, StreamCtlFrame, StreamFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    metric::ArcConnectionMetrics,
-    net::tx::{ArcSendWakers, UnregisterWaker},
-    packet::PacketBuffer,
-    param::{ArcParameters, ParameterId, core::Parameters},
-    sid::{
-        ControlStreamsConcurrency, Dir, StreamId, StreamIds,
-        remote_sid::{AcceptSid, ExceedLimitError},
-    },
+    net::tx::UnregisterWaker,
+    packet::{Package, PacketBuffer},
+    sid::{Dir, StreamId, remote_sid::ExceedLimitError},
     varint::VarInt,
 };
 
-use super::{
-    Ext,
-    io::{ArcInput, ArcOutput, IOState},
-    listener::{AcceptBiStream, AcceptUniStream, ArcListener},
-};
-use crate::{
-    recv::{ArcRecver, Incoming, Reader},
-    send::{ArcSender, Outgoing, Writer},
-};
-
-/// Manage all streams in the connection, send and receive frames, handle frame loss, and acknowledge.
-///
-/// The struct dont truly send and receive frames, this struct provides interfaces to generate frames
-/// will be sent to the peer, receive frames, handle frame loss, and acknowledge.
-///
-/// [`Outgoing`], [`Incoming`] , [`Writer`] and [`Reader`] dont truly send and receive frames, too.
-///
-/// # Send frames
-///
-/// ## Stream frame
-///
-/// When the application wants to send data to the peer, it will call [`write`] method on [`Writer`]
-/// to write data to the [`SendBuf`].
-///
-/// Protocol layer will call [`Package::poll_dump`] to read data from the streams into stream frames and
-/// write the frame into the quic packet.
-///
-/// ## Stream control frame
-///
-/// Be different from the stream frame, the stream control frame is much samller in size.
-///
-/// The struct has a generic type `T`, which must implement the [`SendFrame`] trait. The trait has
-/// a method [`send_frame`], which will be called to send the stream control frame to the peer, see
-/// [`SendFrame`] for more details.
-///
-/// # Receive frames, handle frame loss and acknowledge
-///
-/// Frames received, frames lost or acknowledgmented will be delivered to the corresponding method.
-/// | method on [`DataStreams`]                                | corresponding method                               |
-/// | -------------------------------------------------------- | -------------------------------------------------- |
-/// | [`recv_data`]                                            | [`Incoming::recv_data`]                            |
-/// | [`recv_stream_control`] ([`RESET_STREAM frame`])         | [`Incoming::recv_reset`]                           |
-/// | [`recv_stream_control`] ([`STOP_SENDING frame`])         | [`Outgoing::be_stopped`]                           |
-/// | [`recv_stream_control`] ([`MAX_STREAM_DATA frame`])      | [`Outgoing::update_window`]                        |
-/// | [`recv_stream_control`] ([`STREAM_DATA_BLOCKED frame`])  | none(the frame will be ignored)                    |
-/// | [`recv_stream_control`] ([`MAX_STREAMS frame`])          | [`ArcLocalStreamIds::recv_max_streams_frame`]      |
-/// | [`recv_stream_control`] ([`STREAMS_BLOCKED frame`])      | [`ArcRemoteStreamIds::recv_streams_blocked_frame`] |
-/// | [`on_data_acked`]                                        | [`Outgoing::on_data_acked`]                        |
-/// | [`may_loss_data`]                                        | [`Outgoing::may_loss_data`]                        |
-/// | [`on_reset_acked`]                                       | [`Outgoing::on_reset_acked`]                       |
-///
-/// # Create and accept streams
-///
-/// Stream frames and stream control frames have the function of creating flows. If a steam frame is
-/// received but the corresponding stream has not been created, a stream will be created passively.
-///
-/// [`AcceptBiStream`] and [`AcceptUniStream`] are provided to the application layer to `accept` a
-/// stream (obtain a passively created stream). These future will be resolved when a stream is created
-/// by peer.
-///
-/// Alternatively, sending a stream frame or a stream control frame will create a stream actively.
-/// [`OpenBiStream`] and [`OpenUniStream`] are provided to the application layer to `open` a stream.
-/// These future will be resolved when the connection established.
-///
-/// [`write`]: tokio::io::AsyncWriteExt::write
-/// [`SendBuf`]: crate::send::SendBuf
-/// [`send_frame`]: SendFrame::send_frame
-/// [`Package::poll_dump`]: qbase::packet::Package::poll_dump
-/// [`recv_data`]: DataStreams::recv_data
-/// [`recv_stream_control`]: DataStreams::recv_stream_control
-/// [`on_data_acked`]: DataStreams::on_data_acked
-/// [`may_loss_data`]: DataStreams::may_loss_data
-/// [`on_reset_acked`]: DataStreams::on_reset_acked
-/// [`RESET_STREAM frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-reset_stream-frame
-/// [`STOP_SENDING frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-stop_sending-frames
-/// [`MAX_STREAM_DATA frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-max_stream_data-frame
-/// [`MAX_STREAMS frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-max_streams-frame
-/// [`STREAM_DATA_BLOCKED frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-stream_data_blocked-frame
-/// [`STREAMS_BLOCKED frame`]: https://www.rfc-editor.org/rfc/rfc9000.html#name-streams_blocked-frame
-/// [`OpenBiStream`]: crate::streams::OpenBiStream
-/// [`OpenUniStream`]: crate::streams::OpenUniStream
-/// [`ArcLocalStreamIds::recv_max_streams_frame`]: qbase::sid::ArcLocalStreamIds::recv_max_streams_frame
-/// [`ArcRemoteStreamIds::recv_streams_blocked_frame`]: qbase::sid::ArcRemoteStreamIds::recv_streams_blocked_frame
-///
-#[derive(Debug)]
-pub struct DataStreams<TX> {
-    // 该queue与space中的transmitter中的frame_queue共享，为了方便向transmitter中写入帧
-    ctrl_frames: TX,
-    flow_ctrl: FlowController<Ext<TX>>,
-
-    parameters: ArcParameters,
-    stream_ids: StreamIds<Ext<TX>, Ext<TX>>,
-    // 所有流的待写端，要发送数据，就得向这些流索取
-    output: ArcOutput<Ext<TX>>,
-    // 所有流的待读端，收到了数据，交付给这些流
-    input: ArcInput<Ext<TX>>,
-    // 对方主动创建的流
-    listener: ArcListener<Ext<TX>>,
-    tls_fin: AtomicBool,
-    tx_wakers: ArcSendWakers,
-
-    metrics: ArcConnectionMetrics,
-}
+use super::{DataStreams, Ext, RawDataStreams, io::IOState};
+use crate::send::Outgoing;
 
 fn wrapper_error(fty: FrameType) -> impl FnOnce(ExceedLimitError) -> QuicError {
     move |e| QuicError::new(ErrorKind::StreamLimit, fty.into(), e.to_string())
 }
 
-impl<TX> DataStreams<TX>
+impl<TX> RawDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -289,7 +179,7 @@ where
     ///
     /// If the correspoding stream is not exist, `accept` the stream.
     ///
-    /// Actually calls the [`Incoming::recv_data`] method of the corresponding stream.
+    /// Actually calls the [`Incoming::recv_data`](crate::recv::Incoming::recv_data) method of the corresponding stream.
     pub fn recv_data(&self, (stream_frame, body): (StreamFrame, bytes::Bytes)) -> Result<usize, Error> {
         if self.input.streams().is_err() {
             return Ok(0);
@@ -451,211 +341,9 @@ where
         }
         self.flow_ctrl.recver.on_new_rcvd(frame_type, sync_fresh_data)
     }
-
-    /// Called when a connection error occured.
-    ///
-    /// After the method called, read on [`Reader`] or write on [`Writer`] will return an error,
-    /// the resouces will be released.
-    pub fn on_error(&self, error: &Error) {
-        let mut output = match self.output.guard() {
-            Ok(out) => out,
-            Err(_) => return,
-        };
-        let mut input = match self.input.guard() {
-            Ok(input) => input,
-            Err(_) => return,
-        };
-        let mut listener = match self.listener.guard() {
-            Ok(listener) => listener,
-            Err(_) => return,
-        };
-
-        output.on_error(error);
-        input.on_error(error);
-        listener.on_error(error);
-        self.stream_ids.on_error();
-        self.tx_wakers.wake_all();
-    }
 }
 
-impl<TX> DataStreams<TX>
-where
-    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
-{
-    pub(super) fn new(
-        parameters: ArcParameters,
-        ctrl: Box<dyn ControlStreamsConcurrency>,
-        ctrl_frames: TX,
-        metrics: ArcConnectionMetrics,
-    ) -> Self {
-        let tx_wakers = ArcSendWakers::default();
-        Self {
-            flow_ctrl: FlowController::new(
-                parameters.remote(ParameterId::InitialMaxData),
-                parameters.local(ParameterId::InitialMaxData),
-                Ext(ctrl_frames.clone()),
-            ),
-            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl, tx_wakers.clone()),
-            parameters,
-            output: ArcOutput::new(),
-            input: ArcInput::default(),
-            listener: ArcListener::new(),
-            ctrl_frames,
-            tls_fin: AtomicBool::new(false),
-            tx_wakers,
-            metrics,
-        }
-    }
-
-    pub fn revise_params<Role>(&self, zero_rtt_rejected: bool, remote_params: &Parameters<Role>) {
-        if let Ok(output) = self.output.guard() {
-            // enter 1rtt state, old state must be 0rtt
-            self.tls_fin.store(true, Release);
-
-            let opened_bidi = self.stream_ids.local.opened_streams(Dir::Bi);
-            let opened_uni = self.stream_ids.local.opened_streams(Dir::Uni);
-            let opened_bidi_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataBidiRemote);
-            let opened_uni_snd_wnd_size = remote_params.get::<u64>(ParameterId::InitialMaxStreamDataUni);
-            output.revise_max_stream_data(zero_rtt_rejected, opened_bidi, opened_uni, opened_bidi_snd_wnd_size, opened_uni_snd_wnd_size);
-            let max_streams_bidi = remote_params.get::<u64>(ParameterId::InitialMaxStreamsBidi);
-            let max_streams_uni = remote_params.get::<u64>(ParameterId::InitialMaxStreamsUni);
-            self.stream_ids.local.revise_max_streams(zero_rtt_rejected, max_streams_bidi, max_streams_uni);
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub(super) fn poll_open_bi_stream(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let snd_buf_size = self.parameters.remote(ParameterId::InitialMaxStreamDataBidiRemote);
-        self.poll_open_bi_with_limit(cx, snd_buf_size)
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn poll_open_bi_with_limit(
-        &self,
-        cx: &mut Context<'_>,
-        snd_buf_size: u64,
-    ) -> Poll<Result<Option<(StreamId, (Reader<Ext<TX>>, Writer<Ext<TX>>))>, Error>> {
-        let mut output = self.output.guard()?;
-        let mut input = self.input.guard()?;
-        let Some(sid) = ready!(self.stream_ids.local.poll_alloc_sid(cx, Dir::Bi)) else {
-            return Poll::Ready(Ok(None));
-        };
-
-        let arc_sender = self.create_sender(sid, snd_buf_size);
-        let arc_recver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataBidiLocal));
-        let io_state = IOState::bidirection();
-        output.insert(sid, Outgoing::new(arc_sender.clone()), io_state.clone());
-        input.insert(sid, Incoming::new(arc_recver.clone()), io_state);
-        self.tx_wakers.wake_all();
-        Poll::Ready(Ok(Some((sid, (Reader::new(arc_recver), Writer::new(arc_sender))))))
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub(super) fn poll_open_uni_stream(&self, cx: &mut Context<'_>) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
-        let snd_buf_size = self.parameters.remote(ParameterId::InitialMaxStreamDataUni);
-        self.poll_open_uni_with_limit(cx, snd_buf_size)
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn poll_open_uni_with_limit(
-        &self,
-        cx: &mut Context<'_>,
-        snd_buf_size: u64,
-    ) -> Poll<Result<Option<(StreamId, Writer<Ext<TX>>)>, Error>> {
-        let mut output = self.output.guard()?;
-        let Some(sid) = ready!(self.stream_ids.local.poll_alloc_sid(cx, Dir::Uni)) else {
-            return Poll::Ready(Ok(None));
-        };
-
-        let arc_sender = self.create_sender(sid, snd_buf_size);
-        let io_state = IOState::send_only();
-        output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
-        self.tx_wakers.wake_all();
-        Poll::Ready(Ok(Some((sid, Writer::new(arc_sender)))))
-    }
-
-    pub(super) fn accept_bi(&self) -> AcceptBiStream<'_, Ext<TX>> {
-        self.listener.accept_bi_stream(&self.parameters)
-    }
-
-    pub(super) fn accept_uni(&self) -> AcceptUniStream<'_, Ext<TX>> {
-        self.listener.accept_uni_stream()
-    }
-
-    fn try_accept_sid(&self, sid: StreamId) -> Result<(), ExceedLimitError> {
-        match sid.dir() {
-            Dir::Bi => self.try_accept_bi_sid(sid),
-            Dir::Uni => self.try_accept_uni_sid(sid),
-        }
-    }
-
-    fn try_accept_bi_sid(&self, sid: StreamId) -> Result<(), ExceedLimitError> {
-        let Ok(mut output) = self.output.guard() else {
-            return Ok(());
-        };
-        let Ok(mut input) = self.input.guard() else {
-            return Ok(());
-        };
-        let Ok(mut listener) = self.listener.guard() else {
-            return Ok(());
-        };
-        let result = self.stream_ids.remote.try_accept_sid(sid)?;
-
-        match result {
-            AcceptSid::Old => Ok(()),
-            AcceptSid::New(need_create) => {
-                for sid in need_create {
-                    let arc_recver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataBidiRemote));
-                    // buf_size will be revised by Listener::poll_accept_bi_stream
-                    let arc_sender = self.create_sender(sid, 0);
-                    let io_state = IOState::bidirection();
-                    input.insert(sid, Incoming::new(arc_recver.clone()), io_state.clone());
-                    output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
-                    self.tx_wakers.wake_all();
-                    listener.push_bi_stream(sid, (arc_recver, arc_sender));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn try_accept_uni_sid(&self, sid: StreamId) -> Result<(), ExceedLimitError> {
-        let mut input = match self.input.guard() {
-            Ok(input) => input,
-            Err(_) => return Ok(()),
-        };
-        let mut listener = match self.listener.guard() {
-            Ok(listener) => listener,
-            Err(_) => return Ok(()),
-        };
-        let result = self.stream_ids.remote.try_accept_sid(sid)?;
-        match result {
-            AcceptSid::Old => Ok(()),
-            AcceptSid::New(need_create) => {
-                for sid in need_create {
-                    let arc_receiver = self.create_recver(sid, self.parameters.local(ParameterId::InitialMaxStreamDataUni));
-                    let io_state = IOState::receive_only();
-                    input.insert(sid, Incoming::new(arc_receiver.clone()), io_state);
-                    listener.push_uni_stream(sid, arc_receiver);
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn create_sender(&self, sid: StreamId, buf_size: u64) -> ArcSender<Ext<TX>> {
-        ArcSender::new(sid, buf_size, Ext(self.ctrl_frames.clone()), self.metrics.clone())
-    }
-
-    fn create_recver(&self, sid: StreamId, buf_size: u64) -> ArcRecver<Ext<TX>> {
-        ArcRecver::new(sid, buf_size, Ext(self.ctrl_frames.clone()))
-    }
-}
-
-impl<TX> DataStreams<TX>
+impl<TX> RawDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
@@ -752,5 +440,45 @@ where
                 outgoing.unregister(waker);
             }
         }
+    }
+}
+
+impl<TX> ReceiveFrame<StreamCtlFrame> for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    type Output = usize;
+
+    fn recv_frame(&self, frame: StreamCtlFrame) -> Result<Self::Output, Error> {
+        self.0.recv_stream_control(frame)
+    }
+}
+
+impl<TX> ReceiveFrame<(StreamFrame, Bytes)> for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    type Output = usize;
+
+    fn recv_frame(&self, frame: (StreamFrame, Bytes)) -> Result<Self::Output, Error> {
+        self.0.recv_data(frame)
+    }
+}
+
+impl<TX, B: bytes::BufMut + ?Sized> Package<B> for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+        self.0.poll_dump(cx, buffer)
+    }
+}
+
+impl<TX> UnregisterWaker for DataStreams<TX>
+where
+    TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
+{
+    fn unregister(&self, waker: &std::task::Waker) {
+        self.0.unregister(waker);
     }
 }
