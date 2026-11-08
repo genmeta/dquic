@@ -11,7 +11,7 @@ use std::{
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::{AckFrame, PingFrame},
+    frame::{AckFrame, PingFrame, io::ReceiveFrame},
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
@@ -81,18 +81,6 @@ impl<K> Space<K> {
         self.sent_journal.on_sent(pn, in_flight, retransmit_after, retention);
     }
 
-    /// Release acknowledged CRYPTO data and report whether any bytes were acknowledged.
-    pub fn on_acked(&self, ack: &AckFrame) -> Result<bool, Error> {
-        let mut crypto_acked = false;
-        self.sent_journal.on_acked(ack, |frame| {
-            if let GuaranteedFrame::Crypto(frame) = frame {
-                crypto_acked |= frame.len() > 0;
-                self.crypto.outgoing().on_data_acked(frame);
-            }
-        })?;
-        Ok(crypto_acked)
-    }
-
     /// Cancel an unsubmitted packet and return its CRYPTO data for retransmission.
     pub fn cancel(&self, pn: u64) {
         self.sent_journal.cancel(pn, |frame| self.recover(&frame));
@@ -103,6 +91,23 @@ impl<K> Space<K> {
         if let GuaranteedFrame::Crypto(frame) = frame {
             self.crypto.outgoing().may_loss_data(frame);
         }
+    }
+}
+
+impl<K> ReceiveFrame<AckFrame> for Space<K> {
+    /// Return the ACK for congestion feedback and whether CRYPTO data was acknowledged.
+    type Output = (AckFrame, bool);
+
+    /// The caller holds the receiving path's CC lock before entering the journal.
+    fn recv_frame(&self, frame: AckFrame) -> Result<Self::Output, Error> {
+        let mut crypto_acked = false;
+        self.sent_journal.on_acked(&frame, |frame| {
+            if let GuaranteedFrame::Crypto(frame) = frame {
+                crypto_acked |= frame.len() > 0;
+                self.crypto.outgoing().on_data_acked(frame);
+            }
+        })?;
+        Ok((frame, crypto_acked))
     }
 }
 
@@ -162,9 +167,6 @@ impl<K> UnregisterWaker for Space<K> {
 
 /// Recovery and retirement of a space's own frame sources.
 pub trait Recover {
-    /// Release acknowledged frames and return the highest acknowledged key generation.
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error>;
-
     fn recover(&self, frame: &GuaranteedFrame);
 
     fn cancel(&self, pn: u64, frames: &mut dyn Iterator<Item = GuaranteedFrame>);
@@ -175,14 +177,6 @@ pub trait Recover {
 }
 
 impl<K: Clone> Recover for Space<ArcKeys<K>> {
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
-        self.sent_journal.on_acked(ack, |frame| {
-            if let GuaranteedFrame::Crypto(frame) = frame {
-                self.crypto.outgoing().on_data_acked(frame);
-            }
-        })
-    }
-
     fn recover(&self, frame: &GuaranteedFrame) {
         Space::recover(self, frame);
     }

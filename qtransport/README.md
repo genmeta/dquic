@@ -25,13 +25,12 @@
 
 | 模块 | 责任 |
 | --- | --- |
-| `space` | Initial/Handshake 使用 `Space<K>`；独立的 `DataSpace` 还持有 `DataStreams` 和 `ArcReliableFrames`，负责三类帧的恢复；没有父级回指 |
+| `space` | Initial/Handshake 使用 `Space<K>`；独立的 `DataSpace` 还持有 `DataStreams` 和 `ArcReliableFrames`，负责三类帧的恢复；分别实现 `ReceiveFrame<AckFrame>`，Data 内部处理延迟解码和密钥确认；没有父级回指 |
 | `keys` | Result<K, KeyRetired>、同步取材与退役、1-RTT 代次、认证与 AEAD 用量；OpenPacket、SealPacket、私有 open_with 包保护基础实现 |
 | `packet` | qtls 密钥驱动的 `CipherPacket<H>` / `PlainPacket<H>`；`channel` 提供四个加密级别的 typed channel |
 | `router` | Signpost → Inbox；CID registry、未知包 channel |
-| `recv` | acknowledge；Data 空间的 ACK 处理 |
 | `path` | 每路径一个 CC、路径验证/重试、反放大信用、按实例退役 |
-| `send` | 每路径一个 Sender，分空间组包、Burst 批量提交；独立的 `acknowledge` 函数供原组件管道捕获 |
+| `send` | 每路径一个 Sender，分空间组包、Burst 批量提交 |
 | `send/write` | 四种包型共用的 Packet、含 datagram.msg 的 buffer、带约束和记录的 PacketWriter、消费式 seal |
 | `send/records` | 独立的 ArcSendJournal，永不归还的 PN、IndexDeque 集中存储 Option<GuaranteedFrame>及每包 frame_range、明确放弃的 PN 集合、ACK 帧恢复记录 |
 

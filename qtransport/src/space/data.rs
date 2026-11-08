@@ -10,10 +10,14 @@ use derive_more::Deref;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::{AckFrame, PingFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
+    frame::{
+        AckFrame, PingFrame, ReliableFrame, StreamCtlFrame,
+        io::{ReceiveFrame, SendFrame},
+    },
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{DataHeader, OneRttHeader, PacketContent, PacketNumber, assemble::Package},
+    varint::{VARINT_MAX, VarInt},
 };
 use qcongestion::{ArcCC, Transport as _};
 use qevent::quic::recovery::PacketLostTrigger;
@@ -51,6 +55,27 @@ impl DataSpace {
         let mut space = Space::new(Epoch::Data, initial_scid, keys, facts);
         space.rcvd_journal = space.rcvd_journal.with_ack_delay_exponent(local_ack_delay_exponent);
         Self { space, streams, reliable_frames, peer_ack_delay_exponent }
+    }
+}
+
+impl ReceiveFrame<AckFrame> for DataSpace {
+    /// Return the ACK with its delay decoded for congestion feedback.
+    type Output = AckFrame;
+
+    /// The caller holds the receiving path's CC lock before entering the journal.
+    fn recv_frame(&self, mut frame: AckFrame) -> Result<Self::Output, Error> {
+        let acknowledged = self.sent_journal.on_acked(&frame, |frame| match frame {
+            GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().on_data_acked(frame),
+            GuaranteedFrame::Stream(frame) => self.streams.on_data_acked(*frame),
+            GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::ResetStream(frame))) => self.streams.on_reset_acked(*frame),
+            _ => {}
+        })?;
+        if let Some(generation) = acknowledged {
+            self.keys.on_ack(generation);
+        }
+        let delay = frame.delay().checked_shl(self.peer_ack_delay_exponent).unwrap_or(VARINT_MAX).min(VARINT_MAX);
+        frame.set_delay(VarInt::from_u64(delay).unwrap());
+        Ok(frame)
     }
 }
 
@@ -93,16 +118,6 @@ impl qcongestion::Resend for DataSpace {
 }
 
 impl Recover for DataSpace {
-    /// Release acknowledged data and return the highest newly acknowledged key generation.
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
-        self.sent_journal.on_acked(ack, |frame| match frame {
-            GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().on_data_acked(frame),
-            GuaranteedFrame::Stream(frame) => self.streams.on_data_acked(*frame),
-            GuaranteedFrame::Reliable(ReliableFrame::StreamCtl(StreamCtlFrame::ResetStream(frame))) => self.streams.on_reset_acked(*frame),
-            _ => {}
-        })
-    }
-
     fn recover(&self, frame: &GuaranteedFrame) {
         match frame {
             GuaranteedFrame::Crypto(frame) => self.crypto.outgoing().may_loss_data(frame),

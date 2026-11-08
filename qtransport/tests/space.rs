@@ -8,7 +8,10 @@ use std::{sync::Arc, time::Duration};
 
 use qbase::{
     Epoch,
-    frame::{AckFrame, Frame, StreamCtlFrame, io::SendFrame},
+    frame::{
+        AckFrame, Frame, StreamCtlFrame,
+        io::{ReceiveFrame, SendFrame},
+    },
     handshake::HandshakeFacts,
     role::Role,
 };
@@ -22,7 +25,7 @@ use tokio::{io::AsyncWriteExt, time::Instant};
 fn handshake_facts(multipath: bool) -> Arc<HandshakeFacts> {
     let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
     if !multipath {
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
     }
     facts
 }
@@ -96,16 +99,17 @@ async fn only_crypto_ack_disables_shared_replay_across_spaces() {
         space.sent_journal.on_sealed(ping_pn, None, 0, metadata(acknowledged, &[Frame::Ping(PingFrame)]), std::iter::empty());
         space.on_sent(ping_pn, true, Duration::from_secs(1), Duration::from_secs(3));
         let ack = |pn: u64| AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
-        assert!(!space.on_acked(&ack(ping_pn)).unwrap());
-        assert!(facts.is_mp_handshaking());
+        assert!(!space.recv_frame(ack(ping_pn)).unwrap().1);
+        assert!(facts.is_mp_replaying());
 
         let mut pns = [0; 3];
         for space in &spaces {
             space.crypto.writer().write_all(b"hello").await.unwrap();
             pns[space.epoch] = record(space);
         }
-        assert!(space.on_acked(&ack(pns[acknowledged])).unwrap());
-        assert!(!facts.is_mp_handshaking());
+        let frame = ack(pns[acknowledged]);
+        assert_eq!(space.recv_frame(frame.clone()).unwrap(), (frame, true));
+        assert!(!facts.is_mp_replaying());
         for other in &spaces {
             let frames = support::frames::take_frames(&mut other.crypto.outgoing());
             assert_eq!(frames.len(), usize::from(other.epoch != acknowledged));
@@ -147,11 +151,11 @@ async fn late_ack_cancels_crypto_recovery() {
     let pn = record(&space);
     space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
     let ack = AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
-    assert!(space.on_acked(&ack).unwrap());
+    assert!(space.recv_frame(ack.clone()).unwrap().1);
     space.resend(PacketLostTrigger::TimeThreshold, &mut [pn].into_iter());
     space.on_tick(Instant::now() + Duration::from_secs(2));
     assert!(support::frames::take_frames(&mut space.crypto.outgoing()).is_empty());
-    assert!(!space.on_acked(&ack).unwrap());
+    assert!(!space.recv_frame(ack).unwrap().1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -167,7 +171,7 @@ async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
             pns.push(pn);
         }
         let ack = AckFrame::new(pns[0].try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
-        assert!(space.on_acked(&ack).unwrap());
+        assert!(space.recv_frame(ack.clone()).unwrap().1);
         for &pn in &pns[..2] {
             space.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
         }
@@ -177,12 +181,12 @@ async fn batch_submission_allows_early_ack_and_leaves_suffix_pending() {
         space.cancel(pns[2]);
         let recovered = support::frames::take_frames(&mut space.crypto.outgoing());
         assert!(matches!(recovered.as_slice(), [Frame::Crypto(frame, _)] if frame.offset() == 11 && frame.len() == 5));
-        assert!(!space.on_acked(&ack).unwrap());
+        assert!(!space.recv_frame(ack).unwrap().1);
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
+async fn data_pending_ack_prevents_retransmission() {
     use qbase::frame::MaxDataFrame;
     use qtransport::space::{Recover as _, Transmit};
 
@@ -191,17 +195,70 @@ async fn data_pending_ack_reports_generation_and_prevents_retransmission() {
     Transmit::on_sealed(
         data.as_ref(),
         pn,
-        Some(7),
+        Some(0),
         0,
         metadata(Epoch::Data, &[Frame::StreamCtl(StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())))]),
         &mut [qbase::frame::GuaranteedFrame::Reliable(StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into())).into())].into_iter(),
     );
     let ack = AckFrame::new(pn.try_into().unwrap(), 0u32.into(), 0u32.into(), vec![], None);
-    assert_eq!(data.on_acked(&ack).unwrap(), Some(7));
+    let ack = data.recv_frame(ack).unwrap();
     data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     data.on_tick(Instant::now() + Duration::from_secs(2));
     assert!(support::frames::take_frames(&mut data.reliable_frames.clone()).is_empty());
-    assert!(data.on_acked(&ack).unwrap().is_none());
+    data.recv_frame(ack).unwrap();
+}
+
+#[tokio::test]
+async fn data_ack_decodes_delay_and_preserves_ranges_and_ecn() {
+    use qbase::{
+        frame::{EcnCounts, PingFrame},
+        varint::VARINT_MAX,
+    };
+
+    for (exponent, delay, decoded) in [(0, 7, 7), (3, 7, 56), (20, 7, 7 << 20), (3, VARINT_MAX, VARINT_MAX)] {
+        let mut data = support::data::data();
+        Arc::get_mut(&mut data).unwrap().peer_ack_delay_exponent = exponent;
+        for _ in 0..4 {
+            let pn = data.next_pn().0;
+            data.sent_journal.on_sealed(pn, Some(0), 0, metadata(Epoch::Data, &[Frame::Ping(PingFrame)]), []);
+            data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        }
+        let ranges = vec![(1u32.into(), 0u32.into())];
+        let ecn = Some(EcnCounts::new(1u32.into(), 2u32.into(), 3u32.into()));
+        let ack = AckFrame::new(3u32.into(), delay.try_into().unwrap(), 0u32.into(), ranges.clone(), ecn);
+        let ack = data.recv_frame(ack).unwrap();
+        assert_eq!(ack, AckFrame::new(3u32.into(), decoded.try_into().unwrap(), 0u32.into(), ranges, ecn));
+        let journal = data.sent_journal.lock_guard();
+        assert!(journal.packet(0).is_none());
+        assert!(journal.packet(1).is_some());
+        assert!(journal.packet(2).is_some());
+        assert!(journal.packet(3).is_none());
+    }
+}
+
+#[tokio::test]
+async fn data_ack_only_authorizes_key_update_for_the_current_generation() {
+    use qbase::frame::PingFrame;
+
+    let data = support::data::data();
+    let ack = |pn: u32| AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
+    for generation in 0..=1 {
+        let pn = data.next_pn().0;
+        data.sent_journal.on_sealed(pn, Some(generation), 0, metadata(Epoch::Data, &[Frame::Ping(PingFrame)]), []);
+        data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
+        if generation == 0 {
+            data.keys.allow_update();
+            data.keys.update().unwrap();
+        }
+    }
+    data.recv_frame(ack(0)).unwrap();
+    assert!(data.keys.update().is_err(), "old generation's ACK must not authorize another update");
+    assert!(data.recv_frame(ack(2)).is_err(), "an unsent packet must not be acknowledged");
+    assert!(data.keys.update().is_err());
+    data.recv_frame(ack(1)).unwrap();
+    data.keys.update().unwrap();
+    data.recv_frame(ack(1)).unwrap();
+    assert!(data.keys.update().is_err(), "a duplicate ACK must not authorize another update");
 }
 
 #[tokio::test]

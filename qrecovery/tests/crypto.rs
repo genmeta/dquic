@@ -21,7 +21,7 @@ mod tests {
 
     fn single_path_stream() -> CryptoStream {
         let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
         CryptoStream::with_facts(facts)
     }
 
@@ -114,9 +114,9 @@ mod tests {
                 }
             }
             streams[acknowledged].outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 0u32.into()));
-            assert!(facts.is_mp_handshaking());
+            assert!(facts.is_mp_replaying());
             streams[acknowledged].outgoing().on_data_acked(&CryptoFrame::new(0u32.into(), 5u32.into()));
-            assert!(!facts.is_mp_handshaking());
+            assert!(!facts.is_mp_replaying());
 
             // Previously Lost ranges can still be sent once; subsequent sends wait for recovery.
             for stream in &streams {
@@ -187,7 +187,7 @@ mod tests {
         second.load(&mut stream.outgoing()).unwrap();
         assert_eq!(second.0, first.0);
 
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
         let mut selected = TestPacket(bytes::BytesMut::with_capacity(64));
         selected.load(&mut stream.outgoing()).unwrap();
         assert_eq!(selected.0, first.0);
@@ -223,7 +223,7 @@ mod tests {
         let mut first = TestPacket(bytes::BytesMut::with_capacity(64));
         first.load(&mut stream.outgoing()).unwrap();
         let prefix = crypto_frame(&first);
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
         let mut replayed = TestPacket(bytes::BytesMut::with_capacity(64));
         replayed.load(&mut stream.outgoing()).unwrap();
         assert_eq!(crypto_frame(&replayed).range(), prefix.range());
@@ -412,7 +412,7 @@ mod poll_tests {
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
             if pass == 2 {
-                facts.quit_mp_handshaking();
+                facts.quit_mp_replaying();
             }
             let result = stream.outgoing().poll_dump(&mut cx, &mut buffer);
             if pass == 3 {

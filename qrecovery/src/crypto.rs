@@ -57,7 +57,7 @@ mod send {
         fn on_data_acked(&mut self, crypto_frame: &CryptoFrame) {
             self.sndbuf.on_data_acked(&crypto_frame.range());
             if !crypto_frame.range().is_empty() {
-                self.facts.quit_mp_handshaking();
+                self.facts.quit_mp_replaying();
             }
             if self.sndbuf.remaining_mut() > 0
                 && let Some(waker) = self.writable_waker.take()
@@ -206,7 +206,7 @@ mod send {
             };
             let result = inner.poll_dump(cx, buffer);
             // Keep assembly and replay rearming under the same sender lock.
-            if inner.facts.is_mp_handshaking() {
+            if inner.facts.is_mp_replaying() {
                 inner.sndbuf.multipath_handshake();
             }
             result

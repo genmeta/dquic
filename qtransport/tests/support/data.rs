@@ -20,7 +20,7 @@ pub(crate) fn data() -> Arc<DataSpace> {
     let reliable = ArcReliableFrames::with_capacity(0);
     let streams = ArcDataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
     let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
-    facts.quit_mp_handshaking();
+    facts.quit_mp_replaying();
     Arc::new(DataSpace::new(
         Default::default(),
         ArcOneRttKeys::from(keys),

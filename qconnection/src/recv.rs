@@ -14,7 +14,6 @@ use qcongestion::Transport as _;
 use qtransport::{
     keys::{ArcKeys, Open, PacketError, open},
     packet::{CipherPacket, LogPacketHeader, PlainPacket},
-    recv,
     space::{DataSpace, Space},
 };
 use tokio::time::Instant;
@@ -145,7 +144,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                     }
                     Frame::Ack(frame) => {
                         let mut cc = path.cc.lock();
-                        let crypto_acked = space.on_acked(&frame)?;
+                        let (frame, crypto_acked) = space.recv_frame(frame)?;
                         cc.on_ack_rcvd(epoch, &frame, Instant::now());
                         drop(cc);
                         if role == Role::Server && epoch == Epoch::Initial && crypto_acked {
@@ -259,7 +258,11 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
                 match frame {
                     Frame::Ping(_) => {}
                     Frame::Ack(frame) => {
-                        recv::acknowledge(&data, &frame, &path, |generation| keys.on_ack(generation))?;
+                        let mut cc = path.cc.lock();
+                        let frame = data.recv_frame(frame)?;
+                        cc.on_ack_rcvd(Epoch::Data, &frame, Instant::now());
+                        drop(cc);
+                        path.send_waker.wake_all();
                     }
                     Frame::Crypto(frame, bytes) => {
                         data.crypto.incoming().recv_frame((frame, bytes))?;

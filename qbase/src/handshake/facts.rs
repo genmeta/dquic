@@ -35,12 +35,12 @@ impl HandshakeFacts {
         }
     }
 
-    pub fn is_mp_handshaking(&self) -> bool {
+    pub fn is_mp_replaying(&self) -> bool {
         self.is_mp_handshaking.load(Ordering::Acquire)
     }
 
     /// Stop replaying unacknowledged CRYPTO across handshake paths.
-    pub fn quit_mp_handshaking(&self) {
+    pub fn quit_mp_replaying(&self) {
         self.is_mp_handshaking.store(false, Ordering::Release);
     }
 

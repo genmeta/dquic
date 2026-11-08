@@ -55,17 +55,17 @@ fn concurrent_updates_claim_each_fact_once() {
 fn quitting_multipath_handshaking_is_shared_and_events_cannot_restart_it() {
     for role in [Role::Client, Role::Server] {
         let facts = Arc::new(HandshakeFacts::with_role(role));
-        assert!(facts.is_mp_handshaking());
+        assert!(facts.is_mp_replaying());
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 let facts = facts.clone();
-                scope.spawn(move || facts.quit_mp_handshaking());
+                scope.spawn(move || facts.quit_mp_replaying());
             }
         });
-        assert!(!facts.is_mp_handshaking());
+        assert!(!facts.is_mp_replaying());
         for event in EVENTS {
             event(&facts);
-            assert!(!facts.is_mp_handshaking());
+            assert!(!facts.is_mp_replaying());
         }
     }
 }
