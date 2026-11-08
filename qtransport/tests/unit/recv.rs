@@ -490,7 +490,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     assert!(matches!(poll_collect(&second, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(n)) if n > 0));
     assert!(datagrams.iter().all(|p| datagram_metadata(p, Epoch::Data).is_none()));
     let initial = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap();
-    datagrams[0].packets.retain(|(_, meta)| meta.epoch() != Epoch::Initial);
+    datagrams[0].packets.retain(|meta| meta.epoch() != Epoch::Initial);
     mature.spaces.initial.on_sent(initial.pn, initial.in_flight, Duration::from_secs(1), Duration::from_secs(3));
     second.refresh(&mut datagrams, &mut frames);
 

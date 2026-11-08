@@ -1,7 +1,6 @@
 use std::{
     future::poll_fn,
     io::{Cursor, IoSlice},
-    sync::Arc,
     task::{Context, Poll, ready},
 };
 
@@ -20,16 +19,13 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::Path;
-use crate::{
-    Error,
-    space::{ArcSpaces, Encapsulate},
-};
+use crate::{Error, space::ArcSpaces};
 
 /// A UDP datagram and the QUIC packets awaiting submission within it.
 #[derive(Default)]
 pub struct Datagram {
     pub(crate) bytes: BytesMut,
-    pub(crate) packets: SmallVec<[(Arc<dyn Encapsulate>, Metadata); 1]>,
+    pub(crate) packets: SmallVec<[Metadata; 1]>,
 }
 
 impl Path {
@@ -40,17 +36,6 @@ impl Path {
         datagrams: &mut [Datagram],
         frames: &mut Vec<GuaranteedFrame>,
     ) -> Poll<Result<usize, Error>> {
-        // Read later epochs first so concurrent prefix retirement cannot leave a hole.
-        let handles: SmallVec<[_; 3]> = Epoch::EPOCHS.into_iter().rev().filter_map(|epoch| self.spaces.get(epoch)).collect();
-        let spaces = ArcSpaces::default();
-        match handles.last().map(|space| space.epoch()) {
-            Some(Epoch::Handshake) => spaces.retire(Epoch::Initial),
-            Some(Epoch::Data) => spaces.retire(Epoch::Handshake),
-            _ => {}
-        }
-        for space in handles.into_iter().rev() {
-            spaces.add(space);
-        }
         let mut credit = match self.validation.poll_credit(cx) {
             Poll::Ready(credit) => {
                 credit.map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?.unwrap_or(usize::MAX)
@@ -61,7 +46,7 @@ impl Path {
         let mut send_quota = {
             let mut cc = self.cc.lock();
             // Update the budget before driving PTO, including when credit polling waits.
-            update_amplification_blocked(&mut cc, &spaces, dcid, credit, overhead);
+            update_amplification_blocked(&mut cc, &self.spaces, dcid, credit, overhead);
             if credit == 0 {
                 ready!(cc.poll_send_quota(cx)).map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
                 drop(cc);
@@ -75,15 +60,23 @@ impl Path {
         } else {
             PacketContent::JustPing
         };
-        let handles = Epoch::EPOCHS.map(|epoch| spaces.get(epoch));
-        let mut acks = Epoch::EPOCHS
-            .map(|epoch| (epoch, handles[epoch].as_ref().map(|space| space.rcvd_journal().ack_package(self.cc.need_ack(epoch)))));
+        let mut acks: SmallVec<[_; 3]> =
+            self.spaces.iter().map(|space| (space.epoch(), space.rcvd_journal().ack_package(self.cc.need_ack(space.epoch())))).collect();
         let mut terminator = &self.terminator;
         let mut heartbeat = self.heartbeat.clone();
         let mut validation = self.validation.clone();
-        let mut probes = Epoch::EPOCHS.map(|epoch| {
-            (epoch, (packet_content == PacketContent::EffectivePayload && self.cc.need_send_ack_eliciting(epoch) > 0).then_some(PingFrame))
-        });
+        let mut probes: SmallVec<[_; 3]> = self
+            .spaces
+            .iter()
+            .filter(|space| packet_content == PacketContent::EffectivePayload && self.cc.need_send_ack_eliciting(space.epoch()) > 0)
+            .map(|space| (space.epoch(), Some(PingFrame)))
+            .collect();
+        let mut sources: SmallVec<[_; 9]> = acks.iter_mut().map(|ack| ack as &mut dyn for<'b> Package<&'b mut [u8]>).collect();
+        sources.extend([&mut validation as &mut dyn for<'b> Package<&'b mut [u8]>, &mut heartbeat]);
+        sources.extend(probes.iter_mut().map(|probe| probe as &mut dyn for<'b> Package<&'b mut [u8]>));
+        if packet_content == PacketContent::EffectivePayload {
+            sources.insert(0, &mut terminator);
+        }
         let mut count = 0;
         for datagram in datagrams {
             let buffer = &mut datagram.bytes;
@@ -94,19 +87,10 @@ impl Path {
             };
             let length = 1200.min(credit.saturating_sub(overhead)).min(quota);
             buffer.resize(length, 0);
-            let [a0, a1, a2] = &mut acks;
-            let [p0, p1, p2] = &mut probes;
-            let mut sources: [&mut dyn for<'b> Package<&'b mut [u8]>; 9] =
-                [&mut terminator, a0, a1, a2, &mut validation, &mut heartbeat, p0, p1, p2];
-            let external = if packet_content == PacketContent::EffectivePayload {
-                &mut sources[..]
-            } else {
-                &mut sources[1..]
-            };
             let (size, collected) =
-                spaces.poll_dump(cx, &self.cc, dcid, &mut Cursor::new(buffer.as_mut()), packet_content, frames, external);
+                self.spaces.poll_dump(cx, &self.cc, dcid, &mut Cursor::new(buffer.as_mut()), packet_content, frames, &mut sources);
             let in_flight: usize = collected.iter().filter(|meta| meta.in_flight).map(|meta| meta.pktlen).sum();
-            datagram.packets.extend(collected.into_iter().map(|meta| (spaces.get(meta.epoch()).unwrap(), meta)));
+            datagram.packets.extend(collected);
             buffer.truncate(size);
             if size == 0 {
                 break;
@@ -160,7 +144,7 @@ impl Path {
                     && datagrams[first..]
                         .iter()
                         .flat_map(|datagram| &datagram.packets)
-                        .any(|(_, meta)| meta.content == PacketContent::EffectivePayload)
+                        .any(|meta| meta.content == PacketContent::EffectivePayload)
                 {
                     return Poll::Ready(Ok(None));
                 }
@@ -170,9 +154,11 @@ impl Path {
                 };
                 for datagram in &mut datagrams[first..first + sent] {
                     let mut packets = [None; 3];
-                    for (space, meta) in datagram.packets.drain(..) {
+                    for meta in datagram.packets.drain(..) {
                         let epoch = meta.epoch();
-                        space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
+                        if let Some(space) = self.spaces.get(epoch) {
+                            space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
+                        }
                         sent_handshake |= epoch == Epoch::Handshake;
                         packets[epoch] = Some(meta);
                     }
@@ -202,11 +188,13 @@ impl Path {
         Ok(())
     }
 
-    /// Recover only unsubmitted packets, then reuse the buffers and release the CID.
+    /// Recover unsubmitted packets in live spaces, then reuse buffers and release the CID.
     pub fn refresh(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) {
         for datagram in datagrams {
-            for (space, meta) in datagram.packets.drain(..) {
-                space.cancel(meta.pn, &mut std::iter::empty());
+            for meta in datagram.packets.drain(..) {
+                if let Some(space) = self.spaces.get(meta.epoch()) {
+                    space.cancel(meta.pn, &mut std::iter::empty());
+                }
             }
             datagram.bytes.clear();
         }

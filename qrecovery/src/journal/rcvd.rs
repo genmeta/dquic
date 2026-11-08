@@ -223,18 +223,18 @@ impl ArcRcvdJournal {
         self.inner.read().unwrap().gen_ack_frame_util(largest, rcvd_time, capacity)
     }
 
-    pub fn ack_package<'r>(&'r self, need_ack: Option<(u64, Instant)>) -> AckPackege<'r> {
-        AckPackege { journal: self, need_ack, exponent: self.ack_delay_exponent }
+    pub fn ack_package(&self, need_ack: Option<(u64, Instant)>) -> AckPackege {
+        AckPackege { journal: self.clone(), need_ack, exponent: self.ack_delay_exponent }
     }
 }
 
-pub struct AckPackege<'r> {
-    journal: &'r ArcRcvdJournal,
+pub struct AckPackege {
+    journal: ArcRcvdJournal,
     need_ack: Option<(u64, Instant)>,
     pub exponent: u32,
 }
 
-impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
+impl<B: BufMut + ?Sized> Package<B> for AckPackege {
     fn content(&self) -> PacketContent {
         PacketContent::NonAckEliciting
     }
@@ -271,7 +271,7 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege<'_> {
     }
 }
 
-impl UnregisterWaker for AckPackege<'_> {
+impl UnregisterWaker for AckPackege {
     fn unregister(&self, waker: &std::task::Waker) {
         self.journal.waiters.unregister(waker);
     }
