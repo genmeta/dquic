@@ -66,6 +66,7 @@ impl Path {
             Duration::from_millis(25),
             resenders,
             hs_facts,
+            validation.clone(),
             Arc::new(AtomicU16::new(MSS as u16)),
             send_waker.clone(),
         );
@@ -91,12 +92,11 @@ impl Path {
     }
 
     /// Account one successfully submitted datagram under the submission's CC lock.
-    pub fn on_sent(&self, cc: &mut CongestionController, bytes: usize, packets: [Option<Metadata>; 3]) {
-        let overhead = QuicProtocol::packet_overhead(self.pathway);
+    pub fn on_sent(&self, cc: &mut CongestionController, packets: [Option<Metadata>; 3]) {
+        let overhead = QuicProtocol::datagram_overhead(self.pathway);
         let charged =
             packets.iter().position(|p| p.as_ref().is_some_and(|meta| meta.in_flight)).or_else(|| packets.iter().position(Option::is_some));
         let now = Instant::now();
-        self.validation.on_sent(bytes + overhead);
         for (epoch, packet) in Epoch::EPOCHS.into_iter().zip(packets) {
             let Some(meta) = packet else { continue };
             let sent_bytes = meta.pktlen

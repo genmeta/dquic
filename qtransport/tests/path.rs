@@ -125,7 +125,7 @@ async fn cancelling_shared_validation_retires_the_path() {
     assert!(matches!(path.validation.poll_credit(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(qbase::Cancelled))));
     path.close();
     path.close();
-    assert!(path.validation.enter_validated().is_err());
+    assert!(path.validation.grant().is_err());
     assert!(matches!(path.validation.poll_credit(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(qbase::Cancelled))));
 }
 

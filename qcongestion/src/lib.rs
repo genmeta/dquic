@@ -22,6 +22,12 @@ pub struct TooManyPtos(u32);
 
 /// The [`Transport`] trait defines the interface for congestion control algorithms.
 pub trait Transport {
+    /// Refresh recovery timers after amplification credit is exhausted.
+    fn on_blocked(&self);
+
+    /// Refresh recovery timers and wake the sender after amplification credit returns.
+    fn on_charged(&self);
+
     /// Performs a periodic tick to drive the congestion control algorithm.
     fn do_tick(&self) -> Result<(), TooManyPtos>;
 

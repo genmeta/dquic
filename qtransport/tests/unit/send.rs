@@ -54,7 +54,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         path.disable();
         let space = paths.spaces.get(epoch).unwrap();
         for crypto in [&data.spaces.initial.crypto, &data.spaces.handshake.crypto, &data.spaces.data.crypto] {
@@ -63,7 +63,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         let (_, mut writer) = data.spaces.data.streams.open_uni().await.unwrap().unwrap();
         writer.write_all(b"queued stream").await.unwrap();
         data.spaces.data.reliable_frames.send_frame([qbase::frame::StreamCtlFrame::from(MaxDataFrame::new(1234u32.into()))]);
-        path.validation.revalidate().unwrap();
+        crate::common::revalidate(&path);
         path.validation.on_received(1000);
         path.validation.challenge(PathChallengeFrame::from_slice(&[7; 8])).unwrap();
         for pn in [41, 42] {
@@ -136,11 +136,11 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
     path.validation.exempt().unwrap();
     let mut datagrams = [Datagram::default()];
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     path.disable();
     // No socket is registered: successful cancellation must avoid UDP submission.
-    path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     path.refresh(&mut datagrams, &mut frames);
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
@@ -315,7 +315,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                         paths.progress.clone(),
                     ),
                 );
-                path.validation.enter_validated().unwrap();
+                path.validation.grant().unwrap();
                 let competitor = crate::common::registered_path(
                     &paths,
                     Path::new(
@@ -420,7 +420,7 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         paths.progress.on_path_selected(&paths, &path);
         path.heartbeat.on_rcvd_at(qbase::packet::PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
         tokio::time::advance(Duration::from_secs(20)).await;
@@ -628,7 +628,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         paths.progress.on_path_selected(&paths, &path);
         path.disable();
         let counter = Arc::new(Counter::default());
@@ -683,7 +683,7 @@ async fn existing_path_recovers_newly_installed_spaces() {
             paths.progress.clone(),
         ),
     );
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
     let mut frames = Vec::new();
@@ -801,7 +801,7 @@ async fn mature_packets_wait_for_and_share_the_path_cid() {
         ),
     );
     paths.progress.on_path_selected(&paths, &path);
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     // The selected sender waits if the available CID was already consumed.
     assert!(!paths.progress.facts().is_handshake_done() && path.dcid.is_allocated());
     for crypto in [&mature.spaces.initial.crypto, &mature.spaces.handshake.crypto, &mature.spaces.data.crypto] {
@@ -874,7 +874,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             paths.progress.clone(),
         ),
     );
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
     let mut frames = Vec::new();
@@ -916,7 +916,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
             paths.progress.clone(),
         ),
     );
-    waiting_path.validation.enter_validated().unwrap();
+    waiting_path.validation.grant().unwrap();
     mature.spaces.data.crypto.writer().write_all(b"next").await.unwrap();
     paths.entries.lock().unwrap().insert(path.pathway, path.clone());
     let sending_task = tokio::spawn(sending(paths.clone(), waiting_path.clone()));
@@ -977,7 +977,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         paths.progress.on_path_selected(&paths, &path);
         path.heartbeat.on_rcvd_at(PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
 
@@ -1101,7 +1101,7 @@ fn pns_for(datagrams: &[Datagram], epoch: Epoch) -> impl Iterator<Item = (usize,
 }
 
 #[tokio::test(start_paused = true)]
-async fn amplification_unblocks_pto_when_its_probe_fits() {
+async fn amplification_rearms_pto_when_credit_returns() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Counter(AtomicUsize);
@@ -1137,7 +1137,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         if epoch == Epoch::Data {
             super::confirm_handshake(&paths);
             // Withdraw the handshake path's address validation for this credit test.
-            path.validation.revalidate().unwrap();
+            crate::common::revalidate(&path);
         }
         path.validation.on_received(400);
         path.validation.on_sent(1200);
@@ -1155,23 +1155,23 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         let waker = Waker::from(counter.clone());
         let mut cx = Context::from_waker(&waker);
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
-        tokio::time::advance(base * 2).await;
+        tokio::time::advance(base).await;
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
         assert_eq!(path.cc.get_pto(epoch), base);
 
-        // Positive credit can still be too small even for a PING packet.
+        // Credit restoration rearms PTO even when a packet does not yet fit.
         let before = counter.0.load(Ordering::Relaxed);
         path.validation.on_received(1);
         path.send_waker.wake_all();
         assert!(counter.0.load(Ordering::Relaxed) > before);
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
-        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
-        assert_eq!(path.cc.get_pto(epoch), base);
+        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
+        assert!(path.cc.get_pto(epoch) > base);
 
         // Handshake and 1-RTT probes fit well below 1200 bytes.
         let before = counter.0.load(Ordering::Relaxed);
         if validated {
-            path.validation.enter_validated().unwrap();
+            path.validation.grant().unwrap();
         } else {
             path.validation.on_received(20);
         }
@@ -1179,7 +1179,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
         assert!(counter.0.load(Ordering::Relaxed) > before);
         if epoch == Epoch::Initial && !validated {
             assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
-            assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
+            assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
             path.validation.on_received(379);
         }
         assert!(
@@ -1203,7 +1203,7 @@ async fn amplification_unblocks_pto_when_its_probe_fits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_probe() {
+async fn ack_only_submission_exhausts_credit_and_blocks_pto_without_another_collect() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
@@ -1232,20 +1232,22 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     let base = path.cc.get_pto(Epoch::Handshake);
     let mut datagrams = [Datagram::default()];
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
     assert_eq!(count, 1);
     let meta = datagram_metadata(&datagrams[0], Epoch::Handshake).unwrap();
     assert!(!meta.content.is_ack_eliciting());
     assert!(!meta.in_flight);
     assert!(meta.ack.is_some());
-    path.send(&mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
-    assert!(crate::common::path_credit(&path) > 0);
+    // Leave exactly enough credit for this ACK to exhaust the allowance.
+    path.validation.on_sent(crate::common::path_credit(&path).unwrap() - datagrams[0].bytes.len());
+    path.send(&mut datagrams[..1], &paths.idle_timer()).await.unwrap();
+    assert_eq!(crate::common::path_credit(&path), Some(0));
     tokio::time::advance(base * 2).await;
     // No subsequent budget poll: submission must already have told CC it is blocked.
     path.cc.do_tick().unwrap();
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 0);
     assert_eq!(path.cc.get_pto(Epoch::Handshake), base);
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     assert!(matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
     path.refresh(&mut datagrams, &mut frames);
@@ -1288,7 +1290,7 @@ async fn path_validation_respects_small_amplification_credit() {
             } else {
                 path.validation.challenge(challenge).unwrap();
             }
-            let credit = crate::common::path_credit(&path);
+            let credit = crate::common::path_credit(&path).unwrap();
             let mut datagrams = [Datagram::default()];
             let mut frames = Vec::new();
             let result = poll_collect(&path, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop()));
@@ -1457,7 +1459,7 @@ async fn termination_discards_collected_packets_after_space_retirement() {
     let quota = path.cc.send_quota();
     let mut datagrams = [Datagram::default()];
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     paths.progress.on_handshake_sent();
     assert!(paths.spaces.get(Epoch::Initial).is_none());
@@ -1467,7 +1469,7 @@ async fn termination_discards_collected_packets_after_space_retirement() {
     tokio::select! {
         biased;
         _ = paths.terminator.clone() => {},
-        _ = path.send(&mut datagrams[..count], dcid, &idle_timer) => panic!("terminated task must skip submission"),
+        _ = path.send(&mut datagrams[..count], &idle_timer) => panic!("terminated task must skip submission"),
     }
     path.refresh(&mut datagrams, &mut frames);
     path.refresh(&mut datagrams, &mut frames);
@@ -1508,7 +1510,7 @@ async fn collection_bounds_each_datagram_and_charges_envelopes_once() {
                 ),
             );
             paths.progress.on_path_selected(&paths, &path);
-            let overhead = QuicProtocol::packet_overhead(path.pathway);
+            let overhead = QuicProtocol::datagram_overhead(path.pathway);
             crate::common::spaces::take_reliable(&mature);
             let budget = (1500 + 2 * overhead).div_ceil(3) * 3;
             if amplification_limited {
@@ -1576,7 +1578,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
 
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     assert!(count > 1);
     let pending: Vec<_> = datagrams.iter().map(|datagram| datagram.packets.clone()).collect();
     let first = packet_metadata(&pending[0], Epoch::Initial).unwrap().pn;
@@ -1595,7 +1597,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         .unwrap();
     // The kernel accepts the first datagram, then rejects the oversized second datagram.
     datagrams[1].bytes.resize(65536, 0);
-    let error = path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
+    let error = path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(
@@ -1611,7 +1613,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
             assert!(journal.packet(packet_metadata(slots, Epoch::Initial).unwrap().pn).is_none());
         }
     }
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     let retransmit = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     assert!(
         space
@@ -1620,7 +1622,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
             .frames(retransmit)
             .any(|frame| { matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == offset) })
     );
-    path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
     cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
@@ -1660,11 +1662,11 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = [Datagram::default()];
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     path.close();
 
-    let error = path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
+    let error = path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(matches!(error, crate::Error::Quic(error) if error.reason() == "Cancelled"));
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
@@ -1711,7 +1713,7 @@ async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path()
     paths.progress.on_path_selected(&paths, &path);
     let mut datagrams = [Datagram::default()];
     let mut frames = Vec::new();
-    let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
+    let (count, _) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     assert_eq!(count, 1);
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
     assert!(datagram_metadata(&datagrams[0], Epoch::Handshake).is_some());
@@ -1722,12 +1724,12 @@ async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path()
     for journal in journals {
         journal.on_tick(Instant::now(), |_| panic!("unsubmitted packet timed out"));
     }
-    assert_eq!(crate::common::path_credit(&path), 3600);
+    assert_eq!(crate::common::path_credit(&path), Some(3600));
     let delays = [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
-    path.send(&mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..1], &paths.idle_timer()).await.unwrap();
     let submitted_at = Instant::now();
     assert!(datagrams[0].packets.is_empty());
-    assert_eq!(crate::common::path_credit(&path), 2400);
+    assert_eq!(crate::common::path_credit(&path), Some(2400));
     path.refresh(&mut datagrams, &mut frames);
     for ((journal, delay), expected) in journals.into_iter().zip(delays).zip([0, 1]) {
         journal.on_tick(submitted_at + delay - Duration::from_nanos(1), |_| panic!("timer started before submission"));
@@ -1778,7 +1780,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         path
     };
     let selected = make_path(9);
@@ -1798,7 +1800,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     let (count, dcid) =
         other.collect(&mut datagrams, &mut frames).now_or_never().expect("missing replacement must not suspend this sender").unwrap();
     assert_eq!(dcid, old);
-    other.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    other.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     assert_eq!(received_dcid(&peer).await, old);
     assert!(other.validation.is_validated());
     other.refresh(&mut datagrams, &mut frames);
@@ -1808,7 +1810,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     mature.spaces.data.crypto.writer().write_all(b"replacement CID sends").await.unwrap();
     let (count, dcid) = other.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
     assert_eq!(dcid, replacement);
-    other.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    other.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     assert_eq!(received_dcid(&peer).await, replacement);
     other.refresh(&mut datagrams, &mut frames);
     other.close();
@@ -1886,7 +1888,7 @@ async fn cancelled_collect_keeps_subscriptions_until_path_task_exits() {
     assert!(a.0.load(Ordering::Relaxed) > 0);
     assert!(b.0.load(Ordering::Relaxed) > 0);
     // Keep the second task credit-blocked while the first task retires.
-    second.validation.revalidate().unwrap();
+    crate::common::revalidate(&second);
     first.close();
     common::wait_for_sender_exit(&first).await;
     let first_before = a.0.load(Ordering::Relaxed);
@@ -1938,7 +1940,7 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
         initial.crypto.writer().write_all(b"client hello").await.unwrap();
         let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
         let mut frames = Vec::new();
-        let (count, dcid) = first.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
+        let (count, _) = first.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
         match change {
             0 => {
                 paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
@@ -1956,7 +1958,7 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
             }
         }
         // Verify the CID on the wire after the policy changes and submission completes.
-        first.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+        first.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
         if change == 0 {
             first.refresh(&mut datagrams, &mut frames);
         } else {

@@ -357,9 +357,9 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         let path = &paths.entries.lock().unwrap().get(&link.into()).cloned().unwrap();
         assert_eq!(path.pathway, link.into());
         let expected = if receiver.parameters.role() == Role::Client {
-            usize::MAX
+            None
         } else {
-            packet.len() * 3
+            Some(packet.len() * 3)
         };
         assert_eq!(crate::common::path_credit(path), expected);
 

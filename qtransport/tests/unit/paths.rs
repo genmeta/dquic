@@ -168,7 +168,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
     let incoming = paths.get_or_create_path(&pathway(30004));
     for path in [&first, &second, &incoming] {
         assert!(path.validation.is_validated());
-        assert_eq!(crate::common::path_credit(path), usize::MAX);
+        assert_eq!(crate::common::path_credit(path), None);
         assert_eq!(super::selection(&paths, path), u8::MAX);
     }
     paths.progress.on_path_selected(&paths, &first);
@@ -189,7 +189,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
     for path in current {
         assert_eq!(super::selection(&paths, &path), 2);
         assert!(path.validation.is_validated());
-        assert_eq!(crate::common::path_credit(&path), usize::MAX);
+        assert_eq!(crate::common::path_credit(&path), None);
         assert!(super::take_validation_frames(&path).is_empty());
         assert!(paths.validations.get(&path.pathway).unwrap().is_validated());
     }
@@ -271,7 +271,7 @@ async fn server_paths_start_guarded_and_responses_are_dispatched_by_pathway() {
     let paths = paths(Role::Server);
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
-    assert_eq!(crate::common::path_credit(&first), 0);
+    assert_eq!(crate::common::path_credit(&first), Some(0));
     paths.start_validation(&first);
     confirm_validation(&paths);
     paths.start_validation(&first);
@@ -284,8 +284,8 @@ async fn server_paths_start_guarded_and_responses_are_dispatched_by_pathway() {
     paths.validations.recv_frame((first.pathway, qbase::frame::PathResponseFrame::from(challenge))).unwrap();
     tokio::task::yield_now().await;
     assert!(first.validation.is_validated());
-    assert_eq!(crate::common::path_credit(&first), usize::MAX);
-    assert_eq!(crate::common::path_credit(&second), 0);
+    assert_eq!(crate::common::path_credit(&first), None);
+    assert_eq!(crate::common::path_credit(&second), Some(0));
     assert!(paths.validations.get(&first.pathway).unwrap().is_validated());
     paths.retire_all();
 }
@@ -317,7 +317,7 @@ async fn first_mismatched_response_fails_even_if_a_matching_response_follows() {
 async fn failed_validation_removes_its_path_and_stops_its_sender_without_closing_other_paths() {
     let paths = paths(Role::Server);
     let live = paths.add_path(pathway(30002));
-    live.validation.enter_validated().unwrap();
+    live.validation.grant().unwrap();
     let failed = paths.add_path(pathway(30003));
     confirm_validation(&paths);
     let close = crate::common::observe_close(&paths.terminator);
@@ -385,9 +385,9 @@ async fn revalidation_starts_a_new_task_on_the_registered_validation() {
     for round in 0..2 {
         if round == 1 {
             let previous = path.validation.respond();
-            path.validation.revalidate().unwrap();
+            crate::common::revalidate(&path);
             assert_eq!(previous.await.unwrap(), None);
-            assert_eq!(crate::common::path_credit(&path), 0);
+            assert_eq!(crate::common::path_credit(&path), Some(0));
             assert!(!paths.validations.get(&path.pathway).unwrap().is_validated());
         }
         paths.start_validation(&path);

@@ -32,8 +32,8 @@ impl Sender {
         spaces.retire(Epoch::Handshake);
         spaces.add(self.transport.data.clone());
         self.path.cc.prepare_burst_budget(&mut Context::from_waker(std::task::Waker::noop())).unwrap();
-        let overhead = QuicProtocol::packet_overhead(self.path.pathway);
-        let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead));
+        let overhead = QuicProtocol::datagram_overhead(self.path.pathway);
+        let length = credit.map_or(1200, |credit| 1200.min(credit.saturating_sub(overhead)));
         let mut ack = self.transport.data.rcvd_journal.ack_package(self.path.cc.need_ack(Epoch::Data));
         let mut validation = self.path.validation.clone();
         let mut ping = self.heartbeat.then_some(PingFrame);
@@ -70,7 +70,9 @@ impl Sender {
         std::task::ready!(submit(cx, self.path.pathway, &self.bytes))
             .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
         Transmit::on_sent(self.transport.data.as_ref(), meta.pn, meta.in_flight, delay, retention);
-        self.path.on_sent(&mut cc, self.bytes.len(), [None, None, self.pending.take()]);
+        self.path.on_sent(&mut cc, [None, None, self.pending.take()]);
+        drop(cc);
+        self.path.validation.on_sent(self.bytes.len() + QuicProtocol::datagram_overhead(self.path.pathway));
         Poll::Ready(Ok(true))
     }
 

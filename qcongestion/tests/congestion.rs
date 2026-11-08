@@ -5,6 +5,7 @@ use qbase::{
     Epoch,
     frame::AckFrame,
     handshake::HandshakeFacts,
+    net::validate::ArcValidation,
     role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
@@ -15,6 +16,13 @@ use tokio::time::{Duration, Instant};
 mod common;
 mod congestion {
     mod handshake_retirement;
+}
+
+fn amplification_controller(feedback: Arc<dyn Resend>) -> (ArcCC, ArcValidation) {
+    let validation = ArcValidation::new();
+    let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+    handshake.on_handshake_done();
+    (controller_with_validation(handshake, trackers(feedback), validation.clone()), validation)
 }
 
 fn ack(pn: u64) -> AckFrame {
@@ -248,8 +256,7 @@ async fn ack_with_largest_on_another_path_does_not_sample_rtt() {
 
 #[tokio::test(start_paused = true)]
 async fn regression_releasing_amplification_credit_rearms_recovery() {
-    let cc = controller();
-    cc.lock().set_amplification_blocked(true);
+    let (cc, validation) = amplification_controller(Arc::new(NoopFeedback));
     cc.do_tick().unwrap();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     let base = cc.get_pto(Epoch::Data);
@@ -257,7 +264,7 @@ async fn regression_releasing_amplification_credit_rearms_recovery() {
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
     assert_eq!(cc.get_pto(Epoch::Data), base);
-    cc.lock().set_amplification_blocked(false);
+    validation.on_received(1);
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     assert!(cc.get_pto(Epoch::Data) > base);
@@ -265,11 +272,12 @@ async fn regression_releasing_amplification_credit_rearms_recovery() {
 
 #[tokio::test(start_paused = true)]
 async fn amplification_blocking_disarms_an_already_running_pto() {
-    let cc = controller();
+    let (cc, validation) = amplification_controller(Arc::new(NoopFeedback));
+    validation.on_received(400);
     cc.do_tick().unwrap();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     let base = cc.get_pto(Epoch::Data);
-    cc.lock().set_amplification_blocked(true);
+    validation.on_sent(1200);
     tokio::time::advance(base).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
@@ -278,7 +286,8 @@ async fn amplification_blocking_disarms_an_already_running_pto() {
 
 #[tokio::test(start_paused = true)]
 async fn amplification_unblocking_preserves_the_deadline_and_backoff() {
-    let cc = controller();
+    let (cc, validation) = amplification_controller(Arc::new(NoopFeedback));
+    validation.on_received(400);
     cc.do_tick().unwrap();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     tokio::time::advance(cc.get_pto(Epoch::Data)).await;
@@ -286,10 +295,10 @@ async fn amplification_unblocking_preserves_the_deadline_and_backoff() {
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     cc.on_pkt_sent(Epoch::Data, 1, true, 30, true, None);
     let backoff = cc.get_pto(Epoch::Data);
-    cc.lock().set_amplification_blocked(true);
+    validation.on_sent(1200);
     tokio::time::advance(backoff / 2).await;
     for _ in 0..4 {
-        cc.lock().set_amplification_blocked(false);
+        validation.on_received(1);
         cc.do_tick().unwrap();
         assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
         assert_eq!(cc.get_pto(Epoch::Data), backoff);
@@ -303,14 +312,15 @@ async fn amplification_unblocking_preserves_the_deadline_and_backoff() {
 #[tokio::test(start_paused = true)]
 async fn amplification_blocking_preserves_time_threshold_loss_detection() {
     let lost = Arc::new(Mutex::new(Vec::new()));
-    let cc = controller_with_feedback(Arc::new(RecordingFeedback(lost.clone())));
+    let (cc, validation) = amplification_controller(Arc::new(RecordingFeedback(lost.clone())));
+    validation.on_received(400);
     cc.do_tick().unwrap();
     cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
     cc.on_pkt_sent(Epoch::Data, 1, true, MSS, true, None);
     tokio::time::advance(Duration::from_millis(5)).await;
     cc.on_ack_rcvd(Epoch::Data, &ack(1));
     assert!(lost.lock().unwrap().is_empty());
-    cc.lock().set_amplification_blocked(true);
+    validation.on_sent(1200);
     tokio::time::advance(Duration::from_millis(10)).await;
     cc.do_tick().unwrap();
     assert_eq!(*lost.lock().unwrap(), [0]);

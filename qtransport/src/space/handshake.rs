@@ -14,11 +14,7 @@ use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Recover, Space};
-use crate::{
-    Error, GuaranteedFrame,
-    keys::{ArcKeys, Seal},
-    packet::encrypt::Packet,
-};
+use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 /// Handshake headers carry no token or application-data sources.
 #[derive(Deref)]
@@ -71,12 +67,6 @@ impl<K> UnregisterWaker for HandshakeSpace<K> {
 }
 
 impl Encapsulate for HandshakeSpace<ArcKeys> {
-    fn probe_size(&self, dcid: ConnectionId) -> Option<usize> {
-        let keys = self.keys.get().ok()?;
-        let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
-        Some(super::probe_size(&header, self.sent_journal.lock_guard().next_pn_len(), keys.sealing.tag_len()))
-    }
-
     fn packet(&self, dcid: ConnectionId) -> Option<Packet> {
         let header = LongHeaderBuilder::with_cid(dcid, self.initial_scid).handshake();
         let (pn, keys) = self.pn_and_keys()?;

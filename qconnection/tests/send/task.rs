@@ -88,7 +88,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     );
     let space = crate::common::initial_space(&paths.spaces);
     let path = paths.add_path(Pathway::new(local, EndpointAddr::direct(peer.local_addr().unwrap())));
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
     space.rcvd_journal.on_rcvd_pn(0, true, Duration::from_secs(1));

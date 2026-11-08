@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, atomic::AtomicU16};
 
 use qbase::{
     handshake::HandshakeFacts,
-    net::tx::ArcSendWakers,
+    net::{tx::ArcSendWakers, validate::ArcValidation},
     role::Role,
     util::{ArcIndexDeque, IndexDeque},
 };
@@ -33,11 +33,22 @@ pub fn trackers(feedback: Arc<dyn Resend>) -> ArcIndexDeque<Arc<dyn Resend>, 2> 
 }
 
 pub fn controller_with(handshake: Arc<HandshakeFacts>, trackers: ArcIndexDeque<Arc<dyn Resend>, 2>) -> ArcCC {
+    let validation = ArcValidation::new();
+    validation.exempt().unwrap();
+    controller_with_validation(handshake, trackers, validation)
+}
+
+pub fn controller_with_validation(
+    handshake: Arc<HandshakeFacts>,
+    trackers: ArcIndexDeque<Arc<dyn Resend>, 2>,
+    validation: ArcValidation,
+) -> ArcCC {
     ArcCC::new(
         Algorithm::NewReno,
         Duration::from_millis(25),
         trackers,
         handshake,
+        validation,
         Arc::new(AtomicU16::new(MSS as u16)),
         ArcSendWakers::default(),
     )

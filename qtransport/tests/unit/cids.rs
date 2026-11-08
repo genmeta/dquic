@@ -306,7 +306,7 @@ async fn collect_releases_idle_cids_and_refresh_releases_collected_cids_once() {
         let selected = path(&paths, 4001);
         paths.progress.on_path_selected(&paths, &selected);
         super::install_data(&paths, &mature);
-        selected.validation.enter_validated().unwrap();
+        selected.validation.grant().unwrap();
         take_retired(&mature);
         if collected {
             mature.spaces.data.crypto.writer().write_all(b"CID snapshot").await.unwrap();
@@ -340,7 +340,7 @@ async fn collect_releases_idle_cids_and_refresh_releases_collected_cids_once() {
 async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_sender_alive() {
     let (paths, mature) = super::send::data_spaces(Role::Client, Duration::ZERO);
     let selected = path(&paths, 4001);
-    selected.validation.enter_validated().unwrap();
+    selected.validation.grant().unwrap();
     paths.progress.on_path_selected(&paths, &selected);
     super::install_data(&paths, &mature);
     super::confirm_handshake(&paths);

@@ -6,12 +6,19 @@ use std::{
     task::Context,
 };
 
-use qbase::{Epoch, frame::AckFrame, handshake::HandshakeFacts, net::tx::ArcSendWakers, role::Role, util::ArcIndexDeque};
+use qbase::{
+    Epoch,
+    frame::AckFrame,
+    handshake::HandshakeFacts,
+    net::{tx::ArcSendWakers, validate::ArcValidation},
+    role::Role,
+    util::ArcIndexDeque,
+};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
 use crate::{
-    Algorithm, MSS, Resend, TooManyPtos,
+    Algorithm, MSS, Resend, TooManyPtos, Transport,
     algorithm::{Control, new_reno::NewReno},
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
@@ -47,42 +54,11 @@ pub struct CongestionController {
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
     hs_facts: Arc<HandshakeFacts>,
     pmtu: Arc<AtomicU16>,
-    // The sender reports whether amplification credit prevents the current PTO probe.
-    amplification_blocked: bool,
+    validation: ArcValidation,
     tx_waker: ArcSendWakers,
 }
 
 impl CongestionController {
-    /// A.6. On Receiving a Datagram
-    /// OnDatagramReceived(datagram):
-    ///   // If this datagram unblocks the server, arm the
-    ///   // PTO timer to avoid deadlock.
-    ///   if (server was at anti-amplification limit):
-    ///     SetLossDetectionTimer()
-    ///     if loss_detection_timer.timeout < now():
-    ///       // Execute PTO if it would have expired
-    ///       // while the amplification limit applied.
-    ///       OnLossDetectionTimeout()
-    ///
-    /// The sender reports blocking after credit changes; prepare_burst_budget then
-    /// processes an expired PTO using the updated budget.
-    /// Update the sender's anti-amplification decision without resetting PTO backoff.
-    pub fn set_amplification_blocked(&mut self, blocked: bool) {
-        if self.amplification_blocked != blocked {
-            self.amplification_blocked = blocked;
-            self.set_loss_detection_timer();
-        }
-    }
-
-    /// Select the next PTO's space after observing handshake retirement.
-    pub fn pto_epoch(&mut self) -> Option<Epoch> {
-        self.retire_handshake_spaces();
-        if self.no_ack_eliciting_in_flight() && self.peer_completed_address_validation() {
-            return None;
-        }
-        self.get_pto_time_and_epoch().map(|(_, epoch)| epoch)
-    }
-
     fn mtu(&self) -> usize {
         self.pmtu.load(Ordering::Relaxed) as usize
     }
@@ -93,6 +69,7 @@ impl CongestionController {
         max_ack_delay: Duration,
         resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
         hs_facts: Arc<HandshakeFacts>,
+        validation: ArcValidation,
         pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
@@ -121,7 +98,7 @@ impl CongestionController {
             need_send_ack_eliciting_packets: [0; Epoch::count()],
             hs_facts,
             pmtu,
-            amplification_blocked: false,
+            validation,
             tx_waker,
         }
     }
@@ -290,7 +267,7 @@ impl CongestionController {
             return;
         }
 
-        if self.amplification_blocked {
+        if self.validation.is_blocking() {
             self.loss_detection_timer = None;
             return;
         }
@@ -527,7 +504,7 @@ impl CongestionController {
         // loss detection and existing PTO deadlines that are still needed.
         let peer_validated = self.peer_completed_address_validation();
         if self.loss_detection_timer.is_none()
-            || self.amplification_blocked
+            || self.validation.is_blocking()
             || (peer_validated && self.no_ack_eliciting_in_flight() && self.get_loss_time_and_epoch().is_none())
         {
             // Rearm after credit returns, keeping an already running PTO's deadline.
@@ -583,11 +560,31 @@ impl ArcCC {
         max_ack_delay: Duration,
         resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
         hs_facts: Arc<HandshakeFacts>,
+        validation: ArcValidation,
         pmtu: Arc<AtomicU16>,
         tx_waker: ArcSendWakers,
     ) -> Self {
-        let cc =
-            ArcCC(Arc::new(Mutex::new(CongestionController::init(algorithm, max_ack_delay, resenders, hs_facts, pmtu, tx_waker.clone()))));
+        let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
+            algorithm,
+            max_ack_delay,
+            resenders,
+            hs_facts,
+            validation.clone(),
+            pmtu,
+            tx_waker.clone(),
+        ))));
+        let blocked = Arc::downgrade(&cc.0);
+        let charged = blocked.clone();
+        validation.on_blocked(move || {
+            if let Some(cc) = blocked.upgrade() {
+                ArcCC(cc).on_blocked();
+            }
+        });
+        validation.on_charged(move || {
+            if let Some(cc) = charged.upgrade() {
+                ArcCC(cc).on_charged();
+            }
+        });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&cc.0);
             runtime.spawn(async move {
@@ -644,6 +641,16 @@ impl ArcCC {
 }
 
 impl super::Transport for ArcCC {
+    fn on_blocked(&self) {
+        self.lock().set_loss_detection_timer();
+    }
+
+    fn on_charged(&self) {
+        let mut cc = self.lock();
+        cc.set_loss_detection_timer();
+        cc.tx_waker.wake_all();
+    }
+
     fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> Result<(), TooManyPtos> {
         let mut cc = self.lock();
         cc.tx_waker.register(cx.waker());
@@ -740,7 +747,11 @@ impl super::Transport for ArcCC {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU16};
 
-    use qbase::{handshake::HandshakeFacts, net::tx::ArcSendWakers, util::IndexDeque};
+    use qbase::{
+        handshake::HandshakeFacts,
+        net::{tx::ArcSendWakers, validate::ArcValidation},
+        util::IndexDeque,
+    };
 
     use super::*;
 
@@ -755,6 +766,8 @@ mod tests {
         handshake.on_handshake_done();
         let pmtu = Arc::new(AtomicU16::new(MSS as u16));
 
+        let validation = ArcValidation::new();
+        validation.exempt().unwrap();
         CongestionController::init(
             Algorithm::NewReno,
             Duration::from_millis(25),
@@ -766,6 +779,7 @@ mod tests {
                 ArcIndexDeque::from(trackers)
             },
             handshake,
+            validation,
             pmtu,
             ArcSendWakers::default(),
         )
@@ -774,6 +788,54 @@ mod tests {
     fn controller() -> CongestionController {
         let feedback: Arc<dyn Resend> = Arc::new(NoopFeedback);
         controller_with_feedback(feedback)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn validation_updates_pto_immediately_without_retaining_the_controller() {
+        let validation = ArcValidation::new();
+        let handshake = Arc::new(HandshakeFacts::with_role(Role::Client));
+        handshake.on_handshake_done();
+        let cc = ArcCC::new(
+            Algorithm::NewReno,
+            Duration::from_millis(25),
+            Default::default(),
+            handshake,
+            validation.clone(),
+            Arc::new(AtomicU16::new(MSS as u16)),
+            ArcSendWakers::default(),
+        );
+        let weak = Arc::downgrade(&cc.0);
+        cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);
+        assert!(cc.lock().loss_detection_timer.is_none());
+        validation.on_received(400);
+        let deadline = cc.lock().loss_detection_timer.unwrap();
+        validation.on_sent(1200);
+        assert!(cc.lock().loss_detection_timer.is_none());
+        validation.grant().unwrap();
+        assert_eq!(cc.lock().loss_detection_timer, Some(deadline));
+        let blocked = weak.clone();
+        let charged = weak.clone();
+        validation
+            .revalidate(
+                move || {
+                    if let Some(cc) = blocked.upgrade() {
+                        ArcCC(cc).on_blocked();
+                    }
+                },
+                move || {
+                    if let Some(cc) = charged.upgrade() {
+                        ArcCC(cc).on_charged();
+                    }
+                },
+            )
+            .unwrap();
+        assert!(cc.lock().loss_detection_timer.is_none());
+        validation.on_received(1);
+        assert_eq!(cc.lock().loss_detection_timer, Some(deadline));
+        drop(cc);
+        assert!(weak.upgrade().is_none());
+        validation.on_sent(3);
+        validation.on_received(1);
     }
 
     #[test]

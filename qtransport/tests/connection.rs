@@ -28,9 +28,9 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
             Default::default(),
         ))
     }));
-    paths[0].validation.enter_validated().unwrap();
+    paths[0].validation.grant().unwrap();
     paths[1].cc.set_ack_delays(Duration::ZERO, Duration::from_millis(100));
-    paths[2].validation.enter_validated().unwrap();
+    paths[2].validation.grant().unwrap();
     paths[2].close();
     let largest = paths[1].cc.pto_base(Epoch::Data);
     assert!(largest > paths[0].cc.pto_base(Epoch::Data));
@@ -53,7 +53,7 @@ async fn borrowed_path_observer_tracks_validation_and_closes_with_the_largest_pt
     assert!(matches!(terminator.await, Error::App(error) if error.error_code() == 42));
     assert_eq!(Instant::now() - start, largest * 3);
 
-    paths[1].validation.enter_validated().unwrap();
+    paths[1].validation.grant().unwrap();
     assert_eq!(connection.validated_paths(), [paths[0].pathway, paths[1].pathway]);
     paths[0].close();
     assert_eq!(connection.validated_paths(), [paths[1].pathway]);

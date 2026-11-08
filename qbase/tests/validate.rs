@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
@@ -46,6 +46,87 @@ fn challenge(value: u8) -> PathChallengeFrame {
 
 fn credit(validation: &ArcValidation) -> Poll<Result<Option<usize>, Cancelled>> {
     validation.poll_credit(&mut Context::from_waker(Waker::noop()))
+}
+
+#[test]
+fn blocking_follows_credit_validation_and_cancellation() {
+    let validation = ArcValidation::new();
+    assert!(validation.is_blocking());
+    validation.on_received(1);
+    assert!(!validation.is_blocking());
+    validation.on_sent(2);
+    assert!(!validation.is_blocking());
+    validation.on_sent(1);
+    assert!(validation.is_blocking());
+    validation.grant().unwrap();
+    assert!(!validation.is_blocking());
+    validation.revalidate(|| {}, || {}).unwrap();
+    assert!(validation.is_blocking());
+    validation.on_received(1);
+    assert!(!validation.is_blocking());
+    validation.cancel();
+    assert!(validation.is_blocking());
+}
+
+#[test]
+fn cancellation_does_not_notify_credit_callbacks() {
+    for received in [0, 1] {
+        let validation = ArcValidation::new();
+        validation.on_received(received);
+        validation.on_blocked(|| panic!("cancellation is not credit exhaustion"));
+        validation.on_charged(|| panic!("cancellation is not credit restoration"));
+        validation.cancel();
+        validation.cancel();
+        assert!(validation.is_cancelled());
+        assert!(validation.credit().is_err());
+    }
+}
+
+#[test]
+fn grant_notifies_charge_only_when_credit_was_zero() {
+    for received in [0, 1] {
+        let validation = ArcValidation::new();
+        validation.on_received(received);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let charged = calls.clone();
+        validation.on_charged(move || {
+            charged.fetch_add(1, Ordering::Relaxed);
+        });
+        validation.grant().unwrap();
+        validation.grant().unwrap();
+        assert_eq!(validation.credit().unwrap(), None);
+        assert_eq!(calls.load(Ordering::Relaxed), usize::from(received == 0));
+    }
+}
+
+#[test]
+fn credit_callbacks_run_after_unlocking_and_only_on_state_changes() {
+    let validation = Arc::new(ArcValidation::new());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let blocked = Arc::downgrade(&validation);
+    let charged = blocked.clone();
+    let blocked_events = events.clone();
+    let charged_events = events.clone();
+    let block_cb = move || blocked_events.lock().unwrap().push(blocked.upgrade().unwrap().credit().unwrap());
+    let charge_cb = move || charged_events.lock().unwrap().push(charged.upgrade().unwrap().credit().unwrap());
+    validation.on_blocked(|| panic!("the old block callback must be replaced"));
+    validation.on_charged(|| panic!("the old charge callback must be replaced"));
+    validation.on_blocked(block_cb.clone());
+    validation.on_charged(charge_cb.clone());
+    validation.on_received(0);
+    validation.on_received(1);
+    validation.on_received(1);
+    validation.on_sent(5);
+    validation.on_sent(1);
+    validation.on_sent(0);
+    validation.grant().unwrap();
+    validation.grant().unwrap();
+    validation.revalidate(block_cb.clone(), charge_cb.clone()).unwrap();
+    validation.revalidate(block_cb, charge_cb).unwrap();
+    validation.on_received(1);
+    validation.cancel();
+    validation.on_received(1);
+    assert_eq!(*events.lock().unwrap(), [Some(3), Some(0), None, Some(0), Some(3)]);
 }
 
 fn dump(
@@ -96,7 +177,7 @@ fn credit_snapshots_preserve_the_sending_tasks_waiter() {
             assert_eq!(validation.credit().unwrap(), Some(1200));
             validation.on_sent(1200);
             assert_eq!(validation.credit().unwrap(), Some(0));
-            validation.enter_validated().unwrap();
+            validation.grant().unwrap();
             assert_eq!(validation.credit().unwrap(), None);
         }
         assert_eq!(count(&wakes), 1);
@@ -135,7 +216,7 @@ fn shared_validation_send_frame_wakes_sender_and_packages_both_frame_types() {
     sender.send_frame([PathResponseFrame::from(challenge(4))]);
     assert_eq!(count(&wakes), 2);
 
-    frames.enter_validated().unwrap();
+    frames.grant().unwrap();
     sender.send_frame([challenge(5)]);
     sender.send_frame([PathResponseFrame::from(challenge(6))]);
     assert_eq!(dump(&mut frames, 64, &waker).1, vec![Frame::PathResponse(challenge(4).into()), Frame::PathResponse(challenge(6).into()),]);
@@ -244,7 +325,7 @@ fn exemption_grants_unlimited_credit_and_revalidation_revokes_it() {
     validation.on_received(usize::MAX);
     validation.on_sent(usize::MAX);
     assert!(matches!(credit(&validation), Poll::Ready(Ok(None))));
-    validation.revalidate().unwrap();
+    validation.revalidate(|| {}, || {}).unwrap();
     assert!(!validation.is_validated());
     assert!(credit(&validation).is_pending());
     assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(7).into())]);
@@ -289,7 +370,7 @@ async fn respond_does_not_match_challenges_or_enter_validated() {
     assert!(!validation.is_validated());
     assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(30)))));
 
-    validation.enter_validated().unwrap();
+    validation.grant().unwrap();
     assert!(validation.is_validated());
     assert_eq!(validation.respond().await.unwrap(), None);
     assert!(matches!(credit(&validation), Poll::Ready(Ok(None))));
@@ -321,7 +402,7 @@ async fn validated_state_keeps_the_response_waiter_until_cancellation() {
     let (wakes, waker) = waiter();
     assert!(response.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
 
-    validation.enter_validated().unwrap();
+    validation.grant().unwrap();
     assert_eq!(count(&wakes), 0);
     validation.cancel();
     assert_eq!(count(&wakes), 1);
@@ -342,7 +423,7 @@ async fn explicit_validation_wakes_credit_and_preserves_replies_to_the_peer() {
     validation.recv_frame(PathResponseFrame::from(challenge(1))).unwrap();
     assert_eq!(response.await.unwrap(), Some(PathResponseFrame::from(challenge(1))));
     assert_eq!(count(&wakes), 0);
-    validation.enter_validated().unwrap();
+    validation.grant().unwrap();
     assert_eq!(count(&wakes), 1);
     assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathResponse(challenge(2).into())]);
     validation.recv_frame(challenge(3)).unwrap();
@@ -384,7 +465,7 @@ async fn revalidate_during_validation_preserves_the_current_attempt() {
     tokio::pin!(response);
     assert!(futures::poll!(&mut response).is_pending());
 
-    validation.revalidate().unwrap();
+    validation.revalidate(|| {}, || {}).unwrap();
     assert!(futures::poll!(&mut response).is_pending());
     assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(290)))));
     assert_eq!(dump(&mut validation, 64, Waker::noop()).1, vec![Frame::PathChallenge(challenge(1))]);
@@ -401,9 +482,9 @@ async fn revalidation_from_validated_creates_a_receiver_for_the_new_attempt() {
     validation.challenge(challenge(1)).unwrap();
     let first = PathResponseFrame::from(challenge(1));
     validation.recv_frame(first).unwrap();
-    validation.enter_validated().unwrap();
+    validation.grant().unwrap();
 
-    validation.revalidate().unwrap();
+    validation.revalidate(|| {}, || {}).unwrap();
     let response = validation.respond();
     tokio::pin!(response);
     assert!(futures::poll!(&mut response).is_pending());
@@ -446,8 +527,8 @@ async fn cancellation_wakes_all_three_waiters_and_cannot_be_reversed() {
     assert!(matches!(response.await, Err(Cancelled)));
     assert!(matches!(credit(&validation), Poll::Ready(Err(Cancelled))));
     assert!(validation.exempt().is_err());
-    assert!(validation.enter_validated().is_err());
-    assert!(validation.revalidate().is_err());
+    assert!(validation.grant().is_err());
+    assert!(validation.revalidate(|| {}, || {}).is_err());
     assert!(validation.challenge(challenge(1)).is_err());
     assert!(matches!(validation.respond().await, Err(Cancelled)));
     validation.recv_frame(challenge(2)).unwrap();
@@ -461,7 +542,7 @@ fn every_received_challenge_queues_a_response_in_both_states() {
     for validated in [false, true] {
         let mut validation = ArcValidation::new();
         if validated {
-            validation.enter_validated().unwrap();
+            validation.grant().unwrap();
         }
         for _ in 0..10 {
             validation.recv_frame(challenge(1)).unwrap();
@@ -508,7 +589,7 @@ async fn registry_clones_dispatch_both_directions_to_the_correct_path() {
     assert_eq!(first.respond().await.unwrap(), Some(PathResponseFrame::from(challenge(11))));
     assert_eq!(second.respond().await.unwrap(), Some(PathResponseFrame::from(challenge(22))));
     let shared = receiver.get(&pathway(1)).unwrap();
-    shared.enter_validated().unwrap();
+    shared.grant().unwrap();
     assert!(first.is_validated());
 }
 
