@@ -31,13 +31,9 @@ impl Sender {
         let spaces = ArcSpaces::default();
         spaces.retire(Epoch::Handshake);
         spaces.add(self.transport.data.clone());
-        let quota = self.path.cc.send_quota();
+        self.path.cc.prepare_burst_budget(&mut Context::from_waker(std::task::Waker::noop())).unwrap();
         let overhead = QuicProtocol::packet_overhead(self.path.pathway);
-        let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead)).min(if quota == 0 {
-            1200
-        } else {
-            quota.saturating_sub(overhead)
-        });
+        let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead));
         let mut ack = self.transport.data.rcvd_journal.ack_package(self.path.cc.need_ack(Epoch::Data));
         let mut validation = self.path.validation.clone();
         let mut ping = (self.heartbeat || self.path.cc.need_send_ack_eliciting(Epoch::Data) > 0).then_some(PingFrame);
@@ -45,8 +41,9 @@ impl Sender {
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
             &self.path.cc,
+            overhead,
             ConnectionId::from_slice(b"original"),
-            &mut std::io::Cursor::new(self.bytes.as_mut()),
+            self.bytes.as_mut(),
             PacketContent::EffectivePayload,
             &mut Vec::new(),
             &mut [&mut ack, &mut validation, &mut ping],
@@ -86,6 +83,7 @@ impl Sender {
 
 impl Drop for Sender {
     fn drop(&mut self) {
+        self.path.cc.on_burst_completed();
         if let Some(meta) = self.pending.take() {
             Recover::cancel(self.transport.data.as_ref(), meta.pn, &mut std::iter::empty());
         }

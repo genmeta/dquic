@@ -3,7 +3,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU16, Ordering},
     },
-    task::{Context, Poll},
+    task::Context,
 };
 
 use qbase::{Epoch, frame::AckFrame, handshake::HandshakeFacts, net::tx::ArcSendWakers, role::Role, util::ArcIndexDeque};
@@ -41,6 +41,7 @@ pub struct CongestionController {
     pacer: pacing::Pacer,
     // The waker to notify when the controller is ready to send.
     pending_burst: bool,
+    burst_budget: Option<usize>,
     // Shared connection spaces, indexed by epoch even after early spaces retire.
     resenders: ArcIndexDeque<Arc<dyn Resend>, 2>,
     need_send_ack_eliciting_packets: [usize; Epoch::count()],
@@ -63,7 +64,7 @@ impl CongestionController {
     ///       // while the amplification limit applied.
     ///       OnLossDetectionTimeout()
     ///
-    /// The sender reports blocking after credit changes; poll_send_quota then
+    /// The sender reports blocking after credit changes; prepare_burst_budget then
     /// processes an expired PTO using the updated budget.
     /// Update the sender's anti-amplification decision without resetting PTO backoff.
     pub fn set_amplification_blocked(&mut self, blocked: bool) {
@@ -115,6 +116,7 @@ impl CongestionController {
             discarded_epochs: [false; Epoch::count()],
             pacer: Pacer::new(INITIAL_RTT, INIT_CWND, pmtu.load(Ordering::Relaxed) as usize, now, None),
             pending_burst: false,
+            burst_budget: None,
             resenders,
             need_send_ack_eliciting_packets: [0; Epoch::count()],
             hs_facts,
@@ -170,6 +172,7 @@ impl CongestionController {
 
     /// Record a submitted packet and the ACK carried by it under the same guard.
     pub fn on_pkt_sent(&mut self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>) {
+        self.burst_budget = None;
         self.on_packet_sent(pn, epoch, is_ack_eliciting, in_flight, sent_bytes);
         if let Some(largest_acked) = ack {
             self.packet_spaces[epoch].rcvd_packets.on_ack_sent(pn, largest_acked);
@@ -539,14 +542,6 @@ impl CongestionController {
         Ok(())
     }
 
-    pub fn poll_send_quota(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
-        self.tx_waker.register(cx.waker());
-        self.tick()?;
-        let quota = self.send_quota();
-        self.pending_burst = quota < self.mtu();
-        Poll::Ready(Ok(if self.pending_burst { 0 } else { quota }))
-    }
-
     fn on_path_lost(&mut self) {
         // Initial and Handshake packets belong to the single handshake path. They are discarded
         // when the handshake completes, so retiring a path must not requeue them for retransmit.
@@ -617,8 +612,10 @@ impl ArcCC {
         self.0.lock().unwrap().tx_waker.unregister(waker);
     }
 
-    pub fn poll_send_quota(&self, cx: &mut Context<'_>) -> Poll<Result<usize, TooManyPtos>> {
-        self.lock().poll_send_quota(cx)
+    pub fn on_pkt_sealed(&self, sent_bytes: usize) {
+        if let Some(budget) = self.lock().burst_budget.as_mut() {
+            *budget = budget.saturating_sub(sent_bytes);
+        }
     }
 
     /// Install negotiated local ACK scheduling and peer ACK/PTO bounds.
@@ -647,6 +644,20 @@ impl ArcCC {
 }
 
 impl super::Transport for ArcCC {
+    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> Result<(), TooManyPtos> {
+        let mut cc = self.lock();
+        cc.tx_waker.register(cx.waker());
+        cc.tick()?;
+        let quota = cc.send_quota();
+        cc.pending_burst = quota < cc.mtu();
+        cc.burst_budget = Some(if cc.pending_burst { 0 } else { quota });
+        Ok(())
+    }
+
+    fn on_burst_completed(&self) {
+        self.lock().burst_budget = None;
+    }
+
     fn do_tick(&self) -> Result<(), TooManyPtos> {
         let mut guard = self.0.lock().unwrap();
         guard.tick()?;
@@ -664,13 +675,12 @@ impl super::Transport for ArcCC {
 
     fn send_quota(&self) -> usize {
         let mut guard = self.0.lock().unwrap();
-        let send_quota = guard.send_quota();
-        if send_quota >= guard.mtu() {
-            send_quota
-        } else {
-            guard.pending_burst = true;
-            0
+        if let Some(budget) = guard.burst_budget {
+            return budget;
         }
+        let send_quota = guard.send_quota();
+        guard.pending_burst = send_quota < guard.mtu();
+        if guard.pending_burst { 0 } else { send_quota }
     }
 
     fn retransmit_and_expire_time(&self, epoch: Epoch) -> (Duration, Duration) {

@@ -17,7 +17,7 @@ use qbase::{
     },
     util::IndexDeque,
 };
-use qcongestion::ArcCC;
+use qcongestion::{ArcCC, Transport as _};
 use smallvec::SmallVec;
 use tokio::time::Instant;
 
@@ -78,14 +78,27 @@ impl ArcSpaces {
         &self,
         cx: &mut Context<'_>,
         cc: &ArcCC,
+        overhead: usize,
         dcid: ConnectionId,
-        bytes: &mut Cursor<&mut [u8]>,
+        bytes: &mut [u8],
         packet_content: PacketContent,
         frames: &mut Vec<GuaranteedFrame>,
         sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
     ) -> (usize, SmallVec<[Metadata; 1]>) {
         let spaces = self.0.read().unwrap().clone();
-        spaces.poll_dump(cx, cc, dcid, bytes, packet_content, frames, sources)
+        let quota = cc.send_quota();
+        let length = bytes.len().min(if quota == 0 {
+            usize::MAX
+        } else {
+            quota.saturating_sub(overhead)
+        });
+        let mut datagram = Cursor::new(&mut bytes[..length]);
+        let (size, packets) = spaces.poll_dump_at(cx, cc, dcid, Epoch::Initial, &mut datagram, packet_content, None, frames, sources);
+        let in_flight: usize = packets.iter().filter(|meta| meta.in_flight).map(|meta| meta.pktlen).sum();
+        if in_flight > 0 {
+            cc.on_pkt_sealed(in_flight + overhead);
+        }
+        (size, packets)
     }
 }
 
@@ -98,20 +111,6 @@ impl UnregisterWaker for ArcSpaces {
 }
 
 impl Spaces {
-    #[allow(clippy::too_many_arguments)]
-    fn poll_dump(
-        &self,
-        cx: &mut Context<'_>,
-        cc: &ArcCC,
-        dcid: ConnectionId,
-        bytes: &mut Cursor<&mut [u8]>,
-        packet_content: PacketContent,
-        frames: &mut Vec<GuaranteedFrame>,
-        sources: &mut [&mut dyn for<'b> Package<&'b mut [u8]>],
-    ) -> (usize, SmallVec<[Metadata; 1]>) {
-        self.poll_dump_at(cx, cc, dcid, Epoch::Initial, bytes, packet_content, None, frames, sources)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn poll_dump_at(
         &self,

@@ -1,3 +1,5 @@
+use std::task::Context;
+
 use qbase::{Epoch, frame::AckFrame};
 use qevent::quic::recovery::PacketLostTrigger;
 use thiserror::Error;
@@ -23,8 +25,11 @@ pub trait Transport {
     /// Performs a periodic tick to drive the congestion control algorithm.
     fn do_tick(&self) -> Result<(), TooManyPtos>;
 
-    /// Returns how many bytes can be sent at the moment.
-    /// Returns zero when the congestion controller is not ready.
+    /// Prepare one assembly budget and register the sender for recovery wakeups.
+    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> Result<(), TooManyPtos>;
+
+    /// Returns the prepared assembly budget, or computes live credit outside assembly.
+    /// A prepared budget retains its remainder even when it is smaller than one MTU.
     fn send_quota(&self) -> usize;
 
     /// Gets the retransmission and expiration time for the given epoch.
@@ -38,6 +43,9 @@ pub trait Transport {
     /// - `in_flight`: A boolean indicating whether the packet is considered in-flight.
     /// - `ack`: An optional `u64` representing the largest acknowledged packet number if an AckFrame was included.
     fn on_pkt_sent(&self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>);
+
+    /// Discard the assembly budget after submission or cancellation.
+    fn on_burst_completed(&self);
 
     /// Records the receipt of a packet, which may influence future packet transmissions.
     /// # Parameters
