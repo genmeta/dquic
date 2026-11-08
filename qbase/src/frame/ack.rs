@@ -4,7 +4,7 @@ use nom::{Parser, combinator::map};
 
 use crate::{
     frame::{GetFrameType, io::WriteFrameType},
-    varint::{VarInt, WriteVarInt, be_varint},
+    varint::{VARINT_MAX, VarInt, WriteVarInt, be_varint},
 };
 
 /// ECN flag for ACK frames
@@ -112,11 +112,6 @@ impl AckFrame {
         self.delay.into_u64()
     }
 
-    /// Set the ACK delay.
-    pub fn set_delay(&mut self, delay: VarInt) {
-        self.delay = delay;
-    }
-
     /// Return the first range.
     pub fn first_range(&self) -> u64 {
         self.first_range.into_u64()
@@ -203,7 +198,7 @@ impl EcnCounts {
 
 /// Parser for parsing an ACK frame with the given ECN flag,
 /// [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn ack_frame_with_ecn(ecn: Ecn) -> impl Fn(&[u8]) -> nom::IResult<&[u8], AckFrame> {
+pub fn ack_frame_with_ecn(ecn: Ecn, ack_delay_exponent: u32) -> impl Fn(&[u8]) -> nom::IResult<&[u8], AckFrame> {
     move |input: &[u8]| {
         let (mut remain, (largest, delay, count, first_range)) = (be_varint, be_varint, be_varint, be_varint).parse(input)?;
         let mut ranges = Vec::new();
@@ -223,6 +218,8 @@ pub fn ack_frame_with_ecn(ecn: Ecn) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Ack
             None
         };
 
+        let delay = delay.into_u64().saturating_mul(1u64 << ack_delay_exponent).min(VARINT_MAX);
+        let delay = VarInt::from_u64(delay).unwrap();
         Ok((remain, AckFrame { largest, delay, first_range, ranges, ecn }))
     }
 }

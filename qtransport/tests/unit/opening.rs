@@ -37,7 +37,6 @@ fn data(receiver: &super::DataFixture, keys: ArcOneRttKeys) -> Arc<DataSpace> {
         receiver.spaces.data.streams.clone(),
         receiver.spaces.data.reliable_frames.clone(),
         0,
-        0,
         receiver.paths.progress.facts(),
     ))
 }
@@ -61,6 +60,7 @@ async fn receive(data: Arc<DataSpace>, paths: Arc<crate::Paths>, buffers: Vec<By
         paths,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         crate::ArcHandshakeDone::new_client(),
+        0,
     )
     .await;
 }

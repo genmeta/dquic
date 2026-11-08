@@ -180,6 +180,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
     paths: Arc<Paths>,
     tokens: ArcTokenRegistry,
     hs_done: ArcHandshakeDone,
+    peer_ack_delay_exponent: u32,
 ) {
     let terminator = paths.terminator.clone();
     let idle = paths.idle_timer();
@@ -239,7 +240,7 @@ pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
             let packet = PlainPacket::new(header, pn, encoded, buffer.freeze(), pn_offset, plain_len);
             let pn = packet.pn();
             let mut content = PacketContent::default();
-            for frame in FrameReader::new(packet.body(), packet.get_type()) {
+            for frame in FrameReader::new(packet.body(), packet.get_type()).with_ack_delay_exponent(peer_ack_delay_exponent) {
                 let (frame, fty) = frame?;
                 content += PacketContent::from(fty);
                 if !matches!(frame, Frame::Padding(_)) {

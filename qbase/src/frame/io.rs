@@ -17,7 +17,7 @@ use crate::{ArcReceiving, util::Buffer};
 ///
 /// Some frames like [`StreamFrame`] and [`CryptoFrame`] have a data body,
 /// which use `bytes::Bytes` to store.
-fn complete_frame(frame_type: FrameType, raw: Bytes) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame<Bytes>> {
+fn complete_frame(frame_type: FrameType, raw: Bytes, ack_delay_exponent: u32) -> impl Fn(&[u8]) -> nom::IResult<&[u8], Frame<Bytes>> {
     use nom::{Parser, combinator::map};
     move |input: &[u8]| match frame_type {
         FrameType::Padding => Ok((input, Frame::Padding(PaddingFrame))),
@@ -31,7 +31,7 @@ fn complete_frame(frame_type: FrameType, raw: Bytes) -> impl Fn(&[u8]) -> nom::I
         FrameType::PathResponse => map(be_path_response_frame, Frame::PathResponse).parse(input),
         FrameType::HandshakeDone => Ok((input, Frame::HandshakeDone(HandshakeDoneFrame))),
         FrameType::NewToken => map(be_new_token_frame, Frame::NewToken).parse(input),
-        FrameType::Ack(ecn) => map(ack_frame_with_ecn(ecn), Frame::Ack).parse(input),
+        FrameType::Ack(ecn) => map(ack_frame_with_ecn(ecn, ack_delay_exponent), Frame::Ack).parse(input),
         FrameType::ResetStream => map(be_reset_stream_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::StopSending => map(be_stop_sending_frame, |f| Frame::StreamCtl(f.into())).parse(input),
         FrameType::MaxStreamData => map(be_max_stream_data_frame, |f| Frame::StreamCtl(f.into())).parse(input),
@@ -86,14 +86,20 @@ fn complete_frame(frame_type: FrameType, raw: Bytes) -> impl Fn(&[u8]) -> nom::I
 }
 
 /// Parse a frame type from the raw bytes, [nom](https://docs.rs/nom/latest/nom/) parser style.
-pub fn be_frame(raw: &Bytes, packet_type: Type) -> Result<(usize, Frame<Bytes>, FrameType), Error> {
+/// Data ACK delays use the peer's negotiated exponent (0..=20); other levels do not apply it.
+pub fn be_frame(raw: &Bytes, packet_type: Type, ack_delay_exponent: u32) -> Result<(usize, Frame<Bytes>, FrameType), Error> {
     let input = raw.as_ref();
     let (remain, frame_type) = be_frame_type(input)?;
     if !frame_type.belongs_to(packet_type) {
         return Err(Error::WrongType(frame_type, packet_type));
     }
 
-    let (remain, frame) = complete_frame(frame_type, raw.clone())(remain).map_err(|e| match e {
+    let ack_delay_exponent = if matches!(packet_type, Type::Short(_)) {
+        ack_delay_exponent
+    } else {
+        0
+    };
+    let (remain, frame) = complete_frame(frame_type, raw.clone(), ack_delay_exponent)(remain).map_err(|e| match e {
         ne @ nom::Err::Incomplete(_) => nom::Err::Error(Error::IncompleteFrame(frame_type, ne.to_string())),
         nom::Err::Error(ne) => {
             // may be TooLarge in MaxStreamsFrame/CryptoFrame/StreamFrame,

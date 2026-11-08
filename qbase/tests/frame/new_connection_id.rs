@@ -48,7 +48,7 @@ fn test_invalid_retire_prior_to() {
     buf.put_varint(&VarInt::from_u32(1)); // sequence
     buf.put_varint(&VarInt::from_u32(2)); // retire_prior_to > sequence
 
-    assert!(io::be_frame(&buf.freeze(), super::Type::Short(super::OneRtt(0.into()))).is_err());
+    assert!(io::be_frame(&buf.freeze(), super::Type::Short(super::OneRtt(0.into())), 0).is_err());
 }
 
 #[test]
@@ -59,5 +59,5 @@ fn test_zero_length_connection_id() {
     buf.put_varint(&VarInt::from_u32(0));
     buf.put_u8(0); // zero length CID
 
-    assert!(io::be_frame(&buf.freeze(), super::Type::Short(super::OneRtt(0.into()))).is_err());
+    assert!(io::be_frame(&buf.freeze(), super::Type::Short(super::OneRtt(0.into())), 0).is_err());
 }

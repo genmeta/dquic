@@ -555,7 +555,6 @@ pub(super) fn data_spaces(role: Role, defer: Duration) -> (Arc<Paths>, super::Da
         streams,
         reliable_frames.clone(),
         parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         facts,
     ));
     terminator.register(Arc::new(data.crypto.clone()));

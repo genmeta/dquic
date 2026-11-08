@@ -92,7 +92,6 @@ pub async fn client_growing(
                 streams,
                 reliable_frames.clone(),
                 parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
                 progress.facts(),
             ));
             progress.install_data(data_space.clone());
@@ -106,6 +105,7 @@ pub async fn client_growing(
                 paths.clone(),
                 token_registry,
                 hs_done.clone(),
+                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
             ));
 
             tokio::spawn(read_tls_to_space(tls_context.clone(), data_space.as_ref(), paths.clone()));

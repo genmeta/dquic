@@ -160,6 +160,7 @@ async fn receive_on_paths(
         paths.clone(),
         tokens,
         handshake.clone(),
+        phase.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
     )
     .await;
     assert!(notification.notified().is_none(), "received frames must not close the connection");
@@ -228,6 +229,7 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
         paths.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         ArcHandshakeDone::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
+        receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
     ));
     let peer_error: crate::Error = QuicError::with_default_fty(ErrorKind::None, "peer close").into();
     let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
@@ -313,6 +315,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             paths.clone(),
             ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
             handshake.clone(),
+            receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         )
         .await;
         let stream_error = receiver.spaces.data.streams.accept_uni().await.unwrap_err();

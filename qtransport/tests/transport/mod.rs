@@ -169,7 +169,6 @@ fn transport(role: Role, keys: qtls::OneRttKeyMaterial, limits: u32) -> Arc<Tran
         streams,
         reliable,
         params.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        params.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         confirmed_handshake(role),
     ));
     data.keys.allow_update();
@@ -271,6 +270,7 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     receive_packets(
         packets.one_rtt,
         Epoch::Data,
+        transport.parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
         {
             let keys = transport.data.keys.clone();
             move || Some(keys.clone())
@@ -489,6 +489,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             receive_packets(
                 rcvd_pkt.initial,
                 space.epoch,
+                0,
                 {
                     let keys = space.keys.clone();
                     move || keys.get().ok()
@@ -508,6 +509,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
             receive_packets(
                 rcvd_pkt.handshake,
                 space.epoch,
+                0,
                 {
                     let keys = space.keys.clone();
                     move || keys.get().ok()
@@ -585,6 +587,7 @@ async fn router_and_receive_deliver_streams_and_keep_close_receiving() {
     let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
+        st.parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
         {
             let keys = st.data.keys.clone();
             move || Some(keys.clone())
@@ -647,6 +650,7 @@ async fn receive_error_keeps_the_engine_alive_for_peer_close() {
     receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
+        st.parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
         {
             let keys = st.data.keys.clone();
             move || Some(keys.clone())
@@ -1005,7 +1009,8 @@ async fn receiving_starts_with_ready_keys() {
     let [client, server] = materials;
     let ct = transport(Role::Client, client, 1);
     let cp = path(&ct, 0);
-    let data = transport(Role::Server, server, 1).data.clone();
+    let st = transport(Role::Server, server, 1);
+    let data = st.data.clone();
     let (inbox, rcvd_pkt) = channel::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -1013,6 +1018,7 @@ async fn receiving_starts_with_ready_keys() {
     let task = tokio::spawn(receive_packets(
         rcvd_pkt.one_rtt,
         Epoch::Data,
+        st.parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
         {
             let keys = data.keys.clone();
             move || Some(keys.clone())
@@ -1050,6 +1056,7 @@ async fn pipeline_rejection_does_not_ack_and_close_bypasses_business_delivery() 
     receive_packets(
         packets.one_rtt,
         Epoch::Data,
+        st.parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
         {
             let keys = st.data.keys.clone();
             move || Some(keys.clone())
@@ -1414,6 +1421,7 @@ async fn empty_inbox_wait_ends_when_channel_closes() {
     let mut task = tokio::spawn(receive_packets(
         rcvd_pkt.initial,
         space.epoch,
+        0,
         {
             let keys = space.keys.clone();
             move || keys.get().ok()

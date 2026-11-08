@@ -52,7 +52,7 @@ fn test_read_max_streams_frame() {
 fn test_read_too_large_max_streams_frame() {
     let buf = bytes::Bytes::from_static(&[0x12, 0xd0, 0x34, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]);
     assert_eq!(
-        qbase::frame::io::be_frame(&buf, super::Type::Short(super::OneRtt(0.into()))),
+        qbase::frame::io::be_frame(&buf, super::Type::Short(super::OneRtt(0.into())), 0),
         Err(qbase::frame::Error::ParseError(FrameType::MaxStreams(Dir::Bi), nom::error::ErrorKind::TooLarge.description().to_owned()))
     );
 }

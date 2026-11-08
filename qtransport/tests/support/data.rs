@@ -27,7 +27,6 @@ pub(crate) fn data() -> Arc<DataSpace> {
         streams,
         reliable,
         parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-        parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         facts,
     ))
 }

@@ -93,3 +93,47 @@ fn test_read_ack_frame() {
         ))
     );
 }
+
+#[test]
+fn frame_reader_decodes_ack_delay_and_preserves_ranges_and_ecn() {
+    use qbase::{
+        packet::r#type::{Type, short::OneRtt},
+        varint::VARINT_MAX,
+    };
+
+    for (exponent, encoded, decoded) in [(0, 7, 7), (3, 7, 56), (20, 7, 7 << 20), (3, 1 << 61, VARINT_MAX), (3, VARINT_MAX, VARINT_MAX)] {
+        for ecn in [None, Some(EcnCounts::new(1u32.into(), 2u32.into(), 3u32.into()))] {
+            let ranges = vec![(1u32.into(), 0u32.into())];
+            let mut bytes = bytes::BytesMut::new();
+            bytes.put_frame(&AckFrame::new(3u32.into(), encoded.try_into().unwrap(), 0u32.into(), ranges.clone(), ecn));
+            bytes.put_frame(&PingFrame);
+            let mut reader = FrameReader::new(bytes.freeze(), Type::Short(OneRtt(0.into()))).with_ack_delay_exponent(exponent);
+            assert_eq!(
+                reader.next().unwrap().unwrap(),
+                (
+                    Frame::Ack(AckFrame::new(3u32.into(), decoded.try_into().unwrap(), 0u32.into(), ranges, ecn)),
+                    FrameType::Ack(if ecn.is_some() { Ecn::Exist } else { Ecn::None }),
+                )
+            );
+            assert_eq!(reader.next().unwrap().unwrap(), (Frame::Ping(PingFrame), FrameType::Ping));
+            assert!(reader.next().is_none());
+        }
+    }
+}
+
+#[test]
+fn frame_reader_does_not_apply_peer_ack_delay_exponent_to_handshake_spaces() {
+    use qbase::packet::r#type::{
+        Type,
+        long::{Type::V1, Ver1},
+    };
+
+    let ack = AckFrame::new(0u32.into(), 7u32.into(), 0u32.into(), vec![], None);
+    let mut bytes = bytes::BytesMut::new();
+    bytes.put_frame(&ack);
+    for packet_type in [Type::Long(V1(Ver1::INITIAL)), Type::Long(V1(Ver1::HANDSHAKE))] {
+        let mut reader = FrameReader::new(bytes.clone().freeze(), packet_type).with_ack_delay_exponent(20);
+        assert_eq!(reader.next().unwrap().unwrap().0, Frame::Ack(ack.clone()));
+        assert!(reader.next().is_none());
+    }
+}

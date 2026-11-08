@@ -21,6 +21,7 @@ use crate::{
 pub(super) async fn receive_packets<H, M>(
     mut packets: PacketReceiver<H>,
     epoch: Epoch,
+    ack_delay_exponent: u32,
     mut keys: impl FnMut() -> Option<M>,
     journal: ArcRcvdJournal,
     mut admit_path: impl FnMut(Pathway, Link) -> Option<Arc<Path>>,
@@ -41,7 +42,7 @@ pub(super) async fn receive_packets<H, M>(
         let result = open(&keys, packet, pathway).and_then(|opened| {
             if let Some(packet) = opened {
                 let pn = packet.pn();
-                let frames = FrameReader::new(packet.body(), packet.get_type());
+                let frames = FrameReader::new(packet.body(), packet.get_type()).with_ack_delay_exponent(ack_delay_exponent);
                 let mut content = PacketContent::default();
                 for frame in frames {
                     let (frame, fty) = frame?;

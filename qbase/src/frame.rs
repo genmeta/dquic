@@ -669,12 +669,19 @@ pub struct FrameReader {
     #[deref_mut]
     payload: Bytes,
     packet_type: Type,
+    ack_delay_exponent: u32,
 }
 
 impl FrameReader {
     /// Creates a [`FrameReader`] for a packet of type `packet_type`
     pub fn new(payload: Bytes, packet_type: Type) -> Self {
-        Self { payload, packet_type }
+        Self { payload, packet_type, ack_delay_exponent: 0 }
+    }
+
+    /// Decode Data ACK delays with the peer's negotiated exponent (0..=20).
+    pub fn with_ack_delay_exponent(mut self, exponent: u32) -> Self {
+        self.ack_delay_exponent = exponent;
+        self
     }
 }
 
@@ -686,7 +693,7 @@ impl Iterator for FrameReader {
             return None;
         }
 
-        match io::be_frame(&self.payload, self.packet_type) {
+        match io::be_frame(&self.payload, self.packet_type, self.ack_delay_exponent) {
             Ok((consumed, frame, frame_type)) => {
                 self.payload.advance(consumed);
                 Some(Ok((frame, frame_type)))
