@@ -80,7 +80,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         assert_eq!(meta.content, PacketContent::NonAckEliciting);
         assert!(space.sent_journal().lock_guard().frames(meta.pn).next().is_none());
         assert_eq!(data.spaces.data.streams.fresh_bytes(), b"queued stream".len());
-        datagrams[0].packets.retain(|(_, meta)| meta.epoch() != epoch);
+        datagrams[0].packets.retain(|meta| meta.epoch() != epoch);
         space.on_sent(meta.pn, false, Duration::from_secs(1), Duration::from_secs(3));
         path.cc.on_pkt_sent(epoch, meta.pn, false, meta.pktlen, false, Some(42));
         path.refresh(&mut datagrams, &mut frames);
@@ -367,7 +367,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     if (selected == u8::MAX && attempt < 3) || (matches!(selected, 1 | 2) && attempt == 0) {
                         assert!(matches!(result, Some(Ok((1, _)))), "{role:?} {handshaking} {selected} {attempt}");
                         for slots in &mut datagrams {
-                            slots.packets.retain(|(_, meta)| meta.epoch() != Epoch::Initial);
+                            slots.packets.retain(|meta| meta.epoch() != Epoch::Initial);
                         }
                     } else {
                         assert!(result.is_none(), "{role:?} {handshaking} {selected} {attempt}");
@@ -453,7 +453,7 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
         assert!(decoded.iter().any(|(frame, _)| matches!(frame, Frame::Close(_))));
         assert!(decoded.iter().all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_))));
         for slots in &mut datagrams {
-            slots.packets.retain(|(_, meta)| meta.epoch() != epoch);
+            slots.packets.retain(|meta| meta.epoch() != epoch);
         }
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
         terminator.terminate();
@@ -897,7 +897,7 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     assert!(matches!(path.collect(&mut datagrams, &mut frames).now_or_never(), Some(Ok((1, _)))));
     assert_eq!(pns_for(&datagrams, Epoch::Initial).count(), 1);
     for slots in &mut datagrams {
-        slots.packets.retain(|(_, meta)| meta.epoch() != Epoch::Initial);
+        slots.packets.retain(|meta| meta.epoch() != Epoch::Initial);
     }
     // A path without an available CID must wait before collecting data. Retirement
     // must wake that wait even though the socket has never been polled.
@@ -995,7 +995,7 @@ async fn heartbeat_wakes_the_collector_and_supplies_ping_in_each_space() {
             assert!(matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(1))));
             for slots in &mut datagrams {
                 if let Some(meta) = datagram_metadata(slots, Epoch::Data) {
-                    slots.packets.retain(|(_, meta)| meta.epoch() != Epoch::Data);
+                    slots.packets.retain(|meta| meta.epoch() != Epoch::Data);
                     mature.spaces.data.on_sent(meta.pn, meta.in_flight, Duration::from_secs(1), Duration::from_secs(3));
                 }
             }
@@ -1081,7 +1081,7 @@ async fn trackers_follow_space_creation_and_retirement_in_epoch_order() {
 }
 
 pub(super) fn datagram_metadata(datagram: &Datagram, epoch: Epoch) -> Option<Metadata> {
-    datagram.packets.iter().find(|(_, meta)| meta.epoch() == epoch).map(|(_, meta)| *meta)
+    datagram.packets.iter().find(|meta| meta.epoch() == epoch).copied()
 }
 
 pub(super) fn poll_collect(
@@ -1094,7 +1094,7 @@ pub(super) fn poll_collect(
 }
 
 fn metadata(datagrams: &[Datagram]) -> impl Iterator<Item = &Metadata> {
-    datagrams.iter().flat_map(|datagram| datagram.packets.iter().map(|(_, meta)| meta))
+    datagrams.iter().flat_map(|datagram| &datagram.packets)
 }
 
 fn pns_for(datagrams: &[Datagram], epoch: Epoch) -> impl Iterator<Item = (usize, u64)> + '_ {
@@ -1431,7 +1431,7 @@ async fn sending_uses_its_budget_across_multiple_collections() {
 }
 
 #[tokio::test]
-async fn termination_after_space_retirement_recovers_collected_packets() {
+async fn termination_discards_collected_packets_after_space_retirement() {
     let paths = crate::common::initial_paths(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
@@ -1462,7 +1462,7 @@ async fn termination_after_space_retirement_recovers_collected_packets() {
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     paths.progress.on_handshake_sent();
     assert!(paths.spaces.get(Epoch::Initial).is_none());
-    assert!(owner.upgrade().is_some(), "collected packets retain their space");
+    assert!(owner.upgrade().is_none(), "collected packets must not retain retired spaces");
     paths.terminator.terminate();
     let idle_timer = paths.idle_timer();
     tokio::select! {
@@ -1475,8 +1475,7 @@ async fn termination_after_space_retirement_recovers_collected_packets() {
     assert!(datagrams[0].bytes.is_empty());
     assert!(datagrams[0].packets.is_empty());
     assert!(frames.is_empty());
-    assert!(space.sent_journal.lock_guard().packet(pn).is_none());
-    assert!(owner.upgrade().is_none());
+    assert!(space.sent_journal.lock_guard().packet(pn).is_some(), "refresh must skip the retired journal");
     assert_eq!(path.cc.send_quota(), quota);
     cancel_waiters(&paths, &path);
     paths.retire_all();
@@ -1580,7 +1579,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     let mut frames = Vec::new();
     let (count, dcid) = path.collect(&mut datagrams, &mut frames).await.unwrap();
     assert!(count > 1);
-    let pending: Vec<_> = datagrams.iter().map(|datagram| datagram.packets.iter().map(|(_, meta)| *meta).collect::<Vec<_>>()).collect();
+    let pending: Vec<_> = datagrams.iter().map(|datagram| datagram.packets.clone()).collect();
     let first = packet_metadata(&pending[0], Epoch::Initial).unwrap().pn;
     let suffix = packet_metadata(&pending[1], Epoch::Initial).unwrap().pn;
     let offset = space
@@ -1601,7 +1600,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(
-        datagrams[1].packets.iter().map(|(_, meta)| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
+        datagrams[1].packets.iter().map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
         pending[1].iter().map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
     );
     path.refresh(&mut datagrams, &mut frames);
@@ -1677,7 +1676,7 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
+async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path() {
     use qprotocol::{QuicProtocol, UdpSocket};
     use tokio::time::Instant;
 
@@ -1692,7 +1691,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
         keys(true),
     );
     let initial = crate::common::initial_space(&paths.spaces);
-    let handshake = Arc::new(HandshakeSpace::new(Default::default(), initial.keys.clone(), paths.progress.facts()));
+    let handshake = Arc::new(HandshakeSpace::new(Default::default(), ArcKeys::new(Arc::new(keys(true))), paths.progress.facts()));
     initial.crypto.writer().write_all(b"initial").await.unwrap();
     handshake.crypto.writer().write_all(b"handshake").await.unwrap();
     super::install_handshake(&paths, handshake.clone());
@@ -1717,6 +1716,8 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     assert_eq!(count, 1);
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
     assert!(datagram_metadata(&datagrams[0], Epoch::Handshake).is_some());
+    paths.progress.on_handshake_received();
+    assert!(paths.spaces.get(Epoch::Initial).is_none());
     let journals = [&initial.sent_journal, &handshake.sent_journal];
     tokio::time::advance(Duration::from_secs(10)).await;
     for journal in journals {
@@ -1729,11 +1730,11 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(crate::common::path_credit(&path), 2400);
     path.refresh(&mut datagrams, &mut frames);
-    for (journal, delay) in journals.into_iter().zip(delays) {
+    for ((journal, delay), expected) in journals.into_iter().zip(delays).zip([0, 1]) {
         journal.on_tick(submitted_at + delay - Duration::from_nanos(1), |_| panic!("timer started before submission"));
         let mut recovered = 0;
         journal.on_tick(submitted_at + delay, |_| recovered += 1);
-        assert_eq!(recovered, 1, "each space starts its submitted packet's journal timer");
+        assert_eq!(recovered, expected, "only the live space starts its journal timer");
     }
     cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());

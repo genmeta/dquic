@@ -62,9 +62,8 @@ impl ArcSpaces {
         space.downcast().ok()
     }
 
-    fn iter(&self) -> impl Iterator<Item = Arc<dyn Encapsulate>> {
-        let spaces: SmallVec<[_; 3]> = self.0.read().unwrap().0.iter().cloned().collect();
-        spaces.into_iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Arc<dyn Encapsulate>> + '_ {
+        Epoch::EPOCHS.into_iter().filter_map(|epoch| self.get(epoch))
     }
 
     /// Drive recovery timers for the installed spaces.
