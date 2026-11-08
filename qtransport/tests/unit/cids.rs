@@ -299,7 +299,7 @@ async fn collect_releases_idle_cids_and_refresh_releases_collected_cids_once() {
     use futures::FutureExt;
     use tokio::io::AsyncWriteExt;
 
-    use crate::send::Datagram;
+    use crate::path::Datagram;
 
     for collected in [false, true] {
         let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);

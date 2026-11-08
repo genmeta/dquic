@@ -19,10 +19,10 @@ impl ArcProgress {
         facts: Arc<HandshakeFacts>,
         remote_cids: ArcRemoteCids,
         spaces: ArcSpaces,
-        loss_resender: ArcResend,
+        resenders: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self(Arc::new(Mutex::new(Progress::new(facts, remote_cids, spaces, loss_resender, terminator))))
+        Self(Arc::new(Mutex::new(Progress::new(facts, remote_cids, spaces, resenders, terminator))))
     }
 
     pub fn facts(&self) -> Arc<HandshakeFacts> {
@@ -84,10 +84,10 @@ impl Progress {
         facts: Arc<HandshakeFacts>,
         remote_cids: ArcRemoteCids,
         spaces: ArcSpaces,
-        loss_resender: ArcResend,
+        resenders: ArcResend,
         terminator: ArcTerminator,
     ) -> Self {
-        Self { role: facts.role(), facts, remote_cids, spaces, loss_resender, terminator }
+        Self { role: facts.role(), facts, remote_cids, spaces, loss_resender: resenders, terminator }
     }
 
     fn on_initial_received(&mut self, peer_scid: ConnectionId) -> bool {

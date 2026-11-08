@@ -25,7 +25,10 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     Paths,
     common::{self, initial_keys as keys, opening::PacketOpen as _, packet_metadata},
-    send::{Datagram, cancel_waiters, send, sending},
+    path::{
+        Datagram,
+        task::{cancel_waiters, sending},
+    },
 };
 
 #[tokio::test(start_paused = true)]
@@ -139,7 +142,7 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     path.disable();
     // No socket is registered: successful cancellation must avoid UDP submission.
-    send(&path, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
     path.refresh(&mut datagrams, &mut frames);
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
@@ -1236,7 +1239,7 @@ async fn ack_only_submission_blocks_pto_when_amplification_credit_cannot_fit_a_p
     assert!(!meta.content.is_ack_eliciting());
     assert!(!meta.in_flight);
     assert!(meta.ack.is_some());
-    send(&path, &mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
     assert!(crate::common::path_credit(&path) > 0);
     tokio::time::advance(base * 2).await;
     // No subsequent budget poll: submission must already have told CC it is blocked.
@@ -1465,7 +1468,7 @@ async fn termination_after_space_retirement_recovers_collected_packets() {
     tokio::select! {
         biased;
         _ = paths.terminator.clone() => {},
-        _ = send(&path, &mut datagrams[..count], dcid, &idle_timer) => panic!("terminated task must skip submission"),
+        _ = path.send(&mut datagrams[..count], dcid, &idle_timer) => panic!("terminated task must skip submission"),
     }
     path.refresh(&mut datagrams, &mut frames);
     path.refresh(&mut datagrams, &mut frames);
@@ -1594,7 +1597,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
         .unwrap();
     // The kernel accepts the first datagram, then rejects the oversized second datagram.
     datagrams[1].bytes.resize(65536, 0);
-    let error = send(&path, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
+    let error = path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(
@@ -1619,7 +1622,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
             .frames(retransmit)
             .any(|frame| { matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == offset) })
     );
-    send(&path, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
     cancel_waiters(&paths, &path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
@@ -1663,7 +1666,7 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     let pn = datagram_metadata(&datagrams[0], Epoch::Initial).unwrap().pn;
     path.close();
 
-    let error = send(&path, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
+    let error = path.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
     assert!(matches!(error, crate::Error::Quic(error) if error.reason() == "Cancelled"));
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
@@ -1721,7 +1724,7 @@ async fn space_and_path_account_each_packet_and_start_timers_at_submission() {
     }
     assert_eq!(crate::common::path_credit(&path), 3600);
     let delays = [Epoch::Initial, Epoch::Handshake].map(|epoch| path.cc.retransmit_and_expire_time(epoch).0);
-    send(&path, &mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
+    path.send(&mut datagrams[..1], dcid, &paths.idle_timer()).await.unwrap();
     let submitted_at = Instant::now();
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(crate::common::path_credit(&path), 2400);
@@ -1795,7 +1798,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     let (count, dcid) =
         other.collect(&mut datagrams, &mut frames).now_or_never().expect("missing replacement must not suspend this sender").unwrap();
     assert_eq!(dcid, old);
-    send(&other, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    other.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
     assert_eq!(received_dcid(&peer).await, old);
     assert!(other.validation.is_validated());
     other.refresh(&mut datagrams, &mut frames);
@@ -1805,7 +1808,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     mature.spaces.data.crypto.writer().write_all(b"replacement CID sends").await.unwrap();
     let (count, dcid) = other.collect(&mut datagrams, &mut frames).now_or_never().unwrap().unwrap();
     assert_eq!(dcid, replacement);
-    send(&other, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+    other.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
     assert_eq!(received_dcid(&peer).await, replacement);
     other.refresh(&mut datagrams, &mut frames);
     other.close();
@@ -1953,7 +1956,7 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
             }
         }
         // Verify the CID on the wire after the policy changes and submission completes.
-        send(&first, &mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
+        first.send(&mut datagrams[..count], dcid, &paths.idle_timer()).await.unwrap();
         if change == 0 {
             first.refresh(&mut datagrams, &mut frames);
         } else {

@@ -1,6 +1,6 @@
 use std::{
     future::poll_fn,
-    io::Cursor,
+    io::{Cursor, IoSlice},
     sync::Arc,
     task::{Context, Poll, ready},
 };
@@ -12,10 +12,12 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{GuaranteedFrame, PingFrame},
     packet::{Package, PacketContent, assemble::Metadata},
+    time::timer::ArcIdleTimer,
 };
 use qcongestion::{CongestionController, Transport as _};
 use qprotocol::QuicProtocol;
 use smallvec::SmallVec;
+use tokio::time::Instant;
 
 use super::Path;
 use crate::{
@@ -26,41 +28,11 @@ use crate::{
 /// A UDP datagram and the QUIC packets awaiting submission within it.
 #[derive(Default)]
 pub struct Datagram {
-    pub bytes: BytesMut,
-    pub packets: SmallVec<[(Arc<dyn Encapsulate>, Metadata); 1]>,
+    pub(crate) bytes: BytesMut,
+    pub(crate) packets: SmallVec<[(Arc<dyn Encapsulate>, Metadata); 1]>,
 }
 
 impl Path {
-    /// Wait for at least one datagram. Call [`Self::refresh`] after submission or cancellation.
-    pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> Result<(usize, ConnectionId), Error> {
-        poll_fn(|cx| {
-            self.send_waker.register(cx.waker());
-            if self.validation.is_cancelled() {
-                return Poll::Ready(Err(QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired").into()));
-            }
-            let dcid = ready!(self.dcid.poll_borrow(cx))
-                .ok_or_else(|| QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired"))?;
-            let result = self.poll_collect(cx, dcid, datagrams, frames);
-            if result.is_pending() {
-                self.dcid.refresh();
-            }
-            result.map(|result| result.map(|count| (count, dcid)))
-        })
-        .await
-    }
-
-    /// Recover only unsubmitted packets, then reuse the buffers and release the CID.
-    pub fn refresh(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) {
-        for datagram in datagrams {
-            for (space, meta) in datagram.packets.drain(..) {
-                space.cancel(meta.pn, &mut std::iter::empty());
-            }
-            datagram.bytes.clear();
-        }
-        frames.clear();
-        self.dcid.refresh();
-    }
-
     fn poll_collect(
         &self,
         cx: &mut Context<'_>,
@@ -154,10 +126,97 @@ impl Path {
             Poll::Ready(Ok(count))
         }
     }
+
+    /// Wait for at least one datagram. Call [`Self::refresh`] after submission or cancellation.
+    pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> Result<(usize, ConnectionId), Error> {
+        poll_fn(|cx| {
+            self.send_waker.register(cx.waker());
+            if self.validation.is_cancelled() {
+                return Poll::Ready(Err(QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired").into()));
+            }
+            let dcid = ready!(self.dcid.poll_borrow(cx))
+                .ok_or_else(|| QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired"))?;
+            let result = self.poll_collect(cx, dcid, datagrams, frames);
+            if result.is_pending() {
+                self.dcid.refresh();
+            }
+            result.map(|result| result.map(|count| (count, dcid)))
+        })
+        .await
+    }
+
+    /// Submit the datagrams and account each successful prefix under the CC lock.
+    pub(crate) async fn send(&self, datagrams: &mut [Datagram], dcid: ConnectionId, idle_timer: &ArcIdleTimer) -> Result<(), Error> {
+        let overhead = QuicProtocol::packet_overhead(self.pathway);
+        let deadlines = Epoch::EPOCHS.map(|epoch| (self.cc.retransmit_and_expire_time(epoch).0, self.cc.pto_base(epoch) * 3));
+        let mut first = 0;
+        while first < datagrams.len() {
+            let mut sent_handshake = false;
+            let sent = poll_fn(|cx| -> Poll<std::io::Result<Option<usize>>> {
+                // ACK handling takes the same lock as submission and completion.
+                let mut cc = self.cc.lock();
+                self.validation.credit().map_err(std::io::Error::other)?;
+                if !self.is_active()
+                    && datagrams[first..]
+                        .iter()
+                        .flat_map(|datagram| &datagram.packets)
+                        .any(|(_, meta)| meta.content == PacketContent::EffectivePayload)
+                {
+                    return Poll::Ready(Ok(None));
+                }
+                let sent = {
+                    let buffers: SmallVec<[_; 8]> = datagrams[first..].iter().map(|datagram| IoSlice::new(&datagram.bytes)).collect();
+                    ready!(QuicProtocol::global().poll_send(cx, self.pathway, &buffers))?
+                };
+                for datagram in &mut datagrams[first..first + sent] {
+                    let mut packets = [None; 3];
+                    for (space, meta) in datagram.packets.drain(..) {
+                        let epoch = meta.epoch();
+                        space.on_sent(meta.pn, meta.in_flight, deadlines[epoch].0, deadlines[epoch].1);
+                        sent_handshake |= epoch == Epoch::Handshake;
+                        packets[epoch] = Some(meta);
+                    }
+                    let _ = idle_timer.on_sent_at(Instant::now());
+                    self.on_sent(&mut cc, datagram.bytes.len(), packets);
+                }
+                update_amplification_blocked(
+                    &mut cc,
+                    &self.spaces,
+                    dcid,
+                    self.validation.credit().map_or(0, |credit| credit.unwrap_or(usize::MAX)),
+                    overhead,
+                );
+                Poll::Ready(Ok(Some(sent)))
+            })
+            .await
+            .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+            let Some(sent) = sent else { return Ok(()) };
+            if sent_handshake {
+                self.progress.on_handshake_sent();
+            }
+            if sent == 0 {
+                return Err(QuicError::with_default_fty(ErrorKind::NoViablePath, "UDP submitted zero datagrams").into());
+            }
+            first += sent;
+        }
+        Ok(())
+    }
+
+    /// Recover only unsubmitted packets, then reuse the buffers and release the CID.
+    pub fn refresh(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) {
+        for datagram in datagrams {
+            for (space, meta) in datagram.packets.drain(..) {
+                space.cancel(meta.pn, &mut std::iter::empty());
+            }
+            datagram.bytes.clear();
+        }
+        frames.clear();
+        self.dcid.refresh();
+    }
 }
 
 /// Refresh the amplification budget while holding the path's CC lock.
-pub fn update_amplification_blocked(cc: &mut CongestionController, spaces: &ArcSpaces, dcid: ConnectionId, credit: usize, overhead: usize) {
+fn update_amplification_blocked(cc: &mut CongestionController, spaces: &ArcSpaces, dcid: ConnectionId, credit: usize, overhead: usize) {
     let epoch = cc.pto_epoch();
     let blocked = match credit {
         0 => true,

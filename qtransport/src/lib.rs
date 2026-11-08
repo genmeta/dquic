@@ -18,17 +18,18 @@ mod connection;
 pub mod keys;
 pub mod packet;
 pub mod path;
-mod paths;
 pub mod progress;
 pub mod punch;
 pub mod recv;
 pub mod router;
-pub mod send;
+pub mod send {
+    pub use crate::packet::encrypt::{self as packet, Packet};
+}
 pub mod space;
 pub mod terminate;
 
 pub use connection::ArcConnection;
-pub use paths::Paths;
+pub use path::Paths;
 pub use progress::ArcProgress;
 pub use qbase::{error::Error, param::ArcParameters, role::Role, sid::StreamId, varint::VarInt};
 pub use qrecovery::{recv::StopSending, send::CancelStream, streams::error::StreamError};

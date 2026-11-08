@@ -19,9 +19,9 @@ use qbase::{
 };
 use qcongestion::Transport;
 
+use super::Path;
 use crate::{
     ArcProgress, ArcPuncher, ArcReliableFrames, ArcResend, CidRegistry, CloseReason,
-    path::Path,
     punch::ProbeEncoder,
     space::{ArcSpaces, InitialSpace},
     terminate::ArcTerminator,
@@ -168,7 +168,7 @@ impl Paths {
             self.spawn_validation(&path);
         }
 
-        tokio::spawn(crate::send::sending(self.clone(), path.clone()));
+        tokio::spawn(super::task::sending(self.clone(), path.clone()));
         path.send_waker.wake_all();
         path
     }

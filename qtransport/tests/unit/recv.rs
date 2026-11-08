@@ -451,7 +451,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
     use tokio::io::AsyncWriteExt;
 
     use super::send::{datagram_metadata, poll_collect};
-    use crate::send::Datagram;
+    use crate::path::Datagram;
 
     let (paths, mature) = super::send::data_spaces(Role::Server, Duration::ZERO);
     paths.progress.on_initial_received(mature.peer_cid());
