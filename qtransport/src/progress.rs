@@ -144,7 +144,7 @@ impl Progress {
             return false;
         }
         path.dcid.upgrade();
-        self.facts.quit_mp_handshaking();
+        self.facts.quit_mp_replaying();
         for other in entries.values() {
             if !Arc::ptr_eq(other, path) {
                 other.disable();

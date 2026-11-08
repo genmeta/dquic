@@ -156,7 +156,7 @@ where
 pub fn handshake_facts(role: qbase::role::Role, multipath: bool) -> Arc<qbase::handshake::HandshakeFacts> {
     let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(role));
     if !multipath {
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
     }
     facts
 }

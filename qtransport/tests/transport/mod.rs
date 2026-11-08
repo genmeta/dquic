@@ -251,7 +251,7 @@ fn dispatch(transport: &Transport, path: &Arc<Path>, frame: Frame<Bytes>) -> Res
         Frame::StreamCtl(frame) => {
             transport.data.streams.recv_frame(frame)?;
         }
-        Frame::Ack(frame) => acknowledge(transport, &frame, path)?,
+        Frame::Ack(frame) => acknowledge(transport, frame, path)?,
         Frame::PathChallenge(frame) => path.validation.recv_frame(frame)?,
         Frame::PathResponse(frame) => path.validation.recv_frame(frame)?,
         Frame::Crypto(frame, bytes) => transport.data.crypto.incoming().recv_frame((frame, bytes))?,
@@ -290,9 +290,13 @@ fn receive(transport: &Arc<Transport>, path: &Arc<Path>, bytes: &[u8]) -> Option
     .expect("queued packet and closed inbox must complete immediately");
     received
 }
-fn acknowledge(transport: &Transport, ack: &AckFrame, path: &Arc<Path>) -> Result<(), Error> {
-    let keys = keys(transport);
-    crate::recv::acknowledge(&transport.data, ack, path, |generation| keys.on_ack(generation))
+fn acknowledge(transport: &Transport, ack: AckFrame, path: &Arc<Path>) -> Result<(), Error> {
+    let mut cc = path.cc.lock();
+    let ack = transport.data.recv_frame(ack)?;
+    cc.on_ack_rcvd(Epoch::Data, &ack, tokio::time::Instant::now());
+    drop(cc);
+    path.send_waker.wake_all();
+    Ok(())
 }
 fn ack(pn: u64) -> AckFrame {
     AckFrame::new(VarInt::from_u64(pn).unwrap(), 0u32.into(), 0u32.into(), vec![], None)
@@ -459,7 +463,7 @@ async fn long_header_receive_uses_each_spaces_keys_and_journal() {
         bytes[offset + pn_len..offset + pn_len + 4].copy_from_slice(&[0x06, 0, 1, 0xaa]);
         material.opening.seal(0, &mut bytes, offset, offset + pn_len, material.opening.packet.tag_len()).unwrap();
         let facts = Arc::new(qbase::handshake::HandshakeFacts::with_role(Role::Server));
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
         let space = Arc::new(Space::new(epoch, Default::default(), ArcKeys::new(Arc::new(material)), facts));
         let ready = space.keys.get().unwrap();
         assert!(Arc::ptr_eq(&space.keys.get().unwrap(), &ready));
@@ -782,7 +786,7 @@ async fn real_tls_keys_stream_roundtrip_and_ack_complete_shutdown() {
     let mut ss = Sender::new(st.clone(), sp.clone());
     let bytes = emit(&mut cs);
     let pn = receive(&st, &sp, &bytes).unwrap();
-    acknowledge(&ct, &ack(pn), &cp).unwrap();
+    acknowledge(&ct, ack(pn), &cp).unwrap();
     shutdown.await.unwrap();
     let (_, (mut request, mut response)) = server.accept_bi_stream().await.unwrap();
     let mut input = String::new();
@@ -958,7 +962,7 @@ async fn pending_packet_on_a_slow_path_keeps_its_number_and_key_generation() {
     assert_eq!(receive(&st, &sp, &fast_bytes), Some(1));
     let bytes = emit(&mut slow);
     assert_eq!(receive(&st, &sp, &bytes), Some(0));
-    acknowledge(&ct, &ack(0), &cp).unwrap();
+    acknowledge(&ct, ack(0), &cp).unwrap();
     let (_, mut reader) = st.data.streams.accept_uni().await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut output = [0; 8];
@@ -1119,7 +1123,7 @@ async fn late_ack_clears_requeued_stream_and_crypto_before_the_sender_runs() {
     let mut sender = Sender::new(ct.clone(), cp.clone());
     emit(&mut sender);
     ct.data.resend(qevent::quic::recovery::PacketLostTrigger::TimeThreshold, &mut [0].into_iter());
-    acknowledge(&ct, &ack(0), &cp).unwrap();
+    acknowledge(&ct, ack(0), &cp).unwrap();
     assert!(!sender.prepare().unwrap());
 }
 
@@ -1133,7 +1137,7 @@ async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() 
     ct.data.resend(qevent::quic::recovery::PacketLostTrigger::TimeThreshold, &mut [0].into_iter());
     let retry = emit(&mut sender);
     assert_eq!(receive(&st, &sp, &retry), Some(1));
-    acknowledge(&ct, &ack(1), &cp).unwrap();
+    acknowledge(&ct, ack(1), &cp).unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut bytes = [0; 9];
@@ -1141,7 +1145,7 @@ async fn loss_requeues_stream_ranges_and_late_ack_does_not_duplicate_delivery() 
     assert_eq!(&bytes, b"lost once");
     // Late arrival and ACK of the original packet do not deliver/credit the bytes twice.
     assert_eq!(receive(&st, &sp, &dropped), Some(0));
-    acknowledge(&ct, &ack(0), &cp).unwrap();
+    acknowledge(&ct, ack(0), &cp).unwrap();
 }
 
 #[tokio::test]
@@ -1186,8 +1190,8 @@ async fn connection_tick_recovers_after_the_original_path_and_sender_are_dropped
     assert_eq!(receive(&peer, &peer_path, &emit(&mut sender)), Some(1));
     transport.data.on_tick(tokio::time::Instant::now());
     assert!(!sender.prepare().unwrap(), "a second tick must not duplicate recovery");
-    acknowledge(&transport, &ack(0), &replacement).unwrap();
-    acknowledge(&transport, &ack(1), &replacement).unwrap();
+    acknowledge(&transport, ack(0), &replacement).unwrap();
+    acknowledge(&transport, ack(1), &replacement).unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut body = [0; 12];
@@ -1205,7 +1209,7 @@ async fn connection_close_preserves_completed_streams_and_errors_active_streams(
     assert!(futures::poll!(&mut shutdown).is_pending());
     let mut sender = Sender::new(ct.clone(), cp.clone());
     let pn = receive(&st, &sp, &emit(&mut sender)).unwrap();
-    acknowledge(&ct, &ack(pn), &cp).unwrap();
+    acknowledge(&ct, ack(pn), &cp).unwrap();
     shutdown.await.unwrap();
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
 
@@ -1302,7 +1306,7 @@ async fn ack_between_socket_submission_and_accounting_waits_for_commit() {
         let barrier = barrier.clone();
         std::thread::spawn(move || {
             barrier.wait();
-            done.send(acknowledge(&transport, &ack(0), &path)).unwrap();
+            done.send(acknowledge(&transport, ack(0), &path)).unwrap();
         })
     };
     assert!(matches!(
@@ -1373,7 +1377,7 @@ async fn shared_ack_only_updates_the_receiving_paths_congestion_control() {
     let second_pto = second.cc.pto_base(Epoch::Data);
     tokio::time::advance(Duration::from_millis(5)).await;
     let ack = AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None);
-    acknowledge(&transport, &ack, &second).unwrap();
+    acknowledge(&transport, ack, &second).unwrap();
     assert_eq!(first.cc.pto_base(Epoch::Data), first_pto);
     assert_ne!(second.cc.pto_base(Epoch::Data), second_pto);
     tokio::time::advance(first.cc.get_pto(Epoch::Data)).await;
@@ -1456,6 +1460,6 @@ async fn sealing_does_not_wait_for_socket_submission() {
 fn confirmed_handshake(role: Role) -> Arc<qbase::handshake::HandshakeFacts> {
     let handshake = Arc::new(qbase::handshake::HandshakeFacts::with_role(role));
     handshake.on_handshake_done();
-    handshake.quit_mp_handshaking();
+    handshake.quit_mp_replaying();
     handshake
 }

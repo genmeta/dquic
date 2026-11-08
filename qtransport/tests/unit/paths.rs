@@ -217,9 +217,9 @@ async fn selecting_a_live_handshake_path_stops_crypto_replay() {
         paths.del_path(&stale.pathway);
         let selected = paths.add_path(pathway(30002));
         paths.progress.on_path_selected(&paths, &stale);
-        assert!(facts.is_mp_handshaking());
+        assert!(facts.is_mp_replaying());
         paths.progress.on_path_selected(&paths, &selected);
-        assert!(!facts.is_mp_handshaking());
+        assert!(!facts.is_mp_replaying());
         paths.retire_all();
     }
 }

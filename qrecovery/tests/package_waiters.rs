@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt;
 fn handshake_facts(multipath: bool) -> Arc<HandshakeFacts> {
     let facts = Arc::new(HandshakeFacts::with_role(Role::Client));
     if !multipath {
-        facts.quit_mp_handshaking();
+        facts.quit_mp_replaying();
     }
     facts
 }
@@ -114,7 +114,7 @@ async fn closed_crypto_sources_are_empty_for_every_close_reason() {
         stream.on_error(&error);
         for enabled in [true, false] {
             if !enabled {
-                facts.quit_mp_handshaking();
+                facts.quit_mp_replaying();
             }
             assert_eq!(poll(&mut stream.outgoing(), 128, Waker::noop()), Poll::Ready(Ok(0)));
         }

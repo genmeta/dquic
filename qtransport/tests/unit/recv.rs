@@ -303,11 +303,11 @@ async fn client_selects_handshake_but_not_initial_ping() {
         let original_dcid = crate::common::cid_value(&dcid);
         assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
         receive_ping(Role::Client, epoch, true, &paths, &first).await;
-        assert!(paths.progress.facts().is_mp_handshaking());
+        assert!(paths.progress.facts().is_mp_replaying());
         assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
         assert_eq!(crate::common::cid_value(&dcid), original_dcid);
         receive_ping(Role::Client, epoch, false, &paths, &second).await;
-        assert_eq!(paths.progress.facts().is_mp_handshaking(), epoch == Epoch::Initial);
+        assert_eq!(paths.progress.facts().is_mp_replaying(), epoch == Epoch::Initial);
         let expected = if epoch == Epoch::Handshake {
             (0, 1)
         } else {
@@ -351,7 +351,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
     let bytes = seal(header(), &peer.sealing, &journal, [&mut ack]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv6).await;
-    assert!(paths.progress.facts().is_mp_handshaking());
+    assert!(paths.progress.facts().is_mp_replaying());
 
     assert_eq!((super::selection(&paths, &ipv6), super::selection(&paths, &ipv4)), (u8::MAX, u8::MAX));
     assert!(space.sent_journal.lock_guard().packet(0).is_none());
@@ -362,7 +362,7 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
     let mut crypto = (CryptoFrame::new(0u32.into(), 4u32.into()), b"data".as_slice());
     let bytes = seal(header(), &peer.sealing, &journal, [&mut crypto]).unwrap();
     receive_bytes(bytes, space.clone(), &paths, &ipv4).await;
-    assert!(!paths.progress.facts().is_mp_handshaking());
+    assert!(!paths.progress.facts().is_mp_replaying());
     assert_eq!((super::selection(&paths, &ipv6), super::selection(&paths, &ipv4)), (0, 1));
     let mut received = [0; 4];
     space.crypto.reader().read_exact(&mut received).await.unwrap();
@@ -375,13 +375,13 @@ async fn client_keeps_ipv6_ack_candidate_until_ipv4_initial_crypto_arrives() {
 async fn server_initial_does_not_select_but_authenticated_handshake_does() {
     let (paths, first, second) = paths(Role::Server);
     receive_ping(Role::Server, Epoch::Initial, false, &paths, &first).await;
-    assert!(paths.progress.facts().is_mp_handshaking());
+    assert!(paths.progress.facts().is_mp_replaying());
     assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
     receive_ping(Role::Server, Epoch::Handshake, true, &paths, &first).await;
-    assert!(paths.progress.facts().is_mp_handshaking());
+    assert!(paths.progress.facts().is_mp_replaying());
     assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (u8::MAX, u8::MAX));
     receive_ping(Role::Server, Epoch::Handshake, false, &paths, &second).await;
-    assert!(!paths.progress.facts().is_mp_handshaking());
+    assert!(!paths.progress.facts().is_mp_replaying());
     assert_eq!((super::selection(&paths, &first), super::selection(&paths, &second)), (0, 1));
     paths.retire_all();
 }
@@ -411,7 +411,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
         let mut ack = AckFrame::new(pn.into(), 0u32.into(), 0u32.into(), vec![], None);
         let packet = seal(header().initial(vec![]), &client_keys.sealing, &journal, [&mut ack]).unwrap();
         receive_bytes(BytesMut::from(packet.as_ref()), space.clone(), &paths, &second).await;
-        assert_eq!(paths.progress.facts().is_mp_handshaking(), pn == 0);
+        assert_eq!(paths.progress.facts().is_mp_replaying(), pn == 0);
         assert_eq!(
             (super::selection(&paths, &first), super::selection(&paths, &second)),
             if pn == 1 { (0, 1) } else { (u8::MAX, u8::MAX) }
@@ -432,12 +432,12 @@ async fn client_initial_crypto_ack_stops_replay_without_selecting_a_path() {
     space.crypto.writer().write_all(b"client hello").await.unwrap();
     seal(header(), &keys(false).sealing, &space.sent_journal, [&mut space.crypto.outgoing()]).unwrap();
     space.on_sent(0, true, Duration::from_secs(1), Duration::from_secs(3));
-    assert!(paths.progress.facts().is_mp_handshaking());
+    assert!(paths.progress.facts().is_mp_replaying());
 
     let mut ack = AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
     let packet = seal(header(), &keys(true).sealing, &ArcSentJournal::default(), [&mut ack]).unwrap();
     receive_bytes(packet, space, &paths, &first).await;
-    assert!(!paths.progress.facts().is_mp_handshaking());
+    assert!(!paths.progress.facts().is_mp_replaying());
     assert_eq!(super::selection(&paths, &first), u8::MAX);
     assert_eq!(super::selection(&paths, &second), u8::MAX);
     paths.retire_all();

@@ -5,7 +5,6 @@ use derive_more::Deref;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::AckFrame,
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{DataHeader, LongHeaderBuilder},
@@ -14,7 +13,7 @@ use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Recover, Space};
-use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
+use crate::{GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 /// Handshake headers carry no token or application-data sources.
 #[derive(Deref)]
@@ -39,10 +38,6 @@ impl<K: Clone + Send> qcongestion::Resend for HandshakeSpace<ArcKeys<K>> {
 }
 
 impl<K: Clone> Recover for HandshakeSpace<ArcKeys<K>> {
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
-        Recover::on_acked(&self.0, ack)
-    }
-
     fn recover(&self, frame: &GuaranteedFrame) {
         self.0.recover(frame);
     }

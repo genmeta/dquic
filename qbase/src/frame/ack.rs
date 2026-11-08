@@ -112,6 +112,11 @@ impl AckFrame {
         self.delay.into_u64()
     }
 
+    /// Set the ACK delay.
+    pub fn set_delay(&mut self, delay: VarInt) {
+        self.delay = delay;
+    }
+
     /// Return the first range.
     pub fn first_range(&self) -> u64 {
         self.first_range.into_u64()

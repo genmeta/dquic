@@ -5,7 +5,6 @@ use derive_more::Deref;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::AckFrame,
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{DataHeader, LongHeaderBuilder},
@@ -14,7 +13,7 @@ use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::Instant;
 
 use super::{Allocate, Encapsulate, Recover, Space};
-use crate::{Error, GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
+use crate::{GuaranteedFrame, keys::ArcKeys, packet::encrypt::Packet};
 
 /// Initial headers retain their token across every packet in this space.
 #[derive(Deref)]
@@ -43,10 +42,6 @@ impl qcongestion::Resend for InitialSpace {
 }
 
 impl Recover for InitialSpace {
-    fn on_acked(&self, ack: &AckFrame) -> Result<Option<u64>, Error> {
-        Recover::on_acked(&self.space, ack)
-    }
-
     fn recover(&self, frame: &GuaranteedFrame) {
         self.space.recover(frame);
     }
