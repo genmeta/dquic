@@ -20,6 +20,7 @@ pub mod packet;
 pub mod path;
 pub mod progress;
 pub mod punch;
+pub mod recv;
 pub mod router;
 pub mod send {
     pub use crate::packet::encrypt::{self as packet, Packet};

@@ -11,16 +11,16 @@ use qbase::{
     token::ArcTokenRegistry,
 };
 use qcongestion::Transport as _;
-use qtransport::{
+use tokio::time::Instant;
+
+use crate::{
+    ArcHandshakeDone, Paths,
     keys::{ArcKeys, Open, PacketError, open},
     packet::{CipherPacket, LogPacketHeader, PlainPacket},
     space::{DataSpace, Space},
 };
-use tokio::time::Instant;
 
-use crate::{ArcHandshakeDone, Paths};
-
-pub type PacketReceiver<H> = qtransport::packet::channel::PacketReceiver<H>;
+pub type PacketReceiver<H> = crate::packet::channel::PacketReceiver<H>;
 
 fn drop_packet(header: impl LogPacketHeader, buffer: bytes::BytesMut, pn_offset: usize, pn: Option<u64>, error: impl ToString) {
     CipherPacket::new(header, buffer, pn_offset).drop_on_decryption_failure(pn, error);
@@ -33,7 +33,7 @@ fn key_error(error: PacketError) -> crate::Error {
     }
 }
 
-pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
+pub async fn recv_ih_pkt_and_deliver_frames<H>(
     (mut packets, scopes): (PacketReceiver<H>, Option<Scopes>),
     space: Arc<impl AsRef<Space<ArcKeys>> + Send + Sync>,
     paths: Arc<Paths>,
@@ -174,7 +174,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
 
 /// Receive Data packets and update the connection's paths, handshake and close state.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn receive_1rtt_pkt_and_deliver_frames(
+pub async fn receive_1rtt_pkt_and_deliver_frames(
     (mut packets, scopes): (PacketReceiver<OneRttHeader>, Option<Scopes>),
     data: Arc<DataSpace>,
     paths: Arc<Paths>,

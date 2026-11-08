@@ -5,7 +5,6 @@
 
 mod endpoint;
 pub(crate) mod lifecycle;
-pub mod recv;
 pub mod tls;
 
 pub use endpoint::{QuicEndpoint, Server, ServerRegistry};
@@ -17,6 +16,6 @@ pub use qbase::{
 };
 pub use qtransport::{
     Accepted, ArcConnection, ArcDcid, ArcHandshakeDone, ArcLocalCids, ArcProgress, ArcPuncher, ArcReliableFrames, ArcRemoteCids, ArcResend,
-    CidRegistry, CloseReason, Connected, DataStreams, Paths, send,
+    CidRegistry, CloseReason, Connected, DataStreams, Paths, recv, send,
 };
 pub use tls::TlsContext;
