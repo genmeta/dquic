@@ -95,7 +95,6 @@ pub fn pair() -> [Arc<DataFixture>; 2] {
                 streams,
                 reliable_frames.clone(),
                 parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-                parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
                 facts,
             ));
             let concrete = SpaceFixture { initial: super::initial_space(&paths.spaces), handshake, data };

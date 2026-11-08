@@ -259,7 +259,7 @@ fn test_frame_reader_stops_at_unknown_custom_frame() {
 }
 
 fn parse_frame(input: &[u8], expected_type: FrameType) -> Frame<bytes::Bytes> {
-    let (consumed, frame, frame_type) = io::be_frame(&bytes::Bytes::copy_from_slice(input), Type::Short(OneRtt(0.into()))).unwrap();
+    let (consumed, frame, frame_type) = io::be_frame(&bytes::Bytes::copy_from_slice(input), Type::Short(OneRtt(0.into())), 0).unwrap();
     assert_eq!(frame_type, expected_type);
     assert_eq!(consumed, input.len());
     frame

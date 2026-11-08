@@ -91,7 +91,6 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
                 streams,
                 reliable_frames.clone(),
                 parameters.local::<u64>(ParameterId::AckDelayExponent) as u32,
-                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
                 progress.facts(),
             ));
             let puncher = paths.puncher.clone();
@@ -133,6 +132,7 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
                 paths.clone(),
                 token,
                 hs_done.clone(),
+                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
             ));
             hs_done.done();
 

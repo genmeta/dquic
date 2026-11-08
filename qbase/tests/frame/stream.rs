@@ -59,7 +59,7 @@ fn test_read_stream_frame() {
     buf.extend_from_slice(b"hello world");
     buf.push(0);
     let raw = bytes::Bytes::from(buf);
-    let (consumed, frame, frame_type) = io::be_frame(&raw, super::Type::Short(super::OneRtt(0.into()))).unwrap();
+    let (consumed, frame, frame_type) = io::be_frame(&raw, super::Type::Short(super::OneRtt(0.into())), 0).unwrap();
     let mut expected = StreamFrame::new(VarInt::from_u32(0x1234).into(), 0x1234, 11);
     expected.set_len_bit(Len::Explicit);
     expected.set_eos_flag(false);
@@ -73,7 +73,7 @@ fn test_read_last_stream_frame() {
     let mut buf = vec![0x0c, 0x52, 0x34, 0x52, 0x34];
     buf.extend_from_slice(b"hello world");
     let raw = bytes::Bytes::from(buf);
-    let (consumed, frame, frame_type) = io::be_frame(&raw, super::Type::Short(super::OneRtt(0.into()))).unwrap();
+    let (consumed, frame, frame_type) = io::be_frame(&raw, super::Type::Short(super::OneRtt(0.into())), 0).unwrap();
     let mut expected = StreamFrame::new(VarInt::from_u32(0x1234).into(), 0x1234, 11);
     expected.set_len_bit(Len::Omit);
     expected.set_eos_flag(false);

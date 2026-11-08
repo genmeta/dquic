@@ -209,31 +209,24 @@ async fn data_pending_ack_prevents_retransmission() {
 }
 
 #[tokio::test]
-async fn data_ack_decodes_delay_and_preserves_ranges_and_ecn() {
-    use qbase::{
-        frame::{EcnCounts, PingFrame},
-        varint::VARINT_MAX,
-    };
+async fn data_ack_preserves_decoded_delay_ranges_and_ecn() {
+    use qbase::frame::{EcnCounts, PingFrame};
 
-    for (exponent, delay, decoded) in [(0, 7, 7), (3, 7, 56), (20, 7, 7 << 20), (3, VARINT_MAX, VARINT_MAX)] {
-        let mut data = support::data::data();
-        Arc::get_mut(&mut data).unwrap().peer_ack_delay_exponent = exponent;
-        for _ in 0..4 {
-            let pn = data.next_pn().0;
-            data.sent_journal.on_sealed(pn, Some(0), 0, metadata(Epoch::Data, &[Frame::Ping(PingFrame)]), []);
-            data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
-        }
-        let ranges = vec![(1u32.into(), 0u32.into())];
-        let ecn = Some(EcnCounts::new(1u32.into(), 2u32.into(), 3u32.into()));
-        let ack = AckFrame::new(3u32.into(), delay.try_into().unwrap(), 0u32.into(), ranges.clone(), ecn);
-        let ack = data.recv_frame(ack).unwrap();
-        assert_eq!(ack, AckFrame::new(3u32.into(), decoded.try_into().unwrap(), 0u32.into(), ranges, ecn));
-        let journal = data.sent_journal.lock_guard();
-        assert!(journal.packet(0).is_none());
-        assert!(journal.packet(1).is_some());
-        assert!(journal.packet(2).is_some());
-        assert!(journal.packet(3).is_none());
+    let data = support::data::data();
+    for _ in 0..4 {
+        let pn = data.next_pn().0;
+        data.sent_journal.on_sealed(pn, Some(0), 0, metadata(Epoch::Data, &[Frame::Ping(PingFrame)]), []);
+        data.on_sent(pn, true, Duration::from_secs(1), Duration::from_secs(3));
     }
+    let ranges = vec![(1u32.into(), 0u32.into())];
+    let ecn = Some(EcnCounts::new(1u32.into(), 2u32.into(), 3u32.into()));
+    let ack = AckFrame::new(3u32.into(), 56u32.into(), 0u32.into(), ranges, ecn);
+    assert_eq!(data.recv_frame(ack.clone()).unwrap(), ack);
+    let journal = data.sent_journal.lock_guard();
+    assert!(journal.packet(0).is_none());
+    assert!(journal.packet(1).is_some());
+    assert!(journal.packet(2).is_some());
+    assert!(journal.packet(3).is_none());
 }
 
 #[tokio::test]

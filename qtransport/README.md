@@ -25,7 +25,7 @@
 
 | 模块 | 责任 |
 | --- | --- |
-| `space` | Initial/Handshake 使用 `Space<K>`；独立的 `DataSpace` 还持有 `DataStreams` 和 `ArcReliableFrames`，负责三类帧的恢复；分别实现 `ReceiveFrame<AckFrame>`，Data 内部处理延迟解码和密钥确认；没有父级回指 |
+| `space` | Initial/Handshake 使用 `Space<K>`；独立的 `DataSpace` 还持有 `DataStreams` 和 `ArcReliableFrames`，负责三类帧的恢复；分别实现 `ReceiveFrame<AckFrame>`，Data 内部处理密钥确认；ACK 延迟在帧解析时按对端指数解码；没有父级回指 |
 | `keys` | Result<K, KeyRetired>、同步取材与退役、1-RTT 代次、认证与 AEAD 用量；OpenPacket、SealPacket、私有 open_with 包保护基础实现 |
 | `packet` | qtls 密钥驱动的 `CipherPacket<H>` / `PlainPacket<H>`；`channel` 提供四个加密级别的 typed channel |
 | `router` | Signpost → Inbox；CID registry、未知包 channel |
