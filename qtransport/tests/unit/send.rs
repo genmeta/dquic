@@ -1159,28 +1159,26 @@ async fn amplification_rearms_pto_when_credit_returns() {
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
         assert_eq!(path.cc.get_pto(epoch), base);
 
-        // Credit restoration rearms PTO even when a packet does not yet fit.
+        // Credit below the sending threshold neither wakes the sender nor rearms PTO.
         let before = counter.0.load(Ordering::Relaxed);
         path.validation.on_received(1);
-        path.send_waker.wake_all();
-        assert!(counter.0.load(Ordering::Relaxed) > before);
+        assert_eq!(counter.0.load(Ordering::Relaxed), before);
         assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
-        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
-        assert!(path.cc.get_pto(epoch) > base);
+        assert_eq!(path.cc.need_send_ack_eliciting(epoch), 0);
+        assert_eq!(path.cc.get_pto(epoch), base);
 
         // Handshake and 1-RTT probes fit well below 1200 bytes.
         let before = counter.0.load(Ordering::Relaxed);
         if validated {
             path.validation.grant().unwrap();
         } else {
-            path.validation.on_received(20);
+            path.validation.on_received(42);
         }
-        path.send_waker.wake_all();
         assert!(counter.0.load(Ordering::Relaxed) > before);
         if epoch == Epoch::Initial && !validated {
             assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
             assert_eq!(path.cc.need_send_ack_eliciting(epoch), 1);
-            path.validation.on_received(379);
+            path.validation.on_received(357);
         }
         assert!(
             matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(1))),
@@ -1193,7 +1191,7 @@ async fn amplification_rearms_pto_when_credit_returns() {
         if epoch == Epoch::Initial {
             assert_eq!(datagrams[0].bytes.len(), 1200);
         } else if !validated {
-            assert!(datagrams[0].bytes.len() <= 63);
+            assert!(datagrams[0].bytes.len() <= 129);
         }
         path.refresh(&mut datagrams, &mut frames);
         cancel_waiters(&paths, &path);
@@ -1203,7 +1201,7 @@ async fn amplification_rearms_pto_when_credit_returns() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ack_only_submission_exhausts_credit_and_blocks_pto_without_another_collect() {
+async fn ack_only_submission_leaves_credit_below_threshold_and_blocks_pto_without_another_collect() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
@@ -1225,7 +1223,7 @@ async fn ack_only_submission_exhausts_credit_and_blocks_pto_without_another_coll
         ),
     );
     paths.progress.on_path_selected(&paths, &path);
-    path.validation.on_received(20);
+    path.validation.on_received(43);
     path.cc.on_pkt_sent(Epoch::Handshake, 0, true, 1200, true, None);
     mature.spaces.handshake.rcvd_journal.on_rcvd_pn(42, true, path.cc.pto_base(Epoch::Handshake));
     path.cc.on_pkt_rcvd(Epoch::Handshake, 42, true);
@@ -1238,10 +1236,8 @@ async fn ack_only_submission_exhausts_credit_and_blocks_pto_without_another_coll
     assert!(!meta.content.is_ack_eliciting());
     assert!(!meta.in_flight);
     assert!(meta.ack.is_some());
-    // Leave exactly enough credit for this ACK to exhaust the allowance.
-    path.validation.on_sent(crate::common::path_credit(&path).unwrap() - datagrams[0].bytes.len());
     path.send(&mut datagrams[..1], &paths.idle_timer()).await.unwrap();
-    assert_eq!(crate::common::path_credit(&path), Some(0));
+    assert!((1..96).contains(&crate::common::path_credit(&path).unwrap()));
     tokio::time::advance(base * 2).await;
     // No subsequent budget poll: submission must already have told CC it is blocked.
     path.cc.do_tick().unwrap();
@@ -1261,7 +1257,7 @@ async fn ack_only_submission_exhausts_credit_and_blocks_pto_without_another_coll
 async fn path_validation_respects_small_amplification_credit() {
     use qbase::frame::{PathChallengeFrame, io::ReceiveFrame};
 
-    for received in [0, 128, 399, 400] {
+    for received in [0, 31, 32, 128, 399, 400] {
         for reply in [false, true] {
             let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
             super::install_data(&paths, &mature);
@@ -1294,7 +1290,7 @@ async fn path_validation_respects_small_amplification_credit() {
             let mut datagrams = [Datagram::default()];
             let mut frames = Vec::new();
             let result = poll_collect(&path, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop()));
-            if received == 0 {
+            if credit < 96 {
                 assert!(result.is_pending());
                 assert!(pns_for(&datagrams, Epoch::Data).next().is_none());
             } else {

@@ -362,6 +362,7 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
             Some(packet.len() * 3)
         };
         assert_eq!(crate::common::path_credit(path), expected);
+        assert!(!path.validation.is_blocking(), "one authenticated punch probe must fund path validation");
 
         // Neither failed authentication nor duplicate packets credit an existing path.
         receive_on_paths(receiver, &paths, vec![forged, packet.clone()], link.into(), link, Scopes::ALL).await;
