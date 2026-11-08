@@ -117,6 +117,8 @@ async fn handshake_ack_completes_peer_address_validation_before_handshake_done()
     tokio::time::advance(cc.get_pto(Epoch::Handshake)).await;
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Handshake), 1);
+    cc.prepare_burst_budget(&mut std::task::Context::from_waker(std::task::Waker::noop())).unwrap();
+    assert_eq!(cc.send_quota(), 0, "PTO uses the space's probe allowance for one datagram");
     assert!(cc.get_pto(Epoch::Handshake) > cc.pto_base(Epoch::Handshake));
     cc.on_pkt_sent(Epoch::Handshake, 1, true, MSS, true, None);
     cc.on_ack_rcvd(Epoch::Handshake, &AckFrame::new(1u32.into(), 0u32.into(), 1u32.into(), vec![], None));

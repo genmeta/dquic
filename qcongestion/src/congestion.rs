@@ -649,7 +649,9 @@ impl super::Transport for ArcCC {
         cc.tx_waker.register(cx.waker());
         cc.tick()?;
         let quota = cc.send_quota();
-        cc.pending_burst = quota < cc.mtu();
+        // PTO uses each space's probe allowance for one datagram.
+        let probe = cc.need_send_ack_eliciting_packets.iter().any(|&need| need > 0);
+        cc.pending_burst = quota < cc.mtu() || probe;
         cc.burst_budget = Some(if cc.pending_burst { 0 } else { quota });
         Ok(())
     }

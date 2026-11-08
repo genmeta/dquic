@@ -36,7 +36,7 @@ impl Sender {
         let length = 1200.min(credit.unwrap_or(usize::MAX).saturating_sub(overhead));
         let mut ack = self.transport.data.rcvd_journal.ack_package(self.path.cc.need_ack(Epoch::Data));
         let mut validation = self.path.validation.clone();
-        let mut ping = (self.heartbeat || self.path.cc.need_send_ack_eliciting(Epoch::Data) > 0).then_some(PingFrame);
+        let mut ping = self.heartbeat.then_some(PingFrame);
         self.bytes.resize(length, 0);
         let (size, packets) = spaces.poll_dump(
             &mut Context::from_waker(std::task::Waker::noop()),
