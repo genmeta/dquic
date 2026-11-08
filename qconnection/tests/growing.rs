@@ -98,7 +98,7 @@ async fn queued_output_is_bounded_without_waiting_for_its_reader() {
 async fn retiring_initial_reader_leaves_other_tls_input_alive() {
     let [client, server] = pair(false);
     let (paths, closed) = common::paths(qbase::role::Role::Server);
-    paths.progress.facts().quit_mp_handshaking();
+    paths.progress.facts().quit_mp_replaying();
     let space = Space::new(Epoch::Initial, Default::default(), ArcKeys::new(Arc::new(common::initial_keys(true))), paths.progress.facts());
     let crypto = &space.crypto;
     closed.register(Arc::new(space.crypto.clone()));
@@ -137,14 +137,13 @@ async fn data_space_delivers_post_handshake_crypto_to_tls() {
         let reliable = ArcReliableFrames::with_capacity(0);
         let streams = ArcDataStreams::new(parameters.clone(), Box::new(DemandConcurrency), reliable.clone(), Default::default());
         let (paths, closed) = common::paths(role);
-        paths.progress.facts().quit_mp_handshaking();
+        paths.progress.facts().quit_mp_replaying();
         let space = DataSpace::new(
             Default::default(),
             keys,
             streams,
             reliable,
             parameters.local::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
-            parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
             paths.progress.facts(),
         );
         closed.register(Arc::new(space.crypto.clone()));
