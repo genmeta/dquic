@@ -21,7 +21,11 @@ use tokio::time::Instant;
 use crate::{ArcDcid, ArcProgress, ArcResend, space::ArcSpaces, terminate::ArcTerminator};
 
 mod send;
-pub use send::{Datagram, update_amplification_blocked};
+mod set;
+pub(crate) mod task;
+
+pub use send::Datagram;
+pub use set::Paths;
 
 pub struct Path {
     pub pathway: Pathway,
@@ -31,11 +35,11 @@ pub struct Path {
     pub validation: ArcValidation,
     pub heartbeat: ArcHeartbeat,
     /// Connection-wide packet sources shared by every path.
-    pub spaces: ArcSpaces,
+    spaces: ArcSpaces,
     /// Connection-wide termination and CLOSE source.
-    pub terminator: ArcTerminator,
+    terminator: ArcTerminator,
     /// Connection-wide handshake transitions shared by every path.
-    pub progress: ArcProgress,
+    pub(crate) progress: ArcProgress,
     /// Payload eligibility; ACKs and heartbeats remain available while inactive.
     is_active: AtomicBool,
 }
