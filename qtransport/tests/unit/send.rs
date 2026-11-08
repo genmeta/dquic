@@ -102,8 +102,6 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         paths
             .terminator
             .close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "closed")), paths.closing_pto());
-        assert!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx).is_pending());
-        path.enable();
         assert!(matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(1))));
         assert!(metadata(&datagrams).all(|meta| meta.content == PacketContent::NonAckEliciting));
         path.refresh(&mut datagrams, &mut frames);
@@ -427,6 +425,7 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
         path.heartbeat.on_rcvd_at(qbase::packet::PacketContent::EffectivePayload, tokio::time::Instant::now()).unwrap();
         tokio::time::advance(Duration::from_secs(20)).await;
         let error = QuicError::with_default_fty(ErrorKind::Internal, "TLS failed");
+        path.disable();
         terminator.close(crate::CloseReason::Internal(error.clone()), paths.closing_pto());
         space.crypto.on_error(&error.into());
         let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());

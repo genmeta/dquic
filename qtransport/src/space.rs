@@ -11,7 +11,7 @@ use std::{
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::AckFrame,
+    frame::{AckFrame, PingFrame},
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
@@ -300,11 +300,8 @@ pub trait Encapsulate: Transmit {
         if !self.sent_journal().has_capacity() {
             return Poll::Ready((None, 0));
         }
-        let quota = cc.send_quota().max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
-            1200
-        } else {
-            0
-        });
+        let mut probe = (cc.need_send_ack_eliciting(self.epoch()) > 0).then_some(PingFrame);
+        let quota = cc.send_quota().max(if probe.is_some() { 1200 } else { 0 });
         if self.epoch() == Epoch::Initial && (datagram.get_ref().len() < 1200 || quota < 1200) {
             return Poll::Ready((None, 0));
         }
@@ -316,6 +313,7 @@ pub trait Encapsulate: Transmit {
         let mut crypto = self.crypto().outgoing();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
             sources.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
+        sources.push(&mut probe);
         sources.push(&mut crypto);
         let result = packet.assemble(cx, datagram, quota, packet_content, frames, &mut sources);
         drop(sources);

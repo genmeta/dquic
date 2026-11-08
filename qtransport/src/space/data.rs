@@ -10,7 +10,7 @@ use derive_more::Deref;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    frame::{AckFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
+    frame::{AckFrame, PingFrame, ReliableFrame, StreamCtlFrame, io::SendFrame},
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{DataHeader, OneRttHeader, PacketContent, PacketNumber, assemble::Package},
@@ -165,16 +165,14 @@ impl Encapsulate for DataSpace {
         };
         let start = frames.len();
         let offset = datagram.position() as usize;
-        let quota = cc.send_quota().max(if cc.need_send_ack_eliciting(self.epoch()) > 0 {
-            1200
-        } else {
-            0
-        });
+        let mut probe = (cc.need_send_ack_eliciting(self.epoch()) > 0).then_some(PingFrame);
+        let quota = cc.send_quota().max(if probe.is_some() { 1200 } else { 0 });
         let mut crypto = self.crypto().outgoing();
         let mut reliable = self.reliable_frames.clone();
         let mut streams = self.streams.clone();
         let mut sources: SmallVec<[&mut dyn Package<&mut [u8]>; 12]> =
             sources.iter_mut().map(|source| &mut **source as &mut dyn Package<&mut [u8]>).collect();
+        sources.push(&mut probe);
         sources.push(&mut crypto);
         sources.push(&mut reliable);
         sources.push(&mut streams);

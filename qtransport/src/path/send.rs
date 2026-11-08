@@ -9,7 +9,7 @@ use qbase::{
     Epoch,
     cid::ConnectionId,
     error::{ErrorKind, QuicError},
-    frame::{GuaranteedFrame, PingFrame},
+    frame::GuaranteedFrame,
     packet::{Package, PacketContent, assemble::Metadata},
     time::timer::ArcIdleTimer,
 };
@@ -60,26 +60,16 @@ impl Path {
         let mut terminator = &self.terminator;
         let mut heartbeat = self.heartbeat.clone();
         let mut validation = self.validation.clone();
-        let mut probes: SmallVec<[_; 3]> = self
-            .spaces
-            .iter()
-            .filter(|space| packet_content == PacketContent::EffectivePayload && self.cc.need_send_ack_eliciting(space.epoch()) > 0)
-            .map(|space| (space.epoch(), Some(PingFrame)))
-            .collect();
-        let mut sources: SmallVec<[_; 9]> = acks.iter_mut().map(|ack| ack as &mut dyn for<'b> Package<&'b mut [u8]>).collect();
-        sources.extend([&mut validation as &mut dyn for<'b> Package<&'b mut [u8]>, &mut heartbeat]);
-        sources.extend(probes.iter_mut().map(|probe| probe as &mut dyn for<'b> Package<&'b mut [u8]>));
-        if packet_content == PacketContent::EffectivePayload {
-            sources.insert(0, &mut terminator);
-        }
+        let mut sources: SmallVec<[_; 6]> = acks.iter_mut().map(|ack| ack as &mut dyn for<'b> Package<&'b mut [u8]>).collect();
+        sources.extend([&mut terminator as &mut dyn for<'b> Package<&'b mut [u8]>, &mut validation, &mut heartbeat]);
         let mut count = 0;
         for datagram in datagrams {
             let buffer = &mut datagram.bytes;
             let length = 1200.min(credit.saturating_sub(overhead));
             buffer.resize(length, 0);
-            let (size, collected) =
+            let (size, packets) =
                 self.spaces.poll_dump(cx, &self.cc, overhead, dcid, buffer.as_mut(), packet_content, frames, &mut sources);
-            datagram.packets.extend(collected);
+            datagram.packets.extend(packets);
             buffer.truncate(size);
             if size == 0 {
                 break;
