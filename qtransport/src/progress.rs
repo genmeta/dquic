@@ -169,7 +169,7 @@ impl Progress {
         self.remote_cids.upgrade();
         for path in entries.values() {
             if path.dcid.is_allocated() {
-                let _ = path.validation.enter_validated();
+                let _ = path.validation.grant();
             } else {
                 path.dcid.upgrade();
                 paths.spawn_validation(path);

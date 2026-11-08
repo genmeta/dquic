@@ -64,11 +64,12 @@ impl<B: BufMut + ?Sized> Package<B> for PathValidateFrames {
 
 /// Address validation and amplification allowance for one path.
 /// Each state retains the same attempt's response receiver.
-#[derive(Debug)]
 pub enum Validation {
     Validating {
         rcvd_bytes: usize,
         sent_bytes: usize,
+        block_cb: Arc<dyn Fn() + Send + Sync>,
+        charge_cb: Arc<dyn Fn() + Send + Sync>,
         credit_waker: Option<Waker>,
         frames: PathValidateFrames,
         response: ArcReceiving<PathResponseFrame>,
@@ -82,11 +83,24 @@ pub enum Validation {
     },
 }
 
+impl std::fmt::Debug for Validation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match self {
+            Self::Validating { .. } => "Validating",
+            Self::Validated { .. } => "Validated",
+            Self::Cancelled { .. } => "Cancelled",
+        };
+        f.debug_struct(state).field("credit", &self.credit()).finish_non_exhaustive()
+    }
+}
+
 impl Default for Validation {
     fn default() -> Self {
         Self::Validating {
             rcvd_bytes: 0,
             sent_bytes: 0,
+            block_cb: Arc::new(|| {}),
+            charge_cb: Arc::new(|| {}),
             credit_waker: None,
             frames: PathValidateFrames::default(),
             response: ArcReceiving::default(),
@@ -99,12 +113,31 @@ impl Validation {
         Self::default()
     }
 
+    /// Replace the callback for exhausted credit on the current validation attempt.
+    pub fn on_blocked(&mut self, callback: impl Fn() + Send + Sync + 'static) {
+        if let Self::Validating { block_cb, .. } = self {
+            *block_cb = Arc::new(callback);
+        }
+    }
+
+    /// Replace the callback for restored credit on the current validation attempt.
+    pub fn on_charged(&mut self, callback: impl Fn() + Send + Sync + 'static) {
+        if let Self::Validating { charge_cb, .. } = self {
+            *charge_cb = Arc::new(callback);
+        }
+    }
+
     pub fn is_validated(&self) -> bool {
         matches!(self, Self::Validated { .. })
     }
 
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled { .. })
+    }
+
+    /// Whether amplification credit currently prevents sending, including cancellation.
+    pub fn is_blocking(&self) -> bool {
+        self.credit().unwrap_or(Some(0)) == Some(0)
     }
 
     /// Snapshot the allowance without registering a credit waiter.
@@ -118,14 +151,19 @@ impl Validation {
 
     /// `None` grants unlimited credit. Zero finite credit waits for new input.
     pub fn poll_credit(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<usize>, Cancelled>> {
-        let credit = self.credit()?;
-        if let Self::Validating { credit_waker, .. } = self
-            && credit == Some(0)
-        {
-            *credit_waker = Some(cx.waker().clone());
-            return Poll::Pending;
+        match self {
+            Self::Validating { rcvd_bytes, sent_bytes, credit_waker, .. } => {
+                let credit = rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes);
+                if credit == 0 {
+                    *credit_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(Some(credit)))
+                }
+            }
+            Self::Validated { .. } => Poll::Ready(Ok(None)),
+            Self::Cancelled { .. } => Poll::Ready(Err(Cancelled)),
         }
-        Poll::Ready(Ok(credit))
     }
 
     /// Account for each received UDP datagram once.
@@ -174,20 +212,30 @@ impl Validation {
     }
 
     /// Revoke a validated path's trust and start a new attempt with zero credit.
-    /// Preserve replies owed to the peer; an ongoing validation is unchanged.
-    pub fn revalidate(&mut self) -> Result<(), Cancelled> {
+    /// Preserve replies owed to the peer and replace this attempt's callbacks.
+    pub fn revalidate(
+        &mut self,
+        block_cb: impl Fn() + Send + Sync + 'static,
+        charge_cb: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), Cancelled> {
         match self {
             Self::Validated { frames, .. } => {
                 *self = Self::Validating {
                     rcvd_bytes: 0,
                     sent_bytes: 0,
+                    block_cb: Arc::new(block_cb),
+                    charge_cb: Arc::new(charge_cb),
                     credit_waker: None,
                     frames: std::mem::take(frames),
                     response: ArcReceiving::default(),
                 };
                 Ok(())
             }
-            Self::Validating { .. } => Ok(()),
+            Self::Validating { block_cb: blocked, charge_cb: charged, .. } => {
+                *blocked = Arc::new(block_cb);
+                *charged = Arc::new(charge_cb);
+                Ok(())
+            }
             Self::Cancelled { .. } => Err(Cancelled),
         }
     }
@@ -278,7 +326,7 @@ impl<B: BufMut + ?Sized> Package<B> for Validation {
 /// validation.challenge(challenge)?;
 /// let response = validation.respond().await?;
 /// if response == Some(PathResponseFrame::from(challenge)) {
-///     validation.enter_validated()?;
+///     validation.grant()?;
 /// }
 /// # Ok(())
 /// # }
@@ -291,8 +339,22 @@ impl ArcValidation {
         Self::default()
     }
 
+    /// Replace the callback for exhausted credit on the current validation attempt.
+    pub fn on_blocked(&self, callback: impl Fn() + Send + Sync + 'static) {
+        self.0.lock().unwrap().on_blocked(callback);
+    }
+
+    /// Replace the callback for restored credit on the current validation attempt.
+    pub fn on_charged(&self, callback: impl Fn() + Send + Sync + 'static) {
+        self.0.lock().unwrap().on_charged(callback);
+    }
+
     pub fn is_validated(&self) -> bool {
         self.0.lock().unwrap().is_validated()
+    }
+
+    pub fn is_blocking(&self) -> bool {
+        self.0.lock().unwrap().is_blocking()
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -310,23 +372,73 @@ impl ArcValidation {
     }
 
     pub fn on_received(&self, bytes: usize) {
-        self.0.lock().unwrap().on_received(bytes);
+        let mut state = self.0.lock().unwrap();
+        let Ok(credit) = state.credit() else { return };
+        state.on_received(bytes);
+        if let Validation::Validating { charge_cb, .. } = &*state
+            && credit == Some(0)
+            && bytes > 0
+        {
+            let charge_cb = charge_cb.clone();
+            drop(state);
+            charge_cb();
+        }
     }
 
     pub fn on_sent(&self, bytes: usize) {
-        self.0.lock().unwrap().on_sent(bytes);
+        let mut state = self.0.lock().unwrap();
+        state.on_sent(bytes);
+        let Ok(credit) = state.credit() else { return };
+        if let Validation::Validating { block_cb, .. } = &*state
+            && bytes > 0
+            && credit == Some(0)
+        {
+            let block_cb = block_cb.clone();
+            drop(state);
+            block_cb();
+        }
     }
 
     pub fn exempt(&self) -> Result<(), Cancelled> {
-        self.0.lock().unwrap().exempt()
+        self.grant()
     }
 
-    pub fn enter_validated(&self) -> Result<(), Cancelled> {
-        self.0.lock().unwrap().trust()
+    pub fn grant(&self) -> Result<(), Cancelled> {
+        let mut state = self.0.lock().unwrap();
+        match &*state {
+            Validation::Validating { charge_cb, .. } => {
+                let credit = state.credit()?;
+                if credit == Some(0) {
+                    let charge_cb = charge_cb.clone();
+                    state.trust()?;
+                    drop(state);
+                    charge_cb();
+                    Ok(())
+                } else {
+                    state.trust()
+                }
+            }
+            Validation::Validated { .. } => Ok(()),
+            Validation::Cancelled { .. } => Err(Cancelled),
+        }
     }
 
-    pub fn revalidate(&self) -> Result<(), Cancelled> {
-        self.0.lock().unwrap().revalidate()
+    pub fn revalidate(
+        &self,
+        block_cb: impl Fn() + Send + Sync + 'static,
+        charge_cb: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), Cancelled> {
+        let mut state = self.0.lock().unwrap();
+        let new_attempt = state.is_validated();
+        state.revalidate(block_cb, charge_cb)?;
+        if let Validation::Validating { block_cb, .. } = &*state
+            && new_attempt
+        {
+            let block_cb = block_cb.clone();
+            drop(state);
+            block_cb();
+        }
+        Ok(())
     }
 
     pub fn challenge(&self, frame: PathChallengeFrame) -> Result<(), Cancelled> {

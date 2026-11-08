@@ -236,7 +236,7 @@ impl Paths {
                     result = tokio::time::timeout(path.cc.pto_base(Epoch::Data) * 3, response.clone()) => result,
                 } {
                     Ok(Ok(Some(frame))) if frame == PathResponseFrame::from(challenge) => {
-                        if path.validation.enter_validated().is_ok() {
+                        if path.validation.grant().is_ok() {
                             path.send_waker.wake_all();
                         }
                         break;

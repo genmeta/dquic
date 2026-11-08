@@ -220,7 +220,7 @@ fn path(transport: &Arc<Transport>, index: u16) -> Arc<Path> {
         path_heartbeat(),
         Default::default(),
     ));
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     path
 }
 
@@ -1274,7 +1274,7 @@ async fn udp_submission_delivers_an_encrypted_stream() {
         path_heartbeat(),
         Default::default(),
     ));
-    path.validation.enter_validated().unwrap();
+    path.validation.grant().unwrap();
     let (_, mut writer) = client.open_uni_stream().await.unwrap().unwrap();
     writer.write(Bytes::from_static(b"udp payload")).unwrap();
     let mut sender = Sender::new(ct.clone(), path);
@@ -1342,15 +1342,15 @@ async fn path_validation_replies_on_ingress_and_allows_data_within_credit() {
     let mut ss = Sender::new(st.clone(), sp.clone());
     let challenge = emit(&mut cs);
     assert_eq!(challenge.len(), 1200);
-    assert_eq!(sp.validation.credit().unwrap().unwrap(), 0);
+    assert_eq!(sp.validation.credit().unwrap(), Some(0));
     receive(&st, &sp, &challenge);
     let (_, mut reader) = server.accept_uni_stream().await.unwrap();
     let response = emit(&mut ss);
     assert_eq!(response.len(), 1200);
-    assert_eq!(sp.validation.credit().unwrap().unwrap(), 2400);
+    assert_eq!(sp.validation.credit().unwrap(), Some(2400));
     receive(&ct, &cp, &response);
     assert_eq!(waiting.await.unwrap(), Some(challenge_frame.into()));
-    cp.validation.enter_validated().unwrap();
+    cp.validation.grant().unwrap();
     assert!(cp.validation.is_validated());
     use tokio::io::AsyncReadExt;
     let mut body = [0; 9];

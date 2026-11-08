@@ -94,7 +94,7 @@ impl QuicProtocol {
             return Poll::Ready(Ok(0));
         }
         let packets = &packets[..packets.len().min(Self::MAX_DATAGRAMS)];
-        let overhead = Self::packet_overhead(pathway);
+        let overhead = Self::datagram_overhead(pathway);
         if overhead == 0 {
             return self.poll_send_datagrams(cx, pathway, packets);
         }
@@ -128,7 +128,7 @@ impl QuicProtocol {
     }
 
     /// Bytes added by qprotocol outside the QUIC packet.
-    pub fn packet_overhead(pathway: Pathway) -> usize {
+    pub fn datagram_overhead(pathway: Pathway) -> usize {
         if matches!(pathway.local(), EndpointAddr::Direct { .. }) && matches!(pathway.remote(), EndpointAddr::Direct { .. }) {
             0
         } else {

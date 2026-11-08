@@ -256,14 +256,14 @@ async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
                 assert_eq!(
                     crate::common::path_credit(&admitted),
                     if role == Role::Client {
-                        usize::MAX
+                        None
                     } else {
-                        3600
+                        Some(3600)
                     }
                 );
             } else {
                 assert!(admitted.validation.is_validated());
-                assert_eq!(crate::common::path_credit(&admitted), usize::MAX);
+                assert_eq!(crate::common::path_credit(&admitted), None);
             }
             paths.retire_all();
         }
@@ -393,7 +393,7 @@ async fn server_selects_initial_ack_of_crypto_but_not_ack_of_ping() {
     let (paths, first, second) = paths(Role::Server);
     let space = crate::common::initial_space(&paths.spaces);
     let server_keys = keys(true);
-    first.validation.enter_validated().unwrap();
+    first.validation.grant().unwrap();
     let header = || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"peercid0"), ConnectionId::from_slice(b"localcid"));
     space.crypto.writer().write_all(b"server hello").await.unwrap();
     let mut ping = PingFrame;
@@ -470,7 +470,7 @@ async fn server_handshake_path_receives_cid_after_initial_crypto_ack() {
                 paths.progress.clone(),
             ),
         );
-        path.validation.enter_validated().unwrap();
+        path.validation.grant().unwrap();
         paths.entries.lock().unwrap().insert(path.pathway, path.clone());
         path
     };

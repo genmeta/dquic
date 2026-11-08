@@ -28,13 +28,8 @@ pub fn registered_path(paths: &qtransport::Paths, path: qtransport::path::Path) 
     path
 }
 
-pub fn path_credit(path: &qtransport::path::Path) -> usize {
-    use std::task::{Context, Poll, Waker};
-
-    match path.validation.poll_credit(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(Ok(credit)) => credit.unwrap_or(usize::MAX),
-        _ => 0,
-    }
+pub fn path_credit(path: &qtransport::path::Path) -> Option<usize> {
+    path.validation.credit().unwrap()
 }
 
 pub fn packet_metadata(packets: &[qbase::packet::assemble::Metadata], epoch: qbase::Epoch) -> Option<qbase::packet::assemble::Metadata> {
@@ -330,12 +325,36 @@ pub mod path_fixtures;
 
 /// Congestion control for standalone space-assembly tests without a path task.
 pub fn send_cc() -> qcongestion::ArcCC {
+    let validation = qbase::net::validate::ArcValidation::new();
+    validation.exempt().unwrap();
     qcongestion::ArcCC::new(
         qcongestion::Algorithm::NewReno,
         std::time::Duration::from_millis(25),
         Default::default(),
         handshake_facts(qbase::role::Role::Client, true),
+        validation,
         Arc::new(std::sync::atomic::AtomicU16::new(1200)),
         Default::default(),
     )
+}
+
+/// Start a fresh validation attempt with callbacks that do not retain the path.
+pub fn revalidate(path: &Arc<qtransport::path::Path>) {
+    use qcongestion::Transport as _;
+    let blocked = Arc::downgrade(path);
+    let charged = blocked.clone();
+    path.validation
+        .revalidate(
+            move || {
+                if let Some(path) = blocked.upgrade() {
+                    path.cc.on_blocked();
+                }
+            },
+            move || {
+                if let Some(path) = charged.upgrade() {
+                    path.cc.on_charged();
+                }
+            },
+        )
+        .unwrap();
 }

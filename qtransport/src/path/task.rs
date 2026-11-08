@@ -18,8 +18,8 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
             biased;
             _ = terminator.clone() => break None,
             result = async {
-                let (count, dcid) = path.collect(&mut datagrams, &mut frames).await?;
-                path.send(&mut datagrams[..count], dcid, &idle_timer).await
+                let (count, _) = path.collect(&mut datagrams, &mut frames).await?;
+                path.send(&mut datagrams[..count], &idle_timer).await
             } => result,
         };
         path.refresh(&mut datagrams, &mut frames);

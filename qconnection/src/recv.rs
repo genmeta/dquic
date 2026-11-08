@@ -132,7 +132,7 @@ pub(crate) async fn recv_ih_pkt_and_deliver_frames<H>(
                 paths.progress.on_path_selected(&paths, &path);
             }
             if epoch == Epoch::Handshake {
-                if path.validation.enter_validated().is_ok() {
+                if path.validation.grant().is_ok() {
                     path.send_waker.wake_all();
                 }
                 paths.progress.on_handshake_received();

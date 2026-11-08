@@ -15,7 +15,7 @@ use qbase::{
     handshake::HandshakeFacts,
     net::tx::UnregisterWaker,
     packet::{
-        GetType, HeaderSize, PacketContent, PacketNumber, Type,
+        PacketContent, PacketNumber,
         assemble::{Metadata, Package},
     },
 };
@@ -282,8 +282,6 @@ where
 
 /// Space-specific packet header and frame assembly.
 pub trait Encapsulate: Transmit {
-    fn probe_size(&self, dcid: ConnectionId) -> Option<usize>;
-
     fn packet(&self, dcid: ConnectionId) -> Option<Packet>;
 
     #[allow(clippy::too_many_arguments)]
@@ -328,10 +326,4 @@ pub trait Encapsulate: Transmit {
             }
         }
     }
-}
-
-fn probe_size(header: &(impl HeaderSize + GetType), pn_len: usize, tag_len: usize) -> usize {
-    let pn_offset = header.size() + usize::from(matches!(header.get_type(), Type::Long(_))) * 2;
-    // A PING occupies one byte. Header protection also needs a full sample.
-    (pn_offset + pn_len + 1 + tag_len).max(pn_offset + 4 + 16)
 }
