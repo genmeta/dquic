@@ -1,6 +1,6 @@
 use std::{
     future::poll_fn,
-    io::{Cursor, IoSlice},
+    io::IoSlice,
     task::{Context, Poll, ready},
 };
 
@@ -43,18 +43,13 @@ impl Path {
             Poll::Pending => 0,
         };
         let overhead = QuicProtocol::packet_overhead(self.pathway);
-        let mut send_quota = {
-            let mut cc = self.cc.lock();
-            // Update the budget before driving PTO, including when credit polling waits.
-            update_amplification_blocked(&mut cc, &self.spaces, dcid, credit, overhead);
-            if credit == 0 {
-                ready!(cc.poll_send_quota(cx)).map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
-                drop(cc);
-                self.cc.cancel(cx.waker());
-                return Poll::Pending;
-            }
-            ready!(cc.poll_send_quota(cx)).map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?
-        };
+        // Update the budget before driving PTO, including when credit polling waits.
+        update_amplification_blocked(&mut self.cc.lock(), &self.spaces, dcid, credit, overhead);
+        self.cc.prepare_burst_budget(cx).map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+        if credit == 0 {
+            self.cc.cancel(cx.waker());
+            return Poll::Pending;
+        }
         let packet_content = if self.is_active() {
             PacketContent::EffectivePayload
         } else {
@@ -80,27 +75,18 @@ impl Path {
         let mut count = 0;
         for datagram in datagrams {
             let buffer = &mut datagram.bytes;
-            let quota = if send_quota == 0 {
-                1200
-            } else {
-                send_quota.saturating_sub(overhead)
-            };
-            let length = 1200.min(credit.saturating_sub(overhead)).min(quota);
+            let length = 1200.min(credit.saturating_sub(overhead));
             buffer.resize(length, 0);
             let (size, collected) =
-                self.spaces.poll_dump(cx, &self.cc, dcid, &mut Cursor::new(buffer.as_mut()), packet_content, frames, &mut sources);
-            let in_flight: usize = collected.iter().filter(|meta| meta.in_flight).map(|meta| meta.pktlen).sum();
+                self.spaces.poll_dump(cx, &self.cc, overhead, dcid, buffer.as_mut(), packet_content, frames, &mut sources);
             datagram.packets.extend(collected);
             buffer.truncate(size);
             if size == 0 {
                 break;
             }
             credit -= size + overhead;
-            if in_flight > 0 {
-                send_quota = send_quota.saturating_sub(in_flight + overhead);
-            }
             count += 1;
-            if send_quota == 0 {
+            if self.cc.send_quota() == 0 {
                 break;
             }
         }
@@ -199,6 +185,7 @@ impl Path {
             datagram.bytes.clear();
         }
         frames.clear();
+        self.cc.on_burst_completed();
         self.dcid.refresh();
     }
 }

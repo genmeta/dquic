@@ -26,8 +26,19 @@ async fn pacing_tokens_do_not_bypass_the_congestion_window() {
     let cc = controller();
     let window = cc.send_quota();
     assert_eq!(window, 10 * MSS);
+    cc.prepare_burst_budget(&mut std::task::Context::from_waker(std::task::Waker::noop())).unwrap();
+    cc.on_pkt_sealed(window - 300);
+    assert_eq!(cc.send_quota(), 300, "the prepared budget keeps a sub-MTU remainder");
+    cc.do_tick().unwrap();
+    assert_eq!(cc.send_quota(), 300, "a tick must not refill the assembly budget");
+    cc.on_pkt_sealed(300);
+    assert_eq!(cc.send_quota(), 0, "Some(0) must not fall back to live credit");
+    cc.on_burst_completed();
+    assert_eq!(cc.send_quota(), window, "discarding sealed packets must not charge the real CC");
+    cc.prepare_burst_budget(&mut std::task::Context::from_waker(std::task::Waker::noop())).unwrap();
     for pn in 0..window / MSS {
         cc.on_pkt_sent(Epoch::Data, pn as u64, true, MSS, true, None);
+        assert_eq!(cc.send_quota(), window - (pn + 1) * MSS, "submission clears the prepared budget");
     }
     // The pacing bucket refills, but none of the outstanding data is ACKed.
     tokio::time::advance(Duration::from_millis(10)).await;

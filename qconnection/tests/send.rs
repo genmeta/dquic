@@ -93,8 +93,9 @@ async fn mixed_packets_record_each_space() {
     let (size, pns) = spaces.poll_dump(
         &mut cx,
         &common::send_cc(),
+        0,
         Default::default(),
-        &mut Cursor::new(&mut bytes[..]),
+        &mut bytes[..],
         PacketContent::EffectivePayload,
         &mut frames,
         &mut [],
@@ -255,17 +256,16 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
         let mut external: [&mut dyn for<'b> Package<&'b mut [u8]>; 3] = [a, b, c];
         let mut bytes = [0xa5; 1216];
         let mut frames = Vec::new();
-        let mut datagram = Cursor::new(&mut bytes[..1200]);
         let (size, pns) = spaces.poll_dump(
             &mut Context::from_waker(Waker::noop()),
             &common::send_cc(),
+            0,
             sender.peer_cid(),
-            &mut datagram,
+            &mut bytes[..1200],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut external,
         );
-        assert_eq!(datagram.position() as usize, size);
         assert_eq!(size, expected.iter().sum::<usize>());
         assert_eq!(
             pns.iter().map(|meta| meta.epoch()).collect::<Vec<_>>(),
@@ -357,17 +357,16 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         let mut external: [&mut dyn for<'b> Package<&'b mut [u8]>; 2] = [&mut crypto, &mut challenge];
         let mut bytes = [0xa5; 1216];
         let mut frames = Vec::new();
-        let mut datagram = Cursor::new(&mut bytes[..capacity]);
         let (size, pns) = spaces.poll_dump(
             &mut Context::from_waker(Waker::noop()),
             &common::send_cc(),
+            0,
             sender.peer_cid(),
-            &mut datagram,
+            &mut bytes[..capacity],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut external,
         );
-        assert_eq!(datagram.position() as usize, size);
         assert!(packet_metadata(&pns, Epoch::Initial).is_none());
         assert!(packet_metadata(&pns, Epoch::Handshake).is_some());
         assert_eq!(packet_metadata(&pns, Epoch::Data).is_some(), capacity == 1200);
@@ -381,8 +380,9 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
         let (size, _) = spaces.poll_dump(
             &mut Context::from_waker(Waker::noop()),
             &common::send_cc(),
+            0,
             sender.peer_cid(),
-            &mut Cursor::new(&mut bytes[..1200]),
+            &mut bytes[..1200],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut [&mut (Epoch::Data, &mut ping)],
@@ -411,8 +411,9 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
         let (_, pns) = spaces.poll_dump(
             &mut cx,
             &common::send_cc(),
+            0,
             dcid,
-            &mut Cursor::new(&mut bytes[..]),
+            &mut bytes[..],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut [&mut (Epoch::Initial, &mut ping)],
@@ -449,8 +450,9 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     let (size, pns) = spaces.poll_dump(
         &mut cx,
         &common::send_cc(),
+        0,
         Default::default(),
-        &mut Cursor::new(&mut bytes[..]),
+        &mut bytes[..],
         PacketContent::EffectivePayload,
         &mut frames,
         &mut [&mut (Epoch::Initial, &mut ping), &mut (Epoch::Handshake, &mut crypto), &mut (Epoch::Handshake, Failed)],
@@ -468,8 +470,9 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
     let (_, pns) = spaces.poll_dump(
         &mut cx,
         &common::send_cc(),
+        0,
         Default::default(),
-        &mut Cursor::new(&mut bytes[..]),
+        &mut bytes[..],
         PacketContent::EffectivePayload,
         &mut frames,
         &mut [],
@@ -506,8 +509,9 @@ fn ack_only_and_in_flight_packets_keep_metadata_and_empty_attempts_stay_empty() 
         let (size, pns) = spaces.poll_dump(
             &mut cx,
             &common::send_cc(),
+            0,
             Default::default(),
-            &mut Cursor::new(&mut bytes[..]),
+            &mut bytes[..],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut sources,
@@ -519,8 +523,9 @@ fn ack_only_and_in_flight_packets_keep_metadata_and_empty_attempts_stay_empty() 
         let (size, pns) = spaces.poll_dump(
             &mut cx,
             &common::send_cc(),
+            0,
             Default::default(),
-            &mut Cursor::new(&mut bytes[..]),
+            &mut bytes[..],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut sources,
@@ -545,15 +550,8 @@ async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
     let mut bytes = [0xa5; 1200];
     let mut frames = Vec::new();
     let cc = common::send_cc();
-    let (size, packets) = spaces.poll_dump(
-        &mut cx,
-        &cc,
-        sender.peer_cid(),
-        &mut Cursor::new(&mut bytes[..278]),
-        PacketContent::EffectivePayload,
-        &mut frames,
-        &mut [],
-    );
+    let (size, packets) =
+        spaces.poll_dump(&mut cx, &cc, 0, sender.peer_cid(), &mut bytes[..278], PacketContent::EffectivePayload, &mut frames, &mut []);
     assert_eq!(size, 278);
     assert_eq!(&bytes[278..], &[0xa5; 922]);
     assert_eq!(packets[0].pktlen, size);
@@ -564,8 +562,9 @@ async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
         let (size, packets) = spaces.poll_dump(
             &mut cx,
             &cc,
+            0,
             sender.peer_cid(),
-            &mut Cursor::new(&mut bytes[..length]),
+            &mut bytes[..length],
             PacketContent::EffectivePayload,
             &mut frames,
             &mut [],
@@ -579,28 +578,14 @@ async fn datagram_windows_bound_payload_and_cc_keeps_ack_progress() {
     assert_eq!(cc.send_quota(), 0);
     let fresh = sender.spaces.data.streams.fresh_bytes();
     let mut ack = Some(AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None));
-    let (size, packets) = spaces.poll_dump(
-        &mut cx,
-        &cc,
-        sender.peer_cid(),
-        &mut Cursor::new(&mut bytes[..]),
-        PacketContent::EffectivePayload,
-        &mut frames,
-        &mut [&mut ack],
-    );
+    let (size, packets) =
+        spaces.poll_dump(&mut cx, &cc, 0, sender.peer_cid(), &mut bytes[..], PacketContent::EffectivePayload, &mut frames, &mut [&mut ack]);
     assert!(size > 0);
     assert_eq!(packets[0].ack, Some(0));
     assert!(!packets[0].in_flight);
     assert_eq!(sender.spaces.data.streams.fresh_bytes(), fresh);
-    let (size, packets) = spaces.poll_dump(
-        &mut cx,
-        &cc,
-        sender.peer_cid(),
-        &mut Cursor::new(&mut bytes[..]),
-        PacketContent::EffectivePayload,
-        &mut frames,
-        &mut [],
-    );
+    let (size, packets) =
+        spaces.poll_dump(&mut cx, &cc, 0, sender.peer_cid(), &mut bytes[..], PacketContent::EffectivePayload, &mut frames, &mut []);
     assert_eq!(size, 0);
     assert!(packets.is_empty());
 }
