@@ -830,7 +830,7 @@ mod tests {
             )
             .unwrap();
         assert!(cc.lock().loss_detection_timer.is_none());
-        validation.on_received(1);
+        validation.on_received(43);
         assert_eq!(cc.lock().loss_detection_timer, Some(deadline));
         drop(cc);
         assert!(weak.upgrade().is_none());

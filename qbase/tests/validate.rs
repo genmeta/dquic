@@ -49,12 +49,70 @@ fn credit(validation: &ArcValidation) -> Poll<Result<Option<usize>, Cancelled>> 
 }
 
 #[test]
+fn amplification_credit_threshold_controls_waiters_and_callbacks() {
+    let validation = ArcValidation::new();
+    let blocked = Arc::new(AtomicUsize::new(0));
+    let charged = Arc::new(AtomicUsize::new(0));
+    let block_calls = blocked.clone();
+    let charge_calls = charged.clone();
+    validation.on_blocked(move || {
+        block_calls.fetch_add(1, Ordering::Relaxed);
+    });
+    validation.on_charged(move || {
+        charge_calls.fetch_add(1, Ordering::Relaxed);
+    });
+    let (wakes, waker) = waiter();
+    assert!(validation.poll_credit(&mut Context::from_waker(&waker)).is_pending());
+
+    validation.on_received(31);
+    validation.on_received(0);
+    assert_eq!(validation.credit().unwrap(), Some(93));
+    assert!(validation.is_blocking());
+    assert_eq!(count(&wakes), 0);
+    assert_eq!(charged.load(Ordering::Relaxed), 0);
+
+    validation.on_received(2);
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(99)))));
+    assert!(!validation.is_blocking());
+    assert_eq!(count(&wakes), 1);
+    assert_eq!(charged.load(Ordering::Relaxed), 1);
+    validation.on_sent(2);
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(97)))));
+    validation.on_sent(1);
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(96)))));
+    assert!(!validation.is_blocking());
+    assert_eq!(blocked.load(Ordering::Relaxed), 0);
+
+    validation.on_sent(3);
+    assert!(validation.is_blocking());
+    assert!(validation.poll_credit(&mut Context::from_waker(&waker)).is_pending());
+    assert_eq!(blocked.load(Ordering::Relaxed), 1);
+    validation.on_received(1);
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(96)))));
+    assert!(!validation.is_blocking());
+    assert_eq!(count(&wakes), 2);
+    assert_eq!(charged.load(Ordering::Relaxed), 2);
+
+    validation.on_sent(1);
+    assert_eq!(validation.credit().unwrap(), Some(95));
+    assert!(validation.is_blocking());
+    assert!(validation.poll_credit(&mut Context::from_waker(&waker)).is_pending());
+    assert_eq!(blocked.load(Ordering::Relaxed), 2);
+    validation.grant().unwrap();
+    validation.grant().unwrap();
+    assert!(matches!(credit(&validation), Poll::Ready(Ok(None))));
+    assert!(!validation.is_blocking());
+    assert_eq!(count(&wakes), 3);
+    assert_eq!(charged.load(Ordering::Relaxed), 3);
+}
+
+#[test]
 fn blocking_follows_credit_validation_and_cancellation() {
     let validation = ArcValidation::new();
     assert!(validation.is_blocking());
-    validation.on_received(1);
+    validation.on_received(33);
     assert!(!validation.is_blocking());
-    validation.on_sent(2);
+    validation.on_sent(3);
     assert!(!validation.is_blocking());
     validation.on_sent(1);
     assert!(validation.is_blocking());
@@ -62,7 +120,7 @@ fn blocking_follows_credit_validation_and_cancellation() {
     assert!(!validation.is_blocking());
     validation.revalidate(|| {}, || {}).unwrap();
     assert!(validation.is_blocking());
-    validation.on_received(1);
+    validation.on_received(33);
     assert!(!validation.is_blocking());
     validation.cancel();
     assert!(validation.is_blocking());
@@ -83,10 +141,11 @@ fn cancellation_does_not_notify_credit_callbacks() {
 }
 
 #[test]
-fn grant_notifies_charge_only_when_credit_was_zero() {
-    for received in [0, 1] {
+fn grant_notifies_charge_only_when_credit_was_below_threshold() {
+    for credit in [0, 95, 96, 97] {
         let validation = ArcValidation::new();
-        validation.on_received(received);
+        validation.on_received(33);
+        validation.on_sent(99 - credit);
         let calls = Arc::new(AtomicUsize::new(0));
         let charged = calls.clone();
         validation.on_charged(move || {
@@ -95,7 +154,7 @@ fn grant_notifies_charge_only_when_credit_was_zero() {
         validation.grant().unwrap();
         validation.grant().unwrap();
         assert_eq!(validation.credit().unwrap(), None);
-        assert_eq!(calls.load(Ordering::Relaxed), usize::from(received == 0));
+        assert_eq!(calls.load(Ordering::Relaxed), usize::from(credit < 96));
     }
 }
 
@@ -114,19 +173,19 @@ fn credit_callbacks_run_after_unlocking_and_only_on_state_changes() {
     validation.on_blocked(block_cb.clone());
     validation.on_charged(charge_cb.clone());
     validation.on_received(0);
+    validation.on_received(33);
     validation.on_received(1);
-    validation.on_received(1);
-    validation.on_sent(5);
+    validation.on_sent(6);
     validation.on_sent(1);
     validation.on_sent(0);
     validation.grant().unwrap();
     validation.grant().unwrap();
     validation.revalidate(block_cb.clone(), charge_cb.clone()).unwrap();
     validation.revalidate(block_cb, charge_cb).unwrap();
-    validation.on_received(1);
+    validation.on_received(33);
     validation.cancel();
     validation.on_received(1);
-    assert_eq!(*events.lock().unwrap(), [Some(3), Some(0), None, Some(0), Some(3)]);
+    assert_eq!(*events.lock().unwrap(), [Some(99), Some(95), None, Some(0), Some(99)]);
 }
 
 fn dump(
@@ -258,9 +317,11 @@ fn unvalidated_credit_counts_datagrams_and_debits_successful_sends() {
     validation.on_received(100);
     assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(300)))));
     validation.on_sent(250);
-    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(50)))));
+    assert_eq!(validation.credit().unwrap(), Some(50));
+    assert!(credit(&validation).is_pending());
     validation.on_received(10);
-    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(80)))));
+    assert_eq!(validation.credit().unwrap(), Some(80));
+    assert!(credit(&validation).is_pending());
     validation.on_sent(80);
     assert!(credit(&validation).is_pending());
 }
@@ -286,7 +347,7 @@ fn credit_and_frame_waiters_are_independent() {
 
     validation.on_received(0);
     assert_eq!(count(&credit_count), 0);
-    validation.on_received(10);
+    validation.on_received(43);
     assert_eq!(count(&credit_count), 1);
     assert_eq!(count(&send_count), 0);
 
@@ -306,7 +367,7 @@ fn each_waiter_slot_keeps_only_its_latest_waker() {
     assert!(validation.poll_credit(&mut Context::from_waker(&new_credit_waker)).is_pending());
     assert!(dump(&mut validation, 64, &old_send_waker).0.is_pending());
     assert!(dump(&mut validation, 64, &new_send_waker).0.is_pending());
-    validation.on_received(1);
+    validation.on_received(43);
     validation.challenge(challenge(1)).unwrap();
     assert_eq!(count(&old_credit), 0);
     assert_eq!(count(&new_credit), 1);
@@ -368,7 +429,8 @@ async fn respond_does_not_match_challenges_or_enter_validated() {
     validation.recv_frame(incoming).unwrap();
     assert_eq!(validation.respond().await.unwrap(), Some(incoming));
     assert!(!validation.is_validated());
-    assert!(matches!(credit(&validation), Poll::Ready(Ok(Some(30)))));
+    assert_eq!(validation.credit().unwrap(), Some(30));
+    assert!(credit(&validation).is_pending());
 
     validation.grant().unwrap();
     assert!(validation.is_validated());

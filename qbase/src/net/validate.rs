@@ -19,6 +19,9 @@ use crate::{
     packet::{Package, PacketBuffer, Type},
 };
 
+/// Minimum amplification credit required to resume sending.
+const MIN_SEND_CREDIT: usize = 96;
+
 /// Outgoing challenges and responses, with a single sending-task waiter.
 /// Keeps the latest queued challenge and one response for every received challenge.
 /// Shared access is synchronized by `ArcValidation`.
@@ -113,7 +116,7 @@ impl Validation {
         Self::default()
     }
 
-    /// Replace the callback for exhausted credit on the current validation attempt.
+    /// Replace the callback for credit below the sending threshold on this attempt.
     pub fn on_blocked(&mut self, callback: impl Fn() + Send + Sync + 'static) {
         if let Self::Validating { block_cb, .. } = self {
             *block_cb = Arc::new(callback);
@@ -137,7 +140,7 @@ impl Validation {
 
     /// Whether amplification credit currently prevents sending, including cancellation.
     pub fn is_blocking(&self) -> bool {
-        self.credit().unwrap_or(Some(0)) == Some(0)
+        self.credit().unwrap_or(Some(0)).is_some_and(|credit| credit < MIN_SEND_CREDIT)
     }
 
     /// Snapshot the allowance without registering a credit waiter.
@@ -149,12 +152,12 @@ impl Validation {
         }
     }
 
-    /// `None` grants unlimited credit. Zero finite credit waits for new input.
+    /// `None` grants unlimited credit. Credit below the sending threshold waits for input.
     pub fn poll_credit(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<usize>, Cancelled>> {
         match self {
             Self::Validating { rcvd_bytes, sent_bytes, credit_waker, .. } => {
                 let credit = rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes);
-                if credit == 0 {
+                if credit < MIN_SEND_CREDIT {
                     *credit_waker = Some(cx.waker().clone());
                     Poll::Pending
                 } else {
@@ -170,7 +173,7 @@ impl Validation {
     pub fn on_received(&mut self, bytes: usize) {
         if let Self::Validating { rcvd_bytes, sent_bytes, credit_waker, .. } = self {
             *rcvd_bytes = rcvd_bytes.saturating_add(bytes);
-            if rcvd_bytes.saturating_mul(3) > *sent_bytes {
+            if rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes) >= MIN_SEND_CREDIT {
                 if let Some(waker) = credit_waker.take() {
                     waker.wake();
                 }
@@ -339,7 +342,7 @@ impl ArcValidation {
         Self::default()
     }
 
-    /// Replace the callback for exhausted credit on the current validation attempt.
+    /// Replace the callback for credit below the sending threshold on this attempt.
     pub fn on_blocked(&self, callback: impl Fn() + Send + Sync + 'static) {
         self.0.lock().unwrap().on_blocked(callback);
     }
@@ -366,18 +369,20 @@ impl ArcValidation {
         self.0.lock().unwrap().credit()
     }
 
-    /// Wait for positive credit, return `None` for unlimited credit, or report cancellation.
+    /// Wait for enough credit to send, return `None` for unlimited credit, or report cancellation.
     pub fn poll_credit(&self, cx: &mut Context<'_>) -> Poll<Result<Option<usize>, Cancelled>> {
         self.0.lock().unwrap().poll_credit(cx)
     }
 
     pub fn on_received(&self, bytes: usize) {
         let mut state = self.0.lock().unwrap();
-        let Ok(credit) = state.credit() else { return };
+        let Ok(Some(credit)) = state.credit() else {
+            return;
+        };
         state.on_received(bytes);
-        if let Validation::Validating { charge_cb, .. } = &*state
-            && credit == Some(0)
-            && bytes > 0
+        if let Validation::Validating { rcvd_bytes, sent_bytes, charge_cb, .. } = &*state
+            && credit < MIN_SEND_CREDIT
+            && rcvd_bytes.saturating_mul(3).saturating_sub(*sent_bytes) >= MIN_SEND_CREDIT
         {
             let charge_cb = charge_cb.clone();
             drop(state);
@@ -388,10 +393,12 @@ impl ArcValidation {
     pub fn on_sent(&self, bytes: usize) {
         let mut state = self.0.lock().unwrap();
         state.on_sent(bytes);
-        let Ok(credit) = state.credit() else { return };
+        let Ok(Some(credit)) = state.credit() else {
+            return;
+        };
         if let Validation::Validating { block_cb, .. } = &*state
             && bytes > 0
-            && credit == Some(0)
+            && credit < MIN_SEND_CREDIT
         {
             let block_cb = block_cb.clone();
             drop(state);
@@ -408,7 +415,7 @@ impl ArcValidation {
         match &*state {
             Validation::Validating { charge_cb, .. } => {
                 let credit = state.credit()?;
-                if credit == Some(0) {
+                if credit.is_some_and(|credit| credit < MIN_SEND_CREDIT) {
                     let charge_cb = charge_cb.clone();
                     state.trust()?;
                     drop(state);

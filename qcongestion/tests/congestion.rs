@@ -264,7 +264,7 @@ async fn regression_releasing_amplification_credit_rearms_recovery() {
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
     assert_eq!(cc.get_pto(Epoch::Data), base);
-    validation.on_received(1);
+    validation.on_received(43);
     cc.do_tick().unwrap();
     assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 1);
     assert!(cc.get_pto(Epoch::Data) > base);
@@ -298,7 +298,7 @@ async fn amplification_unblocking_preserves_the_deadline_and_backoff() {
     validation.on_sent(1200);
     tokio::time::advance(backoff / 2).await;
     for _ in 0..4 {
-        validation.on_received(1);
+        validation.on_received(43);
         cc.do_tick().unwrap();
         assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), 0);
         assert_eq!(cc.get_pto(Epoch::Data), backoff);
