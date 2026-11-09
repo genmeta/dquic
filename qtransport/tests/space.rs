@@ -351,8 +351,9 @@ async fn data_trait_unregister_removes_all_source_waiters() {
         }
         data.crypto.writer().write_all(b"crypto").await.unwrap();
         data.rcvd_journal.on_rcvd_pn(0, true, Duration::ZERO);
+        assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!unregister));
         data.reliable_frames.send_frame([StreamCtlFrame::MaxData(MaxDataFrame::new(123u32.into()))]);
         writer.write_all(b"stream").await.unwrap();
-        assert_eq!(counter.0.load(Ordering::Relaxed), if unregister { 0 } else { 4 });
+        assert_eq!(counter.0.load(Ordering::Relaxed), if unregister { 0 } else { 3 });
     }
 }

@@ -57,8 +57,13 @@ where
     T: Into<F>,
 {
     fn send_frame<I: IntoIterator<Item = T>>(&self, iter: I) {
-        self.frames_guard().extend(iter.into_iter().map(Into::into));
-        self.tx_wakers.wake_all();
+        let mut frames = self.frames_guard();
+        let len = frames.len();
+        frames.extend(iter.into_iter().map(Into::into));
+        if frames.len() > len {
+            drop(frames);
+            self.tx_wakers.wake_all();
+        }
     }
 }
 

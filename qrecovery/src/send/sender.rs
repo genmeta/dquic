@@ -96,6 +96,9 @@ impl<TX> ReadySender<TX> {
         if self.shutdown_waker.is_some() {
             return Err(StreamError::Finished);
         }
+        if data.is_empty() {
+            return Ok(());
+        }
 
         let data_len = data.len() as u64;
 
@@ -111,7 +114,6 @@ impl<TX> ReadySender<TX> {
         // Update metrics when application writes data
         self.metrics.add_pending(data_len);
 
-        self.tx_wakers.wake_all();
         self.sndbuf.write(data);
         Ok(())
     }
@@ -247,6 +249,9 @@ impl<TX> SendingSender<TX> {
     pub(super) fn write(&mut self, data: Bytes) -> Result<(), StreamError> {
         if self.shutdown_waker.is_some() {
             return Err(StreamError::Finished);
+        }
+        if data.is_empty() {
+            return Ok(());
         }
 
         let data_len = data.len() as u64;

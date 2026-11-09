@@ -230,7 +230,6 @@ impl Paths {
                 }
             }
         });
-        path.send_waker.wake_all();
         path
     }
 
@@ -253,7 +252,7 @@ impl Paths {
         *self.max_idle_timeout.lock().unwrap() = timeout;
         self.idle_timer.update_max_idle_timeout(timeout);
         for path in entries.values() {
-            path.heartbeat.adapt_max_idle_timeout(timeout);
+            path.heartbeat.revise_max_idle_timeout(timeout);
         }
     }
 

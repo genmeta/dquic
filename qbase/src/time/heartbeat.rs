@@ -38,9 +38,10 @@ impl Heartbeat {
         Self { metric: IdleSince::new(), counter: 0, defer_idle_timeout, heartbeat_interval, waker: None }
     }
 
-    pub fn adapt_max_idle_timeout(&mut self, max_idle_timeout: Duration) {
-        if max_idle_timeout != Duration::ZERO {
-            self.heartbeat_interval = max_idle_timeout.div_f32(3.0).max(Duration::from_secs(1)).min(self.heartbeat_interval);
+    pub fn revise_max_idle_timeout(&mut self, max_idle_timeout: Duration) {
+        let interval = max_idle_timeout.div_f32(3.0).max(Duration::from_secs(1));
+        if max_idle_timeout != Duration::ZERO && interval < self.heartbeat_interval {
+            self.heartbeat_interval = interval;
 
             if let Some(waker) = self.waker.take() {
                 waker.wake();
@@ -113,11 +114,11 @@ impl ArcHeartbeat {
         }
     }
 
-    pub fn adapt_max_idle_timeout(&self, max_idle_timeout: Duration) {
+    pub fn revise_max_idle_timeout(&self, max_idle_timeout: Duration) {
         let mut guard = self.0.lock().unwrap();
         match guard.as_mut() {
             Ok(heartbeat) => {
-                heartbeat.adapt_max_idle_timeout(max_idle_timeout);
+                heartbeat.revise_max_idle_timeout(max_idle_timeout);
             }
             Err(_) => (),
         }

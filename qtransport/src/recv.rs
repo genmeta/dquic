@@ -115,7 +115,6 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
             // Admit paths only after authentication and complete frame parsing.
             let path = paths.get_or_create_path(&pathway);
             path.validation.on_received(received_bytes);
-            path.send_waker.wake_all();
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
@@ -131,9 +130,7 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
                 paths.progress.on_path_selected(&paths, &path);
             }
             if epoch == Epoch::Handshake {
-                if path.validation.grant().is_ok() {
-                    path.send_waker.wake_all();
-                }
+                let _ = path.validation.grant();
                 paths.progress.on_handshake_received();
             }
             for frame in parsed_frames.drain(..) {
@@ -249,7 +246,6 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
             // Admit paths only after authentication and complete frame parsing.
             let path = paths.get_or_create_path(&pathway);
             path.validation.on_received(received_bytes);
-            path.send_waker.wake_all();
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
@@ -261,8 +257,6 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
                         let mut cc = path.cc.lock();
                         let frame = data.recv_frame(frame)?;
                         cc.on_ack_rcvd(Epoch::Data, &frame, Instant::now());
-                        drop(cc);
-                        path.send_waker.wake_all();
                     }
                     Frame::Crypto(frame, bytes) => {
                         data.crypto.incoming().recv_frame((frame, bytes))?;
@@ -312,7 +306,6 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
             let pto = path.cc.get_pto(Epoch::Data);
             data.rcvd_journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
             path.cc.on_pkt_rcvd(Epoch::Data, pn, content.is_ack_eliciting());
-            path.send_waker.wake_all();
             Ok(())
         })();
         if let Err(error) = result {

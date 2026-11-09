@@ -108,6 +108,39 @@ fn paths(role: Role) -> (Arc<Paths>, Arc<Path>, Arc<Path>) {
     (paths, first, second)
 }
 
+#[tokio::test(start_paused = true)]
+async fn handshake_packet_wakes_the_validated_path_once() {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+
+    use qcongestion::Transport;
+
+    #[derive(Default)]
+    struct Counter(AtomicUsize);
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for role in [Role::Client, Role::Server] {
+        let (paths, path, _) = paths(role);
+        paths.progress.on_path_selected(&paths, &path);
+        path.validation.grant().unwrap();
+        let counter = Arc::new(Counter::default());
+        path.send_waker.register(&Waker::from(counter.clone()));
+
+        receive_ping(role, Epoch::Handshake, false, &paths, &path).await;
+
+        assert!(path.validation.is_validated());
+        assert!(path.cc.need_ack(Epoch::Handshake).is_some());
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        paths.retire_all();
+    }
+}
+
 #[tokio::test]
 async fn initial_and_handshake_close_enter_draining_through_paths_terminator() {
     use tokio::io::AsyncReadExt;
