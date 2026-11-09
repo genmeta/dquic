@@ -23,11 +23,10 @@ fn take_validation_frames(path: &qtransport::path::Path) -> Vec<qbase::frame::Fr
     let limits_length = 256;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-    let result = path
+    let _ = path
         .validation
         .clone()
         .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
-    assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
     FrameReader::new(bytes.freeze(), ty).map(|frame| frame.unwrap().0).collect()
 }
 

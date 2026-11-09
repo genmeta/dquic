@@ -5,7 +5,6 @@ use std::{
 
 use bytes::BufMut;
 use qbase::{
-    error::Error,
     frame::{Fin, FrameType, Len, Offset, StreamCtlFrame, io::SendFrame},
     net::tx::UnregisterWaker,
     packet::{Package, PacketBuffer},
@@ -15,12 +14,7 @@ use super::{ArcDataStreams, DataStreams, io::Output};
 
 impl<TX: Clone> Output<TX> {
     /// Serve one stream per call, preserving its byte budget across packets and paths.
-    fn poll_dump<B: BufMut + ?Sized>(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-        credit: &mut usize,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump<B: BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>, credit: &mut usize) -> Poll<usize> {
         const STREAM_QUANTUM: usize = 4096;
         let Some((current, remaining)) = self.turn.or_else(|| self.outgoings.last_key_value().map(|(&sid, _)| (sid, STREAM_QUANTUM)))
         else {
@@ -41,12 +35,11 @@ impl<TX: Clone> Output<TX> {
                 STREAM_QUANTUM
             };
             match outgoing.poll_dump(cx, buffer, credit, &mut budget) {
-                Poll::Ready(Ok(n)) if n > 0 => {
+                Poll::Ready(n) if n > 0 => {
                     self.turn = Some((sid, budget));
-                    return Poll::Ready(Ok(n));
+                    return Poll::Ready(n);
                 }
-                Poll::Ready(Ok(_)) => availability = Poll::Ready(Ok(0)),
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(_) => availability = Poll::Ready(0),
                 Poll::Pending => {}
             }
         }
@@ -82,11 +75,7 @@ where
         total
     }
 
-    pub(crate) fn poll_dump<B: BufMut + ?Sized>(
-        &self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    pub(crate) fn poll_dump<B: BufMut + ?Sized>(&self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         buffer.for_frame(qbase::frame::FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let requested = self.fresh_bytes_up_to(buffer.remaining_mut());
         let mut credit = self.flow_ctrl.sender.credit(requested);
@@ -102,19 +91,18 @@ where
         // Hold the insertion lock through polling and the final waiter registration.
         let mut guard = self.output.streams();
         let Ok(output) = guard.as_mut() else {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(0);
         };
         let start = buffer.meta.nframes;
         let result = loop {
             // A full packet or a lengthless STREAM cannot accept another frame.
             buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
             if buffer.remaining_mut() < 2 {
-                break Poll::Ready(Ok(buffer.meta.nframes - start));
+                break Poll::Ready(buffer.meta.nframes - start);
             }
             match output.poll_dump(cx, buffer, &mut remaining) {
-                Poll::Ready(Ok(n)) if n > 0 => {}
-                Poll::Ready(Err(error)) => break Poll::Ready(Err(error)),
-                _ if buffer.meta.nframes != start => break Poll::Ready(Ok(buffer.meta.nframes - start)),
+                Poll::Ready(n) if n > 0 => {}
+                _ if buffer.meta.nframes != start => break Poll::Ready(buffer.meta.nframes - start),
                 Poll::Pending => {
                     self.tx_wakers.register(cx.waker());
                     break Poll::Pending;
@@ -145,7 +133,7 @@ impl<TX, B: bytes::BufMut + ?Sized> Package<B> for ArcDataStreams<TX>
 where
     TX: SendFrame<StreamCtlFrame> + Clone + Send + 'static,
 {
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         self.0.poll_dump(cx, buffer)
     }
 }

@@ -103,11 +103,7 @@ impl Terminator {
         }
     }
 
-    fn poll_dump<B: bytes::BufMut + ?Sized>(
-        &mut self,
-        cx: &mut Context<'_>,
-        buffer: &mut PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump<B: bytes::BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let mut dump_ccf = |error: &Error, buffer: &mut PacketBuffer<'_, B>| {
             let mut frame = match (buffer.meta.pktype, error) {
                 (Type::Long(V1(Ver1::INITIAL | Ver1::HANDSHAKE)), Error::App(_)) => {
@@ -126,7 +122,7 @@ impl Terminator {
             Self::Closing { tx_wakers: send_wakers, sync_ccf, sent_ccf, error, .. } => {
                 if *sync_ccf {
                     let result = dump_ccf(error, buffer);
-                    if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                    if matches!(result, Poll::Ready(n) if n > 0) {
                         *sync_ccf = false;
                         *sent_ccf = true;
                     } else {
@@ -142,7 +138,7 @@ impl Terminator {
             Self::Draining { error, sent_ccf, .. } => {
                 if !*sent_ccf {
                     let result = dump_ccf(error, buffer);
-                    if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                    if matches!(result, Poll::Ready(n) if n > 0) {
                         *sent_ccf = true;
                     } else {
                         buffer.finish();
@@ -150,10 +146,13 @@ impl Terminator {
                     result
                 } else {
                     buffer.finish();
-                    Poll::Ready(Ok(0))
+                    Poll::Ready(0)
                 }
             }
-            Self::Terminated(error) => Poll::Ready(Err(error.clone())),
+            Self::Terminated(_) => {
+                buffer.finish();
+                Poll::Ready(0)
+            }
         }
     }
 
@@ -333,7 +332,7 @@ impl<B: bytes::BufMut + ?Sized> Package<B> for &ArcTerminator {
         u32::MAX
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         self.0.lock().unwrap().poll_dump(cx, buffer)
     }
 }

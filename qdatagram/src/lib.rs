@@ -100,7 +100,7 @@ mod tests {
         for _ in 0..2 {
             let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
             let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, packet_type, 0, 0);
-            assert_eq!(flow.outgoing.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(0)));
+            assert_eq!(flow.outgoing.poll_dump(&mut cx, &mut buffer), Poll::Ready(0));
         }
         assert!(bytes.is_empty());
         assert!(frames.is_empty());

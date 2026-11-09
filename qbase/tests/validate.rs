@@ -9,7 +9,6 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use qbase::{
     Cancelled,
-    error::Error,
     frame::{
         Frame, FrameReader, PathChallengeFrame, PathResponseFrame,
         io::{ReceiveFrame, SendFrame},
@@ -192,7 +191,7 @@ fn dump(
     validation: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
     capacity: usize,
     waker: &Waker,
-) -> (Poll<Result<usize, Error>>, Vec<Frame<Bytes>>) {
+) -> (Poll<usize>, Vec<Frame<Bytes>>) {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = capacity;
@@ -204,7 +203,7 @@ fn dump(
         let result = validation.poll_dump(&mut Context::from_waker(waker), &mut buffer);
         (result, buffer.meta.nframes)
     };
-    if let Poll::Ready(Ok(n)) = result {
+    if let Poll::Ready(n) = result {
         assert_eq!(n, written);
     }
     assert!(frames.is_empty());
@@ -261,7 +260,7 @@ fn shared_validation_send_frame_wakes_sender_and_packages_both_frame_types() {
         PathResponseFrame::from(challenge(1)),
     ]);
     let (result, decoded) = dump(&mut frames, 64, &waker);
-    assert_eq!(result, Poll::Ready(Ok(4)));
+    assert_eq!(result, Poll::Ready(4));
     assert_eq!(
         decoded,
         vec![
@@ -284,7 +283,7 @@ fn shared_validation_send_frame_wakes_sender_and_packages_both_frame_types() {
     assert_eq!(count(&wakes), 3);
     sender.send_frame([challenge(7)]);
     sender.send_frame([PathResponseFrame::from(challenge(8))]);
-    assert_eq!(dump(&mut frames, 64, &waker).0, Poll::Ready(Ok(0)));
+    assert_eq!(dump(&mut frames, 64, &waker).0, Poll::Ready(0));
 }
 
 #[tokio::test]
@@ -307,7 +306,7 @@ async fn raw_validation_receives_both_frame_types_without_internal_locking() {
     validation.recv_path_challenge_frame(challenge(3));
     validation.recv_path_response_frame(incoming);
     assert!(matches!(validation.respond().await, Err(Cancelled)));
-    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(0)));
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(0));
 }
 
 #[test]
@@ -399,7 +398,7 @@ fn both_directions_share_the_frame_buffer_and_one_dump_writes_multiple_frames() 
     validation.recv_frame(challenge(1)).unwrap();
     validation.recv_frame(challenge(2)).unwrap();
     let (result, frames) = dump(&mut validation, 64, Waker::noop());
-    assert_eq!(result, Poll::Ready(Ok(3)));
+    assert_eq!(result, Poll::Ready(3));
     assert_eq!(
         frames,
         vec![Frame::PathResponse(challenge(1).into()), Frame::PathResponse(challenge(2).into()), Frame::PathChallenge(challenge(3)),]
@@ -413,10 +412,10 @@ fn insufficient_space_preserves_unsent_frames_for_the_next_packet() {
     validation.challenge(challenge(3)).unwrap();
     validation.recv_frame(challenge(1)).unwrap();
     validation.recv_frame(challenge(2)).unwrap();
-    assert_eq!(dump(&mut validation, 8, Waker::noop()).0, Poll::Ready(Ok(0)));
+    assert_eq!(dump(&mut validation, 8, Waker::noop()).0, Poll::Ready(0));
     assert_eq!(dump(&mut validation, 9, Waker::noop()).1, vec![Frame::PathResponse(challenge(1).into())]);
     let (result, frames) = dump(&mut validation, 18, Waker::noop());
-    assert_eq!(result, Poll::Ready(Ok(2)));
+    assert_eq!(result, Poll::Ready(2));
     assert_eq!(frames, vec![Frame::PathResponse(challenge(2).into()), Frame::PathChallenge(challenge(3))]);
 }
 
@@ -596,7 +595,7 @@ async fn cancellation_wakes_all_three_waiters_and_cannot_be_reversed() {
     validation.recv_frame(challenge(2)).unwrap();
     validation.recv_frame(PathResponseFrame::from(challenge(1))).unwrap();
     validation.on_received(10);
-    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(0)));
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(0));
 }
 
 #[test]
@@ -610,7 +609,7 @@ fn every_received_challenge_queues_a_response_in_both_states() {
             validation.recv_frame(challenge(1)).unwrap();
         }
         let (result, frames) = dump(&mut validation, 128, Waker::noop());
-        assert_eq!(result, Poll::Ready(Ok(10)));
+        assert_eq!(result, Poll::Ready(10));
         assert_eq!(frames, vec![Frame::PathResponse(challenge(1).into()); 10]);
     }
 }
@@ -629,7 +628,7 @@ fn assembly_filters_validation_out_of_long_header_packets() {
     let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0);
     assert!(buffer.assemble(&mut Context::from_waker(Waker::noop()), PacketContent::EffectivePayload, &mut [&mut validation]).is_pending());
     assert_eq!(buffer.written(), 0);
-    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(Ok(2)));
+    assert_eq!(dump(&mut validation, 64, Waker::noop()).0, Poll::Ready(2));
 }
 
 #[tokio::test]

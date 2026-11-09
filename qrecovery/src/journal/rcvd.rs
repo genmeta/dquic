@@ -6,7 +6,6 @@ use std::{
 
 use bytes::BufMut;
 use qbase::{
-    error::Error,
     frame::{AckFrame, Ecn, FrameType},
     net::tx::{ArcSendWakers, UnregisterWaker},
     packet::{InvalidPacketNumber, Package, PacketBuffer, PacketContent, PacketNumber},
@@ -239,7 +238,7 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege {
         PacketContent::NonAckEliciting
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         use std::task::Poll;
         buffer.for_frame(FrameType::Ack(Ecn::None));
         let journal = self.journal.inner.read().unwrap();
@@ -249,7 +248,7 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege {
             .and_then(|(largest, time)| journal.gen_ack_frame_util(largest, time, buffer.remaining_mut()))
         {
             Ok(ack) => ack,
-            Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
+            Err(Poll::Ready(())) => return Poll::Ready(0),
             Err(Poll::Pending) => {
                 self.journal.waiters.register(cx.waker());
                 return Poll::Pending;
@@ -264,7 +263,7 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege {
             ack.ecn(),
         );
         let result = ack.poll_dump(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(1))) {
+        if matches!(result, Poll::Ready(1)) {
             self.need_ack = None;
         }
         result
@@ -281,7 +280,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
         PacketContent::NonAckEliciting
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let journal = self.inner.read().unwrap();
         let Some(latest) = journal.packets.largest() else {
             self.waiters.register(cx.waker());

@@ -52,8 +52,7 @@ impl<K: Seal> Packet<K> {
         if self.cursor == 0 && !buffer.begin(&self.header, self.pn.1) {
             return Poll::Ready((0, 0));
         }
-        // Source owners handle connection errors; this packet has no content to send.
-        let result = buffer.assemble(cx, packet_content, sources).map(|result| result.unwrap_or(0));
+        let result = buffer.assemble(cx, packet_content, sources);
         if matches!(result, Poll::Ready(n) if n > 0) {
             let required = buffer.pn_offset() + 4 + 16;
             let padding = required.saturating_sub(buffer.written() + tag);

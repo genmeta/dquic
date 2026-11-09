@@ -7,7 +7,6 @@ use std::{
 
 use bytes::BufMut;
 use qbase::{
-    error::Error,
     frame::{EncodeSize, FrameFeature, io::SendFrame},
     net::tx::{ArcSendWakers, UnregisterWaker},
     packet::{Package, PacketBuffer},
@@ -64,7 +63,7 @@ where
 }
 
 impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let mut queue = self.frames_guard();
         if queue.is_empty() {
             self.tx_wakers.register(cx.waker());
@@ -73,10 +72,9 @@ impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
         let start = buffer.meta.nframes;
         while let Some(frame) = queue.front_mut() {
             match frame.poll_dump(cx, buffer) {
-                Poll::Ready(Ok(n)) if n > 0 => {
+                Poll::Ready(n) if n > 0 => {
                     queue.pop_front();
                 }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending if buffer.meta.nframes == start => {
                     self.tx_wakers.register(cx.waker());
                     return Poll::Pending;
@@ -84,7 +82,7 @@ impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
                 _ => break,
             }
         }
-        Poll::Ready(Ok(buffer.meta.nframes - start))
+        Poll::Ready(buffer.meta.nframes - start)
     }
 }
 

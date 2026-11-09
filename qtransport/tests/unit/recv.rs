@@ -188,7 +188,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, header().initial(vec![]).get_type(), 0, 0),
             )
         };
-        assert!(matches!(poll_close(), Poll::Ready(Ok(n)) if n > 0));
+        assert!(matches!(poll_close(), Poll::Ready(n) if n > 0));
         let peer = keys(false);
         let journal = ArcSentJournal::default();
         for pn in 0..5 {
@@ -206,7 +206,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
                 assert!(poll_close().is_pending());
             }
         }
-        assert!(matches!(poll_close(), Poll::Ready(Ok(n)) if n > 0));
+        assert!(matches!(poll_close(), Poll::Ready(n) if n > 0));
         let local = keys(true);
         let mut ping = PingFrame;
         if epoch == Epoch::Initial {
@@ -229,7 +229,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         .unwrap();
         receive_bytes(bytes, space.clone(), &paths, &path).await;
         assert!(space.sent_journal.lock_guard().packet(0).is_none());
-        assert_eq!(poll_close(), Poll::Ready(Ok(0)));
+        assert_eq!(poll_close(), Poll::Ready(0));
         assert!(futures::poll!(std::pin::pin!(terminator.clone())).is_pending());
         paths.retire_all();
         assert_eq!(terminator.await, close.into());

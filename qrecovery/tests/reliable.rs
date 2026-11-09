@@ -24,7 +24,7 @@ impl std::task::Wake for WakeCount {
 
 #[test]
 fn only_pending_polls_register_waiters() {
-    for (queued, quota, expected) in [(1, 1, Poll::Ready(Ok(1))), (1, 0, Poll::Ready(Ok(0))), (0, 1, Poll::Pending)] {
+    for (queued, quota, expected) in [(1, 1, Poll::Ready(1)), (1, 0, Poll::Ready(0)), (0, 1, Poll::Pending)] {
         let mut queue = ArcReliableFrames::<HandshakeDoneFrame>::with_capacity(2);
         queue.send_frame(std::iter::repeat_n(HandshakeDoneFrame, queued));
         let wakes = Arc::new(WakeCount::default());
@@ -62,7 +62,7 @@ fn reliable_queue_preserves_content_when_only_some_frames_fit() {
             0,
             0,
         );
-        assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(1))));
+        assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(1)));
         assert_eq!(buffer.meta.nframes, 1);
         assert_eq!(&bytes[..], &[0x1e]);
     }
@@ -90,14 +90,14 @@ fn concrete_frame_queue_keeps_a_blocked_frame_and_reports_empty() {
     {
         let mut writer_3 = bytes::BufMut::limit(&mut bytes, limits_length);
         let mut buffer = PacketBuffer::new(&mut writer_3, limits_quota, &mut frames, ty, 0, 0);
-        assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(0))));
+        assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(0)));
     }
     assert!(bytes.is_empty());
     assert!(frames.is_empty());
     limits_quota = 1;
     let mut writer_4 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_4, limits_quota, &mut frames, ty, 0, 0);
-    assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(1))));
+    assert!(matches!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(1)));
     assert!(queue.poll_dump(&mut cx, &mut buffer).is_pending());
     assert_eq!(buffer.meta.nframes, 1);
     assert_eq!(&bytes[..], &[0x1e]);

@@ -45,23 +45,23 @@ impl<B: BufMut + ?Sized> Package<B> for PathValidateFrames {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         if self.responses.is_empty() && self.challenge.is_none() {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
         let start = buffer.meta.nframes;
         while let Some(frame) = self.responses.front_mut() {
-            let n = std::task::ready!(frame.poll_dump(cx, buffer))?;
+            let n = std::task::ready!(frame.poll_dump(cx, buffer));
             if n == 0 {
-                return Poll::Ready(Ok(buffer.meta.nframes - start));
+                return Poll::Ready(buffer.meta.nframes - start);
             }
             self.responses.pop_front();
         }
         if self.challenge.is_some() {
-            std::task::ready!(self.challenge.poll_dump(cx, buffer))?;
+            std::task::ready!(self.challenge.poll_dump(cx, buffer));
         }
-        Poll::Ready(Ok(buffer.meta.nframes - start))
+        Poll::Ready(buffer.meta.nframes - start)
     }
 }
 
@@ -306,13 +306,13 @@ impl<B: BufMut + ?Sized> Package<B> for Validation {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         if matches!(self.credit(), Ok(Some(credit)) if credit < 1200) {
             buffer.scope(0);
         }
         match self {
             Self::Validating { frames, .. } | Self::Validated { frames, .. } => frames.poll_dump(cx, buffer),
-            Self::Cancelled { .. } => Poll::Ready(Ok(0)),
+            Self::Cancelled { .. } => Poll::Ready(0),
         }
     }
 }
@@ -509,7 +509,7 @@ impl<B: BufMut + ?Sized> Package<B> for ArcValidation {
         matches!(packet_type, Type::Short(_))
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         self.0.lock().unwrap().poll_dump(cx, buffer)
     }
 }

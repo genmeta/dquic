@@ -31,7 +31,7 @@ mod send {
 
     impl Sender {
         /// Pack CRYPTO ranges until the packet is full or no more data is available.
-        fn poll_dump<B: BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+        fn poll_dump<B: BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
             buffer.for_frame(FrameType::Crypto);
             let start = buffer.meta.nframes;
             loop {
@@ -40,9 +40,9 @@ mod send {
                 let (range, _, data) = match self.sndbuf.pick_up(predicate, usize::MAX) {
                     Ok(data) => data,
                     Err(_) if buffer.meta.nframes != start => {
-                        return Poll::Ready(Ok(buffer.meta.nframes - start));
+                        return Poll::Ready(buffer.meta.nframes - start);
                     }
-                    Err(Poll::Ready(())) => return Poll::Ready(Ok(0)),
+                    Err(Poll::Ready(())) => return Poll::Ready(0),
                     Err(Poll::Pending) => {
                         self.tx_wakers.register(cx.waker());
                         return Poll::Pending;
@@ -50,7 +50,7 @@ mod send {
                 };
                 let frame = CryptoFrame::new(VarInt::from_u64(range.start).unwrap(), VarInt::from_u64(range.end - range.start).unwrap());
                 let result = (frame, data.as_slice()).poll_dump(cx, buffer);
-                debug_assert!(matches!(result, Poll::Ready(Ok(1))));
+                debug_assert!(matches!(result, Poll::Ready(1)));
             }
         }
 
@@ -198,11 +198,11 @@ mod send {
     }
 
     impl<B: BufMut + ?Sized> Package<B> for CryptoStreamOutgoing {
-        fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+        fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
             let mut guard = self.0.0.lock().unwrap();
             let inner = match guard.as_mut() {
                 Ok(inner) => inner,
-                Err(_) => return Poll::Ready(Ok(0)),
+                Err(_) => return Poll::Ready(0),
             };
             let result = inner.poll_dump(cx, buffer);
             // Keep assembly and replay rearming under the same sender lock.

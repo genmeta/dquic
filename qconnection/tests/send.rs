@@ -10,7 +10,6 @@ use futures::FutureExt;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    error::{ErrorKind, QuicError},
     frame::{Frame, FrameReader, GuaranteedFrame, PingFrame},
     packet::{DataHeader, LongHeaderBuilder, Packet as ParsedPacket, PacketContent, PacketReader, long},
     role::Role,
@@ -392,8 +391,8 @@ async fn recursive_packing_validation_checks_capacity_before_consuming_the_frame
 }
 
 #[test]
-fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
-    use qbase::packet::{GetDcid, GetScid, GetType, Package};
+fn recursive_packing_retains_initial_token_and_skips_closed_sources() {
+    use qbase::packet::{GetDcid, GetScid, GetType};
     use qtransport::space::{ArcSpaces, InitialSpace};
     let scid = ConnectionId::from_slice(b"local000");
     let facts = common::handshake_facts(Role::Client, false);
@@ -433,16 +432,8 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
             .unwrap();
         assert!(FrameReader::new(opened.body(), opened.get_type()).any(|f| matches!(f.unwrap().0, Frame::Ping(_))));
     }
-    struct Failed;
-    impl<B: bytes::BufMut + ?Sized> Package<B> for Failed {
-        fn poll_dump(
-            &mut self,
-            _: &mut Context<'_>,
-            _: &mut qbase::packet::PacketBuffer<'_, B>,
-        ) -> Poll<Result<usize, qconnection::Error>> {
-            Poll::Ready(Err(QuicError::with_default_fty(ErrorKind::Internal, "assembly failed").into()))
-        }
-    }
+    let closed = qrecovery::crypto::CryptoStream::with_facts(facts);
+    closed.sender.retire();
     initial.crypto.writer().write_all(b"retry").now_or_never().unwrap().unwrap();
     handshake.crypto.writer().write_all(b"later").now_or_never().unwrap().unwrap();
     let mut crypto = handshake.crypto.outgoing();
@@ -455,10 +446,10 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
         &mut bytes[..],
         PacketContent::EffectivePayload,
         &mut frames,
-        &mut [&mut (Epoch::Initial, &mut ping), &mut (Epoch::Handshake, &mut crypto), &mut (Epoch::Handshake, Failed)],
+        &mut [&mut (Epoch::Initial, &mut ping), &mut (Epoch::Handshake, &mut crypto), &mut (Epoch::Handshake, closed.outgoing())],
     );
     assert_eq!(size, 1200);
-    assert!(packet_metadata(&pns, Epoch::Handshake).is_none());
+    assert!(packet_metadata(&pns, Epoch::Handshake).is_some());
     assert!(frames.is_empty());
     assert!(
         initial
@@ -467,7 +458,14 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
             .frames(packet_metadata(&pns, Epoch::Initial).unwrap().pn)
             .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5))
     );
-    let (_, pns) = spaces.poll_dump(
+    assert!(
+        handshake
+            .sent_journal
+            .lock_guard()
+            .frames(packet_metadata(&pns, Epoch::Handshake).unwrap().pn)
+            .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5))
+    );
+    let (size, pns) = spaces.poll_dump(
         &mut cx,
         &common::send_cc(),
         0,
@@ -477,14 +475,8 @@ fn recursive_packing_retains_initial_token_and_skips_failed_sources() {
         &mut frames,
         &mut [],
     );
-    assert!(packet_metadata(&pns, Epoch::Initial).is_none());
-    assert!(
-        handshake
-            .sent_journal
-            .lock_guard()
-            .frames(packet_metadata(&pns, Epoch::Handshake).unwrap().pn)
-            .any(|frame| matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 5))
-    );
+    assert_eq!(size, 0);
+    assert!(pns.is_empty());
 }
 
 #[test]

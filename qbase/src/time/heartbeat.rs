@@ -9,7 +9,6 @@ use tokio::time::{Instant, sleep};
 
 use crate::{
     Cancelled,
-    error::Error,
     frame::PingFrame,
     packet::{Package, PacketBuffer, PacketContent},
     time::IdleSince,
@@ -84,14 +83,14 @@ impl<B: BufMut + ?Sized> Package<B> for Heartbeat {
         PacketContent::JustPing
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         if !self.time_to_heartbeat().is_zero() {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
         self.waker = None;
         let result = PingFrame.poll_dump(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(1))) {
+        if matches!(result, Poll::Ready(1)) {
             self.counter += 1;
         }
         result
@@ -174,11 +173,11 @@ impl<B: BufMut + ?Sized> Package<B> for ArcHeartbeat {
         PacketContent::JustPing
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let mut guard = self.0.lock().unwrap();
         match guard.as_mut() {
             Ok(heartbeat) => heartbeat.poll_dump(cx, buffer),
-            Err(_) => Poll::Pending,
+            Err(_) => Poll::Ready(0),
         }
     }
 }
@@ -190,11 +189,7 @@ mod tests {
     use super::*;
     use crate::packet::{GetType, OneRttHeader};
 
-    fn poll(
-        heartbeat: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
-        quota: usize,
-        waker: &Waker,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll(heartbeat: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, quota: usize, waker: &Waker) -> Poll<usize> {
         let mut bytes = BytesMut::new();
         let mut frames = Vec::new();
         let limits_quota = quota;
@@ -203,7 +198,7 @@ mod tests {
         let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
         let result = heartbeat
             .poll_dump(&mut Context::from_waker(waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
-        if matches!(result, Poll::Ready(Ok(1))) {
+        if matches!(result, Poll::Ready(1)) {
             assert_eq!(&bytes[..], &[0x01]);
             assert!(frames.is_empty());
         } else {

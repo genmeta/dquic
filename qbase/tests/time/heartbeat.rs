@@ -9,7 +9,6 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    error::Error,
     packet::{GetType, OneRttHeader, Package, PacketBuffer, PacketContent},
     time::heartbeat::*,
 };
@@ -24,11 +23,7 @@ impl std::task::Wake for WakeCount {
     }
 }
 
-fn poll(
-    heartbeat: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>,
-    quota: usize,
-    waker: &Waker,
-) -> Poll<Result<usize, Error>> {
+fn poll(heartbeat: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, quota: usize, waker: &Waker) -> Poll<usize> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = quota;
@@ -37,7 +32,7 @@ fn poll(
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let result =
         heartbeat.poll_dump(&mut Context::from_waker(waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
-    if matches!(result, Poll::Ready(Ok(1))) {
+    if matches!(result, Poll::Ready(1)) {
         assert_eq!(&bytes[..], &[0x01]);
         assert!(frames.is_empty());
     } else {
@@ -71,7 +66,7 @@ async fn background_rechecks_activity_and_wakes_only_the_current_sender() {
     assert_eq!(old.0.load(Ordering::Relaxed), 0);
     tokio::task::yield_now().await;
     assert_eq!(current.0.load(Ordering::Relaxed), 1);
-    assert_eq!(poll(&mut heartbeat, 1, &current_waker), Poll::Ready(Ok(1)));
+    assert_eq!(poll(&mut heartbeat, 1, &current_waker), Poll::Ready(1));
     assert!(poll(&mut heartbeat, 1, &current_waker).is_pending());
     tokio::time::advance(DEFAULT_HEARTBEAT_INTERVAL).await;
     tokio::task::yield_now().await;
@@ -116,15 +111,15 @@ async fn ping_is_consumed_only_after_it_fits_and_activity_resets_the_schedule() 
     heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now());
     assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert_eq!(poll(&mut heartbeat, 0, Waker::noop()), Poll::Ready(Ok(0)));
+    assert_eq!(poll(&mut heartbeat, 0, Waker::noop()), Poll::Ready(0));
     assert_eq!(heartbeat.time_to_heartbeat(), Duration::ZERO);
-    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(1));
     assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());
     tokio::time::advance(Duration::from_secs(5)).await;
     heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now());
     assert_eq!(heartbeat.time_to_heartbeat(), Duration::from_secs(10));
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(1));
 }
 
 #[tokio::test(start_paused = true)]
@@ -133,13 +128,13 @@ async fn heartbeat_stops_at_the_deferral_boundary_and_can_restart() {
     heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now());
     for _ in 0..2 {
         tokio::time::advance(Duration::from_secs(10)).await;
-        assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(Ok(1)));
+        assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(1));
     }
     tokio::time::advance(Duration::from_secs(10)).await;
     assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());
     heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now());
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(1));
 }
 
 #[tokio::test(start_paused = true)]
@@ -160,7 +155,7 @@ async fn cancellation_is_permanent_and_the_task_stops_after_its_sleep() {
     heartbeat.stop();
     assert!(heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now()).is_err());
     assert!(heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now()).is_err());
-    assert!(poll(&mut heartbeat, 1, Waker::noop()).is_pending());
+    assert_eq!(poll(&mut heartbeat, 1, Waker::noop()), Poll::Ready(0));
     tokio::task::yield_now().await;
     drop(heartbeat);
     assert_eq!(metrics.num_alive_tasks(), 1);
