@@ -336,6 +336,7 @@ impl Paths {
 
 impl Drop for Paths {
     fn drop(&mut self) {
-        self.idle_timer.cancel();
+        self.clean();
+        self.cid_registry.local.clear();
     }
 }

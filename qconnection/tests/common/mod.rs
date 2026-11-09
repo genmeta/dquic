@@ -24,3 +24,18 @@ pub fn use_system_resolver() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| qresolve::Resolver::add(Arc::new(qresolve::SystemResolver)));
 }
+
+/// Release the test's owner and wait for Drop to clear its original CID.
+/// These fixtures keep CID zero until connection teardown.
+pub async fn drop_paths_and_wait(paths: Arc<qconnection::Paths>) {
+    let weak = Arc::downgrade(&paths);
+    let cids = paths.cid_registry.local.clone();
+    drop(paths);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while weak.strong_count() != 0 || cids.initial_scid().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("last Paths owner must release connection resources");
+}

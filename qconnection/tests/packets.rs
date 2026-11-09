@@ -125,6 +125,7 @@ async fn client_waits_for_keys_before_creating_handshake_space() {
     let initial_only = paths.spaces.get(qbase::Epoch::Handshake).is_none();
     tls.on_error(qbase::error::QuicError::with_default_fty(qbase::error::ErrorKind::Internal, "stop before server hello").into());
     growing.await;
+    common::drop_paths_and_wait(paths).await;
     assert!(!route_exists(QuicRouter::global(), cid).await);
     assert!(tls.read_keys().await.is_err());
     assert!(initial_only, "Handshake space must wait for TLS Handshake keys");
@@ -252,7 +253,7 @@ async fn close_at_client_stage(wait: ClientWait) {
             assert_eq!(error.kind(), qbase::error::ErrorKind::TransportParameter);
             assert!(matches!(growing.await.unwrap(), Error::Quic(error)
                 if error.kind() == qbase::error::ErrorKind::TransportParameter));
-            assert!(paths.entries.lock().unwrap().is_empty());
+            common::drop_paths_and_wait(paths).await;
             assert!(!route_exists(&router, cid).await);
             QuicProtocol::global().unregister(socket.local_addr().unwrap());
             return;
@@ -311,9 +312,9 @@ async fn close_at_client_stage(wait: ClientWait) {
         assert!(delivery.await.unwrap().is_err());
     }
     assert!(tls.read_keys().await.is_err());
+    common::drop_paths_and_wait(paths).await;
     assert!(handshake.keys.get().is_err());
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
-    assert!(paths.entries.lock().unwrap().is_empty());
     assert!(!route_exists(&router, cid).await);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
     drop(connection);

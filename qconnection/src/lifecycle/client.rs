@@ -16,7 +16,7 @@ use qtransport::{
     space::{DataSpace, HandshakeSpace, InitialSpace},
 };
 
-use super::{any, finish};
+use super::any;
 use crate::{
     ArcParameters, Connected, DataStreams, Error, Paths, TlsContext,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Grow an already routed client and discover paths from the DNS result stream.
-/// The client owns discovery and cancels it before shutting down its paths.
+/// DNS discovery runs independently; the last Paths owner performs resource cleanup.
 /// The caller runs [`crate::recv::tick`] alongside this future.
 #[allow(clippy::too_many_arguments)]
 pub async fn client_growing(
@@ -48,7 +48,7 @@ pub async fn client_growing(
     cid_registry.remote.set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
     let hs_dcid = cid_registry.remote.apply_dcid();
 
-    let discovery = tokio::spawn({
+    tokio::spawn({
         let paths = paths.clone();
         let terminator = terminator.clone();
         let addresses = AddressBook::global().clone();
@@ -143,39 +143,31 @@ pub async fn client_growing(
         Ok(established_connection) => established_connection,
         Err(reason) => {
             established(Err(reason.clone()));
-            return shutdown(&paths, reason, discovery).await;
+            return terminator.close(reason.into(), paths.closing_pto()).await;
         }
     };
     established(Ok(connected));
 
-    let reason = tokio::select! {
+    tokio::select! {
         biased;
         reason = terminator.clone() => reason,
         () = handshake_done => {
             progress.on_handshake_done(&paths);
-            // Dropping this coroutine also stops observation by dropping the sender.
-            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-            let observer = puncher.observe_endpoints(
+            // Keep Paths alive until observation stops applying address events.
+            let _observer = puncher.observe_endpoints(
                 AddressBook::global().subscribe_punch(crate::Scopes::ALL),
-                stopped,
+                {
+                    let paths = paths.clone();
+                    async move {
+                        paths.terminator.clone().await;
+                        drop(paths);
+                    }
+                },
                 |_| {},
             );
-            let reason = terminator.clone().await;
-            drop(stop);
-            let _ = observer.await;
-            reason
+            terminator.clone().await
         }
-    };
-    shutdown(&paths, reason, discovery).await
-}
-
-async fn shutdown(paths: &Paths, error: Error, discovery: tokio::task::JoinHandle<()>) -> Error {
-    // Stop discovery before path cleanup so late DNS results cannot create senders.
-    discovery.abort();
-    let _ = discovery.await;
-    let reason = finish(paths, error).await;
-    paths.cid_registry.local.clear();
-    reason
+    }
 }
 
 pub(crate) async fn resolve_paths(

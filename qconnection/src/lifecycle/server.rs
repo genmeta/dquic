@@ -16,9 +16,9 @@ use qtransport::{
 };
 use tokio::io::AsyncWriteExt;
 
-use super::{any, finish, interceptor::read_crypto_stream_to_interceptor};
+use super::{any, interceptor::read_crypto_stream_to_interceptor};
 use crate::{
-    ArcParameters, DataStreams, Error, Interceptor, Paths, ServerRegistry,
+    ArcParameters, CloseReason, DataStreams, Error, Interceptor, Paths, ServerRegistry,
     recv::{receive_1rtt_pkt_and_deliver_frames, recv_ih_pkt_and_deliver_frames},
     tls::{read_space_to_tls, read_tls_to_space},
 };
@@ -44,11 +44,15 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
     let hello = match hello {
         Ok(hello) => hello,
         Err(reason) => {
-            return shutdown(&paths, reason).await;
+            return terminator.close(reason.into(), paths.closing_pto()).await;
         }
     };
     let Some(server) = ServerRegistry::global().get(hello.server_name()) else {
-        return shutdown(&paths, Error::from(QuicError::with_default_fty(ErrorKind::ConnectionRefused, "no matching server is listening")))
+        return terminator
+            .close(
+                CloseReason::Internal(QuicError::with_default_fty(ErrorKind::ConnectionRefused, "no matching server is listening")),
+                paths.closing_pto(),
+            )
             .await;
     };
     paths.update_max_idle_timeout(server.server_parameters.get::<std::time::Duration>(ParameterId::MaxIdleTimeout));
@@ -57,7 +61,7 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
             Ok(ready) => ready,
             Err(error) => {
                 tracing::warn!(%error, "QUIC server handshake failed");
-                return shutdown(&paths, error).await;
+                return terminator.close(error.into(), paths.closing_pto()).await;
             }
         };
     terminator.register(Arc::new(tls_ctx.clone()));
@@ -165,21 +169,22 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
         Ok(connection) => connection,
         Err(reason) => {
             tracing::warn!(error = %reason, "QUIC server handshake failed");
-            return shutdown(&paths, reason).await;
+            return terminator.close(reason.into(), paths.closing_pto()).await;
         }
     };
 
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let observer = puncher.observe_endpoints(qprotocol::AddressBook::global().subscribe_punch(scopes), stopped, |_| {});
+    // Keep Paths alive until observation stops applying address events.
+    let _observer = puncher.observe_endpoints(
+        qprotocol::AddressBook::global().subscribe_punch(scopes),
+        {
+            let paths = paths.clone();
+            async move {
+                paths.terminator.clone().await;
+                drop(paths);
+            }
+        },
+        |_| {},
+    );
     (server.accept_cb)(connection);
-    let reason = terminator.await;
-    drop(stop);
-    let _ = observer.await;
-    shutdown(&paths, reason).await
-}
-
-async fn shutdown(paths: &Paths, reason: Error) -> Error {
-    let reason = finish(paths, reason).await;
-    paths.cid_registry.local.clear();
-    reason
+    terminator.await
 }
