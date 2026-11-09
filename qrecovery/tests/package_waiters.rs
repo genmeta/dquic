@@ -47,6 +47,27 @@ fn poll(source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, 
 }
 
 #[tokio::test]
+async fn empty_crypto_write_does_not_wake_registered_senders() {
+    use std::pin::Pin;
+
+    use tokio::io::AsyncWrite;
+
+    let stream = CryptoStream::with_facts(handshake_facts(false));
+    let counter = Arc::new(Counter::default());
+    let waker = Waker::from(counter.clone());
+    assert!(poll(&mut stream.outgoing(), 128, &waker).is_pending());
+    let mut writer = stream.writer();
+    assert_eq!(writer.write(&[]).await.unwrap(), 0);
+    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    assert!(matches!(Pin::new(&mut writer).poll_flush(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(()))));
+    assert!(poll(&mut stream.outgoing(), 128, &waker).is_pending());
+
+    writer.write_all(b"hello").await.unwrap();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    assert_eq!(poll(&mut stream.outgoing(), 128, &waker), Poll::Ready(1));
+}
+
+#[tokio::test]
 async fn crypto_registers_only_when_no_frame_was_written() {
     for quota in [0, 128] {
         for pending_as_lost in [false, true] {
@@ -97,6 +118,58 @@ async fn stream_ready_and_blocked_polls_do_not_subscribe() {
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         writer.cancel(0);
     }
+}
+
+#[tokio::test]
+async fn ready_stream_writes_reuse_creation_notification_until_sending() {
+    let mut source = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        Broker,
+        Default::default(),
+    );
+    let counter = Arc::new(Counter::default());
+    let waker = Waker::from(counter.clone());
+    assert!(poll(&mut source, 128, &waker).is_pending());
+    let (_, mut writer) = source.open_uni().await.unwrap().unwrap();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+
+    writer.write(bytes::Bytes::new()).unwrap();
+    assert!(matches!(writer.poll_flush(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(()))));
+    writer.write_all(b"first").await.unwrap();
+    assert_eq!(source.fresh_bytes(), 5);
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    assert_eq!(poll(&mut source, 128, &waker), Poll::Ready(1));
+    assert!(poll(&mut source, 128, &waker).is_pending());
+
+    writer.write_all(b"next").await.unwrap();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+    assert_eq!(poll(&mut source, 128, &waker), Poll::Ready(1));
+    writer.cancel(0);
+}
+
+#[tokio::test]
+async fn empty_sending_stream_write_does_not_wake_registered_senders() {
+    let mut source = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        Broker,
+        Default::default(),
+    );
+    let (_, mut writer) = source.open_uni().await.unwrap().unwrap();
+    writer.write_all(b"first").await.unwrap();
+    let counter = Arc::new(Counter::default());
+    let waker = Waker::from(counter.clone());
+    assert_eq!(poll(&mut source, 128, &waker), Poll::Ready(1));
+    assert!(poll(&mut source, 128, &waker).is_pending());
+
+    writer.write(bytes::Bytes::new()).unwrap();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    assert!(poll(&mut source, 128, &waker).is_pending());
+    writer.write_all(b"next").await.unwrap();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    assert_eq!(poll(&mut source, 128, &waker), Poll::Ready(1));
+    writer.cancel(0);
 }
 
 #[tokio::test]
@@ -153,7 +226,7 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
 }
 
 #[test]
-fn ack_registers_only_when_pending() {
+fn recording_packets_does_not_wake_ack_senders() {
     for queued in [false, true] {
         for quota in [0, 128] {
             for snapshot in [false, true] {
@@ -174,7 +247,10 @@ fn ack_registers_only_when_pending() {
                     assert_eq!(result, Poll::Ready(usize::from(quota != 0)));
                 }
                 journal.on_rcvd_pn(1, true, Duration::ZERO);
-                assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
+                assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+                assert!(journal.covers_range(1..=1));
+                let mut ack = journal.ack_package(Some((1, tokio::time::Instant::now())));
+                assert_eq!(poll(&mut ack, 128, &waker), Poll::Ready(1));
             }
         }
     }

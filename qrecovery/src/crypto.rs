@@ -79,6 +79,9 @@ mod send {
 
     impl Sender {
         fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            if buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
             assert!(self.writable_waker.is_none() || matches!(self.writable_waker, Some(ref waker) if waker.will_wake(cx.waker())));
             assert!(self.flush_waker.is_none() || matches!(self.flush_waker, Some(ref waker) if waker.will_wake(cx.waker())));
             if self.sndbuf.written() + buf.len() as u64 > VARINT_MAX {

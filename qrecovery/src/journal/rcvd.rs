@@ -214,8 +214,6 @@ impl ArcRcvdJournal {
 
     pub fn on_rcvd_pn(&self, pn: u64, is_ack_eliciting: bool, pto: Duration) {
         self.inner.write().unwrap().on_rcvd_pn(pn, is_ack_eliciting, pto);
-        // TODO: 可不是收到包，马上就唤醒发送Ack
-        self.waiters.wake_all();
     }
 
     pub fn gen_ack_frame_util(&self, largest: u64, rcvd_time: Instant, capacity: usize) -> Result<AckFrame, Poll<()>> {

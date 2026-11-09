@@ -76,8 +76,36 @@ async fn background_rechecks_activity_and_wakes_only_the_current_sender() {
 
 fn heartbeat(defer: u64, interval: u64) -> Heartbeat {
     let mut heartbeat = Heartbeat::new(Duration::from_secs(defer), Duration::ZERO);
-    heartbeat.adapt_max_idle_timeout(Duration::from_secs(interval * 3));
+    heartbeat.revise_max_idle_timeout(Duration::from_secs(interval * 3));
     heartbeat
+}
+
+#[tokio::test(start_paused = true)]
+async fn revising_idle_timeout_only_wakes_when_the_interval_shortens() {
+    let mut heartbeat = heartbeat(60, 10);
+    heartbeat.on_sent_at(PacketContent::EffectivePayload, Instant::now());
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(wakes.clone());
+    assert!(poll(&mut heartbeat, 1, &waker).is_pending());
+
+    for timeout in [Duration::ZERO, Duration::from_secs(30), Duration::from_secs(60)] {
+        heartbeat.revise_max_idle_timeout(timeout);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+        assert_eq!(heartbeat.time_to_heartbeat(), Duration::from_secs(10));
+    }
+    heartbeat.revise_max_idle_timeout(Duration::from_secs(15));
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(heartbeat.time_to_heartbeat(), Duration::from_secs(5));
+
+    assert!(poll(&mut heartbeat, 1, &waker).is_pending());
+    heartbeat.revise_max_idle_timeout(Duration::from_secs(2));
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+    assert_eq!(heartbeat.time_to_heartbeat(), Duration::from_secs(1));
+    assert!(poll(&mut heartbeat, 1, &waker).is_pending());
+    heartbeat.revise_max_idle_timeout(Duration::from_secs(1));
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(poll(&mut heartbeat, 1, &waker), Poll::Ready(1));
 }
 
 #[tokio::test(start_paused = true)]
