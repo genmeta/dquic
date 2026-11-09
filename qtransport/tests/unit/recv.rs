@@ -175,7 +175,7 @@ async fn closing_receives_crypto_and_ping_and_retransmits_close_until_peer_close
         };
         terminator.close(crate::CloseReason::Internal(QuicError::with_default_fty(ErrorKind::Internal, "local")), Duration::from_secs(1));
         assert!(space.crypto.reader().read(&mut [0; 1]).await.is_err());
-        paths.del_path(&path.pathway);
+        paths.del_path(&path);
         let header = || LongHeaderBuilder::with_cid(ConnectionId::from_slice(b"localcid"), ConnectionId::from_slice(b"peercid0"));
         let poll_close = || {
             let mut bytes = BytesMut::new();
@@ -241,8 +241,8 @@ async fn handshake_reception_admits_unknown_paths_only_after_authentication() {
     for role in [Role::Client, Role::Server] {
         for epoch in [Epoch::Initial, Epoch::Handshake] {
             let (paths, first, second) = paths(role);
-            paths.del_path(&first.pathway);
-            paths.del_path(&second.pathway);
+            paths.del_path(&first);
+            paths.del_path(&second);
             assert!(paths.entries.lock().unwrap().is_empty());
 
             receive_ping(role, epoch, true, &paths, &first).await;

@@ -48,7 +48,7 @@ pub trait Transport {
     fn on_pkt_sent(&self, epoch: Epoch, pn: u64, is_ack_eliciting: bool, sent_bytes: usize, in_flight: bool, ack: Option<u64>);
 
     /// Discard the assembly budget after submission or cancellation.
-    fn on_burst_completed(&self);
+    fn refresh_budget(&self);
 
     /// Records the receipt of a packet, which may influence future packet transmissions.
     /// # Parameters

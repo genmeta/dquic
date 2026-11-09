@@ -43,7 +43,7 @@ async fn idle_sending_loop_waits_for_sources_and_exits_when_retired() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn failed_submission_closes_crypto_and_waits_for_termination() {
+async fn failed_submission_stops_the_sender_before_connection_termination() {
     let paths = crate::common::initial_paths(
         Role::Client,
         ConnectionId::from_slice(b"clientid"),
@@ -59,13 +59,39 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
     ));
     paths.progress.on_initial_received(crate::common::cid_value(&paths.cid_registry.remote.apply_dcid()));
     paths.progress.on_path_selected(&paths, &path);
+    let started = tokio::time::Instant::now();
     common::wait_for_sender_exit(&path).await;
+    assert!(tokio::time::Instant::now() - started < path.cc.pto_base(Epoch::Data));
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(path.validation.is_cancelled());
 
     assert!(space.crypto.writer().write_all(b"after close").await.is_err());
-    let error = paths.terminator.clone().now_or_never().expect("last path failure terminates the connection");
+    assert!(paths.terminator.clone().now_or_never().is_none(), "sender exit must not wait for the connection timer");
+    let error = paths.terminator.clone().await;
     assert_eq!(error.kind(), ErrorKind::NoViablePath);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_a_credit_blocked_path_stops_its_detached_sender_before_termination() {
+    let paths = crate::common::initial_paths(
+        Role::Server,
+        ConnectionId::from_slice(b"serverid"),
+        ConnectionId::from_slice(b"original"),
+        keys(true),
+    );
+    let path = paths.add_path(Pathway::new(
+        EndpointAddr::direct("127.0.0.1:35101".parse().unwrap()),
+        EndpointAddr::direct("127.0.0.1:35102".parse().unwrap()),
+    ));
+    tokio::task::yield_now().await;
+    let started = tokio::time::Instant::now();
+    path.close();
+    common::wait_for_sender_exit(&path).await;
+    assert!(tokio::time::Instant::now() - started < path.cc.pto_base(Epoch::Data));
+    assert!(paths.entries.lock().unwrap().is_empty());
+    assert!(paths.validations.get(&path.pathway).is_none());
+    assert!(paths.terminator.clone().now_or_never().is_none());
+    assert_eq!(paths.terminator.clone().await.kind(), ErrorKind::NoViablePath);
 }
 
 #[tokio::test(start_paused = true)]

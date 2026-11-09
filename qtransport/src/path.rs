@@ -22,7 +22,6 @@ use crate::{ArcDcid, ArcProgress, ArcResend, space::ArcSpaces, terminate::ArcTer
 
 mod send;
 mod set;
-pub(crate) mod task;
 
 pub use send::Datagram;
 pub use set::Paths;
@@ -110,6 +109,7 @@ impl Path {
         }
     }
 
+    /// Permanently close this path and wake its sender, including CID and socket waits.
     pub fn close(&self) {
         self.is_active.store(false, Ordering::Release);
         self.validation.cancel();

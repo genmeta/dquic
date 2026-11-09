@@ -164,7 +164,7 @@ impl Path {
             datagram.bytes.clear();
         }
         frames.clear();
-        self.cc.on_burst_completed();
+        self.cc.refresh_budget();
         self.dcid.refresh();
     }
 }

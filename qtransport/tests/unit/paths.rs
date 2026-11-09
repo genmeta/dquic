@@ -195,7 +195,7 @@ async fn client_paths_are_exempt_without_local_challenges() {
     }
     paths.validations.recv_frame((added.pathway, PathChallengeFrame::from_slice(&[7; 8]))).unwrap();
     assert!(matches!(super::take_validation_frames(&added).as_slice(), [Frame::PathResponse(_)]));
-    paths.del_path(&first.pathway);
+    paths.del_path(&first);
     assert!(paths.add_path(pathway(30008)).validation.is_validated());
     paths.retire_all();
 }
@@ -214,7 +214,7 @@ async fn selecting_a_live_handshake_path_stops_crypto_replay() {
             facts.clone(),
         );
         let stale = paths.add_path(pathway(30002));
-        paths.del_path(&stale.pathway);
+        paths.del_path(&stale);
         let selected = paths.add_path(pathway(30002));
         paths.progress.on_path_selected(&paths, &stale);
         assert!(facts.is_mp_replaying());
@@ -229,7 +229,7 @@ async fn removed_undecided_path_cannot_override_selection() {
     let paths = paths(Role::Client);
     let stale = paths.add_path(pathway(30002));
     let selected = paths.add_path(pathway(30003));
-    paths.del_path(&stale.pathway);
+    paths.del_path(&stale);
     paths.progress.on_path_selected(&paths, &selected);
     paths.progress.on_path_selected(&paths, &stale);
     assert_eq!(super::selection(&paths, &selected), 1);
@@ -256,7 +256,7 @@ async fn removing_selected_path_does_not_allow_suspended_paths_to_reselect() {
     let first = paths.add_path(pathway(30002));
     let second = paths.add_path(pathway(30003));
     paths.progress.on_path_selected(&paths, &first);
-    paths.del_path(&first.pathway);
+    paths.del_path(&first);
     let added = paths.add_path(pathway(30004));
     assert_eq!(super::selection(&paths, &added), 0);
     paths.progress.on_path_selected(&paths, &second);
@@ -342,6 +342,33 @@ async fn failed_validation_removes_its_path_and_stops_its_sender_without_closing
 }
 
 #[tokio::test(start_paused = true)]
+async fn failed_validation_stops_the_last_sender_before_connection_termination() {
+    use futures::FutureExt;
+
+    let paths = paths(Role::Server);
+    let path = paths.add_path(pathway(30002));
+    confirm_validation(&paths);
+    paths.start_validation(&path);
+    tokio::task::yield_now().await;
+    let [Frame::PathChallenge(challenge)] = super::take_validation_frames(&path)[..] else {
+        panic!("expected one challenge");
+    };
+    let mut mismatched = *challenge;
+    mismatched[0] ^= 1;
+    paths
+        .validations
+        .recv_frame((path.pathway, qbase::frame::PathResponseFrame::from(PathChallengeFrame::from_slice(&mismatched))))
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    crate::common::wait_for_sender_exit(&path).await;
+    assert!(tokio::time::Instant::now() - started < path.cc.pto_base(Epoch::Data));
+    assert!(paths.entries.lock().unwrap().is_empty());
+    assert!(paths.validations.get(&path.pathway).is_none());
+    assert!(paths.terminator.clone().now_or_never().is_none());
+    assert_eq!(paths.terminator.clone().await.kind(), ErrorKind::NoViablePath);
+}
+
+#[tokio::test(start_paused = true)]
 async fn validation_retransmits_the_same_challenge_three_times_and_retirement_cancels_waiting() {
     let paths = paths(Role::Server);
     let path = paths.add_path(pathway(30002));
@@ -371,7 +398,7 @@ async fn validation_retransmits_the_same_challenge_three_times_and_retirement_ca
     paths.start_validation(&replacement);
     tokio::task::yield_now().await;
     let response = replacement.validation.respond();
-    paths.del_path(&replacement.pathway);
+    paths.del_path(&replacement);
     assert!(response.await.is_err());
     tokio::task::yield_now().await;
     assert!(paths.validations.get(&replacement.pathway).is_none());
@@ -410,8 +437,9 @@ async fn old_validation_and_sending_tasks_cannot_remove_a_replacement_at_the_sam
     confirm_validation(&paths);
     paths.start_validation(&previous);
     tokio::task::yield_now().await;
-    paths.del_path(&previous.pathway);
+    paths.del_path(&previous);
     let replacement = paths.add_path(previous.pathway);
+    assert!(!paths.del_path(&previous), "an old task must not delete its replacement");
     crate::common::wait_for_sender_exit(&previous).await;
     assert!(Arc::ptr_eq(&paths.entries.lock().unwrap().get(&replacement.pathway).cloned().unwrap(), &replacement));
     assert!(paths.validations.get(&replacement.pathway).is_some());
@@ -459,5 +487,5 @@ fn confirm_validation(paths: &Arc<Paths>) {
     for path in paths.entries.lock().unwrap().values() {
         path.dcid.upgrade();
     }
-    paths.del_path(&selected.pathway);
+    paths.del_path(&selected);
 }

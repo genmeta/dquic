@@ -17,8 +17,8 @@ async fn get_admits_a_missing_path() {
     assert!(paths.validations.get(&route).is_some());
 
     let response = path.validation.respond();
-    assert!(paths.del_path(&route));
-    assert!(!paths.del_path(&route));
+    assert!(paths.del_path(&path));
+    assert!(!paths.del_path(&path));
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(paths.validations.get(&route).is_none());
     assert!(response.await.is_err());
@@ -64,7 +64,7 @@ async fn paths_have_independent_heartbeats_and_retirement_cancels_only_one() {
     tokio::time::advance(Duration::from_secs(20)).await;
     assert!(common::take_heartbeat(&first));
     assert!(!common::take_heartbeat(&second));
-    paths.del_path(&first.pathway);
+    paths.del_path(&first);
     assert!(first.heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now()).is_err());
     assert!(second.heartbeat.on_rcvd_at(PacketContent::EffectivePayload, Instant::now()).is_ok());
     common::retire_all(&paths);

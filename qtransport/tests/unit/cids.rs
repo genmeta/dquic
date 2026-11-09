@@ -189,7 +189,7 @@ async fn replacement_at_the_selected_address_does_not_inherit_selection() {
     let paths = paths(Role::Server);
     let old = path(&paths, 4001);
     assert!(paths.progress.on_path_selected(&paths, &old));
-    paths.del_path(&old.pathway);
+    paths.del_path(&old);
     let replacement = path(&paths, 4001);
     assert!(paths.progress.facts().is_handshake_done() || !replacement.dcid.is_allocated());
     assert!(!paths.progress.on_path_selected(&paths, &replacement));
@@ -206,14 +206,14 @@ async fn removal_before_data_installation_still_reserves_zero_for_the_old_handsh
     let old = path(&paths, 4001);
     let other = path(&paths, 4002);
     paths.progress.on_path_selected(&paths, &old);
-    paths.del_path(&old.pathway);
+    paths.del_path(&old);
     let remote = &paths.cid_registry.remote;
     super::install_data(&paths, &mature);
     let next = ConnectionId::from_slice(b"peer0001");
     remote.recv_frame(NewConnectionIdFrame::new(next, 1u32.into(), 0u32.into())).unwrap();
     super::confirm_handshake(&paths);
     assert_eq!(ready(&other), next);
-    paths.del_path(&other.pathway);
+    paths.del_path(&other);
     assert!(paths.entries.lock().unwrap().is_empty());
     assert!(paths.progress.facts().is_handshake_done());
     let replacement = path(&paths, 4001);
@@ -350,7 +350,7 @@ async fn closing_a_sender_waiting_for_a_cid_leaves_the_connection_and_other_send
     let close = crate::common::observe_close(&paths.terminator);
     tokio::task::yield_now().await;
     // Both extra paths await fresh CIDs; preserve the sending tasks' own wakers.
-    paths.del_path(&removed.pathway);
+    paths.del_path(&removed);
     crate::common::wait_for_sender_exit(&removed).await;
     assert!(close.notified().is_none());
     assert!(paths.entries.lock().unwrap().contains_key(&live.pathway));
@@ -369,7 +369,7 @@ async fn closing_a_just_upgraded_sender_releases_its_handshake_cid_without_dropp
     let selected = paths.add_path(pathway(4002));
     paths.progress.on_path_selected(&paths, &selected);
     // Close before the sender polls its first batch after upgrade.
-    paths.del_path(&selected.pathway);
+    paths.del_path(&selected);
     crate::common::wait_for_sender_exit(&selected).await;
     assert_eq!(take_retired(&mature), [0]);
     assert_eq!(super::borrow(&selected), Poll::Ready(None));
