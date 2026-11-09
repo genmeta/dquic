@@ -90,22 +90,8 @@ fn encode_frames<const N: usize>(
 }
 
 fn empty_paths(phase: &super::DataFixture) -> Arc<Paths> {
-    let role = phase.parameters.role();
-    let facts = phase.paths.progress.facts();
-    let initial = Arc::new(qtransport::space::InitialSpace::new(
-        phase.spaces.initial.initial_scid,
-        qtransport::keys::ArcKeys::new(Arc::new(common::initial_keys(role == Role::Server))),
-        None,
-        facts.clone(),
-    ));
-    let paths = Paths::new(
-        initial,
-        facts,
-        phase.paths.cid_registry.clone(),
-        phase.spaces.data.reliable_frames.clone(),
-        Duration::ZERO,
-        Duration::ZERO,
-    );
+    // Shared packet spaces must have one Paths owner for their whole lifetime.
+    let paths = phase.paths.clone();
     super::install_data(&paths, phase);
     let terminator = paths.terminator.clone();
     terminator.register(Arc::new(phase.spaces.data.crypto.clone()));
@@ -155,12 +141,11 @@ async fn receive_on_paths(
     let role = phase.parameters.role();
     let handshake = ArcHandshakeDone::new(role, phase.spaces.data.reliable_frames.clone());
     receive_1rtt_pkt_and_deliver_frames(
-        (rx, (role == Role::Server).then_some(scopes)),
+        (rx, phase.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32, (role == Role::Server).then_some(scopes)),
         phase.spaces.data.clone(),
         paths.clone(),
         tokens,
         handshake.clone(),
-        phase.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
     )
     .await;
     assert!(notification.notified().is_none(), "received frames must not close the connection");
@@ -224,12 +209,11 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     terminator.close(crate::CloseReason::App(AppError::new(42u32.into(), "local close")), Duration::from_secs(1));
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let task = tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
-        (rx, None),
+        (rx, receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32, None),
         receiver.spaces.data.clone(),
         paths.clone(),
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         ArcHandshakeDone::new(Role::Server, receiver.spaces.data.reliable_frames.clone()),
-        receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
     ));
     let peer_error: crate::Error = QuicError::with_default_fty(ErrorKind::None, "peer close").into();
     let mut crypto = (CryptoFrame::new(0u32.into(), 1u32.into()), b"x".as_slice());
@@ -310,12 +294,11 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
         drop(tx);
         let handshake = ArcHandshakeDone::new(receiver.parameters.role(), receiver.spaces.data.reliable_frames.clone());
         receive_1rtt_pkt_and_deliver_frames(
-            (rx, Some(Scopes::ALL)),
+            (rx, receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32, Some(Scopes::ALL)),
             receiver.spaces.data.clone(),
             paths.clone(),
             ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
             handshake.clone(),
-            receiver.parameters.remote::<u64>(qbase::param::ParameterId::AckDelayExponent) as u32,
         )
         .await;
         let stream_error = receiver.spaces.data.streams.accept_uni().await.unwrap_err();

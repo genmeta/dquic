@@ -236,9 +236,9 @@ impl ArcTerminator {
         component.close_with_error(error);
     }
 
-    /// Request closing once and terminate after three PTOs on the Tokio runtime.
-    /// Returns whether this request started closing.
-    pub fn close(&self, reason: CloseReason, pto: Duration) -> bool {
+    /// Request closing immediately and terminate after three PTOs on the Tokio runtime.
+    /// Await the returned handle for the terminal error; dropping it does not cancel closing.
+    pub fn close(&self, reason: CloseReason, pto: Duration) -> Self {
         if let Some(pto) = self.0.lock().unwrap().close(&reason, pto) {
             let deadline = Instant::now() + 3 * pto;
             let terminator = self.clone();
@@ -246,10 +246,8 @@ impl ArcTerminator {
                 tokio::time::sleep_until(deadline).await;
                 terminator.terminate();
             });
-            true
-        } else {
-            false
         }
+        self.clone()
     }
 
     /// Count one authenticated packet. Only Closing schedules another CLOSE response.

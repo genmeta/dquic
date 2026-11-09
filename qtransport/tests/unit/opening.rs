@@ -55,12 +55,11 @@ async fn receive(data: Arc<DataSpace>, paths: Arc<crate::Paths>, buffers: Vec<By
     }
     drop(tx);
     crate::receiving::receive_1rtt_pkt_and_deliver_frames(
-        (rx, None),
+        (rx, 0, None),
         data,
         paths,
         ArcTokenRegistry::with_sink("localhost".into(), Arc::new(NoopTokenRegistry)),
         crate::ArcHandshakeDone::new_client(),
-        0,
     )
     .await;
 }

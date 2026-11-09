@@ -546,3 +546,35 @@ async fn timer_wakes_all_waiters_after_one_is_cancelled() {
     assert_eq!(first, second);
     assert_eq!(first, terminator.await);
 }
+
+#[tokio::test(start_paused = true)]
+async fn close_is_immediate_and_its_return_value_waits_for_the_original_deadline() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Component(AtomicUsize);
+    impl qbase::Close for Component {
+        fn close_with_error(&self, _: Error) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let terminator = ArcTerminator::no_error();
+    let component = Arc::new(Component(AtomicUsize::new(0)));
+    terminator.register(component.clone());
+    let start = Instant::now();
+    let waiter = terminator.close(local_reason(), Duration::from_secs(1));
+    assert_eq!(component.0.load(Ordering::Relaxed), 1, "close takes effect before await");
+    drop(waiter);
+    terminator.close(CloseReason::Internal(QuicError::with_default_fty(ErrorKind::ProtocolViolation, "later")), Duration::from_secs(20));
+    assert_eq!(terminator.clone().await, Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local")));
+    assert_eq!(Instant::now() - start, Duration::from_secs(3));
+    assert_eq!(component.0.load(Ordering::Relaxed), 1);
+    let finished = Instant::now();
+    assert_eq!(
+        terminator.close(local_reason(), Duration::from_secs(10)).await,
+        Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"))
+    );
+    assert_eq!(Instant::now(), finished);
+}

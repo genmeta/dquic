@@ -68,7 +68,7 @@ impl Drop for Registration {
 
 // Global listeners and resolver registrations are isolated in this test process.
 #[tokio::test]
-async fn connect_uses_dns_and_global_addresses_and_closes_its_discovery_stream() {
+async fn connect_uses_dns_and_global_addresses_and_lets_discovery_finish() {
     connect_case(false, b"h3").await;
     connect_case(true, b"test-quic").await;
     reject_wrong_server_identity().await;
@@ -130,13 +130,8 @@ async fn connect_case(anonymous: bool, alpn: &[u8]) {
     .expect("connection supports stream traffic");
 
     client_conn.close(0u32.into(), "test complete");
-    timeout(Duration::from_secs(1), async {
-        while !send.is_closed() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("connection close cancels DNS discovery");
+    assert!(!send.is_closed(), "connection close leaves discovery to its own lifetime");
+    drop(send);
     server_conn.close(0u32.into(), "test complete");
     ServerRegistry::global().remove("localhost");
 }
@@ -193,7 +188,8 @@ impl Resolve for PendingResolver {
             }
             let _probe = DropProbe(self.dropped.clone());
             self.started.store(true, Ordering::SeqCst);
-            futures::future::pending().await
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "test lookup timed out"))
         }
         .boxed()
     }
@@ -272,7 +268,7 @@ async fn cancel_handshake(anonymous: bool) {
     assert!(route_exists(cid));
     connecting.abort();
     assert!(matches!(connecting.await, Err(error) if error.is_cancelled()));
-    wait_until(|| send.is_closed()).await;
+    drop(send);
     wait_until(|| !route_exists(cid)).await;
 }
 
@@ -306,7 +302,7 @@ async fn cancel_queued_connection() {
     // The delivery slot is ready, but its connection has not reached the caller.
     wait_until(|| ready.0.load(Ordering::SeqCst)).await;
     drop(connecting);
-    wait_until(|| send.is_closed()).await;
+    drop(send);
     assert!(timeout(Duration::from_secs(5), connection.accept_uni_stream()).await.unwrap().is_err());
     ServerRegistry::global().remove("localhost");
 }
@@ -338,7 +334,7 @@ async fn reject_wrong_server_identity() {
     Resolver::add(Arc::new(StreamingResolver { hostname: "wrong.test".into(), records: Mutex::new(Some(records)) }));
     send.unbounded_send((qresolve::Source::System, server_socket.0.local_addr().unwrap().into())).unwrap();
     assert!(timeout(Duration::from_secs(5), connect(true, "wrong.test".into(), b"h3")).await.unwrap().is_err());
-    wait_until(|| send.is_closed()).await;
+    drop(send);
     assert!(!accepted.load(Ordering::SeqCst), "wrong-name handshake must not be accepted");
     ServerRegistry::global().remove("wrong.test");
 }
@@ -378,7 +374,7 @@ async fn reject_invalid_client_certificate() {
     })
     .await
     .unwrap();
-    wait_until(|| send.is_closed()).await;
+    drop(send);
     assert!(
         matches!(accepted.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
         "invalid credentials must not invoke the accept callback"

@@ -489,3 +489,26 @@ fn confirm_validation(paths: &Arc<Paths>) {
     }
     paths.del_path(&selected);
 }
+
+#[tokio::test(start_paused = true)]
+async fn last_paths_owner_retires_shared_resources_and_clears_retained_local_cids() {
+    let paths = paths(Role::Server);
+    let retained = paths.clone();
+    let spaces = paths.spaces.clone();
+    let resenders = paths.resenders.clone();
+    let local_cids = paths.cid_registry.local.clone();
+    let initial = crate::common::initial_space(&paths.spaces);
+    let puncher = paths.puncher.clone();
+    let idle = paths.idle_timer();
+    paths.terminator.terminate();
+    drop(paths);
+    assert!(initial.keys.get().is_ok(), "a remaining owner postpones Drop");
+    assert!(local_cids.initial_scid().is_some());
+    drop(retained);
+    assert!(spaces.get(Epoch::Initial).is_none());
+    assert!(resenders.read_guard().is_empty());
+    assert!(initial.keys.get().is_err());
+    assert!(local_cids.initial_scid().is_none());
+    assert!(idle.timeout().await.is_err());
+    drop(puncher);
+}
