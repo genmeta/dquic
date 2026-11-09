@@ -54,7 +54,7 @@ pub async fn client_growing(
         let addresses = AddressBook::global().clone();
         let resolver = qresolve::Resolver::get();
         async move {
-            if let Err(error) = resolve_paths(&paths, &addresses, resolver, &server_name).await {
+            if let Err(error) = resolve_name_and_match_path(&paths, &addresses, resolver, &server_name).await {
                 terminator.close(error.into(), paths.closing_pto());
             }
         }
@@ -170,36 +170,42 @@ pub async fn client_growing(
     }
 }
 
-pub(crate) async fn resolve_paths(
+/// Report a discovery failure only if no path has been available.
+pub(crate) async fn resolve_name_and_match_path(
     paths: &Arc<Paths>,
     addresses: &AddressBook,
     resolver: Arc<dyn qresolve::Resolve>,
     server_name: &str,
 ) -> Result<(), Error> {
-    let mut records = resolver
-        .lookup(server_name, "", None)
-        .await
-        .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, format!("DNS lookup for {server_name} failed: {error}")))?;
-    while let Some((source, peer)) = records.next().await {
-        for pathway in addresses.pathways_to(peer, &source) {
-            let Some(socket) = QuicProtocol::global().find_socket(pathway.local()) else {
-                continue;
-            };
-            let Ok(bound) = socket.local_addr() else {
-                continue;
-            };
-            if !Dock::global().find_socket(bound).is_some_and(|registered| Arc::ptr_eq(&registered, &socket)) {
-                continue;
+    let mut had_path = !paths.entries.lock().unwrap().is_empty();
+    let error = match resolver.lookup(server_name, "", None).await {
+        Ok(mut records) => {
+            while let Some((source, peer)) = records.next().await {
+                for pathway in addresses.pathways_to(peer, &source) {
+                    let Some(socket) = QuicProtocol::global().find_socket(pathway.local()) else {
+                        continue;
+                    };
+                    let Ok(bound) = socket.local_addr() else {
+                        continue;
+                    };
+                    if !Dock::global().find_socket(bound).is_some_and(|registered| Arc::ptr_eq(&registered, &socket)) {
+                        continue;
+                    }
+                    paths.add_path(pathway);
+                    had_path = true;
+                }
             }
-            paths.add_path(pathway);
+            None
         }
+        Err(error) => Some(error),
+    };
+    // Once a path has been admitted, its later failure belongs to Paths.
+    if had_path || !paths.entries.lock().unwrap().is_empty() {
+        return Ok(());
     }
-    if paths.entries.lock().unwrap().is_empty() {
-        return Err(QuicError::with_default_fty(
-            ErrorKind::NoViablePath,
-            format!("DNS lookup for {server_name} ended without a usable path"),
-        )
-        .into());
-    }
-    Ok(())
+    let reason = match error {
+        Some(error) => format!("DNS lookup for {server_name} failed: {error}"),
+        None => format!("DNS lookup for {server_name} ended without a usable path"),
+    };
+    Err(QuicError::with_default_fty(ErrorKind::NoViablePath, reason).into())
 }

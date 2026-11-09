@@ -23,6 +23,28 @@ impl Io for UdpSocket {
         const OPTION_ON: c_int = 1;
         let io = socket.as_raw_socket().try_into().unwrap();
 
+        // ICMP probe failures describe one peer, not this shared UDP socket.
+        let report_icmp: c_int = 0;
+        for code in [WinSock::SIO_UDP_CONNRESET, WinSock::SIO_UDP_NETRESET] {
+            let mut returned = 0;
+            let result = unsafe {
+                WinSock::WSAIoctl(
+                    io,
+                    code,
+                    &report_icmp as *const _ as _,
+                    mem::size_of_val(&report_icmp) as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    ptr::null_mut(),
+                    None,
+                )
+            };
+            if result == WinSock::SOCKET_ERROR {
+                return Err(io::Error::from_raw_os_error(unsafe { WinSock::WSAGetLastError() }));
+            }
+        }
+
         setsockopt(io, WinSock::SOL_SOCKET, WinSock::SO_RCVBUF, 2 * 1024 * 1024);
         match addr {
             SocketAddr::V4(_) => {

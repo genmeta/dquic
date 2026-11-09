@@ -14,7 +14,7 @@ use qbase::{
 use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
-use crate::{Error, Paths, lifecycle::client::resolve_paths};
+use crate::{Error, Paths, lifecycle::client::resolve_name_and_match_path};
 
 struct ScriptedResolver(Mutex<Option<ResolveResult>>);
 
@@ -57,7 +57,7 @@ async fn dns_records_are_consumed_in_order_without_delaying_relays() {
     let direct = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
     let relay = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), direct.addr());
     let (send, records) = mpsc::unbounded();
-    let mut discovery = Box::pin(resolve_paths(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
+    let mut discovery = Box::pin(resolve_name_and_match_path(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
     send.unbounded_send((Source::Dht, relay)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
     assert!(paths.entries.lock().unwrap().contains_key(&Pathway::new(local_relay, relay)));
@@ -88,7 +88,7 @@ async fn relay_only_dns_creates_a_path_without_waiting() {
     QuicProtocol::global().register(local_relay, &local.0).unwrap();
     let paths = paths();
     let relay = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), "127.0.0.1:8443".parse().unwrap());
-    resolve_paths(&paths, &book, resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())), "example.test:8443")
+    resolve_name_and_match_path(&paths, &book, resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())), "example.test:8443")
         .now_or_never()
         .expect("relay-only discovery must not wait for a timer")
         .unwrap();
@@ -107,7 +107,7 @@ async fn relay_only_dns_without_a_local_relay_reports_no_viable_path() {
     QuicProtocol::global().register(public, &local.0).unwrap();
     let paths = paths();
     let relay = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), "127.0.0.1:8443".parse().unwrap());
-    let error = resolve_paths(&paths, &book, resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())), "example.test:8443")
+    let error = resolve_name_and_match_path(&paths, &book, resolver(Ok(stream::iter([(Source::Dht, relay)]).boxed())), "example.test:8443")
         .now_or_never()
         .expect("relay-only discovery must not wait for a timer")
         .unwrap_err();
@@ -168,7 +168,7 @@ async fn streaming_dns_pairs_each_record_with_the_current_book_and_deduplicates_
     let first = LocalSocket::new(&book);
     let paths = paths();
     let (send, records) = mpsc::unbounded();
-    let mut discovery = Box::pin(resolve_paths(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
+    let mut discovery = Box::pin(resolve_name_and_match_path(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
     send.unbounded_send((Source::System, EndpointAddr::direct("[::1]:8443".parse().unwrap()))).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
     assert!(paths.entries.lock().unwrap().is_empty());
@@ -203,10 +203,47 @@ async fn empty_failed_and_unregistered_results_report_no_viable_path() {
     ];
     for input in inputs {
         let paths = paths();
-        let error = resolve_paths(&paths, &book, resolver(input), "example.test:8443").await.unwrap_err();
+        let error = resolve_name_and_match_path(&paths, &book, resolver(input), "example.test:8443").await.unwrap_err();
         assert!(matches!(error, Error::Quic(error) if error.kind() == ErrorKind::NoViablePath));
         assert!(paths.entries.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_lookup_does_not_report_an_error_when_a_path_already_exists() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let paths = paths();
+    let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
+    let path = paths.add_path(Pathway::new(local.endpoint(), peer));
+
+    resolve_name_and_match_path(&paths, &book, resolver(Err(io::ErrorKind::TimedOut.into())), "example.test:8443").await.unwrap();
+    assert!(Arc::ptr_eq(&paths.entries.lock().unwrap().get(&path.pathway).cloned().unwrap(), &path));
+    crate::common::retire_all(&paths);
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_completion_does_not_report_an_error_after_its_path_is_removed() {
+    let book = AddressBook::new();
+    let local = LocalSocket::new(&book);
+    let paths = paths();
+    let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
+    let (send, records) = mpsc::unbounded();
+    let mut discovery = Box::pin(resolve_name_and_match_path(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
+    send.unbounded_send((Source::System, peer)).unwrap();
+    assert!(futures::poll!(&mut discovery).is_pending());
+    let path = paths.entries.lock().unwrap().get(&Pathway::new(local.endpoint(), peer)).cloned().unwrap();
+    assert!(paths.del_path(&path));
+    assert!(paths.entries.lock().unwrap().is_empty());
+
+    drop(send);
+    discovery.await.unwrap();
+    let error = paths.terminator.clone().await;
+    assert!(
+        matches!(&error, Error::Quic(error) if error.kind() == ErrorKind::NoViablePath && error.reason().starts_with("all paths ")),
+        "{error:?}",
+    );
+    crate::common::retire_all(&paths);
 }
 
 #[tokio::test]
@@ -216,7 +253,7 @@ async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     let nic = local.0.bound_device().unwrap().name().to_owned();
     let paths = paths();
     let (send, records) = mpsc::unbounded();
-    let mut discovery = Box::pin(resolve_paths(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
+    let mut discovery = Box::pin(resolve_name_and_match_path(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
     let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
     for source in
         [Source::Mdns { nic: "missing-interface".into(), family: Family::V4 }, Source::Mdns { nic: nic.clone().into(), family: Family::V6 }]
@@ -245,7 +282,7 @@ async fn loopback_dns_excludes_non_loopback_local_endpoints() {
     QuicProtocol::global().register(bridge, &local.0).unwrap();
     let paths = paths();
     let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
-    resolve_paths(&paths, &book, resolver(Ok(stream::iter([(Source::System, peer)]).boxed())), "example.test:8443")
+    resolve_name_and_match_path(&paths, &book, resolver(Ok(stream::iter([(Source::System, peer)]).boxed())), "example.test:8443")
         .now_or_never()
         .unwrap()
         .unwrap();
