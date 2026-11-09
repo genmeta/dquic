@@ -1,4 +1,6 @@
 //! One-datagram fixture for receive and recovery tests, using production assembly.
+use std::io;
+
 use qbase::packet::assemble::Metadata;
 use qprotocol::protocol::quic::QuicProtocol;
 use qtransport::space::{ArcSpaces, Recover, Transmit};
@@ -22,16 +24,15 @@ impl Sender {
         self.heartbeat = true;
     }
 
-    pub(crate) fn prepare(&mut self) -> Result<bool, Error> {
+    pub(crate) fn prepare(&mut self) -> io::Result<bool> {
         if self.pending.is_some() {
             return Ok(true);
         }
-        let credit =
-            self.path.validation.credit().map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+        let credit = self.path.validation.credit().map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))?;
         let spaces = ArcSpaces::default();
         spaces.retire(Epoch::Handshake);
         spaces.add(self.transport.data.clone());
-        self.path.cc.prepare_burst_budget(&mut Context::from_waker(std::task::Waker::noop())).unwrap();
+        self.path.cc.prepare_burst_budget(&mut Context::from_waker(std::task::Waker::noop()))?;
         let overhead = QuicProtocol::datagram_overhead(self.path.pathway);
         let length = credit.map_or(1200, |credit| 1200.min(credit.saturating_sub(overhead)));
         let mut ack = self.transport.data.rcvd_journal.ack_package(self.path.cc.need_ack(Epoch::Data));
@@ -59,16 +60,15 @@ impl Sender {
     pub(crate) fn poll_send_with(
         &mut self,
         cx: &mut Context<'_>,
-        mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<std::io::Result<usize>>,
-    ) -> Poll<Result<bool, Error>> {
+        mut submit: impl FnMut(&mut Context<'_>, Pathway, &[u8]) -> Poll<io::Result<usize>>,
+    ) -> Poll<io::Result<bool>> {
         let Some(meta) = self.pending else {
             return Poll::Ready(Ok(false));
         };
         let delay = self.path.cc.retransmit_and_expire_time(Epoch::Data).0;
         let retention = self.path.cc.pto_base(Epoch::Data) * 3;
         let mut cc = self.path.cc.lock();
-        std::task::ready!(submit(cx, self.path.pathway, &self.bytes))
-            .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+        std::task::ready!(submit(cx, self.path.pathway, &self.bytes))?;
         Transmit::on_sent(self.transport.data.as_ref(), meta.pn, meta.in_flight, delay, retention);
         self.path.on_sent(&mut cc, [None, None, self.pending.take()]);
         drop(cc);
@@ -76,7 +76,7 @@ impl Sender {
         Poll::Ready(Ok(true))
     }
 
-    pub(crate) fn poll_send(&mut self, cx: &mut Context<'_>, protocol: &QuicProtocol) -> Poll<Result<bool, Error>> {
+    pub(crate) fn poll_send(&mut self, cx: &mut Context<'_>, protocol: &QuicProtocol) -> Poll<io::Result<bool>> {
         self.poll_send_with(cx, |cx, path, bytes| {
             protocol.poll_send(cx, path, &[std::io::IoSlice::new(bytes)]).map(|result| result.map(|_| bytes.len()))
         })

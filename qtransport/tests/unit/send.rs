@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    io,
     sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -1087,7 +1088,7 @@ pub(super) fn poll_collect(
     datagrams: &mut [Datagram],
     frames: &mut Vec<GuaranteedFrame>,
     cx: &mut Context<'_>,
-) -> Poll<Result<usize, crate::Error>> {
+) -> Poll<io::Result<usize>> {
     std::pin::pin!(path.collect(datagrams, frames)).poll(cx).map(|result| result.map(|(count, _)| count))
 }
 
@@ -1538,6 +1539,49 @@ async fn collection_bounds_each_datagram_and_charges_envelopes_once() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn collection_reports_unanswered_probes_as_an_io_timeout() {
+    let paths = crate::common::initial_paths(
+        Role::Client,
+        ConnectionId::from_slice(b"clientid"),
+        ConnectionId::from_slice(b"original"),
+        keys(false),
+    );
+    let path = crate::common::registered_path(
+        &paths,
+        Path::new(
+            paths.cid_registry.remote.apply_dcid(),
+            Pathway::new(
+                EndpointAddr::direct("127.0.0.1:38001".parse().unwrap()),
+                EndpointAddr::direct("127.0.0.1:38002".parse().unwrap()),
+            ),
+            paths.progress.facts(),
+            paths.spaces.clone(),
+            paths.resenders.clone(),
+            ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+            paths.terminator.clone(),
+            paths.progress.clone(),
+        ),
+    );
+    path.validation.exempt().unwrap();
+    let sent_at = tokio::time::Instant::now();
+    path.cc.on_pkt_sent(Epoch::Initial, 0, true, 1200, true, None);
+    for _ in 0..6 {
+        let deadline = sent_at + path.cc.get_pto(Epoch::Initial);
+        tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now())).await;
+        path.cc.do_tick().unwrap();
+    }
+    let deadline = sent_at + path.cc.get_pto(Epoch::Initial);
+    tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now())).await;
+    let mut datagrams = [Datagram::default()];
+    let mut frames = Vec::new();
+    let error = path.collect(&mut datagrams, &mut frames).await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(paths.terminator.clone().now_or_never().is_none(), "a path error is not itself a connection error");
+    cancel_waiters(&paths, &path);
+    paths.retire_all();
+}
+
 #[tokio::test]
 async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     use qprotocol::{QuicProtocol, UdpSocket};
@@ -1593,7 +1637,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     // The kernel accepts the first datagram, then rejects the oversized second datagram.
     datagrams[1].bytes.resize(65536, 0);
     let error = path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::NoViablePath);
+    assert!(error.raw_os_error().is_some(), "preserve the socket's original OS error");
     assert!(datagrams[0].packets.is_empty());
     assert_eq!(
         datagrams[1].packets.iter().map(|meta| (meta.pn, meta.pktlen, meta.content, meta.in_flight, meta.ack)).collect::<Vec<_>>(),
@@ -1662,8 +1706,7 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     path.close();
 
     let error = path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::NoViablePath);
-    assert!(matches!(error, crate::Error::Quic(error) if error.reason() == "Cancelled"));
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
     path.refresh(&mut datagrams, &mut frames);
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
@@ -1810,7 +1853,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     other.refresh(&mut datagrams, &mut frames);
     other.close();
     assert!(matches!(poll_collect(&other, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop())), Poll::Ready(Err(error))
-        if error.kind() == ErrorKind::NoViablePath && error.to_string().contains("path CID binding retired")));
+        if error.kind() == io::ErrorKind::BrokenPipe));
     paths.retire_all();
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }

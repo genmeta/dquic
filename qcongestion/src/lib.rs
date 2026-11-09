@@ -1,8 +1,7 @@
-use std::task::Context;
+use std::{io, task::Context};
 
 use qbase::{Epoch, frame::AckFrame};
 use qevent::quic::recovery::PacketLostTrigger;
-use thiserror::Error;
 use tokio::time::{Duration, Instant};
 
 mod algorithm;
@@ -16,10 +15,6 @@ mod rtt;
 /// default datagram size in bytes.
 pub const MSS: usize = 1200;
 
-#[derive(Debug, Clone, Copy, Error)]
-#[error("Too many PTOs: {0}")]
-pub struct TooManyPtos(u32);
-
 /// The [`Transport`] trait defines the interface for congestion control algorithms.
 pub trait Transport {
     /// Refresh recovery timers after amplification credit is exhausted.
@@ -29,10 +24,12 @@ pub trait Transport {
     fn on_charged(&self);
 
     /// Performs a periodic tick to drive the congestion control algorithm.
-    fn do_tick(&self) -> Result<(), TooManyPtos>;
+    /// Returns [`io::ErrorKind::TimedOut`] when unanswered PTOs exceed the path limit.
+    fn do_tick(&self) -> io::Result<()>;
 
     /// Prepare one assembly budget and register the sender for recovery wakeups.
-    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> Result<(), TooManyPtos>;
+    /// Returns [`io::ErrorKind::TimedOut`] when unanswered PTOs exceed the path limit.
+    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> io::Result<()>;
 
     /// Returns the prepared assembly budget, or computes live credit outside assembly.
     /// A prepared budget retains its remainder even when it is smaller than one MTU.
