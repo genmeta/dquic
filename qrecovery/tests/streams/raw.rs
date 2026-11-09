@@ -51,7 +51,7 @@ fn packet_frames_with_capacity(
             0,
         ),
     );
-    assert!(matches!(result, Poll::Ready(Ok(n)) if n > 0));
+    assert!(matches!(result, Poll::Ready(n) if n > 0));
     frames
 }
 
@@ -506,13 +506,13 @@ async fn empty_collection_wakes_for_new_stream_and_cancels_stream_waiters() {
     writer.write_all(b"data").await.unwrap();
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
     assert_eq!(b.0.load(Ordering::Relaxed), 2);
-    assert!(matches!(poll(&wb), Poll::Ready(Ok(n)) if n > 0));
+    assert!(matches!(poll(&wb), Poll::Ready(n) if n > 0));
     streams.unregister(&wb);
     writer.write_all(b"more").await.unwrap();
     assert_eq!(b.0.load(Ordering::Relaxed), 2);
     let c = Arc::new(Counter(AtomicUsize::new(0)));
     let wc = Waker::from(c.clone());
-    assert!(matches!(poll(&wc), Poll::Ready(Ok(n)) if n > 0));
+    assert!(matches!(poll(&wc), Poll::Ready(n) if n > 0));
     let Poll::Ready(Ok(Some((_, mut next)))) = streams.poll_open_uni_with_limit(&mut Context::from_waker(Waker::noop()), 100) else {
         panic!("stream should open");
     };
@@ -622,7 +622,7 @@ fn empty_stream_fin_is_effective_packet_content() {
         0,
         0,
     );
-    assert!(matches!(streams.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(n)) if n > 0));
+    assert!(matches!(streams.poll_dump(&mut cx, &mut buffer), Poll::Ready(n) if n > 0));
     assert_eq!(buffer.meta.content, PacketContent::EffectivePayload);
     assert!(frames.iter().any(|frame| matches!(frame, GuaranteedFrame::Stream(frame) if frame.is_fin())));
 }

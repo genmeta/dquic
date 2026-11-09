@@ -49,14 +49,14 @@ async fn aead_abort_is_terminal_without_a_close_flight_and_preserves_the_first_e
         let start = Instant::now();
         terminator.abort(limit_error);
         assert_eq!(terminator.clone().now_or_never(), Some(expected.clone()));
-        assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Err(expected.clone())));
+        assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(0));
         assert_eq!(waiter.await.unwrap(), expected);
         assert_eq!(Instant::now(), start);
         assert_eq!(component.0.lock().unwrap().as_slice(), &[expected]);
     }
 }
 
-fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<Result<usize, Error>> {
+fn poll_close(terminator: &ArcTerminator, waker: &Waker) -> Poll<usize> {
     let limits_quota = 2400;
     let limits_length = 1200;
     let mut bytes = bytes::BytesMut::new();
@@ -80,7 +80,7 @@ fn dump_close(terminator: &ArcTerminator, packet_type: Type) -> ConnectionCloseF
     let mut frames = Vec::new();
     let mut writer_1 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, packet_type, 0, 0);
-    assert_eq!((&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(Ok(1)));
+    assert_eq!((&*terminator).poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(1));
     let decoded = FrameReader::new(bytes.freeze(), packet_type).collect::<Result<Vec<_>, _>>().unwrap();
     let [(Frame::Close(frame), _)] = decoded.as_slice() else {
         panic!("expected one CONNECTION_CLOSE frame, got {decoded:?}");
@@ -173,7 +173,7 @@ async fn draining_writes_one_close_and_never_schedules_another() {
                     &mut Context::from_waker(Waker::noop()),
                     &mut buffer,
                 ),
-                Poll::Ready(Ok(n)) if n == expected
+                Poll::Ready(n) if n == expected
             ));
             if expected == 1 {
                 assert!(frames.is_empty());
@@ -202,7 +202,7 @@ async fn closing_without_a_written_frame_stops_collection() {
         let terminator = ArcTerminator::no_error();
         terminator.close(local_reason(), Duration::from_secs(1));
         if pending {
-            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
         }
         let limits_quota = 2400;
         let limits_length = 1;
@@ -221,8 +221,8 @@ async fn closing_without_a_written_frame_stops_collection() {
         if pending {
             assert!(result.is_pending());
         } else {
-            assert!(matches!(result, Poll::Ready(Ok(0))));
-            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+            assert!(matches!(result, Poll::Ready(0)));
+            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
         }
         assert!(buffer.is_finished());
         assert!(frames.is_empty());
@@ -233,24 +233,24 @@ async fn closing_without_a_written_frame_stops_collection() {
 async fn closing_sends_immediately_and_again_after_five_packets() {
     let terminator = ArcTerminator::no_error();
     terminator.close(local_reason(), Duration::from_secs(1));
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
 
     for _ in 0..4 {
         terminator.on_rcvd_packet(Instant::now());
         assert!(poll_close(&terminator, Waker::noop()).is_pending());
     }
     terminator.on_rcvd_packet(Instant::now());
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
 }
 
 #[tokio::test(start_paused = true)]
 async fn closing_sends_again_when_a_later_packet_crosses_the_time_threshold() {
     let terminator = ArcTerminator::no_error();
     terminator.close(local_reason(), Duration::from_secs(1));
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
     let sent_at = Instant::now();
     terminator.on_rcvd_packet(sent_at + Duration::from_secs(1));
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
 }
 
 #[tokio::test(start_paused = true)]
@@ -259,13 +259,13 @@ async fn peer_close_during_closing_discards_the_local_close() {
         let terminator = ArcTerminator::no_error();
         terminator.close(local_reason(), Duration::from_secs(1));
         if sent {
-            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
         }
         terminator.recv_conn_close_frame(close_frame("peer"), Duration::from_secs(1));
         if !sent {
-            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+            assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
         }
-        assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(0)));
+        assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(0));
     }
 }
 
@@ -293,30 +293,56 @@ async fn pending_senders_are_woken_in_normal_and_closing() {
             if closing {
                 terminator.close(local_reason(), Duration::from_secs(1));
                 assert_eq!(counter.0.swap(0, Ordering::Relaxed), 1);
-                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(1)));
+                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(1));
                 assert!(poll_close(&terminator, &waker).is_pending());
             }
             if draining {
                 terminator.recv_conn_close_frame(close_frame("peer"), Duration::from_secs(1));
-                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(usize::from(!closing))));
-                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(Ok(0)));
+                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(usize::from(!closing)));
+                assert_eq!(poll_close(&terminator, &waker), Poll::Ready(0));
             }
             terminator.terminate();
             assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!(closing && draining)));
-            assert!(matches!(poll_close(&terminator, &waker), Poll::Ready(Err(_))));
+            assert!(matches!(poll_close(&terminator, &waker), Poll::Ready(0)));
         }
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn terminated_returns_its_stored_error() {
+async fn terminated_source_stops_assembly_without_repeating_its_error() {
+    use qbase::{
+        frame::PingFrame,
+        packet::{Assemble, PacketContent},
+    };
+
+    let terminator = ArcTerminator::no_error();
+    let error = Error::from(close_frame("terminated"));
+    terminator.close(CloseReason::Peer(close_frame("terminated")), Duration::from_secs(1));
+    terminator.terminate();
+    let mut bytes = bytes::BytesMut::new();
+    let mut writer = bytes::BufMut::limit(&mut bytes, 1200);
+    let mut frames = Vec::new();
+    let mut buffer =
+        PacketBuffer::new(&mut writer, 1200, &mut frames, OneRttHeader::new(Default::default(), Default::default()).get_type(), 0, 0);
+    assert_eq!(
+        buffer.assemble(&mut Context::from_waker(Waker::noop()), PacketContent::EffectivePayload, &mut [&mut &terminator, &mut PingFrame],),
+        Poll::Ready(0),
+    );
+    assert!(buffer.is_finished());
+    assert_eq!(buffer.written(), 0);
+    assert_eq!(terminator.await, error);
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminated_source_is_empty_and_future_preserves_its_error() {
     let terminator = ArcTerminator::no_error();
     let error = Error::from(close_frame("terminated"));
     terminator.close(CloseReason::Peer(close_frame("terminated")), Duration::from_secs(1));
     terminator.terminate();
     terminator.close(local_reason(), Duration::from_secs(1));
     terminator.recv_conn_close_frame(close_frame("peer"), Duration::from_secs(1));
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Err(error)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(0));
+    assert_eq!(terminator.await, error);
 }
 
 #[tokio::test(start_paused = true)]
@@ -360,7 +386,7 @@ async fn close_notifies_components_once_and_registration_after_close_is_immediat
     let expected = Error::from(QuicError::with_default_fty(ErrorKind::Internal, "local"));
     assert_eq!(*first.0.lock().unwrap(), vec![expected.clone()]);
     assert_eq!(*late.0.lock().unwrap(), vec![expected]);
-    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(Ok(1)));
+    assert_eq!(poll_close(&terminator, Waker::noop()), Poll::Ready(1));
     assert!(poll_close(&terminator, Waker::noop()).is_pending());
 }
 

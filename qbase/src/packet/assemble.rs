@@ -4,7 +4,6 @@ use std::task::{Context, Poll};
 use bytes::{BufMut, buf::UninitSlice};
 
 use crate::{
-    error::Error,
     frame::{ContainSpec, EncodeSize, Frame, FrameFeature, FrameType, GetFrameType, Len, Spec, io::WriteFrame, *},
     packet::{PacketContent, Type},
 };
@@ -76,11 +75,10 @@ pub trait Package<B: BufMut + ?Sized> {
         0
     }
 
-    /// No data: register the task and return Pending. Data that cannot fit: Ready(Ok(0)).
-    /// Closed sources return Ready(Ok(0)); their stored close error belongs to application I/O.
-    /// A new error requests connection closure, not immediate termination of its sending task.
+    /// No data: register the task and return Pending. Data that cannot fit: Ready(0).
+    /// Closed sources return Ready(0); their stored close error belongs to application I/O.
     /// Retain recovery descriptors in `buffer.frames`; return the number of all frames written.
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>>;
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize>;
 }
 
 pub trait Assemble {
@@ -91,20 +89,15 @@ pub trait Assemble {
         cx: &mut Context<'_>,
         packet_content: PacketContent,
         sources: &mut [&mut dyn Package<Self::Buffer>],
-    ) -> Poll<Result<usize, Error>>;
+    ) -> Poll<usize>;
 }
 
 impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
     type Buffer = B;
 
-    fn assemble(
-        &mut self,
-        cx: &mut Context<'_>,
-        packet_content: PacketContent,
-        sources: &mut [&mut dyn Package<B>],
-    ) -> Poll<Result<usize, Error>> {
+    fn assemble(&mut self, cx: &mut Context<'_>, packet_content: PacketContent, sources: &mut [&mut dyn Package<B>]) -> Poll<usize> {
         if self.finished {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(0);
         }
         let packet_type = self.meta.pktype;
         // Preserve input order at equal priority.
@@ -115,13 +108,12 @@ impl<B: BufMut + ?Sized> Assemble for PacketBuffer<'_, B> {
             if self.finished {
                 break;
             }
-            if let Poll::Ready(value) = source.poll_dump(cx, self) {
-                value?;
-                result = Poll::Ready(Ok(0));
+            if source.poll_dump(cx, self).is_ready() {
+                result = Poll::Ready(0);
             }
         }
         if self.meta.nframes > start {
-            Poll::Ready(Ok(self.meta.nframes - start))
+            Poll::Ready(self.meta.nframes - start)
         } else {
             result
         }
@@ -283,7 +275,7 @@ impl<B: BufMut + ?Sized, P: Package<B> + ?Sized> Package<B> for &mut P {
         (**self).priority()
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         (**self).poll_dump(cx, buffer)
     }
 }
@@ -301,12 +293,12 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for Option<P> {
         self.as_ref().map_or(0, Package::priority)
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let Some(source) = self.as_mut() else {
             return Poll::Pending;
         };
         let result = source.poll_dump(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+        if matches!(result, Poll::Ready(n) if n > 0) {
             *self = None;
         }
         result
@@ -334,7 +326,7 @@ impl<B: BufMut + ?Sized, P: Package<B>> Package<B> for (crate::Epoch, P) {
         self.1.priority()
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         self.1.poll_dump(cx, buffer)
     }
 }
@@ -348,14 +340,14 @@ macro_rules! frame_packages {
             fn belongs_to(&self, packet_type: Type) -> bool {
                 self.frame_type().belongs_to(packet_type)
             }
-            fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
-                if !self.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
+            fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
+                if !self.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(0); }
                 buffer.for_frame(self.frame_type());
-                if !buffer.can_fit(self.encoding_size()) { return Poll::Ready(Ok(0)); }
+                if !buffer.can_fit(self.encoding_size()) { return Poll::Ready(0); }
                 let frame: Frame = self.clone().into();
                 buffer.put_frame(&frame);
                 buffer.record(frame);
-                Poll::Ready(Ok(1))
+                Poll::Ready(1)
             }
         }
     )*};
@@ -388,13 +380,13 @@ macro_rules! data_packages {
             fn belongs_to(&self, packet_type: Type) -> bool {
                 self.0.frame_type().belongs_to(packet_type)
             }
-            fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
-                if !self.0.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(Err(crate::error::QuicError::with_default_fty(crate::error::ErrorKind::Internal, "frame does not belong to packet type").into())); }
+            fn poll_dump(&mut self, _: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
+                if !self.0.frame_type().belongs_to(buffer.meta.pktype) { return Poll::Ready(0); }
                 buffer.for_frame(self.0.frame_type());
-                if !buffer.can_fit(self.0.encoding_size().saturating_add(self.1.len())) { return Poll::Ready(Ok(0)); }
+                if !buffer.can_fit(self.0.encoding_size().saturating_add(self.1.len())) { return Poll::Ready(0); }
                 buffer.put_frame(&Frame::$variant(self.0, self.1.clone()));
                 buffer.record(Frame::$variant(self.0, ()));
-                Poll::Ready(Ok(1))
+                Poll::Ready(1)
             }
         }
     )*};
@@ -408,7 +400,7 @@ macro_rules! stream_control_packages {
             fn belongs_to(&self, packet_type: Type) -> bool {
                 self.frame_type().belongs_to(packet_type)
             }
-            fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+            fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
                 StreamCtlFrame::from(*self).poll_dump(cx, buffer)
             }
         }

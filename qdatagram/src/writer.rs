@@ -235,7 +235,7 @@ mod tests {
                 );
                 assert_eq!(result.is_pending(), !queued);
                 if queued {
-                    assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
+                    assert_eq!(result, Poll::Ready(usize::from(quota != 0)));
                 }
                 writer.send_bytes(Bytes::from_static(b"next")).unwrap();
                 assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
@@ -357,7 +357,7 @@ mod tests {
                 0,
             );
             assert!(
-                matches!(qbase::packet::Package::poll_dump(&mut source, &mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(Ok(n)) if n == buffer.meta.nframes && n > 0)
+                matches!(qbase::packet::Package::poll_dump(&mut source, &mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(n) if n == buffer.meta.nframes && n > 0)
             );
             assert_eq!(actual, bytes[..written]);
         }
@@ -381,16 +381,12 @@ mod tests {
 }
 
 impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
-    fn poll_dump(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buffer: &mut qbase::packet::PacketBuffer<'_, B>,
-    ) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut std::task::Context<'_>, buffer: &mut qbase::packet::PacketBuffer<'_, B>) -> Poll<usize> {
         use std::task::Poll;
         let mut guard = self.0.lock().unwrap();
         let writer = match guard.as_mut() {
             Ok(writer) => writer,
-            Err(_) => return Poll::Ready(Ok(0)),
+            Err(_) => return Poll::Ready(0),
         };
         let Some(data) = writer.datagrams.front() else {
             writer.tx_wakers.register(cx.waker());
@@ -403,7 +399,7 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
         if !buffer.can_fit(frame.encoding_size() + data.len()) {
             frame = DatagramFrame::new(false, length);
             if !buffer.can_fit(frame.encoding_size() + data.len()) {
-                return Poll::Ready(Ok(0));
+                return Poll::Ready(0);
             }
             let padding = buffer.remaining_mut() - frame.encoding_size() - data.len();
             if padding > 0 {
@@ -412,9 +408,9 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
             }
         }
         let result = (frame, data.clone()).poll_dump(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(1))) {
+        if matches!(result, Poll::Ready(1)) {
             writer.datagrams.pop_front();
-            return Poll::Ready(Ok(buffer.meta.nframes - before));
+            return Poll::Ready(buffer.meta.nframes - before);
         }
         result
     }

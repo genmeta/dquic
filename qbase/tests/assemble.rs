@@ -5,7 +5,7 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    error::{Error, ErrorKind, QuicError},
+    error::ErrorKind,
     frame::{AckFrame, ConnectionCloseFrame, CryptoFrame, PathChallengeFrame, PingFrame},
     packet::{Assemble, GetType, LongHeaderBuilder, Package, PacketBuffer, PacketContent, Type},
 };
@@ -15,7 +15,7 @@ enum Output {
     Pending,
     NoSpace,
     Close,
-    Error,
+    Closed,
 }
 
 struct Source<'a> {
@@ -43,16 +43,16 @@ impl<B: bytes::BufMut + ?Sized> Package<B> for Source<'_> {
         self.priority
     }
 
-    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<Result<usize, Error>> {
+    fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         self.calls.borrow_mut().push(self.id);
         match self.output {
             Output::Ping => PingFrame.poll_dump(cx, buffer),
             Output::Pending => Poll::Pending,
-            Output::NoSpace => Poll::Ready(Ok(0)),
+            Output::NoSpace => Poll::Ready(0),
             Output::Close => {
                 ConnectionCloseFrame::new_quic(ErrorKind::Internal, qbase::frame::FrameType::Padding.into(), "closed").poll_dump(cx, buffer)
             }
-            Output::Error => Poll::Ready(Err(QuicError::with_default_fty(ErrorKind::Internal, "source failed").into())),
+            Output::Closed => Poll::Ready(0),
         }
     }
 }
@@ -81,7 +81,7 @@ fn filters_before_polling_and_preserves_equal_priority_order_through_wrappers() 
         let mut excluded_ref = &mut excluded;
         assert_eq!(
             buffer.assemble(cx, PacketContent::JustPing, &mut [&mut low, &mut excluded_ref, &mut first_ref, &mut second]),
-            Poll::Ready(Ok(3)),
+            Poll::Ready(3),
         );
         assert_eq!(*calls.borrow(), [2, 3, 1]);
         assert!(first.is_none());
@@ -101,7 +101,7 @@ fn continues_past_pending_and_no_space_and_reports_earlier_writes() {
         let mut last = source(4, Output::Pending);
         assert_eq!(
             buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut pending, &mut no_space, &mut ping, &mut last]),
-            Poll::Ready(Ok(1)),
+            Poll::Ready(1),
         );
         assert_eq!(*calls.borrow(), [1, 2, 3, 4]);
     });
@@ -113,29 +113,26 @@ fn close_prevents_lower_priority_sources_and_later_assembly() {
         let calls = RefCell::new(Vec::new());
         let mut ping = Source { id: 1, priority: 0, allowed: true, output: Output::Ping, calls: &calls };
         let mut close = Source { id: 2, priority: 10, allowed: true, output: Output::Close, calls: &calls };
-        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping, &mut close]), Poll::Ready(Ok(1)));
+        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping, &mut close]), Poll::Ready(1));
         let written = buffer.written();
-        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping]), Poll::Ready(Ok(0)));
+        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping]), Poll::Ready(0));
         assert_eq!(buffer.written(), written);
         assert_eq!(*calls.borrow(), [2]);
     });
 }
 
 #[test]
-fn source_error_stops_assembly_and_preserves_written_metadata() {
+fn closed_source_preserves_earlier_writes_and_allows_later_sources() {
     buffer_test(|buffer, cx| {
         let calls = RefCell::new(Vec::new());
         let source = |id, output| Source { id, priority: 0, allowed: true, output, calls: &calls };
         let mut ping = source(1, Output::Ping);
-        let mut error = source(2, Output::Error);
+        let mut closed = source(2, Output::Closed);
         let mut last = source(3, Output::Ping);
-        assert!(matches!(
-            buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping, &mut error, &mut last]),
-            Poll::Ready(Err(_)),
-        ));
-        assert_eq!(*calls.borrow(), [1, 2]);
-        assert_eq!(buffer.meta.nframes, 1);
-        assert_eq!(buffer.written(), 1);
+        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ping, &mut closed, &mut last]), Poll::Ready(2),);
+        assert_eq!(*calls.borrow(), [1, 2, 3]);
+        assert_eq!(buffer.meta.nframes, 2);
+        assert_eq!(buffer.written(), 2);
     });
 }
 
@@ -144,7 +141,7 @@ fn initial_filters_data_only_frames_without_consuming_them() {
     buffer_test(|buffer, cx| {
         let mut validation = Some(PathChallengeFrame::random());
         let mut ping = PingFrame;
-        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut validation, &mut ping]), Poll::Ready(Ok(1)));
+        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut validation, &mut ping]), Poll::Ready(1));
         assert!(validation.is_some());
         assert_eq!(buffer.written(), 1);
     });
@@ -160,7 +157,7 @@ fn epoch_scoped_sources_keep_priority_and_only_consume_matching_sources() {
         let mut handshake = (Epoch::Handshake, Some(source(1, 100)));
         let mut initial = (Epoch::Initial, Some(source(2, 10)));
         let mut shared = Some(source(3, 0));
-        assert_eq!(buffer.assemble(cx, PacketContent::JustPing, &mut [&mut shared, &mut handshake, &mut initial]), Poll::Ready(Ok(2)));
+        assert_eq!(buffer.assemble(cx, PacketContent::JustPing, &mut [&mut shared, &mut handshake, &mut initial]), Poll::Ready(2));
         assert_eq!(*calls.borrow(), [2, 3]);
         assert!(handshake.1.is_some());
         assert!(initial.1.is_none());
@@ -172,9 +169,9 @@ fn epoch_scoped_sources_keep_priority_and_only_consume_matching_sources() {
 fn content_filter_leaves_excluded_sources_unpolled() {
     buffer_test(|buffer, cx| {
         let calls = RefCell::new(Vec::new());
-        let mut excluded = Some(Source { id: 1, priority: u32::MAX, allowed: true, output: Output::Error, calls: &calls });
+        let mut excluded = Some(Source { id: 1, priority: u32::MAX, allowed: true, output: Output::Closed, calls: &calls });
         let mut ping = Some(PingFrame);
-        assert_eq!(buffer.assemble(cx, PacketContent::JustPing, &mut [&mut excluded, &mut ping]), Poll::Ready(Ok(1)),);
+        assert_eq!(buffer.assemble(cx, PacketContent::JustPing, &mut [&mut excluded, &mut ping]), Poll::Ready(1),);
         assert!(calls.borrow().is_empty());
         assert!(excluded.is_some());
         assert!(ping.is_none());
@@ -190,7 +187,7 @@ fn content_ranges_filter_frames_before_consuming_sources() {
             let mut ack = Some(AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None));
             let mut ping = Some(PingFrame);
             let mut crypto = Some((CryptoFrame::new(0u32.into(), 7u32.into()), bytes::Bytes::from_static(b"payload")));
-            assert_eq!(buffer.assemble(cx, content, &mut [&mut ack, &mut ping, &mut crypto]), Poll::Ready(Ok(count)),);
+            assert_eq!(buffer.assemble(cx, content, &mut [&mut ack, &mut ping, &mut crypto]), Poll::Ready(count),);
             assert!(ack.is_none());
             assert_eq!(ping.is_none(), content >= JustPing);
             assert_eq!(crypto.is_none(), content == EffectivePayload);
@@ -203,7 +200,7 @@ fn content_ranges_filter_frames_before_consuming_sources() {
 fn metadata_records_actual_content_instead_of_the_requested_range() {
     buffer_test(|buffer, cx| {
         let mut ack = AckFrame::new(3u32.into(), 0u32.into(), 0u32.into(), vec![], None);
-        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ack]), Poll::Ready(Ok(1)),);
+        assert_eq!(buffer.assemble(cx, PacketContent::EffectivePayload, &mut [&mut ack]), Poll::Ready(1),);
         assert_eq!(buffer.meta.content, PacketContent::NonAckEliciting);
         assert_eq!(buffer.meta.ack, Some(3));
         assert!(!buffer.meta.in_flight);

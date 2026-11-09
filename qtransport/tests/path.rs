@@ -163,7 +163,7 @@ async fn validation_registers_only_when_both_sources_are_empty() {
                 .poll_dump(&mut Context::from_waker(&waker), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
             assert_eq!(result.is_pending(), !queued);
             if queued {
-                assert_eq!(result, Poll::Ready(Ok(if quota == 0 { 0 } else { 2 })));
+                assert_eq!(result, Poll::Ready(if quota == 0 { 0 } else { 2 }));
             }
             path.validation.recv_frame(PathChallengeFrame::from_slice(&[3; 8])).unwrap();
             assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));
@@ -195,5 +195,5 @@ async fn every_duplicate_challenge_is_packaged_as_a_response() {
         .validation
         .clone()
         .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_1, limits_quota, &mut frames, ty, 0, 0));
-    assert_eq!(result, Poll::Ready(Ok(10)));
+    assert_eq!(result, Poll::Ready(10));
 }

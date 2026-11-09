@@ -295,12 +295,12 @@ pub fn take_heartbeat(path: &qtransport::path::Path) -> bool {
         .clone()
         .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0))
     {
-        Poll::Ready(Ok(1)) => {
+        Poll::Ready(1) => {
             assert!(frames.is_empty());
             assert_eq!(&bytes[..], &[1]);
             true
         }
-        Poll::Pending => false,
+        Poll::Pending | Poll::Ready(0) => false,
         other => panic!("unexpected heartbeat result: {other:?}"),
     }
 }

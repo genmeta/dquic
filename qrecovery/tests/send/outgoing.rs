@@ -27,7 +27,7 @@ async fn closed_stream_outgoing_is_empty_but_its_writer_keeps_the_error() {
     for _ in 0..2 {
         let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
         let mut buffer = PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0);
-        assert_eq!(outgoing.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(Ok(0)));
+        assert_eq!(outgoing.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer), Poll::Ready(0));
     }
     assert!(bytes.is_empty());
     assert!(frames.is_empty());
@@ -73,13 +73,13 @@ async fn streams_own_waiters_across_states_and_cancel_each_path() {
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
     assert_eq!(b.0.load(Ordering::Relaxed), 1);
     assert_eq!(c.0.load(Ordering::Relaxed), 0);
-    assert!(matches!(poll(&mut source, &wa), Poll::Ready(Ok(1))));
+    assert!(matches!(poll(&mut source, &wa), Poll::Ready(1)));
     source.unregister(&wa);
     writer.write_all(b"next").await.unwrap();
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
     assert_eq!(b.0.load(Ordering::Relaxed), 2);
     assert!(futures::poll!(Box::pin(writer.shutdown())).is_pending());
-    assert!(matches!(poll(&mut source, &wb), Poll::Ready(Ok(1))));
+    assert!(matches!(poll(&mut source, &wb), Poll::Ready(1)));
     let before = b.0.load(Ordering::Relaxed);
     let frame = StreamFrame::new(StreamId::new(Role::Client, Dir::Bi, 0), 0, 5);
     source.may_loss_data(&frame);
@@ -106,7 +106,7 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut writer_2 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_2, limits_quota, &mut frames, ty, 0, 0);
-    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(1))));
+    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(1)));
     let GuaranteedFrame::Stream(frame) = buffer.frames[0] else {
         panic!()
     };
@@ -114,19 +114,19 @@ async fn retransmissions_need_no_fresh_credit_and_fin_waits_for_space() {
     assert!(matches!(qbase::frame::GetFrameType::frame_type(&frame), FrameType::Stream(_, Len::Omit, _)));
     assert!(frame.is_fin());
     let mut ack = qbase::frame::AckFrame::new(0u32.into(), 0u32.into(), 0u32.into(), vec![], None);
-    assert!(matches!(ack.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(0))));
+    assert!(matches!(ack.poll_dump(&mut cx, &mut buffer), Poll::Ready(0)));
     source.may_loss_data(&frame);
     bytes.clear();
     frames.clear();
     limits_quota = 0;
     let mut writer_3 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_3, limits_quota, &mut frames, ty, 0, 0);
-    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(0))));
+    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(0)));
     assert!(buffer.frames.is_empty());
     limits_quota = 12;
     let mut writer_4 = bytes::BufMut::limit(&mut bytes, limits_length);
     let mut buffer = PacketBuffer::new(&mut writer_4, limits_quota, &mut frames, ty, 0, 0);
-    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(Ok(1))));
+    assert!(matches!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(1)));
     assert_eq!(frames, vec![GuaranteedFrame::Stream(frame)]);
     writer.cancel(0);
 }

@@ -52,7 +52,7 @@ fn ack_package_at(records: &ArcRcvdJournal, pn: u64, received: Instant) -> AckFr
     assert!(matches!(
         package
             .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0)),
-        Poll::Ready(Ok(1))
+        Poll::Ready(1)
     ));
     let mut frames = FrameReader::new(bytes.freeze(), ty);
     let Frame::Ack(ack) = frames.next().unwrap().unwrap().0 else {

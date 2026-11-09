@@ -9,10 +9,9 @@ pub(crate) fn take_frames(source: &mut impl for<'b> qbase::packet::Package<bytes
     let limits_length = 1200;
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
-    let result = source.poll_dump(
+    let _ = source.poll_dump(
         &mut std::task::Context::from_waker(std::task::Waker::noop()),
         &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0),
     );
-    assert!(!matches!(result, std::task::Poll::Ready(Err(_))));
     frames.into_iter().map(Into::into).collect()
 }

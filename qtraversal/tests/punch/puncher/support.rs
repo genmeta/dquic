@@ -53,7 +53,7 @@ impl PunchPacketEncoder for Encoder {
         let mut frames = Vec::new();
         let mut buffer = PacketBuffer::new(&mut output, 128 - PROBE.len(), &mut frames, Type::Short(0.into()), 0, 0);
         let result = frame.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer);
-        assert!(matches!(result, Poll::Ready(Ok(1))), "encode probe: {result:?}");
+        assert!(matches!(result, Poll::Ready(1)), "encode probe: {result:?}");
         let size = buffer.written() + PROBE.len();
         bytes.truncate(size);
         for frame in decode(bytes.clone()) {

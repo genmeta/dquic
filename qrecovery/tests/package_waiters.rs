@@ -9,7 +9,6 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{
-    error::Error,
     frame::io::SendFrame,
     handshake::HandshakeFacts,
     packet::{GetType, OneRttHeader, Package, PacketBuffer},
@@ -37,7 +36,7 @@ impl Wake for Counter {
     }
 }
 
-fn poll(source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, quota: usize, waker: &Waker) -> Poll<Result<usize, Error>> {
+fn poll(source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, quota: usize, waker: &Waker) -> Poll<usize> {
     let mut bytes = BytesMut::new();
     let mut frames = Vec::new();
     let limits_quota = quota;
@@ -57,7 +56,7 @@ async fn crypto_registers_only_when_no_frame_was_written() {
             let counter = Arc::new(Counter::default());
             let waker = Waker::from(counter.clone());
             let result = poll(&mut stream.outgoing(), quota, &waker);
-            assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
+            assert_eq!(result, Poll::Ready(usize::from(quota != 0)));
             writer.write_all(b"next").await.unwrap();
             assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         }
@@ -92,7 +91,7 @@ async fn stream_ready_and_blocked_polls_do_not_subscribe() {
         let waker = Waker::from(counter.clone());
         assert!(matches!(
             poll(&mut source, quota, &waker),
-            Poll::Ready(Ok(n)) if (n > 0) == (quota != 0)
+            Poll::Ready(n) if (n > 0) == (quota != 0)
         ));
         writer.write_all(b"next").await.unwrap();
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
@@ -116,7 +115,7 @@ async fn closed_crypto_sources_are_empty_for_every_close_reason() {
             if !enabled {
                 facts.quit_mp_replaying();
             }
-            assert_eq!(poll(&mut stream.outgoing(), 128, Waker::noop()), Poll::Ready(Ok(0)));
+            assert_eq!(poll(&mut stream.outgoing(), 128, Waker::noop()), Poll::Ready(0));
         }
         assert!(stream.writer().write_all(b"late").await.is_err());
     }
@@ -141,7 +140,7 @@ async fn closed_data_streams_ignore_transport_input_and_output() {
     let error = AppError::new(42u32.into(), "closed").into();
     streams.on_error(&error);
     for _ in 0..2 {
-        assert_eq!(poll(&mut streams, 128, Waker::noop()), Poll::Ready(Ok(0)));
+        assert_eq!(poll(&mut streams, 128, Waker::noop()), Poll::Ready(0));
     }
     // These directions would be protocol errors on an active connection.
     assert_eq!(streams.recv_frame((StreamFrame::new(StreamId::new(Role::Client, Dir::Uni, 0), 0, 4), Bytes::from_static(b"late"),)), Ok(0));
@@ -172,7 +171,7 @@ fn ack_registers_only_when_pending() {
                 };
                 assert_eq!(result.is_pending(), !queued);
                 if queued {
-                    assert_eq!(result, Poll::Ready(Ok(usize::from(quota != 0))));
+                    assert_eq!(result, Poll::Ready(usize::from(quota != 0)));
                 }
                 journal.on_rcvd_pn(1, true, Duration::ZERO);
                 assert_eq!(counter.0.load(Ordering::Relaxed), usize::from(!queued));

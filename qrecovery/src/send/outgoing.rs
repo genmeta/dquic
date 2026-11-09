@@ -28,10 +28,10 @@ impl<TX: Clone> Outgoing<TX> {
         buffer: &mut PacketBuffer<'_, B>,
         credit: &mut usize,
         budget: &mut usize,
-    ) -> Poll<Result<usize, QuicError>> {
+    ) -> Poll<usize> {
         let mut guard = self.0.sender();
         let Ok(sender) = guard.as_mut() else {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(0);
         };
         let Some((sid, _)) = sender.source() else {
             return Poll::Pending;
@@ -52,7 +52,7 @@ impl<TX: Clone> Outgoing<TX> {
                 buffer.record(Frame::Padding(PaddingFrame));
             }
             let result = (frame, data.as_slice()).poll_dump(cx, buffer);
-            debug_assert!(matches!(result, Poll::Ready(Ok(1))));
+            debug_assert!(matches!(result, Poll::Ready(1)));
             *budget -= frame.len();
             if fresh {
                 *credit -= frame.len();
@@ -94,8 +94,8 @@ impl<TX: Clone> Outgoing<TX> {
             _ => Err(Poll::Pending),
         };
         match result {
-            Ok(()) => Poll::Ready(Ok(buffer.meta.nframes - start)),
-            Err(Poll::Ready(())) => Poll::Ready(Ok(0)),
+            Ok(()) => Poll::Ready(buffer.meta.nframes - start),
+            Err(Poll::Ready(())) => Poll::Ready(0),
             Err(Poll::Pending) => {
                 if let Some((_, wakers)) = sender.source() {
                     wakers.register(cx.waker());

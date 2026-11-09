@@ -43,8 +43,7 @@ fn send(streams: &mut ArcDataStreams<Broker>) -> Vec<GuaranteedFrame> {
     let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
     let mut writer_0 = bytes::BufMut::limit(&mut bytes, limits_length);
     let _ = streams
-        .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0))
-        .map(Result::unwrap);
+        .poll_dump(&mut Context::from_waker(Waker::noop()), &mut PacketBuffer::new(&mut writer_0, limits_quota, &mut frames, ty, 0, 0));
     frames
 }
 

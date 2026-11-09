@@ -62,7 +62,7 @@ mod tests {
             let mut frames = Vec::new();
             let mut buffer = PacketBuffer::new(self, limits_quota, &mut frames, Type::Long(Long::V1(Ver1::INITIAL)), written, 0);
             match source.poll_dump(&mut Context::from_waker(Waker::noop()), &mut buffer) {
-                std::task::Poll::Ready(Ok(n)) if n > 0 => Ok(n),
+                std::task::Poll::Ready(n) if n > 0 => Ok(n),
                 _ => Err(()),
             }
         }
@@ -419,7 +419,7 @@ mod poll_tests {
                 assert!(result.is_pending());
                 assert!(frames.is_empty());
             } else {
-                assert!(matches!(result, Poll::Ready(Ok(1))));
+                assert!(matches!(result, Poll::Ready(1)));
                 assert!(matches!(frames.as_slice(), [qbase::frame::GuaranteedFrame::Crypto(_)]));
                 if let Some(previous) = &previous {
                     assert_eq!(&bytes, previous);
