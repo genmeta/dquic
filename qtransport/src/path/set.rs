@@ -179,7 +179,7 @@ impl Paths {
     }
 
     /// Wake every registered path's sending task.
-    pub fn wake_all_path_to_send(&self) {
+    pub fn wake_all_to_send(&self) {
         for path in self.entries.lock().unwrap().values() {
             path.send_waker.wake_all();
         }

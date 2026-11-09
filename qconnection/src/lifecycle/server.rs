@@ -33,7 +33,7 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
     let cid_registry = &paths.cid_registry;
     let scid = initial_space.initial_scid;
     let origin_dcid = cid_registry.local.origin_dcid();
-    let handshake_dcid = cid_registry.remote.apply_dcid();
+    let hs_dcid = cid_registry.remote.apply_dcid();
 
     tokio::spawn(recv_ih_pkt_and_deliver_frames((rcvd_pkt.initial, None), initial_space.clone(), paths.clone()));
 
@@ -65,8 +65,8 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
     let result = {
         let establish = async {
             let parameters = ArcParameters::new(Role::Server, client_parameters, server_parameters);
-            let client_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx)).await.expect("handshake CID is available");
-            handshake_dcid.refresh();
+            let client_scid = poll_fn(|cx| hs_dcid.poll_borrow(cx)).await.expect("handshake CID is available");
+            hs_dcid.refresh();
             parameters.authenticate_cids(Requirements::require_client(client_scid))?;
             cid_registry.local.set_limit(parameters.remote::<u64>(ParameterId::ActiveConnectionIdLimit))?;
             cid_registry.remote.set_limit(parameters.local(ParameterId::ActiveConnectionIdLimit));
@@ -125,14 +125,14 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
             progress.on_tls_finished();
             progress.install_data(data_space.clone());
             let hs_done = ArcHandshakeDone::new_server(reliable_frames.clone());
+            let peer_ack_delay_exp = parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32;
             tokio::spawn(read_space_to_tls(tls_ctx.clone(), data_space.as_ref(), paths.clone()));
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
-                (rcvd_pkt.one_rtt, Some(scopes)),
+                (rcvd_pkt.one_rtt, peer_ack_delay_exp, Some(scopes)),
                 data_space.clone(),
                 paths.clone(),
                 token,
                 hs_done.clone(),
-                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
             ));
             hs_done.done();
 
