@@ -69,6 +69,7 @@ impl Drop for Registration {
 // Global listeners and resolver registrations are isolated in this test process.
 #[tokio::test]
 async fn connect_uses_dns_and_global_addresses_and_lets_discovery_finish() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_test_writer().try_init();
     connect_case(false, b"h3").await;
     connect_case(true, b"test-quic").await;
     reject_wrong_server_identity().await;
