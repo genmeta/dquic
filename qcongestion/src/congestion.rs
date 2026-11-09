@@ -664,7 +664,7 @@ impl super::Transport for ArcCC {
         Ok(())
     }
 
-    fn on_burst_completed(&self) {
+    fn refresh_budget(&self) {
         self.lock().burst_budget = None;
     }
 

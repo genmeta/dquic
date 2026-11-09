@@ -1,9 +1,12 @@
 use std::{
     collections::BTreeMap,
+    future::poll_fn,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 
@@ -12,14 +15,14 @@ use qbase::{
     error::{ErrorKind, QuicError},
     frame::{PathChallengeFrame, PathResponseFrame},
     handshake::HandshakeFacts,
-    net::{route::Pathway, validate::ArcValidations},
+    net::{route::Pathway, tx::UnregisterWaker, validate::ArcValidations},
     role::Role,
     time::{heartbeat::ArcHeartbeat, timer::ArcIdleTimer},
     util::IndexDeque,
 };
 use qcongestion::Transport;
 
-use super::Path;
+use super::{Datagram, Path};
 use crate::{
     ArcProgress, ArcPuncher, ArcReliableFrames, ArcResend, CidRegistry, CloseReason,
     punch::ProbeEncoder,
@@ -84,11 +87,11 @@ impl Paths {
         });
         tokio::spawn({
             let weak = Arc::downgrade(&paths);
-            let idle = paths.idle_timer.clone();
+            let idle_timer = paths.idle_timer.clone();
             let terminator = terminator.clone();
             async move {
                 tokio::select! {
-                    result = idle.timeout() => if result.is_ok() {
+                    result = idle_timer.timeout() => if result.is_ok() {
                         let Some(paths) = weak.upgrade() else { return };
                         terminator.close(
                             CloseReason::Internal(QuicError::with_default_fty(
@@ -120,19 +123,63 @@ impl Paths {
         self.entries.lock().unwrap().entry(*pathway).or_insert_with(|| self.create_path(*pathway, facts)).clone()
     }
 
-    /// Remove the registered path and stop its validation, heartbeat and sender.
-    pub fn del_path(&self, pathway: &Pathway) -> bool {
-        let mut entries = self.entries.lock().unwrap();
-        let Some(path) = entries.remove(pathway) else {
-            return false;
+    /// Remove only this path instance and release its resources, even if already removed.
+    pub fn del_path(&self, path: &Arc<Path>) -> bool {
+        let removed = {
+            let mut entries = self.entries.lock().unwrap();
+            if entries.get(&path.pathway).is_some_and(|current| Arc::ptr_eq(current, path)) {
+                entries.remove(&path.pathway);
+                self.validations.remove(&path.pathway);
+                true
+            } else {
+                false
+            }
         };
         path.close();
-        self.validations.remove(pathway);
-        true
+        // A poll already in progress can register again after an earlier del_path.
+        for waker in path.send_waker.drain() {
+            path.spaces.unregister(&waker);
+            self.reliable_frames.unregister(&waker);
+        }
+        path.cc.on_path_lost();
+        removed
+    }
+
+    /// Run until the connection terminates or this path fails or is closed.
+    /// The detached task's owner calls del_path after this method returns.
+    pub(crate) async fn send_via(&self, path: &Path) -> io::Result<()> {
+        let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
+        let mut frames = Vec::with_capacity(256);
+        let terminator = path.terminator.clone();
+        let idle_timer = self.idle_timer();
+        let waker = poll_fn(|cx| {
+            path.send_waker.register(cx.waker());
+            Poll::Ready(cx.waker().clone())
+        })
+        .await;
+        let result = loop {
+            let result = tokio::select! {
+                biased;
+                _ = terminator.clone() => break Ok(()),
+                // Path::close wakes collect/send, which then return BrokenPipe.
+                result = async {
+                    let (count, _) = path.collect(&mut datagrams, &mut frames).await?;
+                    path.send(&mut datagrams[..count], &idle_timer).await
+                } => result,
+            };
+            if let Err(error) = result {
+                break Err(error);
+            }
+            path.refresh(&mut datagrams, &mut frames);
+        };
+        path.refresh(&mut datagrams, &mut frames);
+        // An earlier del_path may have drained it before this poll finished registering sources.
+        path.send_waker.register(&waker);
+        result
     }
 
     /// Wake every registered path's sending task.
-    pub fn wake_all_to_send(&self) {
+    pub fn wake_all_path_to_send(&self) {
         for path in self.entries.lock().unwrap().values() {
             path.send_waker.wake_all();
         }
@@ -168,7 +215,21 @@ impl Paths {
             self.spawn_validation(&path);
         }
 
-        tokio::spawn(super::task::sending(self.clone(), path.clone()));
+        tokio::spawn({
+            let paths = self.clone();
+            let path = path.clone();
+            async move {
+                let result = paths.send_via(&path).await;
+                let pto = path.cc.pto_base(Epoch::Data);
+                paths.del_path(&path);
+                // An idle handshake upgrade can retain a CID without another collect poll.
+                path.dcid.refresh();
+                if paths.entries.lock().unwrap().is_empty() {
+                    let reason = result.err().map_or_else(|| "all paths retired".to_owned(), |error| format!("all paths failed: {error}"));
+                    paths.terminator.close(CloseReason::Internal(QuicError::with_default_fty(ErrorKind::NoViablePath, reason)), pto);
+                }
+            }
+        });
         path.send_waker.wake_all();
         path
     }
@@ -245,23 +306,8 @@ impl Paths {
                     Err(_) => continue,
                 }
             }
-            // Check and remove under one lock: an old task must not remove a replacement.
-            let no_paths = {
-                let mut entries = paths.entries.lock().unwrap();
-                if !path.validation.is_validated() && entries.get(&path.pathway).is_some_and(|current| Arc::ptr_eq(current, &path)) {
-                    path.close();
-                    entries.remove(&path.pathway);
-                    paths.validations.remove(&path.pathway);
-                    entries.is_empty()
-                } else {
-                    false
-                }
-            };
-            if no_paths {
-                terminator.close(
-                    CloseReason::Internal(QuicError::with_default_fty(ErrorKind::NoViablePath, "path validation failed")),
-                    paths.closing_pto(),
-                );
+            if !path.validation.is_validated() {
+                path.close();
             }
         });
     }

@@ -85,7 +85,7 @@ impl Sender {
 
 impl Drop for Sender {
     fn drop(&mut self) {
-        self.path.cc.on_burst_completed();
+        self.path.cc.refresh_budget();
         if let Some(meta) = self.pending.take() {
             Recover::cancel(self.transport.data.as_ref(), meta.pn, &mut std::iter::empty());
         }

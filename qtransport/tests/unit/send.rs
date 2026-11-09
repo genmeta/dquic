@@ -26,10 +26,7 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     Paths,
     common::{self, initial_keys as keys, opening::PacketOpen as _, packet_metadata},
-    path::{
-        Datagram,
-        task::{cancel_waiters, sending},
-    },
+    path::Datagram,
 };
 
 #[tokio::test(start_paused = true)]
@@ -106,7 +103,7 @@ async fn inactive_paths_keep_acks_and_heartbeats_without_consuming_payload() {
         assert!(matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(1))));
         assert!(metadata(&datagrams).all(|meta| meta.content == PacketContent::NonAckEliciting));
         path.refresh(&mut datagrams, &mut frames);
-        cancel_waiters(&paths, &path);
+        paths.del_path(&path);
         paths.retire_all();
     }
 }
@@ -153,7 +150,7 @@ async fn deactivation_cancels_unsubmitted_payload_and_keeps_it_for_reactivation(
         matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == b"queued crypto".len() as u64)
     }));
     path.refresh(&mut datagrams, &mut frames);
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     paths.retire_all();
 }
 
@@ -380,7 +377,7 @@ async fn crypto_replays_until_ack_or_path_selection() {
                     }
                     assert!(frames.is_empty());
                 }
-                cancel_waiters(&paths, &path);
+                paths.del_path(&path);
                 paths.retire_all();
             }
         }
@@ -919,11 +916,17 @@ async fn mature_server_collects_its_three_spaces_and_one_rtt_close() {
     waiting_path.validation.grant().unwrap();
     mature.spaces.data.crypto.writer().write_all(b"next").await.unwrap();
     paths.entries.lock().unwrap().insert(path.pathway, path.clone());
-    let sending_task = tokio::spawn(sending(paths.clone(), waiting_path.clone()));
+    let sending_task = tokio::spawn({
+        let paths = paths.clone();
+        let path = waiting_path.clone();
+        async move { paths.send_via(&path).await }
+    });
     tokio::task::yield_now().await;
     assert!(!sending_task.is_finished());
     waiting_path.close();
-    tokio::time::timeout(Duration::from_secs(1), sending_task).await.unwrap().unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(1), sending_task).await.unwrap().unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    paths.del_path(&waiting_path);
     mature.spaces.initial.retire();
     mature.spaces.handshake.retire();
     let (_, mut writer) = mature.spaces.data.streams.open_uni().await.unwrap().unwrap();
@@ -1194,7 +1197,7 @@ async fn amplification_rearms_pto_when_credit_returns() {
             assert!(datagrams[0].bytes.len() <= 129);
         }
         path.refresh(&mut datagrams, &mut frames);
-        cancel_waiters(&paths, &path);
+        paths.del_path(&path);
         path.close();
         paths.terminator.terminate();
     }
@@ -1247,7 +1250,7 @@ async fn ack_only_submission_leaves_credit_below_threshold_and_blocks_pto_withou
     assert!(matches!(poll_collect(&path, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(1))));
     assert_eq!(path.cc.need_send_ack_eliciting(Epoch::Handshake), 1);
     path.refresh(&mut datagrams, &mut frames);
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     path.close();
     paths.terminator.terminate();
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
@@ -1363,7 +1366,7 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
         }
         path.refresh(&mut datagrams, &mut frames);
         path.send_waker.register(&waker);
-        cancel_waiters(&paths, &path);
+        paths.del_path(&path);
         path.close();
         paths.terminator.terminate();
     }
@@ -1400,7 +1403,7 @@ async fn sending_uses_its_budget_across_multiple_collections() {
     );
     path.validation.exempt().unwrap();
     let quota = path.cc.send_quota();
-    let mut sender = std::pin::pin!(sending(paths.clone(), path.clone()));
+    let mut sender = std::pin::pin!(paths.send_via(&path));
     // The first poll can wait for UDP writability before submitting anything.
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -1422,7 +1425,8 @@ async fn sending_uses_its_budget_across_multiple_collections() {
     };
     assert!(sent > 8, "sending stopped after {sent} datagrams");
     paths.terminator.terminate();
-    sender.await;
+    sender.await.unwrap();
+    paths.del_path(&path);
     assert!(paths.entries.lock().unwrap().is_empty());
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
@@ -1474,7 +1478,7 @@ async fn termination_discards_collected_packets_after_space_retirement() {
     assert!(frames.is_empty());
     assert!(space.sent_journal.lock_guard().packet(pn).is_some(), "refresh must skip the retired journal");
     assert_eq!(path.cc.send_quota(), quota);
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     paths.retire_all();
 }
 
@@ -1532,11 +1536,73 @@ async fn collection_bounds_each_datagram_and_charges_envelopes_once() {
             assert_eq!(charged, budget);
             assert!(metadata(&datagrams[..2]).all(|meta| meta.in_flight));
             path.refresh(&mut datagrams, &mut frames);
-            cancel_waiters(&paths, &path);
+            paths.del_path(&path);
             path.close();
             paths.terminator.terminate();
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleting_a_path_recovers_its_unacknowledged_data_for_another_path() {
+    use qbase::frame::io::ReceiveFrame as _;
+    use qtransport::space::Transmit as _;
+
+    let (paths, data) = data_spaces(Role::Server, Duration::ZERO);
+    let make_path = |port| {
+        common::registered_path(
+            &paths,
+            Path::new(
+                paths.cid_registry.remote.apply_dcid(),
+                common::path_fixtures::pathway(port),
+                paths.progress.facts(),
+                paths.spaces.clone(),
+                paths.resenders.clone(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                paths.terminator.clone(),
+                paths.progress.clone(),
+            ),
+        )
+    };
+    let failed = make_path(38011);
+    let live = make_path(38012);
+    paths.progress.on_path_selected(&paths, &failed);
+    super::install_data(&paths, &data);
+    super::confirm_handshake(&paths);
+    paths
+        .cid_registry
+        .remote
+        .recv_frame(qbase::frame::NewConnectionIdFrame::new(ConnectionId::from_slice(b"client01"), 1u32.into(), 0u32.into()))
+        .unwrap();
+    live.validation.grant().unwrap();
+    common::spaces::take_reliable(&data);
+    data.spaces.data.crypto.writer().write_all(b"recover on another path").await.unwrap();
+    let mut datagrams = [Datagram::default()];
+    let mut frames = Vec::new();
+    failed.collect(&mut datagrams, &mut frames).await.unwrap();
+    let meta = datagram_metadata(&datagrams[0], Epoch::Data).unwrap();
+    data.spaces.data.on_sent(meta.pn, meta.in_flight, Duration::from_secs(1), Duration::from_secs(3));
+    failed.cc.on_pkt_sent(Epoch::Data, meta.pn, meta.content.is_ack_eliciting(), meta.pktlen, meta.in_flight, meta.ack);
+    // These packets have been submitted: refresh must not recover them.
+    datagrams[0].packets.clear();
+    failed.refresh(&mut datagrams, &mut frames);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(poll_collect(&live, &mut datagrams, &mut frames, &mut cx).is_pending());
+    assert!(paths.del_path(&failed));
+    assert!(matches!(poll_collect(&live, &mut datagrams, &mut frames, &mut cx), Poll::Ready(Ok(1))));
+    let retransmit = datagram_metadata(&datagrams[0], Epoch::Data).unwrap();
+    assert_ne!(retransmit.pn, meta.pn);
+    assert!(
+        data.spaces
+            .data
+            .sent_journal
+            .lock_guard()
+            .frames(retransmit.pn)
+            .any(|frame| { matches!(frame, GuaranteedFrame::Crypto(frame) if frame.offset() == 0 && frame.len() == 23) })
+    );
+    live.refresh(&mut datagrams, &mut frames);
+    paths.del_path(&live);
+    paths.retire_all();
 }
 
 #[tokio::test(start_paused = true)]
@@ -1578,7 +1644,7 @@ async fn collection_reports_unanswered_probes_as_an_io_timeout() {
     let error = path.collect(&mut datagrams, &mut frames).await.unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(paths.terminator.clone().now_or_never().is_none(), "a path error is not itself a connection error");
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     paths.retire_all();
 }
 
@@ -1663,7 +1729,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     );
     path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
@@ -1710,7 +1776,7 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     assert!(datagram_metadata(&datagrams[0], Epoch::Initial).is_some());
     path.refresh(&mut datagrams, &mut frames);
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
@@ -1775,7 +1841,7 @@ async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path()
         journal.on_tick(submitted_at + delay, |_| recovered += 1);
         assert_eq!(recovered, expected, "only the live space starts its journal timer");
     }
-    cancel_waiters(&paths, &path);
+    paths.del_path(&path);
     QuicProtocol::global().unregister(socket.local_addr().unwrap());
 }
 
@@ -1890,6 +1956,80 @@ async fn blocked_ack_does_not_wake_itself_and_cancelled_collect_keeps_subscripti
     paths.terminator.terminate();
     common::wait_for_sender_exit(&path).await;
     assert_eq!(Arc::strong_count(&count), 2, "task exit releases subscriptions");
+}
+
+#[tokio::test]
+async fn deleting_a_removed_path_unregisters_its_late_waiters_and_preserves_its_replacement() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use qbase::{
+        frame::{HandshakeDoneFrame, io::SendFrame},
+        packet::{GetType, OneRttHeader, Package, PacketBuffer},
+    };
+
+    struct Counter(AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let paths =
+        common::initial_paths(Role::Client, ConnectionId::from_slice(b"clientid"), ConnectionId::from_slice(b"original"), keys(false));
+    let make_path = || {
+        common::registered_path(
+            &paths,
+            Path::new(
+                paths.cid_registry.remote.apply_dcid(),
+                common::path_fixtures::pathway(38021),
+                paths.progress.facts(),
+                paths.spaces.clone(),
+                paths.resenders.clone(),
+                ArcHeartbeat::new(Duration::ZERO, Duration::ZERO),
+                paths.terminator.clone(),
+                paths.progress.clone(),
+            ),
+        )
+    };
+    let previous = make_path();
+    previous.validation.exempt().unwrap();
+    let old = Arc::new(Counter(AtomicUsize::new(0)));
+    let old_waker = Waker::from(old.clone());
+    let mut sender = std::pin::pin!(paths.send_via(&previous));
+    assert!(sender.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
+    assert!(paths.del_path(&previous));
+    let replacement = make_path();
+    let initial = common::initial_space(&paths.spaces);
+    let live = Arc::new(Counter(AtomicUsize::new(0)));
+    let live_waker = Waker::from(live.clone());
+    let subscribe = |waker: &Waker| {
+        let mut storage = [0; 128];
+        let mut bytes = &mut storage[..];
+        let mut frames = Vec::new();
+        let packet_type = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        let mut buffer = PacketBuffer::new(&mut bytes, 128, &mut frames, packet_type, 0, 0);
+        let mut cx = Context::from_waker(waker);
+        assert!(initial.crypto.outgoing().poll_dump(&mut cx, &mut buffer).is_pending());
+        // Consume the initial CID announcements before subscribing to an empty queue.
+        let _ = paths.reliable_frames.clone().poll_dump(&mut cx, &mut buffer);
+        assert!(paths.reliable_frames.clone().poll_dump(&mut cx, &mut buffer).is_pending());
+    };
+    // Model subscriptions left by a poll already in progress when the old path was removed.
+    subscribe(&old_waker);
+    replacement.send_waker.register(&live_waker);
+    subscribe(&live_waker);
+    assert!(
+        matches!(sender.as_mut().poll(&mut Context::from_waker(&old_waker)), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe)
+    );
+    assert!(!paths.del_path(&previous));
+    let old_before = old.0.load(Ordering::Relaxed);
+    let live_before = live.0.load(Ordering::Relaxed);
+    initial.crypto.writer().write_all(b"wake the live path").await.unwrap();
+    paths.reliable_frames.send_frame([HandshakeDoneFrame]);
+    assert_eq!(old.0.load(Ordering::Relaxed), old_before);
+    assert!(live.0.load(Ordering::Relaxed) > live_before);
+    assert!(Arc::ptr_eq(paths.entries.lock().unwrap().get(&replacement.pathway).unwrap(), &replacement));
+    assert!(!replacement.validation.is_cancelled());
+    paths.retire_all();
 }
 
 #[tokio::test]

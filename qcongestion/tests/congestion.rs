@@ -41,7 +41,7 @@ async fn pacing_tokens_do_not_bypass_the_congestion_window() {
     assert_eq!(cc.send_quota(), 300, "a tick must not refill the assembly budget");
     cc.on_pkt_sealed(300);
     assert_eq!(cc.send_quota(), 0, "Some(0) must not fall back to live credit");
-    cc.on_burst_completed();
+    cc.refresh_budget();
     assert_eq!(cc.send_quota(), window, "discarding sealed packets must not charge the real CC");
     cc.prepare_burst_budget(&mut std::task::Context::from_waker(std::task::Waker::noop())).unwrap();
     for pn in 0..window / MSS {
