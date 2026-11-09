@@ -46,7 +46,7 @@ pub async fn client_growing(
     let scid = initial_space.initial_scid;
     let odcid = cid_registry.local.origin_dcid();
     cid_registry.remote.set_limit(client_params.get(ParameterId::ActiveConnectionIdLimit));
-    let handshake_dcid = cid_registry.remote.apply_dcid();
+    let hs_dcid = cid_registry.remote.apply_dcid();
 
     let discovery = tokio::spawn({
         let paths = paths.clone();
@@ -68,8 +68,8 @@ pub async fn client_growing(
             let handshake_keys = tls_context.read_keys().await?;
             let hs_space = Arc::new(HandshakeSpace::new(scid, ArcKeys::from(handshake_keys), progress.facts()));
             assert!(progress.install_handshake(hs_space.clone()), "first Handshake key installation");
-            let server_scid = poll_fn(|cx| handshake_dcid.poll_borrow(cx)).await.expect("handshake CID is available");
-            handshake_dcid.refresh();
+            let server_scid = poll_fn(|cx| hs_dcid.poll_borrow(cx)).await.expect("handshake CID is available");
+            hs_dcid.refresh();
 
             tokio::spawn(read_tls_to_space(tls_context.clone(), hs_space.as_ref(), paths.clone()));
             tokio::spawn(read_space_to_tls(tls_context.clone(), hs_space.as_ref(), paths.clone()));
@@ -99,13 +99,13 @@ pub async fn client_growing(
             paths.update_max_idle_timeout(parameters.negotiated_max_idle_timeout());
 
             let hs_done = ArcHandshakeDone::new_client();
+            let peer_ack_delay_exp = parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32;
             tokio::spawn(receive_1rtt_pkt_and_deliver_frames(
-                (rcvd_pkt.one_rtt, None),
+                (rcvd_pkt.one_rtt, peer_ack_delay_exp, None),
                 data_space.clone(),
                 paths.clone(),
                 token_registry,
                 hs_done.clone(),
-                parameters.remote::<u64>(ParameterId::AckDelayExponent) as u32,
             ));
 
             tokio::spawn(read_tls_to_space(tls_context.clone(), data_space.as_ref(), paths.clone()));
