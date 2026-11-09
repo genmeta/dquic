@@ -1,6 +1,6 @@
 use std::{
     future::poll_fn,
-    io::IoSlice,
+    io::{self, IoSlice},
     task::{Context, Poll, ready},
 };
 
@@ -8,7 +8,6 @@ use bytes::BytesMut;
 use qbase::{
     Epoch,
     cid::ConnectionId,
-    error::{ErrorKind, QuicError},
     frame::GuaranteedFrame,
     packet::{Package, PacketContent, assemble::Metadata},
     time::timer::ArcIdleTimer,
@@ -19,7 +18,6 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 
 use super::Path;
-use crate::Error;
 
 /// A UDP datagram and the QUIC packets awaiting submission within it.
 #[derive(Default)]
@@ -35,16 +33,16 @@ impl Path {
         dcid: ConnectionId,
         datagrams: &mut [Datagram],
         frames: &mut Vec<GuaranteedFrame>,
-    ) -> Poll<Result<usize, Error>> {
+    ) -> Poll<io::Result<usize>> {
         let mut credit = match self.validation.poll_credit(cx) {
-            Poll::Ready(credit) => credit.map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?,
+            Poll::Ready(credit) => credit.map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))?,
             Poll::Pending => {
                 self.cc.cancel(cx.waker());
                 return Poll::Pending;
             }
         };
         let overhead = QuicProtocol::datagram_overhead(self.pathway);
-        self.cc.prepare_burst_budget(cx).map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+        self.cc.prepare_burst_budget(cx)?;
         let packet_content = if self.is_active() {
             PacketContent::EffectivePayload
         } else {
@@ -85,14 +83,14 @@ impl Path {
     }
 
     /// Wait for at least one datagram. Call [`Self::refresh`] after submission or cancellation.
-    pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> Result<(usize, ConnectionId), Error> {
+    pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> io::Result<(usize, ConnectionId)> {
         poll_fn(|cx| {
             self.send_waker.register(cx.waker());
             if self.validation.is_cancelled() {
-                return Poll::Ready(Err(QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired").into()));
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "path retired")));
             }
-            let dcid = ready!(self.dcid.poll_borrow(cx))
-                .ok_or_else(|| QuicError::with_default_fty(ErrorKind::NoViablePath, "path CID binding retired"))?;
+            let dcid =
+                ready!(self.dcid.poll_borrow(cx)).ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "path CID binding retired"))?;
             let result = self.poll_collect(cx, dcid, datagrams, frames);
             if result.is_pending() {
                 self.dcid.refresh();
@@ -103,16 +101,16 @@ impl Path {
     }
 
     /// Register submitted packets under the CC lock, then debit validation credit.
-    pub(crate) async fn send(&self, datagrams: &mut [Datagram], idle_timer: &ArcIdleTimer) -> Result<(), Error> {
+    pub(crate) async fn send(&self, datagrams: &mut [Datagram], idle_timer: &ArcIdleTimer) -> io::Result<()> {
         let overhead = QuicProtocol::datagram_overhead(self.pathway);
         let deadlines = Epoch::EPOCHS.map(|epoch| (self.cc.retransmit_and_expire_time(epoch).0, self.cc.pto_base(epoch) * 3));
         let mut first = 0;
         while first < datagrams.len() {
             let mut sent_handshake = false;
-            let sent = poll_fn(|cx| -> Poll<std::io::Result<Option<usize>>> {
+            let sent = poll_fn(|cx| -> Poll<io::Result<Option<usize>>> {
                 // ACK handling takes the same lock as submission and completion.
                 let mut cc = self.cc.lock();
-                self.validation.credit().map_err(std::io::Error::other)?;
+                self.validation.credit().map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))?;
                 if !self.is_active()
                     && datagrams[first..]
                         .iter()
@@ -140,8 +138,7 @@ impl Path {
                 }
                 Poll::Ready(Ok(Some(sent)))
             })
-            .await
-            .map_err(|error| QuicError::with_default_fty(ErrorKind::NoViablePath, error.to_string()))?;
+            .await?;
             let Some(sent) = sent else { return Ok(()) };
             // Validation callbacks can acquire CC now that submission has released it.
             self.validation.on_sent(datagrams[first..first + sent].iter().map(|datagram| datagram.bytes.len() + overhead).sum());
@@ -149,7 +146,7 @@ impl Path {
                 self.progress.on_handshake_sent();
             }
             if sent == 0 {
-                return Err(QuicError::with_default_fty(ErrorKind::NoViablePath, "UDP submitted zero datagrams").into());
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "UDP submitted zero datagrams"));
             }
             first += sent;
         }

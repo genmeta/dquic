@@ -1,4 +1,5 @@
 use std::{
+    io,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU16, Ordering},
@@ -18,7 +19,7 @@ use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
 use crate::{
-    Algorithm, MSS, Resend, TooManyPtos, Transport,
+    Algorithm, MSS, Resend, Transport,
     algorithm::{Control, new_reno::NewReno},
     pacing::{self, Pacer},
     packets::{PacketSpace, SentPacket},
@@ -497,7 +498,7 @@ impl CongestionController {
     }
 
     /// Drive recovery: retire completed handshake spaces before processing a timeout.
-    fn tick(&mut self) -> Result<(), TooManyPtos> {
+    fn tick(&mut self) -> io::Result<()> {
         self.retire_handshake_spaces();
         // Another path's Handshake ACK can invalidate an already armed
         // anti-deadlock PTO. Cancel it before dispatching a timeout. Preserve
@@ -513,7 +514,7 @@ impl CongestionController {
         if self.loss_detection_timer.is_some_and(|t| t <= Instant::now()) {
             let count = self.on_loss_detection_timeout(peer_validated);
             if count > MAX_PTO_COUNT {
-                return Err(TooManyPtos(count));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("no acknowledgment after {count} PTOs")));
             }
         }
         Ok(())
@@ -651,7 +652,7 @@ impl super::Transport for ArcCC {
         cc.tx_waker.wake_all();
     }
 
-    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> Result<(), TooManyPtos> {
+    fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> io::Result<()> {
         let mut cc = self.lock();
         cc.tx_waker.register(cx.waker());
         cc.tick()?;
@@ -667,7 +668,7 @@ impl super::Transport for ArcCC {
         self.lock().burst_budget = None;
     }
 
-    fn do_tick(&self) -> Result<(), TooManyPtos> {
+    fn do_tick(&self) -> io::Result<()> {
         let mut guard = self.0.lock().unwrap();
         guard.tick()?;
 

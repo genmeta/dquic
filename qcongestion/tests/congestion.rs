@@ -355,7 +355,7 @@ async fn one_way_receive_traffic_cannot_starve_pto() {
         if pn < 7 {
             result.unwrap();
         } else {
-            assert_eq!(result.unwrap_err().to_string(), "Too many PTOs: 7");
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         }
         assert_eq!(cc.need_send_ack_eliciting(Epoch::Data), pn as usize);
     }
@@ -385,7 +385,7 @@ async fn ack_ranges_keep_healthy_path_alive_while_other_path_times_out() {
         if timeout_count < 7 {
             result.unwrap();
         } else {
-            assert_eq!(result.unwrap_err().to_string(), "Too many PTOs: 7");
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         }
     }
     assert_eq!(black_holed.need_send_ack_eliciting(Epoch::Data), 7);

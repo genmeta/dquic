@@ -6,6 +6,7 @@ use qbase::{
 };
 
 use super::{Datagram, Path, Paths};
+use crate::CloseReason;
 
 pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
@@ -43,10 +44,8 @@ pub(crate) async fn sending(paths: Arc<Paths>, path: Arc<Path>) {
     // An idle upgrade can retain a handshake batch without another collect poll.
     path.dcid.refresh();
     if no_paths {
-        terminator.close(
-            error.unwrap_or_else(|| QuicError::with_default_fty(ErrorKind::NoViablePath, "all paths retired").into()).into(),
-            paths.closing_pto(),
-        );
+        let reason = error.map_or_else(|| "all paths retired".to_owned(), |error| format!("all paths failed: {error}"));
+        terminator.close(CloseReason::Internal(QuicError::with_default_fty(ErrorKind::NoViablePath, reason)), paths.closing_pto());
         terminator.await;
     }
 }

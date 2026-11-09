@@ -64,7 +64,8 @@ async fn failed_submission_closes_crypto_and_waits_for_termination() {
     assert!(path.validation.is_cancelled());
 
     assert!(space.crypto.writer().write_all(b"after close").await.is_err());
-    assert!(paths.terminator.clone().now_or_never().is_some());
+    let error = paths.terminator.clone().now_or_never().expect("last path failure terminates the connection");
+    assert_eq!(error.kind(), ErrorKind::NoViablePath);
 }
 
 #[tokio::test(start_paused = true)]
