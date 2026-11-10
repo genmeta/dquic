@@ -9,8 +9,8 @@ use qbase::{
     error::Error,
     frame::{ResetStreamError, ResetStreamFrame, StreamFrame, io::SendFrame},
     metric::ArcConnectionMetrics,
-    net::tx::ArcSendWakers,
     sid::StreamId,
+    util::WakerGroup,
     varint::{VARINT_MAX, VarInt},
 };
 use qevent::{
@@ -42,7 +42,7 @@ pub struct ReadySender<TX> {
     flush_waker: Option<Waker>,
     shutdown_waker: Option<Waker>,
     broker: TX,
-    tx_wakers: ArcSendWakers,
+    tx_wakers: WakerGroup,
     writable_waker: Option<Waker>,
     metrics: ArcConnectionMetrics,
 }
@@ -55,7 +55,7 @@ impl<TX> ReadySender<TX> {
             flush_waker: None,
             shutdown_waker: None,
             broker,
-            tx_wakers: ArcSendWakers::default(),
+            tx_wakers: WakerGroup::new(),
             writable_waker: None,
             metrics,
         }
@@ -185,7 +185,7 @@ impl<TX: Clone> ReadySender<TX> {
             flush_waker: self.flush_waker.take(),
             shutdown_waker: self.shutdown_waker.take(),
             broker: self.broker.clone(),
-            tx_wakers: self.tx_wakers.clone(),
+            tx_wakers: std::mem::take(&mut self.tx_wakers),
             writable_waker: self.writable_waker.take(),
             metrics: self.metrics.clone(),
         }
@@ -209,6 +209,7 @@ where
             self.stream_id
         );
         self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.tx_wakers.clear();
         log_reset_event(self.stream_id, GranularStreamStates::Ready);
         reset_stream_err
     }
@@ -221,7 +222,7 @@ pub struct SendingSender<TX> {
     flush_waker: Option<Waker>,
     shutdown_waker: Option<Waker>,
     broker: TX,
-    tx_wakers: ArcSendWakers,
+    tx_wakers: WakerGroup,
     writable_waker: Option<Waker>,
     metrics: ArcConnectionMetrics,
 }
@@ -392,7 +393,7 @@ impl<TX: Clone> SendingSender<TX> {
             flush_waker: self.flush_waker.take(),
             shutdown_waker: self.shutdown_waker.take(),
             broker: self.broker.clone(),
-            tx_wakers: self.tx_wakers.clone(),
+            tx_wakers: std::mem::take(&mut self.tx_wakers),
             fin_state: FinState::Sent,
         }
     }
@@ -414,6 +415,7 @@ where
             self.stream_id
         );
         self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.tx_wakers.clear();
         log_reset_event(self.stream_id, GranularStreamStates::Send);
         reset_stream_err
     }
@@ -434,7 +436,7 @@ pub struct DataSentSender<TX> {
     shutdown_waker: Option<Waker>,
     broker: TX,
     // retran/fin
-    tx_wakers: ArcSendWakers,
+    tx_wakers: WakerGroup,
     fin_state: FinState,
 }
 
@@ -480,6 +482,8 @@ impl<TX> DataSentSender<TX> {
             self.fin_state = FinState::Rcvd;
         }
         if self.is_all_rcvd() {
+            // Completing this source adds no send work; do not notify on state drop.
+            self.tx_wakers.clear();
             if let Some(waker) = self.flush_waker.take() {
                 waker.wake();
             }
@@ -547,6 +551,7 @@ where
             self.stream_id
         );
         self.broker.send_frame([reset_stream_err.combine(self.stream_id)]);
+        self.tx_wakers.clear();
         log_reset_event(self.stream_id, GranularStreamStates::DataSent);
         reset_stream_err
     }
@@ -572,11 +577,11 @@ impl<TX> Sender<TX> {
         };
         buffer.written().min(buffer.max_data()).saturating_sub(buffer.sent()) as usize
     }
-    pub(super) fn source(&self) -> Option<(StreamId, &ArcSendWakers)> {
+    pub(super) fn source(&mut self) -> Option<(StreamId, &mut WakerGroup)> {
         match self {
-            Self::Ready(s) => Some((s.stream_id, &s.tx_wakers)),
-            Self::Sending(s) => Some((s.stream_id, &s.tx_wakers)),
-            Self::DataSent(s) => Some((s.stream_id, &s.tx_wakers)),
+            Self::Ready(s) => Some((s.stream_id, &mut s.tx_wakers)),
+            Self::Sending(s) => Some((s.stream_id, &mut s.tx_wakers)),
+            Self::DataSent(s) => Some((s.stream_id, &mut s.tx_wakers)),
             _ => None,
         }
     }

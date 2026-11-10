@@ -9,7 +9,7 @@ use crate::{
         DataBlockedFrame, FrameType, MaxDataFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
+    util::WakerGroup,
     varint::VarInt,
 };
 
@@ -24,12 +24,12 @@ struct SendControler<TX> {
     max_data: u64,
     flow_limited: bool,
     broker: TX,
-    tx_wakers: ArcSendWakers,
+    tx_wakers: WakerGroup,
 }
 
 impl<TX> SendControler<TX> {
     fn new(initial_max_data: u64, broker: TX) -> Self {
-        Self { sent_data: 0, max_data: initial_max_data, flow_limited: false, broker, tx_wakers: ArcSendWakers::default() }
+        Self { sent_data: 0, max_data: initial_max_data, flow_limited: false, broker, tx_wakers: WakerGroup::new() }
     }
 
     fn increase_limit(&mut self, max_data: u64) {
@@ -139,12 +139,19 @@ impl<TX> ArcSendControler<TX> {
     where
         TX: SendFrame<DataBlockedFrame>,
     {
-        self.0.lock().unwrap().tx_wakers.register(cx.waker());
-        Poll::Ready(self.credit(quota))
+        let mut inner = self.0.lock().unwrap();
+        let available = inner.avaliable().min(quota as u64);
+        if available == 0 && quota > 0 {
+            inner.tx_wakers.add(cx.waker());
+        } else {
+            inner.tx_wakers.remove(cx.waker());
+        }
+        inner.commit(available);
+        Poll::Ready(Credit { available: available as usize, controller: self })
     }
 
     pub fn unregister(&self, waker: &Waker) {
-        self.0.lock().unwrap().tx_wakers.unregister(waker);
+        self.0.lock().unwrap().tx_wakers.remove(waker);
     }
 
     pub fn revise_max_data(&self, zero_rtt_rejected: bool, max_data: u64) {

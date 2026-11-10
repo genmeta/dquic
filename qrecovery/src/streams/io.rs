@@ -8,7 +8,7 @@ use std::{
 };
 
 use derive_more::{Deref, DerefMut};
-use qbase::{error::Error as QuicError, sid::StreamId};
+use qbase::{error::Error as QuicError, sid::StreamId, util::WakerGroup};
 
 use crate::{recv::Incoming, send::Outgoing};
 
@@ -44,18 +44,19 @@ impl IOState {
     }
 }
 
-#[derive(Debug, Clone, Deref, DerefMut)]
+#[derive(Debug, Deref, DerefMut)]
 pub(super) struct Output<TX> {
     #[deref]
     #[deref_mut]
     pub(super) outgoings: BTreeMap<StreamId, (Outgoing<TX>, IOState)>,
     /// Last served stream and the payload bytes remaining in its 4096-byte turn.
     pub(super) turn: Option<(StreamId, usize)>,
+    pub(super) tx_wakers: WakerGroup,
 }
 
 impl<TX> Output<TX> {
     fn new() -> Self {
-        Self { outgoings: BTreeMap::default(), turn: None }
+        Self { outgoings: BTreeMap::default(), turn: None, tx_wakers: WakerGroup::new() }
     }
 }
 
@@ -112,6 +113,7 @@ impl<TX> ArcOutputGuard<'_, TX> {
 
     pub(super) fn on_error(&mut self, error: &QuicError) {
         self.deref().values().for_each(|(o, _)| o.on_error(error));
+        self.tx_wakers.wake_all();
         *self.0 = Err(error.clone());
     }
 }

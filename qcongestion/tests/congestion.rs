@@ -30,6 +30,57 @@ fn ack(pn: u64) -> AckFrame {
 }
 
 #[tokio::test(start_paused = true)]
+async fn congestion_notifications_consume_the_waiter_until_registered_again() {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Wake, Waker},
+    };
+
+    struct Counter(AtomicUsize);
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let cc = controller();
+    let counter = Arc::new(Counter(AtomicUsize::new(0)));
+    let waker = Waker::from(counter.clone());
+    cc.prepare_burst_budget(&mut Context::from_waker(&waker)).unwrap();
+    cc.on_charged();
+    cc.on_charged();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    cc.prepare_burst_budget(&mut Context::from_waker(&waker)).unwrap();
+    cc.on_charged();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_acks_rearm_the_sender_even_when_send_quota_is_available() {
+    let cc = controller();
+    for pn in 0..4 {
+        cc.on_pkt_rcvd(Epoch::Data, pn, true);
+        let largest = tokio::time::timeout(
+            Duration::from_millis(100),
+            std::future::poll_fn(|cx| {
+                cc.prepare_burst_budget(cx).unwrap();
+                assert!(cc.send_quota() > 0);
+                if let Some((largest, _)) = cc.need_ack(Epoch::Data) {
+                    cc.cancel(cx.waker());
+                    std::task::Poll::Ready(largest)
+                } else {
+                    std::task::Poll::Pending
+                }
+            }),
+        )
+        .await
+        .expect("the ACK timer lost its registered sender");
+        assert_eq!(largest, pn);
+        cc.on_pkt_sent(Epoch::Data, pn, false, 32, false, Some(largest));
+        cc.refresh_budget();
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn pacing_tokens_do_not_bypass_the_congestion_window() {
     let cc = controller();
     let window = cc.send_quota();

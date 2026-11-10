@@ -93,6 +93,7 @@ where
         let Ok(output) = guard.as_mut() else {
             return Poll::Ready(0);
         };
+        output.tx_wakers.remove(cx.waker());
         let start = buffer.meta.nframes;
         let result = loop {
             // A full packet or a lengthless STREAM cannot accept another frame.
@@ -104,7 +105,7 @@ where
                 Poll::Ready(n) if n > 0 => {}
                 _ if buffer.meta.nframes != start => break Poll::Ready(buffer.meta.nframes - start),
                 Poll::Pending => {
-                    self.tx_wakers.register(cx.waker());
+                    output.tx_wakers.add(cx.waker());
                     break Poll::Pending;
                 }
                 result => break result,
@@ -120,8 +121,8 @@ where
 
     pub(crate) fn unregister(&self, waker: &Waker) {
         self.flow_ctrl.sender.unregister(waker);
-        self.tx_wakers.unregister(waker);
-        if let Ok(output) = self.output.streams().as_ref() {
+        if let Ok(output) = self.output.streams().as_mut() {
+            output.tx_wakers.remove(waker);
             for (outgoing, _) in output.values() {
                 outgoing.unregister(waker);
             }

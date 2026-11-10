@@ -160,7 +160,7 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
             let pto = path.cc.get_pto(epoch);
             space.rcvd_journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
             path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
-            path.send_waker.wake_all();
+            path.wake_sender();
             Ok(())
         })();
         if let Err(error) = result {

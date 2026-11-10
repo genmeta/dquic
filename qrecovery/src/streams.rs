@@ -28,7 +28,6 @@ use qbase::{
     flow::FlowController,
     frame::{StreamCtlFrame, io::SendFrame},
     metric::ArcConnectionMetrics,
-    net::tx::ArcSendWakers,
     param::{ArcParameters, ParameterId},
     sid::{ControlStreamsConcurrency, StreamIds},
 };
@@ -156,7 +155,6 @@ pub struct DataStreams<TX> {
     input: ArcInput<Ext<TX>>,
     // 对方主动创建的流
     listener: ArcListener<Ext<TX>>,
-    tx_wakers: ArcSendWakers,
 
     metrics: ArcConnectionMetrics,
 }
@@ -171,20 +169,18 @@ where
         ctrl_frames: TX,
         metrics: ArcConnectionMetrics,
     ) -> Self {
-        let tx_wakers = ArcSendWakers::default();
         Self {
             flow_ctrl: FlowController::new(
                 parameters.remote(ParameterId::InitialMaxData),
                 parameters.local(ParameterId::InitialMaxData),
                 Ext(ctrl_frames.clone()),
             ),
-            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl_streams, tx_wakers.clone()),
+            stream_ids: StreamIds::new(&parameters, Ext(ctrl_frames.clone()), ctrl_streams),
             parameters,
             output: ArcOutput::new(),
             input: ArcInput::default(),
             listener: ArcListener::new(),
             ctrl_frames,
-            tx_wakers,
             metrics,
         }
     }
@@ -211,7 +207,6 @@ where
         input.on_error(error);
         listener.on_error(error);
         self.stream_ids.on_error();
-        self.tx_wakers.wake_all();
     }
 }
 

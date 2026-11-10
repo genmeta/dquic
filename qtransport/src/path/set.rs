@@ -135,11 +135,14 @@ impl Paths {
                 false
             }
         };
+        let waiters = [path.send_waker.lock().unwrap().clone(), path.io_waker.lock().unwrap().clone()];
         path.close();
-        // A poll already in progress can register again after an earlier del_path.
-        for waker in path.send_waker.drain() {
+        // The send_via exit also cleans subscriptions created by a concurrent poll.
+        for waker in waiters.into_iter().flatten() {
             path.spaces.unregister(&waker);
             self.reliable_frames.unregister(&waker);
+            path.terminator.unregister(&waker);
+            path.cc.cancel(&waker);
         }
         path.cc.on_path_lost();
         removed
@@ -152,11 +155,7 @@ impl Paths {
         let mut frames = Vec::with_capacity(256);
         let terminator = path.terminator.clone();
         let idle_timer = self.idle_timer();
-        let waker = poll_fn(|cx| {
-            path.send_waker.register(cx.waker());
-            Poll::Ready(cx.waker().clone())
-        })
-        .await;
+        let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
         let result = loop {
             let result = tokio::select! {
                 biased;
@@ -173,15 +172,19 @@ impl Paths {
             path.refresh(&mut datagrams, &mut frames);
         };
         path.refresh(&mut datagrams, &mut frames);
-        // An earlier del_path may have drained it before this poll finished registering sources.
-        path.send_waker.register(&waker);
+        path.spaces.unregister(&waker);
+        self.reliable_frames.unregister(&waker);
+        path.terminator.unregister(&waker);
+        path.cc.cancel(&waker);
+        *path.send_waker.lock().unwrap() = None;
+        *path.io_waker.lock().unwrap() = None;
         result
     }
 
     /// Wake every registered path's sending task.
     pub fn wake_all_to_send(&self) {
         for path in self.entries.lock().unwrap().values() {
-            path.send_waker.wake_all();
+            path.wake_sender();
         }
     }
 
@@ -297,7 +300,7 @@ impl Paths {
                 } {
                     Ok(Ok(Some(frame))) if frame == PathResponseFrame::from(challenge) => {
                         if path.validation.grant().is_ok() {
-                            path.send_waker.wake_all();
+                            path.wake_sender();
                         }
                         break;
                     }

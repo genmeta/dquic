@@ -41,7 +41,7 @@ async fn activation_changes_wake_the_sender_without_retiring_the_path() {
         Default::default(),
     );
     let counter = Arc::new(Counter(AtomicUsize::new(0)));
-    path.send_waker.register(&Waker::from(counter.clone()));
+    *path.send_waker.lock().unwrap() = Some(Waker::from(counter.clone()));
     assert!(path.is_active());
     path.disable();
     path.disable();
@@ -49,6 +49,7 @@ async fn activation_changes_wake_the_sender_without_retiring_the_path() {
     assert!(!path.validation.is_cancelled());
     assert!(path.dcid.poll_borrow(&mut Context::from_waker(Waker::noop())).is_ready());
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    *path.send_waker.lock().unwrap() = Some(Waker::from(counter.clone()));
     path.enable();
     path.enable();
     assert!(path.is_active());

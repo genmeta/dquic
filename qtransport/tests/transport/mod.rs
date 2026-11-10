@@ -294,7 +294,7 @@ fn acknowledge(transport: &Transport, ack: AckFrame, path: &Arc<Path>) -> Result
     let ack = transport.data.recv_frame(ack)?;
     cc.on_ack_rcvd(Epoch::Data, &ack, tokio::time::Instant::now());
     drop(cc);
-    path.send_waker.wake_all();
+    path.wake_sender();
     Ok(())
 }
 fn ack(pn: u64) -> AckFrame {

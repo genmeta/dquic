@@ -5,6 +5,7 @@ mod progress;
 mod punch;
 mod recv;
 mod send;
+mod send_wakers;
 
 use crate::Paths;
 

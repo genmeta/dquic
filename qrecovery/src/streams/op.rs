@@ -83,7 +83,7 @@ where
         let io_state = IOState::bidirection();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state.clone());
         input.insert(sid, Incoming::new(arc_recver.clone()), io_state);
-        self.tx_wakers.wake_all();
+        output.tx_wakers.wake_all();
         Poll::Ready(Ok(Some((sid, (Reader::new(arc_recver), Writer::new(arc_sender))))))
     }
 
@@ -107,7 +107,7 @@ where
         let arc_sender = self.create_sender(sid, snd_buf_size);
         let io_state = IOState::send_only();
         output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
-        self.tx_wakers.wake_all();
+        output.tx_wakers.wake_all();
         Poll::Ready(Ok(Some((sid, Writer::new(arc_sender)))))
     }
 
@@ -148,9 +148,9 @@ where
                     let io_state = IOState::bidirection();
                     input.insert(sid, Incoming::new(arc_recver.clone()), io_state.clone());
                     output.insert(sid, Outgoing::new(arc_sender.clone()), io_state);
-                    self.tx_wakers.wake_all();
                     listener.push_bi_stream(sid, (arc_recver, arc_sender));
                 }
+                output.tx_wakers.wake_all();
                 Ok(())
             }
         }

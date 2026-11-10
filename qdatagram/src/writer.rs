@@ -10,7 +10,8 @@ use bytes::{BufMut, Bytes};
 use qbase::{
     error::Error,
     frame::{DatagramFrame, EncodeSize},
-    net::tx::{ArcSendWakers, UnregisterWaker},
+    net::tx::UnregisterWaker,
+    util::WakerGroup,
     varint::VarInt,
 };
 
@@ -18,12 +19,12 @@ use qbase::{
 struct RawDatagramWriter {
     /// The queue that stores the datagram frame to send.
     datagrams: VecDeque<Bytes>,
-    tx_wakers: ArcSendWakers,
+    tx_wakers: WakerGroup,
 }
 
 impl RawDatagramWriter {
     fn new() -> Self {
-        Self { datagrams: VecDeque::new(), tx_wakers: ArcSendWakers::default() }
+        Self { datagrams: VecDeque::new(), tx_wakers: WakerGroup::new() }
     }
 }
 
@@ -388,8 +389,9 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
             Ok(writer) => writer,
             Err(_) => return Poll::Ready(0),
         };
+        writer.tx_wakers.remove(cx.waker());
         let Some(data) = writer.datagrams.front() else {
-            writer.tx_wakers.register(cx.waker());
+            writer.tx_wakers.add(cx.waker());
             return Poll::Pending;
         };
         let before = buffer.meta.nframes;
@@ -418,8 +420,8 @@ impl<B: BufMut + ?Sized> qbase::packet::Package<B> for DatagramOutgoing {
 
 impl UnregisterWaker for DatagramOutgoing {
     fn unregister(&self, waker: &std::task::Waker) {
-        if let Ok(writer) = self.0.lock().unwrap().as_ref() {
-            writer.tx_wakers.unregister(waker);
+        if let Ok(writer) = self.0.lock().unwrap().as_mut() {
+            writer.tx_wakers.remove(waker);
         }
     }
 }

@@ -33,9 +33,10 @@ impl<TX: Clone> Outgoing<TX> {
         let Ok(sender) = guard.as_mut() else {
             return Poll::Ready(0);
         };
-        let Some((sid, _)) = sender.source() else {
+        let Some((sid, wakers)) = sender.source() else {
             return Poll::Pending;
         };
+        wakers.remove(cx.waker());
         buffer.for_frame(FrameType::Stream(Offset::Zero, Len::Explicit, Fin::No));
         let capacity = buffer.remaining_mut();
         let flow_limit = *credit;
@@ -98,7 +99,7 @@ impl<TX: Clone> Outgoing<TX> {
             Err(Poll::Ready(())) => Poll::Ready(0),
             Err(Poll::Pending) => {
                 if let Some((_, wakers)) = sender.source() {
-                    wakers.register(cx.waker());
+                    wakers.add(cx.waker());
                 }
                 Poll::Pending
             }
@@ -275,10 +276,10 @@ impl<TX> Outgoing<TX> {
 
 impl<TX: Clone> UnregisterWaker for Outgoing<TX> {
     fn unregister(&self, waker: &std::task::Waker) {
-        if let Ok(state) = self.0.sender().as_ref()
+        if let Ok(state) = self.0.sender().as_mut()
             && let Some((_, wakers)) = state.source()
         {
-            wakers.unregister(waker);
+            wakers.remove(waker);
         }
     }
 }

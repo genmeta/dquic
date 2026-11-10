@@ -12,8 +12,9 @@ mod send {
         error::{Error, ErrorKind, QuicError},
         frame::{CryptoFrame, FrameType},
         handshake::HandshakeFacts,
-        net::tx::{ArcSendWakers, UnregisterWaker},
+        net::tx::UnregisterWaker,
         packet::{Package, PacketBuffer},
+        util::WakerGroup,
         varint::{VARINT_MAX, VarInt},
     };
     use tokio::io::AsyncWrite;
@@ -26,12 +27,13 @@ mod send {
         facts: Arc<HandshakeFacts>,
         writable_waker: Option<Waker>,
         flush_waker: Option<Waker>,
-        tx_wakers: ArcSendWakers,
+        tx_wakers: WakerGroup,
     }
 
     impl Sender {
         /// Pack CRYPTO ranges until the packet is full or no more data is available.
         fn poll_dump<B: BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
+            self.tx_wakers.remove(cx.waker());
             buffer.for_frame(FrameType::Crypto);
             let start = buffer.meta.nframes;
             loop {
@@ -44,7 +46,7 @@ mod send {
                     }
                     Err(Poll::Ready(())) => return Poll::Ready(0),
                     Err(Poll::Pending) => {
-                        self.tx_wakers.register(cx.waker());
+                        self.tx_wakers.add(cx.waker());
                         return Poll::Pending;
                     }
                 };
@@ -121,7 +123,7 @@ mod send {
                 facts,
                 writable_waker: None,
                 flush_waker: None,
-                tx_wakers: ArcSendWakers::default(),
+                tx_wakers: WakerGroup::new(),
             }))))
         }
 
@@ -218,8 +220,8 @@ mod send {
 
     impl UnregisterWaker for CryptoStreamOutgoing {
         fn unregister(&self, waker: &Waker) {
-            if let Ok(inner) = self.0.0.lock().unwrap().as_ref() {
-                inner.tx_wakers.unregister(waker);
+            if let Ok(inner) = self.0.0.lock().unwrap().as_mut() {
+                inner.tx_wakers.remove(waker);
             }
         }
     }

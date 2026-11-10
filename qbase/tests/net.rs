@@ -2,8 +2,6 @@
 mod addr;
 #[path = "net/route.rs"]
 mod route;
-#[path = "net/tx.rs"]
-mod tx;
 
 use qbase::net::*;
 

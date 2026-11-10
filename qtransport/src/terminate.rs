@@ -11,12 +11,12 @@ use qbase::{
     Close,
     error::{AppError, ErrorKind, QuicError},
     frame::ConnectionCloseFrame,
-    net::tx::ArcSendWakers,
+    net::tx::UnregisterWaker,
     packet::{
         Package, PacketBuffer, PacketContent, Type,
         r#type::long::{Type::V1, Ver1},
     },
-    util::Wakers,
+    util::{WakerGroup, Wakers},
 };
 use tokio::time::Instant;
 
@@ -43,12 +43,12 @@ impl From<Error> for CloseReason {
 enum Terminator {
     NoError {
         waiters: Arc<Wakers>,
-        tx_wakers: ArcSendWakers,
+        tx_wakers: WakerGroup,
         components: Vec<Arc<dyn qbase::Close>>,
     },
     Closing {
         waiters: Arc<Wakers>,
-        tx_wakers: ArcSendWakers,
+        tx_wakers: WakerGroup,
         error: Error,
         sync_ccf: bool,
         sent_ccf: bool,
@@ -66,7 +66,7 @@ enum Terminator {
 
 impl Terminator {
     fn no_error() -> Self {
-        Self::NoError { waiters: Arc::new(Wakers::new()), tx_wakers: ArcSendWakers::default(), components: Vec::new() }
+        Self::NoError { waiters: Arc::new(Wakers::new()), tx_wakers: WakerGroup::new(), components: Vec::new() }
     }
 
     fn close(&mut self, reason: &CloseReason, pto: Duration) -> Option<Duration> {
@@ -87,7 +87,7 @@ impl Terminator {
                     CloseReason::App(_) | CloseReason::Internal(_) => {
                         *self = Self::Closing {
                             waiters: waiters.clone(),
-                            tx_wakers: tx_wakers.clone(),
+                            tx_wakers: std::mem::take(tx_wakers),
                             error,
                             sync_ccf: true,
                             sent_ccf: false,
@@ -104,6 +104,9 @@ impl Terminator {
     }
 
     fn poll_dump<B: bytes::BufMut + ?Sized>(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
+        if let Self::NoError { tx_wakers, .. } | Self::Closing { tx_wakers, .. } = self {
+            tx_wakers.remove(cx.waker());
+        }
         let mut dump_ccf = |error: &Error, buffer: &mut PacketBuffer<'_, B>| {
             let mut frame = match (buffer.meta.pktype, error) {
                 (Type::Long(V1(Ver1::INITIAL | Ver1::HANDSHAKE)), Error::App(_)) => {
@@ -116,7 +119,7 @@ impl Terminator {
         };
         match self {
             Self::NoError { tx_wakers, .. } => {
-                tx_wakers.register(cx.waker());
+                tx_wakers.add(cx.waker());
                 Poll::Pending
             }
             Self::Closing { tx_wakers: send_wakers, sync_ccf, sent_ccf, error, .. } => {
@@ -131,7 +134,7 @@ impl Terminator {
                     result
                 } else {
                     buffer.finish();
-                    send_wakers.register(cx.waker());
+                    send_wakers.add(cx.waker());
                     Poll::Pending
                 }
             }
@@ -173,6 +176,8 @@ impl Terminator {
         if let Self::Closing { waiters, tx_wakers: send_wakers, sent_ccf, .. } = self {
             if !*sent_ccf {
                 send_wakers.wake_all();
+            } else {
+                send_wakers.clear();
             }
             *self = Self::Draining { waiters: waiters.clone(), error: frame.into(), sent_ccf: *sent_ccf }
         }
@@ -318,6 +323,15 @@ impl Future for ArcTerminator {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.lock().unwrap().poll_terminate(cx)
+    }
+}
+
+impl UnregisterWaker for ArcTerminator {
+    fn unregister(&self, waker: &std::task::Waker) {
+        match &mut *self.0.lock().unwrap() {
+            Terminator::NoError { tx_wakers, .. } | Terminator::Closing { tx_wakers, .. } => tx_wakers.remove(waker),
+            _ => (),
+        }
     }
 }
 

@@ -47,6 +47,41 @@ impl std::task::Wake for Counter {
 }
 
 #[tokio::test]
+async fn completing_or_cancelling_a_stream_does_not_add_a_drop_notification() {
+    use std::sync::{Arc, atomic::Ordering};
+
+    for (cancel, fin) in [(false, true), (true, true), (true, false)] {
+        let (mut source, mut writer) = stream(100);
+        writer.write_all(b"data").await.unwrap();
+        if fin {
+            assert!(writer.poll_shutdown(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+        let count = Arc::new(Counter::default());
+        let waker = Waker::from(count.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0; 128];
+        let mut bytes = &mut storage[..];
+        let mut frames = Vec::new();
+        let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+        let mut buffer = PacketBuffer::new(&mut bytes, 128, &mut frames, ty, 0, 0);
+        assert_eq!(source.poll_dump(&mut cx, &mut buffer), Poll::Ready(1));
+        let GuaranteedFrame::Stream(frame) = buffer.frames[0] else {
+            panic!("expected data with FIN");
+        };
+        assert_eq!(frame.is_fin(), fin);
+        assert!(source.poll_dump(&mut cx, &mut buffer).is_pending());
+        if cancel {
+            // This fixture's broker ignores RESET_STREAM; only that queue should notify senders.
+            writer.cancel(0);
+        } else {
+            source.on_data_acked(frame);
+            assert!(matches!(writer.poll_shutdown(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(()))));
+        }
+        assert_eq!(count.0.load(Ordering::Relaxed), 0, "cancel={cancel}, fin={fin}");
+    }
+}
+
+#[tokio::test]
 async fn streams_own_waiters_across_states_and_cancel_each_path() {
     use std::sync::{Arc, atomic::Ordering};
     let (mut source, mut writer) = stream(100);
@@ -75,11 +110,14 @@ async fn streams_own_waiters_across_states_and_cancel_each_path() {
     assert_eq!(c.0.load(Ordering::Relaxed), 0);
     assert!(matches!(poll(&mut source, &wa), Poll::Ready(1)));
     source.unregister(&wa);
+    // The first write consumed both waiters; only a new Pending poll subscribes again.
+    assert!(poll(&mut source, &wb).is_pending());
     writer.write_all(b"next").await.unwrap();
     assert_eq!(a.0.load(Ordering::Relaxed), 1);
     assert_eq!(b.0.load(Ordering::Relaxed), 2);
     assert!(futures::poll!(Box::pin(writer.shutdown())).is_pending());
     assert!(matches!(poll(&mut source, &wb), Poll::Ready(1)));
+    assert!(poll(&mut source, &wb).is_pending());
     let before = b.0.load(Ordering::Relaxed);
     let frame = StreamFrame::new(StreamId::new(Role::Client, Dir::Bi, 0), 0, 5);
     source.may_loss_data(&frame);

@@ -85,17 +85,27 @@ impl Path {
     /// Wait for at least one datagram. Call [`Self::refresh`] after submission or cancellation.
     pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> io::Result<(usize, ConnectionId)> {
         poll_fn(|cx| {
-            self.send_waker.register(cx.waker());
-            if self.validation.is_cancelled() {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "path retired")));
-            }
-            let dcid =
-                ready!(self.dcid.poll_borrow(cx)).ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "path CID binding retired"))?;
-            let result = self.poll_collect(cx, dcid, datagrams, frames);
+            // Serialize the final readiness check and registration with external notifications.
+            let mut waiter = self.send_waker.lock().unwrap();
+            *waiter = None;
+            let result = (|| {
+                if self.validation.is_cancelled() {
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "path retired")));
+                }
+                let dcid = ready!(self.dcid.poll_borrow(cx))
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "path CID binding retired"))?;
+                let result = self.poll_collect(cx, dcid, datagrams, frames);
+                if result.is_pending() {
+                    self.dcid.refresh();
+                }
+                result.map(|result| result.map(|count| (count, dcid)))
+            })();
             if result.is_pending() {
-                self.dcid.refresh();
+                *waiter = Some(cx.waker().clone());
+            } else {
+                self.cc.cancel(cx.waker());
             }
-            result.map(|result| result.map(|count| (count, dcid)))
+            result
         })
         .await
     }
@@ -108,6 +118,8 @@ impl Path {
         while first < datagrams.len() {
             let mut sent_handshake = false;
             let sent = poll_fn(|cx| -> Poll<io::Result<Option<usize>>> {
+                let mut waiter = self.io_waker.lock().unwrap();
+                *waiter = None;
                 // ACK handling takes the same lock as submission and completion.
                 let mut cc = self.cc.lock();
                 self.validation.credit().map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))?;
@@ -121,7 +133,13 @@ impl Path {
                 }
                 let sent = {
                     let buffers: SmallVec<[_; 8]> = datagrams[first..].iter().map(|datagram| IoSlice::new(&datagram.bytes)).collect();
-                    ready!(QuicProtocol::global().poll_send(cx, self.pathway, &buffers))?
+                    match QuicProtocol::global().poll_send(cx, self.pathway, &buffers) {
+                        Poll::Ready(sent) => sent?,
+                        Poll::Pending => {
+                            *waiter = Some(cx.waker().clone());
+                            return Poll::Pending;
+                        }
+                    }
                 };
                 for datagram in &mut datagrams[first..first + sent] {
                     let mut packets = [None; 3];

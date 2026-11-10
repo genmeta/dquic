@@ -631,7 +631,7 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         let counter = Arc::new(Counter::default());
         let other_counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        other.send_waker.register(&Waker::from(other_counter.clone()));
+        *other.send_waker.lock().unwrap() = Some(Waker::from(other_counter.clone()));
         let mut cx = Context::from_waker(&waker);
         let mut datagrams = [Datagram::default()];
         let mut frames = Vec::new();
@@ -1365,7 +1365,7 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
             assert!(counter.0.load(Ordering::Relaxed) > 0);
         }
         path.refresh(&mut datagrams, &mut frames);
-        path.send_waker.register(&waker);
+        *path.send_waker.lock().unwrap() = Some(waker.clone());
         paths.del_path(&path);
         path.close();
         paths.terminator.terminate();
@@ -2015,7 +2015,7 @@ async fn deleting_a_removed_path_unregisters_its_late_waiters_and_preserves_its_
     };
     // Model subscriptions left by a poll already in progress when the old path was removed.
     subscribe(&old_waker);
-    replacement.send_waker.register(&live_waker);
+    *replacement.send_waker.lock().unwrap() = Some(live_waker.clone());
     subscribe(&live_waker);
     assert!(
         matches!(sender.as_mut().poll(&mut Context::from_waker(&old_waker)), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe)
@@ -2071,11 +2071,18 @@ async fn cancelled_collect_keeps_subscriptions_until_path_task_exits() {
     common::wait_for_sender_exit(&first).await;
     let first_before = a.0.load(Ordering::Relaxed);
     second.validation.on_received(1200);
-    second.send_waker.wake_all();
+    second.wake_sender();
     assert!(matches!(
         std::pin::pin!(second.collect(&mut second_bytes, &mut second_frames)).poll(&mut Context::from_waker(&wb)),
         Poll::Ready(Ok((1, _)))
     ));
+    // Finish the simulated send and acknowledge CRYPTO to end automatic handshake replay.
+    initial.crypto.outgoing().on_data_acked(&qbase::frame::CryptoFrame::new(0u32.into(), 5u32.into()));
+    for datagram in &mut second_bytes {
+        datagram.packets.clear();
+    }
+    second.refresh(&mut second_bytes, &mut second_frames);
+    assert!(std::pin::pin!(second.collect(&mut second_bytes, &mut second_frames)).poll(&mut Context::from_waker(&wb)).is_pending());
     let before = b.0.load(Ordering::Relaxed);
     initial.crypto.writer().write_all(b"again").await.unwrap();
     assert_eq!(a.0.load(Ordering::Relaxed), first_before);

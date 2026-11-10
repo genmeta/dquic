@@ -23,6 +23,27 @@ impl std::task::Wake for WakeCount {
 }
 
 #[test]
+fn reliable_notifications_require_a_new_pending_poll() {
+    let mut queue = ArcReliableFrames::<HandshakeDoneFrame>::with_capacity(2);
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(wakes.clone());
+    let mut bytes = BytesMut::new();
+    let mut frames = Vec::new();
+    let ty = OneRttHeader::new(Default::default(), Default::default()).get_type();
+    let mut writer = bytes::BufMut::limit(&mut bytes, 4);
+    let mut buffer = PacketBuffer::new(&mut writer, 4, &mut frames, ty, 0, 0);
+    let mut cx = Context::from_waker(&waker);
+    assert!(queue.poll_dump(&mut cx, &mut buffer).is_pending());
+    queue.send_frame([HandshakeDoneFrame]);
+    queue.send_frame([HandshakeDoneFrame]);
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(queue.poll_dump(&mut cx, &mut buffer), Poll::Ready(2));
+    assert!(queue.poll_dump(&mut cx, &mut buffer).is_pending());
+    queue.send_frame([HandshakeDoneFrame]);
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn empty_frame_batches_do_not_wake_registered_senders() {
     let mut queue = ArcReliableFrames::<HandshakeDoneFrame>::with_capacity(2);
     let wakes = Arc::new(WakeCount::default());

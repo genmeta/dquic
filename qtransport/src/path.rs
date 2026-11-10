@@ -1,16 +1,17 @@
 //! Path validation and per-path congestion control. One sending owner per path.
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU16, Ordering},
     },
+    task::Waker,
     time::Duration,
 };
 
 use qbase::{
     Epoch,
     handshake::HandshakeFacts,
-    net::{route::Pathway, tx::ArcSendWakers, validate::ArcValidation},
+    net::{route::Pathway, validate::ArcValidation},
     packet::assemble::Metadata,
     time::heartbeat::ArcHeartbeat,
 };
@@ -30,7 +31,9 @@ pub struct Path {
     pub pathway: Pathway,
     pub dcid: ArcDcid,
     pub cc: ArcCC,
-    pub send_waker: ArcSendWakers,
+    pub send_waker: Mutex<Option<Waker>>,
+    /// Only path shutdown/disable interrupts a pending socket submission.
+    io_waker: Mutex<Option<Waker>>,
     pub validation: ArcValidation,
     pub heartbeat: ArcHeartbeat,
     /// Connection-wide packet sources shared by every path.
@@ -58,7 +61,6 @@ impl Path {
         progress: ArcProgress,
     ) -> Self {
         let is_active = !hs_facts.has_selected_path() || hs_facts.is_handshake_done();
-        let send_waker = ArcSendWakers::default();
         let validation = ArcValidation::new();
         let cc = ArcCC::new(
             Algorithm::NewReno,
@@ -67,22 +69,49 @@ impl Path {
             hs_facts,
             validation.clone(),
             Arc::new(AtomicU16::new(MSS as u16)),
-            send_waker.clone(),
         );
-        Self { pathway, dcid, cc, send_waker, validation, heartbeat, spaces, terminator, progress, is_active: AtomicBool::new(is_active) }
+        Self {
+            pathway,
+            dcid,
+            cc,
+            send_waker: Mutex::new(None),
+            io_waker: Mutex::new(None),
+            validation,
+            heartbeat,
+            spaces,
+            terminator,
+            progress,
+            is_active: AtomicBool::new(is_active),
+        }
+    }
+
+    /// Consume the current collect waiter. A new Pending poll must register again.
+    pub fn wake_sender(&self) {
+        let waker = self.send_waker.lock().unwrap().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn wake_io(&self) {
+        let waker = self.io_waker.lock().unwrap().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     /// Allow payload collection and wake this path's sender.
     pub fn enable(&self) {
         if !self.is_active.swap(true, Ordering::AcqRel) {
-            self.send_waker.wake_all();
+            self.wake_sender();
         }
     }
 
     /// Keep ACKs and heartbeats running without collecting payload.
     pub fn disable(&self) {
         if self.is_active.swap(false, Ordering::AcqRel) {
-            self.send_waker.wake_all();
+            self.wake_sender();
+            self.wake_io();
         }
     }
 
@@ -115,6 +144,7 @@ impl Path {
         self.validation.cancel();
         self.dcid.retire();
         self.heartbeat.stop();
-        self.send_waker.wake_all();
+        self.wake_sender();
+        self.wake_io();
     }
 }

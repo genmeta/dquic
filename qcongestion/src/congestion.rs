@@ -4,17 +4,10 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU16, Ordering},
     },
-    task::Context,
+    task::{Context, Waker},
 };
 
-use qbase::{
-    Epoch,
-    frame::AckFrame,
-    handshake::HandshakeFacts,
-    net::{tx::ArcSendWakers, validate::ArcValidation},
-    role::Role,
-    util::ArcIndexDeque,
-};
+use qbase::{Epoch, frame::AckFrame, handshake::HandshakeFacts, net::validate::ArcValidation, role::Role, util::ArcIndexDeque};
 use qevent::quic::recovery::PacketLostTrigger;
 use tokio::time::{Duration, Instant};
 
@@ -56,7 +49,7 @@ pub struct CongestionController {
     hs_facts: Arc<HandshakeFacts>,
     pmtu: Arc<AtomicU16>,
     validation: ArcValidation,
-    tx_waker: ArcSendWakers,
+    tx_waker: Option<Waker>,
 }
 
 impl CongestionController {
@@ -72,7 +65,6 @@ impl CongestionController {
         hs_facts: Arc<HandshakeFacts>,
         validation: ArcValidation,
         pmtu: Arc<AtomicU16>,
-        tx_waker: ArcSendWakers,
     ) -> Self {
         let algorithm: Box<dyn Control> = match algorithm {
             Algorithm::Bbr => todo!("implement BBR"),
@@ -100,7 +92,7 @@ impl CongestionController {
             hs_facts,
             pmtu,
             validation,
-            tx_waker,
+            tx_waker: None,
         }
     }
 
@@ -449,7 +441,13 @@ impl CongestionController {
 
     fn send_ack_eliciting_packet(&mut self, epoch: Epoch, count: usize) {
         self.need_send_ack_eliciting_packets[epoch] += count;
-        self.tx_waker.wake_all();
+        self.wake_sender();
+    }
+
+    fn wake_sender(&mut self) {
+        if let Some(waker) = self.tx_waker.take() {
+            waker.wake();
+        }
     }
 
     #[inline]
@@ -563,7 +561,6 @@ impl ArcCC {
         hs_facts: Arc<HandshakeFacts>,
         validation: ArcValidation,
         pmtu: Arc<AtomicU16>,
-        tx_waker: ArcSendWakers,
     ) -> Self {
         let cc = ArcCC(Arc::new(Mutex::new(CongestionController::init(
             algorithm,
@@ -572,7 +569,6 @@ impl ArcCC {
             hs_facts,
             validation.clone(),
             pmtu,
-            tx_waker.clone(),
         ))));
         let blocked = Arc::downgrade(&cc.0);
         let charged = blocked.clone();
@@ -593,12 +589,9 @@ impl ArcCC {
                 loop {
                     ticker.tick().await;
                     let Some(cc) = weak.upgrade() else { break };
-                    let needs_wake = {
-                        let cc = cc.lock().unwrap();
-                        cc.pending_burst || cc.loss_detection_timer.is_some() || cc.need_ack()
-                    };
-                    if needs_wake {
-                        tx_waker.wake_all();
+                    let mut cc = cc.lock().unwrap();
+                    if cc.pending_burst || cc.loss_detection_timer.is_some() || cc.need_ack() {
+                        cc.wake_sender();
                     }
                 }
             });
@@ -607,7 +600,10 @@ impl ArcCC {
     }
 
     pub fn cancel(&self, waker: &std::task::Waker) {
-        self.0.lock().unwrap().tx_waker.unregister(waker);
+        let mut cc = self.lock();
+        if cc.tx_waker.as_ref().is_some_and(|registered| registered.will_wake(waker)) {
+            cc.tx_waker = None;
+        }
     }
 
     pub fn on_pkt_sealed(&self, sent_bytes: usize) {
@@ -649,18 +645,22 @@ impl super::Transport for ArcCC {
     fn on_charged(&self) {
         let mut cc = self.lock();
         cc.set_loss_detection_timer();
-        cc.tx_waker.wake_all();
+        cc.wake_sender();
     }
 
     fn prepare_burst_budget(&self, cx: &mut Context<'_>) -> io::Result<()> {
         let mut cc = self.lock();
-        cc.tx_waker.register(cx.waker());
+        // Tick runs inside the sender's poll; it must not notify a previous registration.
+        cc.tx_waker = None;
         cc.tick()?;
         let quota = cc.send_quota();
         // PTO uses each space's probe allowance for one datagram.
         let probe = cc.need_send_ack_eliciting_packets.iter().any(|&need| need > 0);
         cc.pending_burst = quota < cc.mtu() || probe;
         cc.burst_budget = Some(if cc.pending_burst { 0 } else { quota });
+        // ACK/recovery timers also need this waiter when quota is already available.
+        // The path cancels it if the complete collect poll returns Ready.
+        cc.tx_waker = Some(cx.waker().clone());
         Ok(())
     }
 
@@ -674,10 +674,10 @@ impl super::Transport for ArcCC {
 
         if guard.pending_burst && guard.send_quota() >= guard.mtu() {
             guard.pending_burst = false;
-            guard.tx_waker.wake_all();
+            guard.wake_sender();
         }
         if guard.need_ack() {
-            guard.tx_waker.wake_all();
+            guard.wake_sender();
         }
 
         Ok(())
@@ -748,11 +748,7 @@ impl super::Transport for ArcCC {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU16};
 
-    use qbase::{
-        handshake::HandshakeFacts,
-        net::{tx::ArcSendWakers, validate::ArcValidation},
-        util::IndexDeque,
-    };
+    use qbase::{handshake::HandshakeFacts, net::validate::ArcValidation, util::IndexDeque};
 
     use super::*;
 
@@ -782,7 +778,6 @@ mod tests {
             handshake,
             validation,
             pmtu,
-            ArcSendWakers::default(),
         )
     }
 
@@ -803,7 +798,6 @@ mod tests {
             handshake,
             validation.clone(),
             Arc::new(AtomicU16::new(MSS as u16)),
-            ArcSendWakers::default(),
         );
         let weak = Arc::downgrade(&cc.0);
         cc.on_pkt_sent(Epoch::Data, 0, true, MSS, true, None);

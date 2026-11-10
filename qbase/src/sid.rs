@@ -6,7 +6,6 @@ use super::{
 };
 use crate::{
     frame::{StreamsBlockedFrame, io::SendFrame},
-    net::tx::ArcSendWakers,
     param::{ArcParameters, ParameterId},
     role::Role,
 };
@@ -242,13 +241,12 @@ where
     /// Create a new [`StreamIds`] from the connection's transport parameters.
     ///
     /// Peer parameters limit locally opened streams; local parameters limit peer-opened streams.
-    pub fn new(parameters: &ArcParameters, sid_frames_tx: T, ctrl: Box<dyn ControlStreamsConcurrency>, tx_wakers: ArcSendWakers) -> Self {
+    pub fn new(parameters: &ArcParameters, sid_frames_tx: T, ctrl: Box<dyn ControlStreamsConcurrency>) -> Self {
         let local = ArcLocalStreamIds::new(
             parameters.role(),
             parameters.remote(ParameterId::InitialMaxStreamsBidi),
             parameters.remote(ParameterId::InitialMaxStreamsUni),
             sid_frames_tx.clone(),
-            tx_wakers,
         );
         let remote = ArcRemoteStreamIds::new(
             !parameters.role(),

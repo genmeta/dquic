@@ -47,6 +47,79 @@ fn poll(source: &mut impl for<'b> Package<bytes::buf::Limit<&'b mut BytesMut>>, 
 }
 
 #[tokio::test]
+async fn crypto_notifications_consume_only_the_registered_waiters() {
+    let stream = CryptoStream::with_facts(handshake_facts(false));
+    let first = Arc::new(Counter::default());
+    let second = Arc::new(Counter::default());
+    let a = Waker::from(first.clone());
+    let b = Waker::from(second.clone());
+    assert!(poll(&mut stream.outgoing(), 128, &a).is_pending());
+    assert!(poll(&mut stream.outgoing(), 128, &b).is_pending());
+    stream.writer().write_all(b"first").await.unwrap();
+    stream.writer().write_all(b"second").await.unwrap();
+    assert_eq!(first.0.load(Ordering::Relaxed), 1);
+    assert_eq!(second.0.load(Ordering::Relaxed), 1);
+    assert_eq!(poll(&mut stream.outgoing(), 128, &a), Poll::Ready(1));
+    assert!(poll(&mut stream.outgoing(), 128, &a).is_pending());
+    stream.writer().write_all(b"third").await.unwrap();
+    assert_eq!(first.0.load(Ordering::Relaxed), 2);
+    assert_eq!(second.0.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn crypto_and_stream_senders_resume_after_each_new_pending_poll() {
+    let crypto = CryptoStream::with_facts(handshake_facts(false));
+    let mut crypto_writer = crypto.writer();
+    let mut streams = ArcDataStreams::new(
+        ArcParameters::new(Role::Client, Arc::new(ClientParameters::default()), Arc::new(ServerParameters::default())),
+        Box::new(DemandConcurrency),
+        Broker,
+        Default::default(),
+    );
+    let (_, mut stream_writer) = streams.open_uni().await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..32 {
+            let (trigger, ready) = futures::channel::oneshot::channel();
+            let mut trigger = Some(trigger);
+            let receive = std::future::poll_fn(|cx| {
+                let result = poll(&mut crypto.outgoing(), 128, cx.waker());
+                if result.is_pending()
+                    && let Some(trigger) = trigger.take()
+                {
+                    trigger.send(()).unwrap();
+                }
+                result
+            });
+            let produce = async {
+                ready.await.unwrap();
+                crypto_writer.write_all(b"x").await.unwrap();
+            };
+            assert_eq!(tokio::join!(receive, produce).0, 1);
+
+            let (trigger, ready) = futures::channel::oneshot::channel();
+            let mut trigger = Some(trigger);
+            let receive = std::future::poll_fn(|cx| {
+                let result = poll(&mut streams, 128, cx.waker());
+                if result.is_pending()
+                    && let Some(trigger) = trigger.take()
+                {
+                    trigger.send(()).unwrap();
+                }
+                result
+            });
+            let produce = async {
+                ready.await.unwrap();
+                stream_writer.write_all(b"x").await.unwrap();
+            };
+            assert_eq!(tokio::join!(receive, produce).0, 1);
+        }
+    })
+    .await
+    .expect("a sender lost its notification after re-registering");
+    stream_writer.cancel(0);
+}
+
+#[tokio::test]
 async fn empty_crypto_write_does_not_wake_registered_senders() {
     use std::pin::Pin;
 

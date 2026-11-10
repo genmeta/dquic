@@ -56,7 +56,7 @@ pub(super) async fn receive_packets<H, M>(
                     return Ok(());
                 };
                 path.validation.on_received(received_bytes);
-                path.send_waker.wake_all();
+                path.wake_sender();
                 inspect(epoch, &path)?;
                 // CLOSE reaches the control owner even when ordinary component pipes are full.
                 if let Some(frame) = parsed_frames.iter().find(|frame| matches!(frame, Frame::Close(_))) {
@@ -69,7 +69,7 @@ pub(super) async fn receive_packets<H, M>(
                 let pto = path.cc.get_pto(epoch);
                 journal.on_rcvd_pn(pn, content.is_ack_eliciting(), pto);
                 path.cc.on_pkt_rcvd(epoch, pn, content.is_ack_eliciting());
-                path.send_waker.wake_all();
+                path.wake_sender();
             }
             Ok(())
         });
