@@ -32,6 +32,11 @@ impl<const N: usize> WakerGroup<N> {
         self.wakers.retain(|registered| !registered.will_wake(waker));
     }
 
+    /// Discard all waiters without notifying them, including on drop.
+    pub fn clear(&mut self) {
+        self.wakers.clear();
+    }
+
     pub fn wake_all(&mut self) {
         for waker in self.wakers.drain(..) {
             waker.wake();

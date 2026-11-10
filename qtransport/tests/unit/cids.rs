@@ -56,8 +56,8 @@ async fn first_initial_wakes_only_the_selected_paths_cid_waiter() {
     let selected_counter = Arc::new(Counter::default());
     let other_counter = Arc::new(Counter::default());
     let selected_waker = Waker::from(selected_counter.clone());
-    selected.send_waker.register(&selected_waker);
-    other.send_waker.register(&Waker::from(other_counter.clone()));
+    *selected.send_waker.lock().unwrap() = Some(selected_waker.clone());
+    *other.send_waker.lock().unwrap() = Some(Waker::from(other_counter.clone()));
     assert!(selected.dcid.poll_borrow(&mut Context::from_waker(&selected_waker)).is_pending());
     let peer = ConnectionId::from_slice(b"peer0000");
     assert!(!paths.progress.facts().has_received_initial());
@@ -87,7 +87,7 @@ async fn first_flight_paths_keep_snapshots_and_new_paths_use_the_peer_scid() {
         if handshaking {
             paths.progress.facts().install_handshake_key();
         }
-        a.send_waker.register(&waker);
+        *a.send_waker.lock().unwrap() = Some(waker.clone());
         assert!(paths.progress.on_initial_received(peer));
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         assert!(!paths.progress.on_initial_received(ConnectionId::from_slice(b"ignored0")));
@@ -262,7 +262,7 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     let counter = Arc::new(Counter::default());
     let waker = Waker::from(counter.clone());
     let mut cx = Context::from_waker(&waker);
-    other.send_waker.register(cx.waker());
+    *other.send_waker.lock().unwrap() = Some(cx.waker().clone());
     assert!(super::borrow(&other).is_pending());
     super::confirm_handshake(&paths);
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
@@ -272,7 +272,7 @@ async fn confirmation_new_cid_and_closing_a_pending_path_wake_only_its_sender() 
     remote.recv_frame(NewConnectionIdFrame::new(ConnectionId::from_slice(b"peer0001"), 1u32.into(), 0u32.into())).unwrap();
     assert_eq!(counter.0.load(Ordering::Relaxed), 2);
     let last = path(&paths, 4003);
-    last.send_waker.register(cx.waker());
+    *last.send_waker.lock().unwrap() = Some(cx.waker().clone());
     assert!(last.dcid.poll_borrow(&mut cx).is_pending());
     last.close();
     assert!(counter.0.load(Ordering::Relaxed) >= 3);

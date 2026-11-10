@@ -10,7 +10,6 @@ use crate::{
         MaxStreamsFrame, StreamsBlockedFrame,
         io::{ReceiveFrame, SendFrame},
     },
-    net::tx::ArcSendWakers,
     sid::MAX_STREAMS_LIMIT,
     varint::VarInt,
 };
@@ -26,7 +25,6 @@ struct LocalStreamIds<BLOCKED> {
     wakers: [VecDeque<Waker>; 2],
     /// The StreamsBlocked frames that will be sent to peer
     blocked: BLOCKED,
-    tx_wakers: ArcSendWakers,
 }
 
 impl<BLOCKED> LocalStreamIds<BLOCKED>
@@ -35,7 +33,7 @@ where
 {
     /// Create a new [`LocalStreamIds`] with the given role,
     /// and maximum number of streams that can be created in each [`Dir`].
-    fn new(role: Role, init_max_bi_streams: u64, init_max_uni_streams: u64, blocked: BLOCKED, tx_wakers: ArcSendWakers) -> Self {
+    fn new(role: Role, init_max_bi_streams: u64, init_max_uni_streams: u64, blocked: BLOCKED) -> Self {
         // These may be remembered client limits or already validated peer
         // limits when a server creates its data components after negotiation.
         Self {
@@ -44,7 +42,6 @@ where
             unallocated: [0, 0],
             wakers: [VecDeque::with_capacity(2), VecDeque::with_capacity(2)],
             blocked,
-            tx_wakers,
         }
     }
 
@@ -73,10 +70,6 @@ where
         let max_streams = &mut self.max[dir as usize];
         // RFC9000: MAX_STREAMS frames that do not increase the stream limit MUST be ignored.
         if *max_streams < val {
-            // The rejected 0rtt stream can be sent again, as if new data was written.
-            if *max_streams < self.unallocated[dir as usize] {
-                self.tx_wakers.wake_all();
-            }
             for waker in self.wakers[dir as usize].drain(..) {
                 waker.wake();
             }
@@ -126,8 +119,8 @@ where
     /// Create a new [`ArcLocalStreamIds`] with the given role,
     /// and maximum number of streams that can be created in each direction,
     /// the `blocked` contains the [`StreamsBlockedFrame`] that will be sent to peer.
-    pub fn new(role: Role, max_bidi: u64, max_uni: u64, blocked: BLOCKED, tx_wakers: ArcSendWakers) -> Self {
-        Self(Arc::new(Mutex::new(LocalStreamIds::new(role, max_bidi, max_uni, blocked, tx_wakers))))
+    pub fn new(role: Role, max_bidi: u64, max_uni: u64, blocked: BLOCKED) -> Self {
+        Self(Arc::new(Mutex::new(LocalStreamIds::new(role, max_bidi, max_uni, blocked))))
     }
 
     /// Returns local role

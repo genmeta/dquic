@@ -1,6 +1,7 @@
 //! The reliable transmission for frames.
 use std::{
     collections::VecDeque,
+    mem,
     sync::{Arc, Mutex, MutexGuard},
     task::{Context, Poll, Waker},
 };
@@ -8,9 +9,16 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     frame::{EncodeSize, FrameFeature, io::SendFrame},
-    net::tx::{ArcSendWakers, UnregisterWaker},
+    net::tx::UnregisterWaker,
     packet::{Package, PacketBuffer},
+    util::WakerGroup,
 };
+
+#[derive(Debug, Default)]
+struct ReliableFrames<F> {
+    frames: VecDeque<F>,
+    tx_wakers: WakerGroup,
+}
 
 /// A deque for data space to send reliable frames.
 ///
@@ -29,25 +37,22 @@ use qbase::{
 /// [`DataStreams`]: crate::streams::DataStreams
 /// [`Package::poll_dump`]: qbase::packet::Package::poll_dump
 #[derive(Debug, Default)]
-pub struct ArcReliableFrames<F> {
-    frames: Arc<Mutex<VecDeque<F>>>,
-    tx_wakers: ArcSendWakers,
-}
+pub struct ArcReliableFrames<F>(Arc<Mutex<ReliableFrames<F>>>);
 
 impl<F> Clone for ArcReliableFrames<F> {
     fn clone(&self) -> Self {
-        Self { frames: self.frames.clone(), tx_wakers: self.tx_wakers.clone() }
+        Self(self.0.clone())
     }
 }
 
 impl<F> ArcReliableFrames<F> {
     /// Create a new empty deque with at least the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { frames: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), tx_wakers: ArcSendWakers::default() }
+        Self(Arc::new(Mutex::new(ReliableFrames { frames: VecDeque::with_capacity(capacity), tx_wakers: WakerGroup::new() })))
     }
 
-    fn frames_guard(&self) -> MutexGuard<'_, VecDeque<F>> {
-        self.frames.lock().unwrap()
+    fn frames_guard(&self) -> MutexGuard<'_, ReliableFrames<F>> {
+        self.0.lock().unwrap()
     }
 }
 
@@ -57,12 +62,13 @@ where
     T: Into<F>,
 {
     fn send_frame<I: IntoIterator<Item = T>>(&self, iter: I) {
-        let mut frames = self.frames_guard();
-        let len = frames.len();
-        frames.extend(iter.into_iter().map(Into::into));
-        if frames.len() > len {
-            drop(frames);
-            self.tx_wakers.wake_all();
+        let mut queue = self.frames_guard();
+        let len = queue.frames.len();
+        queue.frames.extend(iter.into_iter().map(Into::into));
+        if queue.frames.len() > len {
+            let mut wakers = mem::take(&mut queue.tx_wakers);
+            drop(queue);
+            wakers.wake_all();
         }
     }
 }
@@ -70,18 +76,19 @@ where
 impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
     fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let mut queue = self.frames_guard();
-        if queue.is_empty() {
-            self.tx_wakers.register(cx.waker());
+        queue.tx_wakers.remove(cx.waker());
+        if queue.frames.is_empty() {
+            queue.tx_wakers.add(cx.waker());
             return Poll::Pending;
         }
         let start = buffer.meta.nframes;
-        while let Some(frame) = queue.front_mut() {
+        while let Some(frame) = queue.frames.front_mut() {
             match frame.poll_dump(cx, buffer) {
                 Poll::Ready(n) if n > 0 => {
-                    queue.pop_front();
+                    queue.frames.pop_front();
                 }
                 Poll::Pending if buffer.meta.nframes == start => {
-                    self.tx_wakers.register(cx.waker());
+                    queue.tx_wakers.add(cx.waker());
                     return Poll::Pending;
                 }
                 _ => break,
@@ -93,6 +100,6 @@ impl<B: BufMut + ?Sized, F: Package<B>> Package<B> for ArcReliableFrames<F> {
 
 impl<F> UnregisterWaker for ArcReliableFrames<F> {
     fn unregister(&self, waker: &Waker) {
-        self.tx_wakers.unregister(waker);
+        self.frames_guard().tx_wakers.remove(waker);
     }
 }

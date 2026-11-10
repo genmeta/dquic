@@ -54,7 +54,11 @@ fn empty_credit_refunds_do_not_wake_the_sender() {
 
     // Returning actual credit must still wake another blocked sender.
     let credit = controller.credit(90);
-    assert_eq!(controller.credit(1).available(), 0);
+    let Poll::Ready(blocked) = controller.poll_credit(&mut cx, 1) else {
+        panic!("flow credit returns an empty reservation while blocked");
+    };
+    assert_eq!(blocked.available(), 0);
+    drop(blocked);
     drop(credit);
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
 }

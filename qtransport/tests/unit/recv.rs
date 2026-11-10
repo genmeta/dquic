@@ -130,7 +130,7 @@ async fn handshake_packet_wakes_the_validated_path_once() {
         paths.progress.on_path_selected(&paths, &path);
         path.validation.grant().unwrap();
         let counter = Arc::new(Counter::default());
-        path.send_waker.register(&Waker::from(counter.clone()));
+        *path.send_waker.lock().unwrap() = Some(Waker::from(counter.clone()));
 
         receive_ping(role, Epoch::Handshake, false, &paths, &path).await;
 

@@ -151,7 +151,7 @@ impl Progress {
             }
         }
         path.enable();
-        path.send_waker.wake_all();
+        path.wake_sender();
         true
     }
 

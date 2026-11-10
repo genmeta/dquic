@@ -334,7 +334,6 @@ pub fn send_cc() -> qcongestion::ArcCC {
         handshake_facts(qbase::role::Role::Client, true),
         validation,
         Arc::new(std::sync::atomic::AtomicU16::new(1200)),
-        Default::default(),
     )
 }
 

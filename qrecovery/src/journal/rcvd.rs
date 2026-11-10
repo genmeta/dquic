@@ -7,7 +7,7 @@ use std::{
 use bytes::BufMut;
 use qbase::{
     frame::{AckFrame, Ecn, FrameType},
-    net::tx::{ArcSendWakers, UnregisterWaker},
+    net::tx::UnregisterWaker,
     packet::{InvalidPacketNumber, Package, PacketBuffer, PacketContent, PacketNumber},
     varint::{VARINT_MAX, VarInt},
 };
@@ -175,7 +175,6 @@ impl RcvdJournal {
 #[derive(Debug, Clone, Default)]
 pub struct ArcRcvdJournal {
     inner: Arc<RwLock<RcvdJournal>>,
-    waiters: ArcSendWakers,
     ack_delay_exponent: u32,
 }
 
@@ -187,11 +186,7 @@ impl ArcRcvdJournal {
     }
 
     pub fn with_capacity(capacity: usize, max_ack_delay: Option<Duration>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(capacity, max_ack_delay))),
-            waiters: Default::default(),
-            ack_delay_exponent: 0,
-        }
+        Self { inner: Arc::new(RwLock::new(RcvdJournal::with_capacity(capacity, max_ack_delay))), ack_delay_exponent: 0 }
     }
 
     /// Whether a whole interval is present in the bounded journal. Intervals below
@@ -248,7 +243,6 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege {
             Ok(ack) => ack,
             Err(Poll::Ready(())) => return Poll::Ready(0),
             Err(Poll::Pending) => {
-                self.journal.waiters.register(cx.waker());
                 return Poll::Pending;
             }
         };
@@ -269,9 +263,8 @@ impl<B: BufMut + ?Sized> Package<B> for AckPackege {
 }
 
 impl UnregisterWaker for AckPackege {
-    fn unregister(&self, waker: &std::task::Waker) {
-        self.journal.waiters.unregister(waker);
-    }
+    // ACK readiness is driven by CC; the journal has no send waiter to unregister.
+    fn unregister(&self, _waker: &Waker) {}
 }
 impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
     fn content(&self) -> PacketContent {
@@ -281,7 +274,6 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
     fn poll_dump(&mut self, cx: &mut Context<'_>, buffer: &mut PacketBuffer<'_, B>) -> Poll<usize> {
         let journal = self.inner.read().unwrap();
         let Some(latest) = journal.packets.largest() else {
-            self.waiters.register(cx.waker());
             return Poll::Pending;
         };
         drop(journal);
@@ -290,7 +282,5 @@ impl<B: BufMut + ?Sized> Package<B> for ArcRcvdJournal {
 }
 
 impl UnregisterWaker for ArcRcvdJournal {
-    fn unregister(&self, waker: &Waker) {
-        self.waiters.unregister(waker);
-    }
+    fn unregister(&self, _waker: &Waker) {}
 }
