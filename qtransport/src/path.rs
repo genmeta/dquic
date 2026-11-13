@@ -11,7 +11,7 @@ use std::{
 use qbase::{
     Epoch,
     handshake::HandshakeFacts,
-    net::{route::Pathway, validate::ArcValidation},
+    net::{route::Pathway, tx::SendWaker, validate::ArcValidation},
     packet::assemble::Metadata,
     time::heartbeat::ArcHeartbeat,
 };
@@ -31,7 +31,7 @@ pub struct Path {
     pub pathway: Pathway,
     pub dcid: ArcDcid,
     pub cc: ArcCC,
-    pub send_waker: Mutex<Option<Waker>>,
+    pub send_waker: Arc<SendWaker>,
     /// Only path shutdown/disable interrupts a pending socket submission.
     io_waker: Mutex<Option<Waker>>,
     pub validation: ArcValidation,
@@ -74,7 +74,7 @@ impl Path {
             pathway,
             dcid,
             cc,
-            send_waker: Mutex::new(None),
+            send_waker: Arc::default(),
             io_waker: Mutex::new(None),
             validation,
             heartbeat,
@@ -85,12 +85,9 @@ impl Path {
         }
     }
 
-    /// Consume the current collect waiter. A new Pending poll must register again.
+    /// Notify the collector, scheduling its task only when collection is pending.
     pub fn wake_sender(&self) {
-        let waker = self.send_waker.lock().unwrap().take();
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        self.send_waker.as_ref().wake();
     }
 
     fn wake_io(&self) {

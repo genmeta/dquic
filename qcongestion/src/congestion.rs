@@ -599,11 +599,9 @@ impl ArcCC {
         cc
     }
 
-    pub fn cancel(&self, waker: &std::task::Waker) {
-        let mut cc = self.lock();
-        if cc.tx_waker.as_ref().is_some_and(|registered| registered.will_wake(waker)) {
-            cc.tx_waker = None;
-        }
+    /// Discard this path's sending waiter without notifying it.
+    pub fn cancel(&self) {
+        self.lock().tx_waker = None;
     }
 
     pub fn on_pkt_sealed(&self, sent_bytes: usize) {

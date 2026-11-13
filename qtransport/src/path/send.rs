@@ -1,7 +1,7 @@
 use std::{
     future::poll_fn,
     io::{self, IoSlice},
-    task::{Context, Poll, ready},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::BytesMut;
@@ -37,7 +37,7 @@ impl Path {
         let mut credit = match self.validation.poll_credit(cx) {
             Poll::Ready(credit) => credit.map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))?,
             Poll::Pending => {
-                self.cc.cancel(cx.waker());
+                self.cc.cancel();
                 return Poll::Pending;
             }
         };
@@ -85,9 +85,9 @@ impl Path {
     /// Wait for at least one datagram. Call [`Self::refresh`] after submission or cancellation.
     pub async fn collect(&self, datagrams: &mut [Datagram], frames: &mut Vec<GuaranteedFrame>) -> io::Result<(usize, ConnectionId)> {
         poll_fn(|cx| {
-            // Serialize the final readiness check and registration with external notifications.
-            let mut waiter = self.send_waker.lock().unwrap();
-            *waiter = None;
+            self.send_waker.register(cx.waker());
+            let waker = Waker::from(self.send_waker.clone());
+            let cx = &mut Context::from_waker(&waker);
             let result = (|| {
                 if self.validation.is_cancelled() {
                     return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "path retired")));
@@ -100,11 +100,10 @@ impl Path {
                 }
                 result.map(|result| result.map(|count| (count, dcid)))
             })();
-            if result.is_pending() {
-                *waiter = Some(cx.waker().clone());
-            } else {
-                self.cc.cancel(cx.waker());
+            if result.is_ready() {
+                self.cc.cancel();
             }
+            self.send_waker.refresh(result.is_ready());
             result
         })
         .await

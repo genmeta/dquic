@@ -631,7 +631,8 @@ async fn publishing_prequeued_spaces_does_not_wake_paths_and_activation_resumes_
         let counter = Arc::new(Counter::default());
         let other_counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
-        *other.send_waker.lock().unwrap() = Some(Waker::from(other_counter.clone()));
+        other.send_waker.register(&Waker::from(other_counter.clone()));
+        other.send_waker.refresh(false);
         let mut cx = Context::from_waker(&waker);
         let mut datagrams = [Datagram::default()];
         let mut frames = Vec::new();
@@ -1365,7 +1366,8 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
             assert!(counter.0.load(Ordering::Relaxed) > 0);
         }
         path.refresh(&mut datagrams, &mut frames);
-        *path.send_waker.lock().unwrap() = Some(waker.clone());
+        path.send_waker.register(&waker);
+        path.send_waker.refresh(false);
         paths.del_path(&path);
         path.close();
         paths.terminator.terminate();
@@ -2014,9 +2016,10 @@ async fn deleting_a_removed_path_unregisters_its_late_waiters_and_preserves_its_
         assert!(paths.reliable_frames.clone().poll_dump(&mut cx, &mut buffer).is_pending());
     };
     // Model subscriptions left by a poll already in progress when the old path was removed.
-    subscribe(&old_waker);
-    *replacement.send_waker.lock().unwrap() = Some(live_waker.clone());
-    subscribe(&live_waker);
+    subscribe(&Waker::from(previous.send_waker.clone()));
+    replacement.send_waker.register(&live_waker);
+    replacement.send_waker.refresh(false);
+    subscribe(&Waker::from(replacement.send_waker.clone()));
     assert!(
         matches!(sender.as_mut().poll(&mut Context::from_waker(&old_waker)), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe)
     );

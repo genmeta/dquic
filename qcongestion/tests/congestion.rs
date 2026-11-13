@@ -52,6 +52,14 @@ async fn congestion_notifications_consume_the_waiter_until_registered_again() {
     cc.prepare_burst_budget(&mut Context::from_waker(&waker)).unwrap();
     cc.on_charged();
     assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+    cc.prepare_burst_budget(&mut Context::from_waker(&waker)).unwrap();
+    cc.cancel();
+    cc.cancel();
+    cc.on_charged();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+    cc.prepare_burst_budget(&mut Context::from_waker(&waker)).unwrap();
+    cc.on_charged();
+    assert_eq!(counter.0.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test(start_paused = true)]
@@ -65,7 +73,7 @@ async fn delayed_acks_rearm_the_sender_even_when_send_quota_is_available() {
                 cc.prepare_burst_budget(cx).unwrap();
                 assert!(cc.send_quota() > 0);
                 if let Some((largest, _)) = cc.need_ack(Epoch::Data) {
-                    cc.cancel(cx.waker());
+                    cc.cancel();
                     std::task::Poll::Ready(largest)
                 } else {
                     std::task::Poll::Pending
