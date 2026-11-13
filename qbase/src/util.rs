@@ -7,5 +7,4 @@ pub use index_deque::{ArcIndexDeque, IndexDeque, IndexError};
 mod unique_id;
 pub use unique_id::{UniqueId, UniqueIdGenerator};
 
-mod wakers;
-pub use wakers::{WakerGroup, Wakers};
+pub use crate::net::tx::{WakerGroup, Wakers};

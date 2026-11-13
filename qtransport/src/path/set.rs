@@ -1,12 +1,11 @@
 use std::{
     collections::BTreeMap,
-    future::poll_fn,
     io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    task::Poll,
+    task::Waker,
     time::Duration,
 };
 
@@ -135,15 +134,13 @@ impl Paths {
                 false
             }
         };
-        let waiters = [path.send_waker.lock().unwrap().clone(), path.io_waker.lock().unwrap().clone()];
+        let waker = Waker::from(path.send_waker.clone());
         path.close();
         // The send_via exit also cleans subscriptions created by a concurrent poll.
-        for waker in waiters.into_iter().flatten() {
-            path.spaces.unregister(&waker);
-            self.reliable_frames.unregister(&waker);
-            path.terminator.unregister(&waker);
-            path.cc.cancel(&waker);
-        }
+        path.spaces.unregister(&waker);
+        self.reliable_frames.unregister(&waker);
+        path.terminator.unregister(&waker);
+        path.cc.cancel();
         path.cc.on_path_lost();
         removed
     }
@@ -155,7 +152,7 @@ impl Paths {
         let mut frames = Vec::with_capacity(256);
         let terminator = path.terminator.clone();
         let idle_timer = self.idle_timer();
-        let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+        let waker = Waker::from(path.send_waker.clone());
         let result = loop {
             let result = tokio::select! {
                 biased;
@@ -171,12 +168,12 @@ impl Paths {
             }
             path.refresh(&mut datagrams, &mut frames);
         };
+        path.send_waker.refresh(true);
         path.refresh(&mut datagrams, &mut frames);
         path.spaces.unregister(&waker);
         self.reliable_frames.unregister(&waker);
         path.terminator.unregister(&waker);
-        path.cc.cancel(&waker);
-        *path.send_waker.lock().unwrap() = None;
+        path.cc.cancel();
         *path.io_waker.lock().unwrap() = None;
         result
     }
