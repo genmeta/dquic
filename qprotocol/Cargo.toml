@@ -12,10 +12,7 @@ categories.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-derive_more = { workspace = true, features = ["display", "into"] }
-http = { workspace = true }
 futures = { workspace = true }
-netdev = { workspace = true }
 nom = { workspace = true }
 dashmap = { workspace = true }
 qbase = { workspace = true }
@@ -26,6 +23,7 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+netdev = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]

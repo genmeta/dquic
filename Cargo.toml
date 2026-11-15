@@ -78,7 +78,6 @@ x509-parser = "0.18"
 
 # dev-dependencies, for examples
 clap = { version = "4", features = ["derive"] }
-http = "1"
 # postcard = { version = "1", features = ["use-std"] }
 tracing-subscriber = "0.3"
 
