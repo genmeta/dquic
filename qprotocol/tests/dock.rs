@@ -89,7 +89,7 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
     assert!(addresses.mdns_endpoints(bound).is_empty());
     addresses.insert_inner(&socket, direct).unwrap();
     assert_eq!(addresses.mdns_endpoints(bound).as_ref(), &[direct]);
-    assert!(matches!(events.try_recv().unwrap(), qprotocol::AddressEvent::Added { endpoint, .. } if endpoint == direct));
+    assert!(matches!(events.try_recv().unwrap(), qprotocol::AddressEvent::Candidate { endpoint, .. } if endpoint == direct));
     dock.topology().quic().register(outer, &socket).unwrap();
     dock.topology().quic().register(relay, &socket).unwrap();
     addresses.insert_outer(&socket, outer).unwrap();

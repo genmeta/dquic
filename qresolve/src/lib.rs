@@ -2,6 +2,7 @@ use std::{
     any::Any,
     fmt::{Debug, Display},
     io,
+    net::IpAddr,
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -21,9 +22,10 @@ pub trait Publish: Any + Send + Sync + Display + Debug {
     fn publish<'a>(&'a self, name: &'a str, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a>;
 }
 
+/// Origin of a resolved endpoint. mDNS records identify the receiving interface's local IP.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Source {
-    Mdns { nic: Arc<str>, family: Family },
+    Mdns { nic_ip: IpAddr },
     Http { server: Arc<str> },
     H3 { server: Arc<str> },
     System,
@@ -33,7 +35,7 @@ pub enum Source {
 impl Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Source::Mdns { nic, family } => write!(f, "MDNS Resolver({nic} {family})"),
+            Source::Mdns { nic_ip } => write!(f, "MDNS Resolver({nic_ip})"),
             Source::Http { server } => write!(f, "HTTP DNS Resolver({server})"),
             Source::H3 { server } => write!(f, "H3 DNS Resolver({server})"),
             Source::System => write!(f, "System DNS Resolver"),

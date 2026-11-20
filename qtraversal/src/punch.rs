@@ -31,11 +31,11 @@ where
     ) -> JoinHandle<()> {
         let puncher = self.clone();
         let apply = move |event| match event {
-            AddressEvent::Added { bound, endpoint, nat } => {
+            AddressEvent::Candidate { inner: bound, endpoint, nat } => {
                 puncher.on_local_removed(endpoint);
                 puncher.on_local_added(bound, endpoint, endpoint.addr(), 0, nat);
             }
-            AddressEvent::Removed { endpoint, .. } => {
+            AddressEvent::Invalid { endpoint, .. } => {
                 puncher.on_local_removed(endpoint);
                 on_removed(endpoint);
             }

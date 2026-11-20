@@ -250,19 +250,17 @@ async fn discovery_completion_does_not_report_an_error_after_its_path_is_removed
 async fn dns_discovery_preserves_mdns_source_when_adding_paths() {
     let book = AddressBook::new();
     let local = LocalSocket::new(&book);
-    let nic = local.0.bound_device().unwrap().name().to_owned();
+    let nic_ip = local.0.local_addr().unwrap().ip();
     let paths = paths();
     let (send, records) = mpsc::unbounded();
     let mut discovery = Box::pin(resolve_name_and_match_path(&paths, &book, resolver(Ok(records.boxed())), "example.test:8443"));
     let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
-    for source in
-        [Source::Mdns { nic: "missing-interface".into(), family: Family::V4 }, Source::Mdns { nic: nic.clone().into(), family: Family::V6 }]
-    {
+    for source in [Source::Mdns { nic_ip: "127.0.0.2".parse().unwrap() }, Source::Mdns { nic_ip: "::1".parse().unwrap() }] {
         send.unbounded_send((source, peer)).unwrap();
         assert!(futures::poll!(&mut discovery).is_pending());
         assert!(paths.entries.lock().unwrap().is_empty());
     }
-    send.unbounded_send((Source::Mdns { nic: nic.into(), family: Family::V4 }, peer)).unwrap();
+    send.unbounded_send((Source::Mdns { nic_ip }, peer)).unwrap();
     assert!(futures::poll!(&mut discovery).is_pending());
     assert!(paths.entries.lock().unwrap().contains_key(&Pathway::new(local.endpoint(), peer)));
     assert_eq!(paths.entries.lock().unwrap().len(), 1);
