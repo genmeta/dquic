@@ -1,16 +1,15 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::collections::HashMap;
 
 use qbase::{
     frame::{AddAddressFrame, RemoveAddressFrame},
-    net::{NatType, addr::EndpointAddr},
+    net::{NatType, addr::EndpointAddr, route::Link},
 };
 
-/// One local address advertised to this peer. `bound` selects the local UDP socket;
+/// One local address advertised to this peer. `link.src` selects the local UDP socket;
 /// `frame` carries the address and NAT information visible to the peer.
 #[derive(Clone)]
 pub struct LocalAddress {
-    pub bound: SocketAddr,
-    pub endpoint: EndpointAddr,
+    pub link: Link,
     pub frame: AddAddressFrame,
 }
 
@@ -23,16 +22,16 @@ pub struct PunchAddresses {
 }
 
 impl PunchAddresses {
-    pub fn add_local(&mut self, bound: SocketAddr, endpoint: EndpointAddr, outer: SocketAddr, tire: u32, nat: NatType) -> AddAddressFrame {
+    pub fn add_local(&mut self, link: Link, tire: u32, nat: NatType) -> AddAddressFrame {
         let seq = self.next_local_seq;
         self.next_local_seq += 1;
-        let frame = AddAddressFrame::new(seq, outer, tire, nat);
-        self.local.insert(seq, LocalAddress { bound, endpoint, frame });
+        let frame = AddAddressFrame::new(seq, link.dst, tire, nat);
+        self.local.insert(seq, LocalAddress { link, frame });
         frame
     }
 
-    pub fn remove_local_endpoint(&mut self, endpoint: EndpointAddr) -> Vec<RemoveAddressFrame> {
-        let seqs = self.local.iter().filter_map(|(&seq, local)| (local.endpoint == endpoint).then_some(seq)).collect::<Vec<_>>();
+    pub fn remove_local_link(&mut self, link: Link) -> Vec<RemoveAddressFrame> {
+        let seqs = self.local.iter().filter_map(|(&seq, local)| (local.link == link).then_some(seq)).collect::<Vec<_>>();
         for seq in &seqs {
             self.local.remove(seq);
         }
@@ -69,7 +68,7 @@ impl PunchAddresses {
         self.local
             .values()
             .filter(|local| {
-                local.frame.tire() == remote.tire() && EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote))
+                local.frame.tire() == remote.tire() && EndpointAddr::direct(*local.frame).can_connect_to(EndpointAddr::direct(*remote))
             })
             .min_by_key(|local| {
                 (

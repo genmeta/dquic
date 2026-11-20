@@ -120,7 +120,7 @@ impl EndpointAddr {
     /// other scopes may differ for NAT.
     /// Mediated endpoints retain their own agents and outer mappings.
     /// Socket binding, interface constraints and reachability are checked by the caller.
-    pub fn matches_peer(&self, peer: Self) -> bool {
+    pub fn can_connect_to(&self, peer: Self) -> bool {
         *self != peer
             && self.kind() == peer.kind()
             && self.addr().family() == peer.addr().family()

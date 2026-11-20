@@ -6,7 +6,7 @@
 `ServerRegistry`.
 
 The crate also exports endpoint identities, stream types and errors, `Role`, transport
-parameters, `Dock`, `UdpSocket`, `AddressBook`, `Resolver`, `SystemResolver`,
+parameters, `Dock`, `UdpSocket`, `ArcAddrBook`, `Resolver`, `SystemResolver`,
 `RootCerts`, `CertificateDer`, `PrivateKeyDer`, and `default_provider` at its root. The `qbase`, `qconnection`,
 `qprotocol`, `qresolve`, `qtls`, and `qtransport` crates are available through
 their own namespaces for parameter configuration, network registration,
@@ -44,7 +44,7 @@ connection and stops discovery through the normal lifecycle.
 
 Before connecting or listening, configure trust with `qtls::RootCerts`, register
 sockets with `qprotocol::Dock` and `qprotocol::QuicProtocol`, publish local
-addresses in `qprotocol::AddressBook`, and add name resolution sources through
+addresses in `qprotocol::ArcAddrBook`, and add name resolution sources through
 `qresolve::Resolver::add`. The global resolver starts empty.
 
 See the [connection API documentation](../qconnection/README.md) and the

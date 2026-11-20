@@ -1,8 +1,8 @@
 use std::{io, net::SocketAddr, sync::Arc};
 
-use qbase::net::addr::EndpointAddr;
+use qbase::net::{NatType, addr::EndpointAddr, route::Link};
 use qprotocol::{
-    AddressBook, Dock, UdpSocket,
+    ArcAddrBook, Dock, UdpSocket,
     protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol},
     topology::Topology,
 };
@@ -78,22 +78,27 @@ fn isolated_dock() -> Arc<Dock> {
 #[tokio::test]
 async fn socket_registration_and_removal_leave_publication_to_the_address_book() {
     let dock = isolated_dock();
-    let addresses = AddressBook::global();
+    let addresses = ArcAddrBook::new();
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let bound = socket.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
     let outer = EndpointAddr::direct("8.8.8.8:4567".parse().unwrap());
     let relay = EndpointAddr::mediate("8.8.4.4:3478".parse().unwrap(), outer.addr());
-    let mut events = addresses.subscribe_punch(qbase::net::route::Scopes::ALL);
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    addresses.attach_puncher(sender);
     dock.add(socket.clone()).unwrap().unwrap();
-    assert!(addresses.mdns_endpoints(bound).is_empty());
-    addresses.insert_inner(&socket, direct).unwrap();
-    assert_eq!(addresses.mdns_endpoints(bound).as_ref(), &[direct]);
-    assert!(matches!(events.try_recv().unwrap(), qprotocol::AddressEvent::Candidate { endpoint, .. } if endpoint == direct));
+    assert_eq!(addresses.mdns_query(bound.ip()), None);
+    addresses.add_sock_addr(bound);
+    assert_eq!(addresses.mdns_query(bound.ip()), Some(bound));
+    assert_eq!(addresses.matches(EndpointAddr::direct("127.0.0.1:9".parse().unwrap())).as_slice(), &[direct]);
+    assert!(events.try_recv().is_err(), "socket publication does not imply a candidate");
     dock.topology().quic().register(outer, &socket).unwrap();
     dock.topology().quic().register(relay, &socket).unwrap();
-    addresses.insert_outer(&socket, outer).unwrap();
-    addresses.set_nat(bound, qbase::net::NatType::RestrictedCone);
+    addresses.add_endpoint_addr(bound, outer).unwrap();
+    addresses.add_endpoint_addr(bound, relay).unwrap();
+    let link = Link::new(bound, outer.addr());
+    addresses.add_candidate(link, NatType::RestrictedCone);
+    assert_eq!(events.try_recv().unwrap(), qprotocol::addr_book::Candidate::New { link, nat: NatType::RestrictedCone });
 
     let other = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     dock.add(other.clone()).unwrap().unwrap();
@@ -101,21 +106,18 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
     for alias in [direct, outer, relay] {
         assert!(dock.topology().quic().find_socket(alias).is_none());
     }
-    assert_eq!(addresses.mdns_endpoints(bound).as_ref(), &[direct]);
-    assert!(addresses.ddns_endpoints().contains(&outer));
-    assert_eq!(addresses.nat(bound), Some(qbase::net::NatType::RestrictedCone));
+    assert_eq!(addresses.mdns_query(bound.ip()), Some(bound));
+    assert!(addresses.matches(EndpointAddr::direct("1.1.1.1:443".parse().unwrap())).contains(&outer));
+    assert_eq!(addresses.try_get_nat_type(link), Some(qbase::net::NatType::RestrictedCone));
     assert!(Arc::ptr_eq(&dock.find_socket(other.local_addr().unwrap()).unwrap(), &other));
     let error = dock.topology().stun().detect_outer(bound, other.local_addr().unwrap()).await.unwrap_err();
     assert!(matches!(error, qprotocol::protocol::stun::StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
-    addresses.remove_bound(bound);
-    assert!(addresses.mdns_endpoints(bound).is_empty());
-    assert!(!addresses.ddns_endpoints().contains(&outer));
-    assert_eq!(addresses.nat(bound), None);
-    let mut removed = false;
-    while let Ok(event) = events.try_recv() {
-        removed |= matches!(event, qprotocol::AddressEvent::BoundRemoved { bound: candidate } if candidate == bound);
-    }
-    assert!(removed, "punch subscriptions must learn that the binding was removed");
+    addresses.del_sock_addr(bound);
+    assert_eq!(addresses.mdns_query(bound.ip()), None);
+    assert!(!addresses.matches(EndpointAddr::direct("1.1.1.1:443".parse().unwrap())).contains(&outer));
+    assert_eq!(addresses.try_get_nat_type(link), None);
+    assert_eq!(events.try_recv().unwrap(), qprotocol::addr_book::Candidate::Invalid { link });
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]

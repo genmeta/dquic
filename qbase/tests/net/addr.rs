@@ -5,13 +5,13 @@ fn matches_peer_allows_nat_across_non_loopback_scopes() {
     let endpoints = ["192.168.1.10:4433", "8.8.4.4:50000", "100.64.0.1:4433"].map(|addr| EndpointAddr::direct(addr.parse().unwrap()));
     for local in endpoints {
         for peer in endpoints {
-            assert_eq!(local.matches_peer(peer), local != peer);
+            assert_eq!(local.can_connect_to(peer), local != peer);
         }
     }
     let local = endpoints[0];
-    assert!(!local.matches_peer(local));
+    assert!(!local.can_connect_to(local));
     for invalid_peer in ["0.0.0.0:443", "1.1.1.1:0", "224.0.0.1:443", "255.255.255.255:443", "[::1]:443"] {
-        assert!(!local.matches_peer(EndpointAddr::direct(invalid_peer.parse().unwrap())));
+        assert!(!local.can_connect_to(EndpointAddr::direct(invalid_peer.parse().unwrap())));
     }
 }
 
@@ -26,9 +26,9 @@ fn loopback_peers_match_in_both_families_including_mapped_ipv4() {
         let local = EndpointAddr::direct(local.parse().unwrap());
         let peer = EndpointAddr::direct(peer.parse().unwrap());
         let non_loopback = EndpointAddr::direct(non_loopback.parse().unwrap());
-        assert!(local.matches_peer(peer));
-        assert!(!local.matches_peer(non_loopback));
-        assert!(!non_loopback.matches_peer(local));
+        assert!(local.can_connect_to(peer));
+        assert!(!local.can_connect_to(non_loopback));
+        assert!(!non_loopback.can_connect_to(local));
     }
 }
 
@@ -36,12 +36,12 @@ fn loopback_peers_match_in_both_families_including_mapped_ipv4() {
 fn matches_peer_validates_mediated_addresses() {
     let local = EndpointAddr::mediate("127.0.0.1:20002".parse().unwrap(), "8.8.4.4:50000".parse().unwrap());
     let peer = EndpointAddr::mediate("127.0.0.1:20003".parse().unwrap(), "1.0.0.1:60000".parse().unwrap());
-    assert!(local.matches_peer(peer));
-    assert!(!EndpointAddr::direct(*local).matches_peer(peer));
+    assert!(local.can_connect_to(peer));
+    assert!(!EndpointAddr::direct(*local).can_connect_to(peer));
     for outer in ["0.0.0.0:50000", "8.8.4.4:0", "224.0.0.1:50000", "[fd00::1]:50000"] {
         let invalid = EndpointAddr::mediate(*local, outer.parse().unwrap());
-        assert!(!invalid.matches_peer(peer));
-        assert!(!peer.matches_peer(invalid));
+        assert!(!invalid.can_connect_to(peer));
+        assert!(!peer.can_connect_to(invalid));
     }
 }
 

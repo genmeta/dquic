@@ -18,8 +18,10 @@ pub use sys::{SystemResolver, split_name_port};
 
 pub type PublishFuture<'a> = BoxFuture<'a, io::Result<()>>;
 
+/// Publishes local endpoints using the name and backend configured by the implementation.
+/// Consume the iterator before returning; the future must not borrow it.
 pub trait Publish: Any + Send + Sync + Display + Debug {
-    fn publish<'a>(&'a self, name: &'a str, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a>;
+    fn publish<'a>(&'a self, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a>;
 }
 
 /// Origin of a resolved endpoint. mDNS records identify the receiving interface's local IP.

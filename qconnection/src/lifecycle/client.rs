@@ -4,12 +4,13 @@ use futures::{StreamExt, future::poll_fn};
 use qbase::{
     error::{ErrorKind, QuicError},
     handshake::ArcHandshakeDone,
+    net::{addr::EndpointAddr, route::Pathway},
     param::{ClientParameters, ParameterId, Requirements},
     role::Role,
     sid::handy::ConsistentConcurrency,
     token::ArcTokenRegistry,
 };
-use qprotocol::{AddressBook, Dock, QuicProtocol};
+use qprotocol::ArcAddrBook;
 use qtransport::{
     keys::{ArcKeys, ArcOneRttKeys},
     packet::channel::RcvdPacket,
@@ -51,10 +52,9 @@ pub async fn client_growing(
     tokio::spawn({
         let paths = paths.clone();
         let terminator = terminator.clone();
-        let addresses = AddressBook::global().clone();
         let resolver = qresolve::Resolver::get();
         async move {
-            if let Err(error) = resolve_name_and_match_path(&paths, &addresses, resolver, &server_name).await {
+            if let Err(error) = resolve_name_and_match_path(&paths, resolver, &server_name).await {
                 terminator.close(error.into(), paths.closing_pto());
             }
         }
@@ -154,8 +154,11 @@ pub async fn client_growing(
         () = handshake_done => {
             progress.on_handshake_done(&paths);
             // Keep Paths alive until observation stops applying address events.
-            let _observer = puncher.observe_endpoints(
-                AddressBook::global().subscribe_punch(crate::Scopes::ALL),
+            let (sender, candidates) = tokio::sync::mpsc::unbounded_channel();
+            ArcAddrBook::global().attach_puncher(sender);
+            let _observer = puncher.observe_candidates(
+                candidates,
+                crate::Scopes::ALL,
                 {
                     let paths = paths.clone();
                     async move {
@@ -163,43 +166,46 @@ pub async fn client_growing(
                         drop(paths);
                     }
                 },
-                |_| {},
             );
             terminator.clone().await
         }
     }
 }
 
-/// Report a discovery failure only if no path has been available.
+/// Create paths from matching DNS records; Paths owns subsequent transport failures.
 pub(crate) async fn resolve_name_and_match_path(
     paths: &Arc<Paths>,
-    addresses: &AddressBook,
     resolver: Arc<dyn qresolve::Resolve>,
     server_name: &str,
 ) -> Result<(), Error> {
+    let addresses = ArcAddrBook::global();
     let mut had_path = !paths.entries.lock().unwrap().is_empty();
     let error = match resolver.lookup(server_name, "", None).await {
         Ok(mut records) => {
             while let Some((source, peer)) = records.next().await {
-                for pathway in addresses.pathways_to(peer, &source) {
-                    let Some(socket) = QuicProtocol::global().find_socket(pathway.local()) else {
-                        continue;
-                    };
-                    let Ok(bound) = socket.local_addr() else {
-                        continue;
-                    };
-                    if !Dock::global().find_socket(bound).is_some_and(|registered| Arc::ptr_eq(&registered, &socket)) {
-                        continue;
+                match source {
+                    qresolve::Source::Mdns { nic_ip } => {
+                        if let Some(bound) = addresses.mdns_query(nic_ip) {
+                            let local = EndpointAddr::direct(bound);
+                            if local.can_connect_to(peer) {
+                                paths.add_path(Pathway::new(local, peer));
+                                had_path = true;
+                            }
+                        }
                     }
-                    paths.add_path(pathway);
-                    had_path = true;
+                    _ => {
+                        for local in addresses.matches(peer) {
+                            paths.add_path(Pathway::new(local, peer));
+                            had_path = true;
+                        }
+                    }
                 }
             }
             None
         }
         Err(error) => Some(error),
     };
-    // Once a path has been admitted, its later failure belongs to Paths.
+    // Once a path has been created, its later failure belongs to Paths.
     if had_path || !paths.entries.lock().unwrap().is_empty() {
         return Ok(());
     }

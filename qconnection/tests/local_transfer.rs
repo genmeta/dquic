@@ -20,7 +20,7 @@ use qbase::{
     role::Role,
 };
 use qconnection::{ArcConnection, QuicEndpoint, Scopes, ServerRegistry};
-use qprotocol::{AddressBook, Dock, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, UdpSocket};
 use qresolve::{EndpointAddr, Family, Resolve, ResolveFuture, Resolver, Source};
 use tls_backend::pki_types::pem::PemObject;
 use tokio::{
@@ -64,7 +64,7 @@ impl LocalSocket {
         let socket = Self { addr: udp.local_addr()?, udp };
         Dock::global().add(socket.udp.clone())?;
         if publish {
-            AddressBook::global().insert_inner(&socket.udp, socket.addr.into())?;
+            ArcAddrBook::global().add_sock_addr(socket.addr);
         }
         Ok(socket)
     }
@@ -72,7 +72,7 @@ impl LocalSocket {
 
 impl Drop for LocalSocket {
     fn drop(&mut self) {
-        AddressBook::global().remove_bound(self.addr);
+        ArcAddrBook::global().del_sock_addr(self.addr);
         Dock::global().remove(&self.udp);
     }
 }

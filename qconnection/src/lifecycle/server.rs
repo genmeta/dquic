@@ -174,17 +174,15 @@ pub async fn server_growing(initial_space: Arc<InitialSpace>, rcvd_pkt: RcvdPack
     };
 
     // Keep Paths alive until observation stops applying address events.
-    let _observer = puncher.observe_endpoints(
-        qprotocol::AddressBook::global().subscribe_punch(scopes),
-        {
-            let paths = paths.clone();
-            async move {
-                paths.terminator.clone().await;
-                drop(paths);
-            }
-        },
-        |_| {},
-    );
+    let (sender, candidates) = tokio::sync::mpsc::unbounded_channel();
+    qprotocol::ArcAddrBook::global().attach_puncher(sender);
+    let _observer = puncher.observe_candidates(candidates, scopes, {
+        let paths = paths.clone();
+        async move {
+            paths.terminator.clone().await;
+            drop(paths);
+        }
+    });
     (server.accept_cb)(connection);
     terminator.await
 }

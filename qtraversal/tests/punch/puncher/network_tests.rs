@@ -67,7 +67,7 @@ impl Peer {
         let encoder = Encoder::default();
         let request_tasks = Arc::new(Mutex::new(Vec::new()));
         let puncher = TestPuncher::new(Broker(sender, request_tasks.clone()), encoder.clone());
-        puncher.on_local_added(bound, outer.into(), outer, 0, nat);
+        puncher.on_local_added(Link::new(bound, outer), 0, nat);
         let ReliableFrame::AddAddress(address) = receiver.recv().await.unwrap() else {
             panic!("first broker frame must advertise the endpoint");
         };
