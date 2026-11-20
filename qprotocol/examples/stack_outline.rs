@@ -5,7 +5,7 @@ use std::{
 
 use qbase::net::{addr::EndpointAddr, route::Pathway};
 use qprotocol::{
-    AddressBook, Dock, UdpSocket,
+    ArcAddrBook, Dock, UdpSocket,
     addr_book::AddressBookError,
     protocol::{
         forward::ForwardProtocol,
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Error> {
     let forward = Arc::new(ForwardProtocol::new());
     let topology = Arc::new(Topology::new(stun.clone(), forward.clone(), quic.clone()));
     let dock = Dock::new(topology);
-    let addresses = AddressBook::new();
+    let addresses = ArcAddrBook::new();
 
     // This example uses a private bind, so its bound address is Direct(inner).
     let interface = netdev::get_interfaces()
@@ -57,13 +57,13 @@ async fn main() -> Result<(), Error> {
     dock.add(raw.clone())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
-    addresses.insert_inner(&raw, inner)?;
+    addresses.add_sock_addr(bound);
     forward.serve(inner.addr(), &raw);
 
     // A FullCone result would add Direct(outer), while retaining the same raw socket.
     let outer = EndpointAddr::direct("203.0.113.10:50000".parse().unwrap());
     quic.register(outer, &raw)?;
-    addresses.insert_outer(&raw, outer)?;
+    addresses.add_endpoint_addr(bound, outer)?;
     forward.serve(outer.addr(), &raw);
 
     // A second raw socket demonstrates the complete independent receive path.
@@ -80,10 +80,9 @@ async fn main() -> Result<(), Error> {
     let mixed_path = Pathway::new(outer, remote_agent);
     println!("Direct Path: {direct_path}");
     println!("Direct -> Agent Path: {mixed_path}");
-    println!("mDNS: {:?}", addresses.mdns_endpoints(raw.local_addr()?));
-    println!("DDNS: {:?}", addresses.ddns_endpoints());
+    println!("mDNS: {:?}", addresses.mdns_query(bound.ip()));
 
-    // Ephemeral sockets use the global Dock/Topology and never enter AddressBook.
+    // Ephemeral sockets use the global Dock/Topology and never enter ArcAddrBook.
     let mut target = bound;
     target.set_port(0);
     let ephemeral = EphemeralSocket::bind(target)?;
@@ -94,7 +93,7 @@ async fn main() -> Result<(), Error> {
 
     drop(punched);
     dock.remove(&peer_raw);
-    addresses.remove_bound(bound);
+    addresses.del_sock_addr(bound);
     dock.shutdown();
     Ok(())
 }

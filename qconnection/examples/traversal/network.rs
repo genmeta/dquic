@@ -1,16 +1,21 @@
 //! Example network owner: scan interfaces once, register sockets, discover and publish addresses.
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::future::join_all;
-use qbase::net::{NatType, addr::EndpointAddr};
-use qprotocol::{AddressBook, Dock, QuicProtocol, StunProtocol, UdpSocket};
-use tokio::{sync::OnceCell, time::timeout};
+use qbase::net::{
+    NatType,
+    addr::EndpointAddr,
+    route::{Link, Scope},
+};
+use qprotocol::{ArcAddrBook, Dock, QuicProtocol, StunProtocol, UdpSocket};
+use tokio::{sync::OnceCell, task::JoinHandle, time::timeout};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct Network {
     pub endpoints: Vec<EndpointAddr>,
-    _sockets: Vec<Socket>,
+    _sockets: Vec<Arc<Socket>>,
+    nat_tasks: Vec<JoinHandle<()>>,
 }
 
 /// Both processes use the same relay so the mapped return address matches that relay.
@@ -46,7 +51,7 @@ async fn scan(relay: Option<SocketAddr>) -> Result<Network, Error> {
         return Err("no active physical IPv4 interface found".into());
     }
 
-    // Probe bindings concurrently, but keep each socket idle during its own NAT classification.
+    // Publish each discovered outer address without waiting for NAT classification.
     let results = join_all(sockets.into_iter().map(|mut socket| async move {
         let result = timeout(Duration::from_secs(45), socket.discover(relay)).await;
         match result {
@@ -56,10 +61,12 @@ async fn scan(relay: Option<SocketAddr>) -> Result<Network, Error> {
         }
     }))
     .await;
-    let mut network = Network { endpoints: Vec::new(), _sockets: Vec::new() };
+    let mut network = Network { endpoints: Vec::new(), _sockets: Vec::new(), nat_tasks: Vec::new() };
     for result in results {
         match result {
             Ok((socket, endpoint)) => {
+                let socket = Arc::new(socket);
+                network.nat_tasks.push(socket.classify(relay, endpoint.addr()));
                 network.endpoints.push(endpoint);
                 network._sockets.push(socket);
             }
@@ -82,7 +89,13 @@ impl Socket {
         let device = qudp::BoundDevice::new(interface.name.clone(), interface.index)?;
         let udp = Arc::new(UdpSocket::bind_to_device(addr, device)?);
         Dock::global().add(udp.clone())?;
-        let direct = udp.local_addr()?.into();
+        let bound = udp.local_addr()?;
+        let direct = EndpointAddr::direct(bound);
+        let addresses = ArcAddrBook::global();
+        addresses.add_sock_addr(bound);
+        if matches!(direct.scope(), Some(Scope::Internal | Scope::Loopback)) {
+            addresses.add_candidate(Link::new(bound, bound), NatType::FullCone);
+        }
         Ok(Self { udp, aliases: vec![direct] })
     }
 
@@ -97,33 +110,52 @@ impl Socket {
     async fn discover(&mut self, relay: SocketAddr) -> Result<EndpointAddr, Error> {
         let bound = self.udp.local_addr()?;
         let stun = StunProtocol::global();
-        let nat = stun.detect_nat(bound, relay).await?;
-        if nat == NatType::Blocked {
-            return Err(io::Error::other(format!("{bound}: STUN blocked")).into());
-        }
         let outer = stun.detect_outer(bound, relay).await?.ok_or("missing STUN mapping")?;
         let endpoint = EndpointAddr::mediate(relay, outer);
         self.register(outer.into())?;
         self.register(endpoint)?;
-        let addresses = AddressBook::global();
-        addresses.insert_inner(&self.udp, bound.into())?;
-        if outer != bound {
-            addresses.insert_outer(&self.udp, outer.into())?;
-        }
-        addresses.set_nat(bound, nat);
-        println!(
-            "STUN: interface={}, NAT={nat:?}\n  Local:  {bound}\n  Public: {outer}\n  Relay:  {relay}\n",
-            self.udp.bound_device().unwrap().name()
-        );
+        let addresses = ArcAddrBook::global();
+        addresses.add_endpoint_addr(bound, outer.into())?;
+        addresses.add_endpoint_addr(bound, endpoint)?;
+        println!("STUN: interface={}\n  Local:  {bound}\n  Public: {outer}\n  Relay:  {relay}\n", self.udp.bound_device().unwrap().name());
         Ok(endpoint)
+    }
+
+    fn classify(self: &Arc<Self>, relay: SocketAddr, outer: SocketAddr) -> JoinHandle<()> {
+        let owner = Arc::downgrade(self);
+        let bound = self.udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let result = timeout(Duration::from_secs(45), StunProtocol::global().detect_nat(bound, relay)).await;
+            // Upgrade only after probing. Hold the socket owner through candidate insertion,
+            // so no late result can add a candidate after del_sock_addr in Socket::drop.
+            let Some(socket) = owner.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(Ok(nat)) if nat != NatType::Blocked => {
+                    ArcAddrBook::global().add_candidate(Link::new(bound, outer), nat);
+                    println!("NAT: {bound} -> {outer}: {nat:?}");
+                }
+                result => eprintln!("NAT classification failed for {bound}: {result:?}"),
+            }
+            drop(socket);
+        })
     }
 }
 
 impl Drop for Socket {
     fn drop(&mut self) {
         if let Ok(bound) = self.udp.local_addr() {
-            AddressBook::global().remove_bound(bound);
+            ArcAddrBook::global().del_sock_addr(bound);
         }
         Dock::global().remove(&self.udp);
+    }
+}
+
+impl Drop for Network {
+    fn drop(&mut self) {
+        for task in &self.nat_tasks {
+            task.abort();
+        }
     }
 }

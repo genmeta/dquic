@@ -84,10 +84,10 @@ where
         }))
     }
 
-    pub fn on_local_added(&self, bound: SocketAddr, endpoint: EndpointAddr, outer: SocketAddr, tire: u32, nat: NatType) {
+    pub fn on_local_added(&self, link: Link, tire: u32, nat: NatType) {
         let (local, remotes) = {
             let mut addresses = self.0.addresses.lock().unwrap();
-            let frame = addresses.add_local(bound, endpoint, outer, tire, nat);
+            let frame = addresses.add_local(link, tire, nat);
             self.0.reliable_frames.send_frame([ReliableFrame::AddAddress(frame)]);
             (addresses.local_for_seq(frame.seq_num()).unwrap(), addresses.remote_frames())
         };
@@ -96,10 +96,10 @@ where
         }
     }
 
-    pub fn on_local_removed(&self, endpoint: EndpointAddr) {
+    pub fn on_local_removed(&self, link: Link) {
         let removed = {
             let mut addresses = self.0.addresses.lock().unwrap();
-            let removed = addresses.remove_local_endpoint(endpoint);
+            let removed = addresses.remove_local_link(link);
             for frame in &removed {
                 self.0.reliable_frames.send_frame([ReliableFrame::RemoveAddress(*frame)]);
             }
@@ -127,7 +127,7 @@ where
     }
 
     fn try_start_active(&self, local: LocalAddress, remote: AddAddressFrame) {
-        if local.frame.tire() != remote.tire() || !EndpointAddr::direct(*local.frame).matches_peer(EndpointAddr::direct(*remote)) {
+        if local.frame.tire() != remote.tire() || !EndpointAddr::direct(*local.frame).can_connect_to(EndpointAddr::direct(*remote)) {
             return;
         }
         let id = (&local.frame, &remote).punch_id();
@@ -378,11 +378,11 @@ where
         let id = (&local.frame, &remote).punch_id();
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
-        tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
+        tracing::trace!(target: "punch", %id, bound = %local.link.src, local = %*local.frame,
             remote = %*remote, ?local_nat, ?remote_nat, "active punch strategy");
         let dst = *remote;
         let socket = Dock::global()
-            .find_socket(local.bound)
+            .find_socket(local.link.src)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable"))?;
         let link = Link::new(socket.local_addr()?, dst);
         let mut now = PunchMeNowFrame::new(id.local_seq, id.remote_seq, *local.frame, local.frame.tire(), local_nat);
@@ -391,7 +391,7 @@ where
             (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric) => Err(io::Error::other("unsupported NAT pair")),
             (_, FullCone) => self.retry_hello(&socket, link, id, &tx, true).await,
             (Dynamic, Symmetric) => {
-                let (temporary, outer) = self.dynamic_socket(local.bound).await?;
+                let (temporary, outer) = self.dynamic_socket(local.link.src).await?;
                 let temp_addr = temporary.udp_socket().local_addr()?;
                 let temp_socket = temporary.udp_socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
@@ -413,7 +413,7 @@ where
             (Symmetric, RestrictedPort) => {
                 self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
                 tokio::time::timeout(COLLISION_TIMEOUT, tx.wait_punch_me_now()).await.map_err(|_| timed_out())?;
-                let won = self.predict(local.bound, dst, id, tx).await?;
+                let won = self.predict(local.link.src, dst, id, tx).await?;
                 self.retain_temporary(won)
             }
             (Symmetric, RestrictedCone) => {
@@ -422,7 +422,7 @@ where
                 self.retry_hello(&socket, link, id, &tx, false).await
             }
             (Dynamic, _) => {
-                let (temporary, outer) = self.dynamic_socket(local.bound).await?;
+                let (temporary, outer) = self.dynamic_socket(local.link.src).await?;
                 let temp_addr = temporary.udp_socket().local_addr()?;
                 let temp_socket = temporary.udp_socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
@@ -454,7 +454,7 @@ where
             }
             (Symmetric, Dynamic) => {
                 self.0.reliable_frames.send_frame([ReliableFrame::PunchMeNow(now)]);
-                let won = self.predict(local.bound, dst, id, tx).await?;
+                let won = self.predict(local.link.src, dst, id, tx).await?;
                 self.retain_temporary(won)
             }
         }
@@ -465,10 +465,10 @@ where
         let id = PunchId::new(local.frame.seq_num(), remote.local_seq());
         let local_nat = local.frame.nat_type();
         let remote_nat = remote.nat_type();
-        tracing::trace!(target: "punch", %id, bound = %local.bound, local = %*local.frame,
+        tracing::trace!(target: "punch", %id, bound = %local.link.src, local = %*local.frame,
             remote = %remote.address(), ?local_nat, ?remote_nat, "passive punch strategy");
         let socket = Dock::global()
-            .find_socket(local.bound)
+            .find_socket(local.link.src)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "local socket unavailable"))?;
         let link = Link::new(socket.local_addr()?, remote.address());
         let now = PunchMeNowFrame::new(id.local_seq, id.remote_seq, *local.frame, local.frame.tire(), local_nat);
@@ -489,7 +489,7 @@ where
                 Ok(())
             }
             (Symmetric, RestrictedPort | Dynamic) => {
-                let won = self.predict(local.bound, link.dst, id, tx).await?;
+                let won = self.predict(local.link.src, link.dst, id, tx).await?;
                 self.retain_temporary(won)
             }
             (RestrictedCone, Symmetric) => {

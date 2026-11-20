@@ -13,7 +13,7 @@ use std::{
 use bytes::BytesMut;
 use qbase::{
     frame::{AddAddressFrame, PunchDoneFrame, PunchHelloFrame, ReliableFrame, io::SendFrame},
-    net::{NatType, addr::EndpointAddr, route::Link},
+    net::{NatType, route::Link},
     packet::assemble::Package,
 };
 use qprotocol::EphemeralSocket;
@@ -44,13 +44,13 @@ impl PunchPacketEncoder for UnusedEncoder {
 fn local_addresses_are_announced_when_added_on_the_reliable_queue() {
     let frames = RecordedFrames::default();
     let puncher = ArcPuncher::new(frames.clone(), UnusedEncoder);
-    let endpoint = EndpointAddr::direct("127.0.0.1:5000".parse().unwrap());
-    puncher.on_local_added("127.0.0.1:5000".parse().unwrap(), endpoint, "198.51.100.1:5000".parse().unwrap(), 1, NatType::RestrictedCone);
+    let link = Link::new("127.0.0.1:5000".parse().unwrap(), "198.51.100.1:5000".parse().unwrap());
+    puncher.on_local_added(link, 1, NatType::RestrictedCone);
     assert!(matches!(
         frames.0.lock().unwrap().as_slice(),
         [ReliableFrame::AddAddress(frame)] if frame.seq_num() == 0
     ));
-    puncher.on_local_removed(endpoint);
+    puncher.on_local_removed(link);
     assert!(matches!(
         frames.0.lock().unwrap().last(),
         Some(ReliableFrame::RemoveAddress(frame)) if frame.seq_num.into_u64() == 0
@@ -65,9 +65,9 @@ async fn adding_another_default_group_binding_probes_that_specific_socket() {
     let second_addr = second.udp_socket().local_addr().unwrap();
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let puncher = ArcPuncher::new(RecordedFrames::default(), support::Encoder::default());
-    puncher.on_local_added(first_addr, first_addr.into(), first_addr, 0, NatType::FullCone);
+    puncher.on_local_added(Link::new(first_addr, first_addr), 0, NatType::FullCone);
     puncher.recv_add_address(AddAddressFrame::new(9, peer.local_addr().unwrap(), 0, NatType::FullCone));
-    puncher.on_local_added(second_addr, second_addr.into(), second_addr, 0, NatType::FullCone);
+    puncher.on_local_added(Link::new(second_addr, second_addr), 0, NatType::FullCone);
     let mut received = std::collections::HashSet::new();
     tokio::time::timeout(Duration::from_secs(2), async {
         while received.len() < 2 {

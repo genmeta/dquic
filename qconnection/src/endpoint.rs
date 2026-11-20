@@ -121,7 +121,7 @@ impl QuicEndpoint {
         .map_err(|error| internal_error(error.to_string()))
     }
 
-    /// Resolve the peer in the background and add every usable AddressBook pairing.
+    /// Resolve the peer in the background and pair discovered peers with the current ArcAddrBook endpoints.
     /// Uses the sources registered with [`qresolve::Resolver::add`].
     /// The client lifecycle owns discovery and stops it when the connection closes.
     /// Dropping this future before delivery closes the pending connection and discovery.

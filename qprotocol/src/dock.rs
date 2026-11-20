@@ -43,7 +43,7 @@ impl Dock {
     }
 
     /// Register reception and the direct QUIC address.
-    /// The caller manages publication and withdrawal through [`crate::AddressBook`].
+    /// The caller manages publication and withdrawal through [`crate::ArcAddrBook`].
     /// The handle identifies this registration even after reception has stopped.
     pub fn add(self: &Arc<Self>, socket: Arc<UdpSocket>) -> io::Result<Option<AbortHandle>> {
         let bound = socket.local_addr()?;

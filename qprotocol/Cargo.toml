@@ -18,6 +18,7 @@ dashmap = { workspace = true }
 qbase = { workspace = true }
 qresolve = { workspace = true }
 qudp = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }

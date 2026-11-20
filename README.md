@@ -134,7 +134,7 @@ RootCerts::set([CertificateDer::from(
 )])?;
 let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
 Dock::global().add(socket.clone())?; // More sockets can be added.
-AddressBook::global().insert_inner(&socket, socket.local_addr()?.into())?;
+ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
 Resolver::add(Arc::new(SystemResolver));
 ```
 

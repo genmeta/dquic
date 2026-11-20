@@ -1,7 +1,7 @@
 //! Run echo-server first, then: cargo run -p dquic --example echo-client
 use std::{error::Error, sync::Arc};
 
-use dquic::{AddressBook, CertificateDer, Dock, QuicEndpoint, Resolver, RootCerts, SystemResolver, UdpSocket};
+use dquic::{ArcAddrBook, CertificateDer, Dock, QuicEndpoint, Resolver, RootCerts, SystemResolver, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main(flavor = "current_thread")]
@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     RootCerts::set([CertificateDer::from(include_bytes!("keychain/ca.der").as_slice())])?;
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
     Dock::global().add(socket.clone())?;
-    AddressBook::global().insert_inner(&socket, socket.local_addr()?.into())?;
+    ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
     Resolver::add(Arc::new(SystemResolver));
 
     let endpoint = QuicEndpoint::anonymous();

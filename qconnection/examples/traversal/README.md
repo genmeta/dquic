@@ -12,7 +12,7 @@
 cargo run -p qconnection --example traversal-server
 ```
 
-等待 STUN 探测完成。server 直接打印可复制执行的命令，例如：
+等待 STUN 映射就绪；NAT 分类在后台继续。server 打印可复制执行的命令，例如：
 
 ```sh
 cargo run -p qconnection --example traversal-client -- \
@@ -41,11 +41,13 @@ client 每两秒继续发送问候，但仅在回显内容变化时打印；serv
 - `traversal-server.rs`：配置测试身份，`endpoint.listen(...)`，回显每个双向流。
 - `traversal/network.rs`：进程内全局初始化一次。用 `netdev` 扫描活动物理网卡的 IPv4 地址，
   为每个地址绑定一个 socket，保存原始网卡名称和索引，注册到 Dock / QuicProtocol。
-  同一个 socket 完成 NAT 分类、映射探测、中转收发和直连收发。
+  同一个 socket 先完成映射探测，登记通信地址并开始通信，后台再完成 NAT 分类。
+  Network 持有 socket 和分类任务，停止时取消任务；结果提交持有 socket 所有者，防止撤销后迟到添加。
 
 STUN 使用 `nat.genmeta.net:20002`。server 选择一个 IPv4 STUN/中转服务地址；client 使用
-server 端点中的同一个 agent，以保证返回地址对应这台中转服务。内网地址和探测出的公网地址
-都发布到 AddressBook，连接内的 Puncher 自动消费这些地址。
+server 端点中的同一个 agent，以保证返回地址对应这台中转服务。实际 socket 地址和探测出的
+Direct / Mediate 端点登记到 ArcAddrBook。内网 self Link 显式登记为 FullCone，外网 Link
+取得 NAT 分类后登记 Candidate，连接内的 Puncher 通过 attach 自动消费。分类失败不撤销已可通信的端点。
 
 全局 `Resolver` 默认没有任何解析源。示例仅用 `Resolver::add` 注册一个 mock，将测试证书
 上的域名 `localhost` 映射为 server 的 **中转端点**。公网 Direct 和内网 Direct 地址均通过

@@ -110,7 +110,7 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
             let low = ArcPuncher::new(Frames(low_frames), low_encoder.clone());
             let high = ArcPuncher::new(Frames(high_frames), high_encoder.clone());
             for (puncher, bound, nat) in [(&low, lower, low_nat), (&high, higher, high_nat)] {
-                puncher.on_local_added(bound, bound.into(), bound, 0, nat);
+                puncher.on_local_added(Link::new(bound, bound), 0, nat);
             }
             let ReliableFrame::AddAddress(low_address) = low_received.recv().await.unwrap().0 else {
                 panic!("expected ADD_ADDRESS");
@@ -219,7 +219,7 @@ async fn stale_active_completion_preserves_passive_transaction_and_done_delivery
     let on_done = DoneCallback::default();
     let encoder = Encoder::default();
     let puncher = ArcPuncher::new(CallbackFrames { frames: Frames(sender), on_done: on_done.clone() }, encoder.clone());
-    puncher.on_local_added(local, local.into(), local, 0, NatType::FullCone);
+    puncher.on_local_added(Link::new(local, local), 0, NatType::FullCone);
     let ReliableFrame::AddAddress(address) = received.recv().await.unwrap().0 else {
         panic!("expected ADD_ADDRESS");
     };

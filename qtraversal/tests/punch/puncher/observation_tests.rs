@@ -17,7 +17,7 @@ use qbase::{
     },
     packet::assemble::Package,
 };
-use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, QuicProtocol, UdpSocket, addr_book::Candidate};
 use qtraversal::punch::{ArcPuncher, PunchPacketEncoder};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -118,14 +118,10 @@ impl Binding {
         }
     }
 
-    fn publish(&mut self, book: &AddressBook, endpoint: EndpointAddr) {
+    fn publish(&mut self, book: &ArcAddrBook, endpoint: EndpointAddr) {
         self.register(endpoint);
-        if endpoint.scope() == Some(Scope::External) {
-            book.insert_outer(&self.socket, endpoint)
-        } else {
-            book.insert_inner(&self.socket, endpoint)
-        }
-        .unwrap();
+        book.add_sock_addr(self.bound());
+        book.add_endpoint_addr(self.bound(), endpoint).unwrap();
     }
 }
 
@@ -135,9 +131,15 @@ impl Drop for Binding {
     }
 }
 
+fn attach(book: &ArcAddrBook) -> mpsc::UnboundedReceiver<Candidate> {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    book.attach_puncher(sender);
+    receiver
+}
+
 #[tokio::test]
-async fn replay_advertises_lan_immediately_and_external_aliases_after_nat_arrives() {
-    let book = AddressBook::new();
+async fn replay_advertises_explicit_candidates_and_refreshes_each_link() {
+    let book = ArcAddrBook::new();
     let mut binding = Binding::new(None);
     let inner = binding.inner();
     let outer = binding.outer([8, 8, 4, 4]);
@@ -145,103 +147,97 @@ async fn replay_advertises_lan_immediately_and_external_aliases_after_nat_arrive
     for endpoint in [inner, outer, alias] {
         binding.publish(&book, endpoint);
     }
+    book.add_candidate(Link::new(binding.bound(), inner.addr()), NatType::FullCone);
     let frames = Frames::default();
     let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
-    let removed = Arc::new(Mutex::new(Vec::new()));
-    let observed = removed.clone();
-    let task = puncher.observe_endpoints(book.subscribe_punch(Scopes::ALL), closed, move |endpoint| {
-        observed.lock().unwrap().push(endpoint);
-    });
+    let task = puncher.observe_candidates(attach(&book), Scopes::ALL, closed);
     assert!(matches!(frames.snapshot().as_slice(), [ReliableFrame::AddAddress(frame)]
         if **frame == inner.addr() && frame.nat_type() == NatType::FullCone && frame.tire() == 0));
-    assert_eq!(book.nat(binding.bound()), None);
-    book.set_nat(binding.bound(), NatType::RestrictedCone);
+    for endpoint in [outer, alias] {
+        let link = Link::new(binding.bound(), endpoint.addr());
+        assert_eq!(book.try_get_nat_type(link), None);
+        assert!(book.add_candidate(link, NatType::RestrictedCone));
+        assert!(!book.add_candidate(link, NatType::RestrictedCone));
+    }
     assert_eq!(frames.wait_for(3).await.len(), 3);
-    assert_eq!(frames.advertised().len(), 3);
-    assert!(!book.set_nat(binding.bound(), NatType::RestrictedCone));
-    book.set_nat(binding.bound(), NatType::Symmetric);
-    let recorded = frames.wait_for(7).await;
-    assert_eq!(recorded.len(), 7);
+    for endpoint in [outer, alias] {
+        book.add_candidate(Link::new(binding.bound(), endpoint.addr()), NatType::Symmetric);
+    }
+    assert_eq!(frames.wait_for(7).await.len(), 7);
     let locals = frames.advertised();
     assert_eq!(locals.iter().filter(|frame| frame.nat_type() == NatType::FullCone).count(), 1);
     assert_eq!(locals.iter().filter(|frame| frame.nat_type() == NatType::Symmetric).count(), 2);
-    assert!(removed.lock().unwrap().is_empty(), "classification changes do not retire paths");
     close.send(()).unwrap();
     task.await.unwrap();
-    book.remove(outer);
+    book.del_candidate(Link::new(binding.bound(), outer.addr()));
     assert_eq!(frames.snapshot().len(), 7);
     assert!(Dock::global().find_socket(binding.bound()).is_some());
 }
 
 #[tokio::test]
-async fn replacement_and_binding_withdrawal_preserve_other_aliases_and_reset_nat() {
-    let book = AddressBook::new();
+async fn endpoint_withdrawal_is_independent_and_socket_withdrawal_removes_all_links() {
+    let book = ArcAddrBook::new();
     let mut binding = Binding::new(None);
     let inner = binding.inner();
     let outer = binding.outer([8, 8, 4, 4]);
     let alias = binding.outer([8, 8, 8, 8]);
-    book.set_nat(binding.bound(), NatType::RestrictedCone);
     for endpoint in [inner, outer, alias] {
         binding.publish(&book, endpoint);
+        book.add_candidate(Link::new(binding.bound(), endpoint.addr()), NatType::RestrictedCone);
     }
     let frames = Frames::default();
     let puncher = ArcPuncher::new(frames.clone(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
-    let (removed, mut removals) = mpsc::unbounded_channel();
-    let task = puncher.observe_endpoints(book.subscribe_punch(Scopes::ALL), closed, move |endpoint| {
-        removed.send(endpoint).unwrap();
-    });
+    let task = puncher.observe_candidates(attach(&book), Scopes::ALL, closed);
     assert_eq!(frames.snapshot().len(), 3);
-    book.remove(outer);
-    assert_eq!(frames.wait_for(4).await.len(), 4);
-    assert_eq!(removals.recv().await, Some(outer));
+    book.del_endpoint_addr(outer);
+    assert_eq!(frames.advertised().len(), 3, "endpoint withdrawal does not remove a candidate");
+    book.del_candidate(Link::new(binding.bound(), outer.addr()));
+    frames.wait_for(4).await;
     assert_eq!(frames.advertised().len(), 2);
     let replacement = binding.outer([142, 250, 1, 1]);
-    binding.register(replacement);
-    book.replace(alias, replacement).unwrap();
+    binding.publish(&book, replacement);
+    book.del_endpoint_addr(alias);
+    book.del_candidate(Link::new(binding.bound(), alias.addr()));
+    book.add_candidate(Link::new(binding.bound(), replacement.addr()), NatType::RestrictedCone);
     let recorded = frames.wait_for(6).await;
     assert!(matches!(&recorded[4..], [ReliableFrame::RemoveAddress(_), ReliableFrame::AddAddress(frame)]
         if **frame == replacement.addr() && frame.nat_type() == NatType::RestrictedCone));
-    assert_eq!(removals.recv().await, Some(alias));
-    book.remove_bound(binding.bound());
+    book.del_sock_addr(binding.bound());
     frames.wait_for(8).await;
-    // Removed(inner), Removed(replacement), then BoundRemoved's actual Direct address.
-    for endpoint in [inner, replacement, inner] {
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1), removals.recv()).await.unwrap(), Some(endpoint));
-    }
-    assert_eq!(frames.advertised().len(), 0);
+    assert!(frames.advertised().is_empty());
+    assert_eq!(book.try_get_nat_type(Link::new(binding.bound(), replacement.addr())), None);
     binding.publish(&book, outer);
-    book.set_nat(binding.bound(), NatType::FullCone);
+    assert_eq!(frames.snapshot().len(), 8, "reusing a socket does not inherit old candidates");
+    book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::FullCone);
     let recorded = frames.wait_for(9).await;
-    assert_eq!(recorded.len(), 9, "a reused binding must not inherit the old NAT classification");
     assert!(matches!(recorded.last(), Some(ReliableFrame::AddAddress(frame)) if frame.nat_type() == NatType::FullCone));
     close.send(()).unwrap();
     task.await.unwrap();
 }
 
 #[tokio::test]
-async fn scoped_subscription_and_pending_endpoint_removal_do_not_leak_advertisements() {
-    let book = AddressBook::new();
+async fn observer_filters_scopes_and_ignores_endpoints_without_candidates() {
+    let book = ArcAddrBook::new();
     let mut binding = Binding::new(None);
-    let inner = binding.inner();
     let outer = binding.outer([8, 8, 4, 4]);
-    binding.publish(&book, inner);
     binding.publish(&book, outer);
+    book.add_candidate(Link::new(binding.bound(), binding.bound()), NatType::FullCone);
     let frames = Frames::default();
     let puncher = ArcPuncher::new(frames.clone(), Encoder);
-    let (removed, mut removals) = mpsc::unbounded_channel();
-    let task = puncher.observe_endpoints(book.subscribe_punch(Scope::External), pending::<()>(), move |endpoint| {
-        removed.send(endpoint).unwrap();
-    });
+    let task = puncher.observe_candidates(attach(&book), Scope::External.into(), pending::<()>());
     assert!(frames.snapshot().is_empty());
-    book.remove(outer);
-    assert_eq!(tokio::time::timeout(Duration::from_secs(1), removals.recv()).await.unwrap(), Some(outer));
-    book.set_nat(binding.bound(), NatType::RestrictedCone);
+    book.del_endpoint_addr(outer);
+    let link = Link::new(binding.bound(), outer.addr());
+    book.add_candidate(link, NatType::RestrictedCone);
+    frames.wait_for(1).await;
+    assert_eq!(frames.advertised().len(), 1, "candidate observation does not read endpoints");
+    book.del_candidate(link);
+    frames.wait_for(2).await;
     drop(book);
     task.await.unwrap();
-    assert!(frames.snapshot().is_empty());
-    assert_eq!(frames.advertised().len(), 0);
+    assert!(frames.advertised().is_empty());
 }
 
 #[tokio::test]
@@ -252,13 +248,13 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
         .expect("loopback interface");
     let device = qudp::BoundDevice::new(interface.name, interface.index).unwrap();
     let mut binding = Binding::new(Some(device.clone()));
-    let book = AddressBook::new();
+    let book = ArcAddrBook::new();
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
-    book.set_nat(binding.bound(), NatType::Symmetric);
+    book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::Symmetric);
     let puncher = ArcPuncher::new(Frames::default(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
-    let task = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
+    let task = puncher.observe_candidates(attach(&book), Scope::External.into(), closed);
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let remote = peer.local_addr().unwrap();
     puncher.recv_punch_me_now(Pathway::new(outer, remote.into()), PunchMeNowFrame::new(9, 0, remote, 0, NatType::RestrictedPort));
@@ -275,14 +271,14 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
 
 #[tokio::test]
 async fn alias_probes_use_the_actual_socket_source_address() {
-    let book = AddressBook::new();
+    let book = ArcAddrBook::new();
     let mut binding = Binding::new(None);
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
-    book.set_nat(binding.bound(), NatType::RestrictedCone);
+    book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::RestrictedCone);
     let puncher = ArcPuncher::new(Frames::default(), Encoder);
     let (close, closed) = oneshot::channel::<()>();
-    let observer = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
+    let observer = puncher.observe_candidates(attach(&book), Scope::External.into(), closed);
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let remote = peer.local_addr().unwrap();
     puncher.recv_punch_me_now(Pathway::new(outer, remote.into()), PunchMeNowFrame::new(9, 0, remote, 0, NatType::FullCone));
@@ -316,16 +312,16 @@ async fn nat_refresh_stops_old_probes_and_allows_new_address_transactions() {
         .expect("requested address pair must send a HELLO")
     }
 
-    let book = AddressBook::new();
+    let book = ArcAddrBook::new();
     let mut binding = Binding::new(None);
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
-    book.set_nat(binding.bound(), NatType::RestrictedCone);
+    book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::RestrictedCone);
     let frames = Frames::default();
     let encoder = super::support::Encoder::default();
     let puncher = ArcPuncher::new(frames.clone(), encoder.clone());
     let (close, closed) = oneshot::channel::<()>();
-    let observer = puncher.observe_endpoints(book.subscribe_punch(Scope::External), closed, |_| {});
+    let observer = puncher.observe_candidates(attach(&book), Scope::External.into(), closed);
     let old_seq = frames.advertised()[0].seq_num();
     let active_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let finished_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -351,7 +347,7 @@ async fn nat_refresh_stops_old_probes_and_allows_new_address_transactions() {
         "completed old pair suppresses replay"
     );
 
-    book.set_nat(binding.bound(), NatType::Dynamic);
+    book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::Dynamic);
     let recorded = frames.wait_for(3).await;
     let [ReliableFrame::RemoveAddress(removed), ReliableFrame::AddAddress(added)] = &recorded[1..] else {
         panic!("NAT refresh withdraws the old address and advertises its replacement");

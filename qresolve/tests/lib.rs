@@ -13,7 +13,9 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct TestPublisher;
+    struct TestPublisher {
+        name: String,
+    }
 
     impl Display for TestPublisher {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -22,10 +24,10 @@ mod tests {
     }
 
     impl Publish for TestPublisher {
-        fn publish<'a>(&'a self, name: &'a str, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a> {
+        fn publish<'a>(&'a self, endpoints: &mut dyn Iterator<Item = EndpointAddr>) -> PublishFuture<'a> {
             let endpoints: Vec<_> = endpoints.collect();
             async move {
-                assert_eq!(name, "demo.dhttp.net");
+                assert_eq!(self.name, "demo.dhttp.net");
                 assert_eq!(endpoints.len(), 1);
                 Ok(())
             }
@@ -35,11 +37,11 @@ mod tests {
 
     #[test]
     fn publish_trait_accepts_endpoint_iterator() {
-        let publisher: &dyn Publish = &TestPublisher;
+        let publisher: &dyn Publish = &TestPublisher { name: "demo.dhttp.net".into() };
         let endpoint = EndpointAddr::direct("203.0.113.10:4433".parse().unwrap());
         let mut endpoints = std::iter::once(endpoint);
 
-        futures::executor::block_on(publisher.publish("demo.dhttp.net", &mut endpoints)).expect("publish succeeds");
+        futures::executor::block_on(publisher.publish(&mut endpoints)).expect("publish succeeds");
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
@@ -56,7 +58,7 @@ mod tests {
     #[test]
     fn publish_trait_objects_upcast_to_any() {
         assert_send_sync::<TestPublisher>();
-        let publisher: &dyn Publish = &TestPublisher;
+        let publisher: &dyn Publish = &TestPublisher { name: "demo.dhttp.net".into() };
         let any: &dyn Any = publisher;
 
         assert!(any.is::<TestPublisher>());

@@ -201,10 +201,10 @@ impl AddrBook {
     }
 
     fn del_endpoint_addr(&mut self, endpoint: EndpointAddr) -> Option<SocketAddr> {
-        if let EndpointAddr::Direct { addr } = endpoint {
-            if self.socket_addr.contains(&addr) {
-                return None;
-            }
+        if let EndpointAddr::Direct { addr } = endpoint
+            && self.socket_addr.contains(&addr)
+        {
+            return None;
         }
         let sock_addr = self.endpoint_addr.remove(&endpoint)?;
         self.notify_publishers();

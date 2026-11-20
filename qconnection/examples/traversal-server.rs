@@ -25,12 +25,11 @@ async fn main() -> Result<(), Error> {
     )?;
     let endpoint = QuicEndpoint::from(identity);
 
-    let network = network::start(None).await?;
-
     let (sender, mut incoming) = mpsc::unbounded_channel();
     endpoint.listen(Scopes::ALL, move |connection| {
         let _ = sender.send(connection);
     })?;
+    let network = network::start(None).await?;
     for address in &network.endpoints {
         println!("cargo run -p qconnection --example traversal-client -- \\\n  --server {address}");
     }

@@ -12,7 +12,7 @@ use std::{
 use futures::{FutureExt, StreamExt, channel::mpsc, stream};
 use qbase::{cid::ConnectionId, endpoint::Anonymous, net::Family, role::Role};
 use qconnection::{QuicEndpoint, Scope, ServerRegistry};
-use qprotocol::{AddressBook, Dock, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, UdpSocket};
 use qresolve::{Record, Resolve, ResolveFuture, Resolver};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -53,7 +53,7 @@ impl Registration {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         Dock::global().add(socket.clone()).unwrap();
         if publish {
-            AddressBook::global().insert_inner(&socket, socket.local_addr().unwrap().into()).unwrap();
+            ArcAddrBook::global().add_sock_addr(socket.local_addr().unwrap());
         }
         Self(socket)
     }
@@ -61,7 +61,7 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        AddressBook::global().remove_bound(self.0.local_addr().unwrap());
+        ArcAddrBook::global().del_sock_addr(self.0.local_addr().unwrap());
         Dock::global().remove(&self.0);
     }
 }

@@ -1,12 +1,16 @@
 //! Real UDP regression for address discovery, punching, validation and path loss.
-//! Keep this in its own test process: Dock, AddressBook and the router are globals.
+//! Keep this in its own test process: Dock, ArcAddrBook and the router are globals.
 mod common;
 
 use std::{sync::Arc, time::Duration};
 
 use qbase::{
     cid::{ConnectionId, GenUniqueCid},
-    net::{addr::EndpointAddr, route::Pathway},
+    net::{
+        NatType,
+        addr::EndpointAddr,
+        route::{Link, Pathway},
+    },
     packet::{GetDcid, GetScid},
     param::ParameterId,
     role::Role,
@@ -15,7 +19,7 @@ use qbase::{
 use qconnection::{
     ArcConnection, ArcLocalCids, ArcReliableFrames, Error, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
 };
-use qprotocol::{AddressBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, QuicProtocol, UdpSocket};
 use qtransport::{StreamReader, StreamWriter, keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -40,11 +44,13 @@ impl Socket {
     }
 
     fn publish(&self) {
-        AddressBook::global().insert_inner(&self.0, self.endpoint()).unwrap();
+        let bound = self.0.local_addr().unwrap();
+        ArcAddrBook::global().add_sock_addr(bound);
+        ArcAddrBook::global().add_candidate(Link::new(bound, bound), NatType::FullCone);
     }
 
     fn withdraw(&self) {
-        AddressBook::global().remove_bound(self.0.local_addr().unwrap());
+        ArcAddrBook::global().del_sock_addr(self.0.local_addr().unwrap());
         Dock::global().remove(&self.0);
     }
 }
@@ -263,7 +269,7 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
     assert_eq!(&opening, b"open");
     echo(&mut client_stream, &mut server_stream, b"before migration").await.unwrap();
 
-    // Only publish a new address. The test must not manually wire observe_endpoints,
+    // Only publish a new address. The test must not manually wire observe_candidates,
     // call on_local_added/start_validation, or mark the new Path as validated.
     let new_socket = Socket::new();
     let new_route = Pathway::new(new_socket.endpoint(), server_socket.endpoint());

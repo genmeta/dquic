@@ -66,20 +66,19 @@ DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignore
 
 可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块统一扫描网卡、注册 Dock 并探测地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
 
-网络所有者通过 `Dock::add(socket)` 登记接收任务及直接 QUIC 地址，额外别名通过 `QuicProtocol::register` 登记。地址发布由所有者显式调用 `AddressBook::insert_inner / insert_outer`；撤回时调用 `AddressBook::remove_bound(bound)`，再从 Dock 移除 socket。Dock 按实际绑定地址调用 `QuicProtocol::unregister(bound)`，撤销该绑定的全部 endpoint。
+网络所有者先通过 `Dock::add(socket)` 登记接收任务及直接 QUIC 地址，再调用 `ArcAddrBook::global().add_sock_addr(bound)`。额外别名先通过 `QuicProtocol::register` 登记通信路由，再调用 `add_endpoint_addr(bound, endpoint)`。取得 NAT 类型后，单独调用 `add_candidate(Link::new(bound, outer), nat)`；内网直接可达的 self Link 也由所有者显式登记为 FullCone。撤销单个端点与候选分别使用 `del_endpoint_addr` 和 `del_candidate`。socket 结束时先停止探测结果提交，调用 `del_sock_addr(bound)` 清除该 socket 的全部端点和候选，再从 Dock 移除 socket。Dock 撤销该绑定的全部 QUIC 路由。
 
-`QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，由客户端生命周期启动并持有 DNS 查询任务。查询使用全局 Resolver 的快照调用 `lookup(server_name, "", None)`，持续消费返回的流；每条 DNS 记录与当前 AddressBook 配对后调用 `paths.add_path`，重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；客户端在握手失败或连接关闭时取消并等待查询任务退出，再回收路径。服务端不启动 DNS 查询，Paths 仅管理路径。
+`QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，查询全局 Resolver 并持续消费 `lookup(server_name, "", None)` 返回的流。每条普通 DNS 记录通过 `ArcAddrBook::matches(peer_ep_addr)` 取得可连接的本地 EndpointAddr，返回 `SmallVec<[EndpointAddr; 4]>`；mDNS 的 `Source::Mdns { nic_ip }` 通过 `mdns_query(nic_ip)` 选取本地实际 socket 地址。地址簿使用 `EndpointAddr::can_connect_to` 筛选类型、地址族、可用性和回环范围；客户端发现模块直接调用 `paths.add_path`，socket 或传输失败由 Path 的发送和退休流程处理。重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；服务端不启动 DNS 查询。
 
-客户端将 DNS 来源直接交给 `AddressBook::pathways_to(peer, &source)`。AddressBook 使用 `EndpointAddr::matches_peer` 匹配端点类型和地址族，回环与非回环端点在两个方向都不配对；其他 scope 不要求相同，保留私网端点经 NAT 访问公网的候选。客户端检查候选对应的 socket 注册是否仍有效，然后添加路径。mDNS 的 `nic` 精确匹配登记时的网卡名称，缺少网卡信息时跳过候选；其他 DNS 来源也可以返回内网地址。配对时不枚举系统网卡，不根据 IP 推断网卡，也不改写网卡名称。
+Endpoint 列表与 NAT 分类独立，outer 就绪即可用于普通通信。握手后，客户端和服务端通过 `ArcAddrBook::attach` 观察 Candidate；Puncher 按连接 scopes 过滤 Link 的 outer，生成 ADD_ADDRESS。NAT 刷新与候选撤销只更新对应完整 Link 的通告和打洞事务，不自动退休已有路径。临时打洞 socket 不加入地址簿。
 
-`insert_inner / insert_outer` 直接接收已创建的 socket，例如 `addresses.insert_inner(&socket, endpoint)`。目录读取其 `local_addr()` 和 `bound_device()`，与端点发布原子地记录绑定信息，不持有 socket。同一绑定的 aliases 必须使用一致的网卡信息；普通 socket 的网卡信息记为未知。冲突会导致登记失败；`remove_bound` 同时清除端点、NAT 和网卡记录。`BindUri` 的解析结果保留 `netdev` 返回的原始网卡名称和索引。后绑定网卡的 `UdpSocket::bind_device` 要求可变引用，并在成功时同步元数据；已发布的绑定需要先撤销再重新登记。
+网络所有者通过 `tokio::spawn(ArcAddrBook::global().clone().attach_publisher(publisher, scopes))` 启动发布观察任务并持有句柄。任务先发布当前列表，再等待变化；按 scopes 过滤后调用 `qresolve::Publish::publish`，空列表也发布以撤销旧记录。发布串行执行，失败记录日志并继续处理后续变化；慢发布期间的变化合并为最新列表。取消任务即停止观察。域名与后端配置由 Publish 实现持有，trait 不再接收域名参数；watch 借用不会跨 publish 的 await。
 
 ### mDNS 跨仓库约束
 
 - mDNS 实现在独立的 `../ddns` 仓库（包名 `dyns`），本仓库提供解析接口并消费解析结果。
-- mDNS 创建、socket 绑定和来源匹配的网卡枚举及标识解析必须统一使用 `netdev`。`Source::Mdns.nic` 与本地绑定必须遵循同一套网卡标识约定。
-- mDNS 来源的生成需要在 `ddns` 仓库落实；连接层的去括号等字符串处理不能代替跨仓库的标识一致性。
-- 当前 mDNS 入口仍接受调用者传入的名称，上述约束尚需在其实现中落实，不代表已完成跨平台兼容验证。
+- 解析源通过 `Source::Mdns { nic_ip: IpAddr }` 标明本地接收接口 IP，连接侧只从地址簿已登记的实际 socket 中查询；不缓存网卡名称或枚举网卡来配对。
+- mDNS 服务按接口 IP 调用 `mdns_query`，返回实际 socket 地址。本次未修改独立仓库的 mDNS 实现。
 
 ### 底层接线
 
@@ -148,7 +147,7 @@ Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `nat.genmeta
 
 接收流程当前先通过 `path_for` 取得或创建路径、记入接收字节，再进行解密认证。认证成功后才接纳新的被动路径（第 7 项）已回退，仍待后续处理。
 
-AddressBook 订阅、路径验证与发送限制、地址撤销后的路径退休和恢复、Puncher 关闭清理仍待完成。
+ArcAddrBook 的 Candidate 订阅已接入客户端和服务端生命周期。地址撤销后的路径退休和恢复不由地址簿承担。
 
 真实 UDP 测试覆盖匿名/双向身份、丢失 ServerHello/Finished、成熟后新增路径及接替原路径、流传输和 detached 任务释放。阶段测试覆盖 Handshake keys 前不创建 Handshake space，以及等待参数、1-RTT keys、HANDSHAKE_DONE 时关闭；交付时检查 Handshake recver 已退役而 sender 仍可用。
 

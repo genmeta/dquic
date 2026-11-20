@@ -549,3 +549,77 @@ async fn data_packets_update_shared_idle_and_only_effective_payload_starts_heart
         paths.retire_all();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn address_observation_keeps_paths_alive_until_its_current_event_finishes() {
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use qbase::{
+        cid::ConnectionId,
+        frame::{ReliableFrame, io::SendFrame},
+        net::{
+            NatType,
+            route::{Link, Scopes},
+        },
+        packet::assemble::Package,
+        role::Role,
+    };
+    use qprotocol::addr_book::Candidate;
+    use qtraversal::punch::{ArcPuncher, PunchPacketEncoder};
+
+    #[derive(Clone)]
+    struct BlockingFrames(Arc<tokio::sync::Notify>, Arc<Mutex<mpsc::Receiver<()>>>);
+
+    impl SendFrame<ReliableFrame> for BlockingFrames {
+        fn send_frame<I: IntoIterator<Item = ReliableFrame>>(&self, _: I) {
+            self.0.notify_one();
+            self.1.lock().unwrap().recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+    }
+
+    #[derive(Clone)]
+    struct UnusedEncoder;
+
+    impl PunchPacketEncoder for UnusedEncoder {
+        fn encode_probe<P>(&self, _: P) -> std::io::Result<bytes::BytesMut>
+        where
+            P: for<'b> Package<&'b mut [u8]>,
+        {
+            unreachable!("no remote candidates are registered");
+        }
+    }
+
+    let paths = common::initial_paths(
+        Role::Server,
+        ConnectionId::from_slice(b"serverid"),
+        ConnectionId::from_slice(b"original"),
+        common::initial_keys(true),
+    );
+    let weak = Arc::downgrade(&paths);
+    let local_cids = paths.cid_registry.local.clone();
+    let initial = common::initial_space(&paths.spaces);
+    let terminator = paths.terminator.clone();
+    let (events, received) = tokio::sync::mpsc::unbounded_channel();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (resume, blocked) = mpsc::channel();
+    let puncher = ArcPuncher::new(BlockingFrames(entered.clone(), Arc::new(Mutex::new(blocked))), UnusedEncoder);
+    let observer = puncher.observe_candidates(received, Scopes::ALL, {
+        let paths = paths.clone();
+        async move {
+            paths.terminator.clone().await;
+            drop(paths);
+        }
+    });
+    let bound = "127.0.0.1:45001".parse().unwrap();
+    events.send(Candidate::New { link: Link::new(bound, bound), nat: NatType::FullCone }).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await.unwrap();
+    terminator.terminate();
+    drop(paths);
+    assert!(weak.upgrade().is_some(), "the current address event still owns the lifetime");
+    assert!(local_cids.initial_scid().is_some());
+    resume.send(()).unwrap();
+    observer.await.unwrap();
+    assert!(weak.upgrade().is_none());
+    assert!(local_cids.initial_scid().is_none());
+    assert!(initial.keys.get().is_err());
+}
