@@ -68,4 +68,12 @@ mod tests {
 
         assert_eq!(source.to_string(), "H3 DNS Resolver(https://dns.genmeta.net:4433)");
     }
+
+    #[test]
+    fn mdns_source_display_identifies_the_local_ip() {
+        for ip in ["192.168.1.10", "fd00::10"] {
+            let source = Source::Mdns { nic_ip: ip.parse().unwrap() };
+            assert_eq!(source.to_string(), format!("MDNS Resolver({ip})"));
+        }
+    }
 }

@@ -68,7 +68,7 @@ async fn address_observation_keeps_paths_alive_until_its_current_event_finishes(
         },
     );
     let bound = "127.0.0.1:45001".parse().unwrap();
-    events.send(AddressEvent::Removed { bound, endpoint: bound.into() }).unwrap();
+    events.send(AddressEvent::Invalid { inner, endpoint: bound.into() }).unwrap();
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await.unwrap();
     terminator.terminate();
     drop(paths);

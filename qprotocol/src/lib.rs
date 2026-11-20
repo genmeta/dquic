@@ -11,12 +11,14 @@ macro_rules! debug_assert_or_warn {
 }
 
 pub mod addr_book;
+pub mod addr_book2;
 pub mod dock;
 pub mod protocol;
 pub mod socket;
 pub mod topology;
 
 pub use addr_book::{AddressBook, AddressEvent};
+pub use addr_book2::ArcAddrBook;
 pub use dock::Dock;
 pub use protocol::{ForwardProtocol, QuicProtocol, StunProtocol};
 pub use socket::{EphemeralSocket, UdpSocket};
