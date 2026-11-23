@@ -60,7 +60,7 @@ impl ProbeTable {
 }
 
 pub(super) struct PortPredictor {
-    bound: SocketAddr,
+    source: Arc<UdpSocket>,
     dst: SocketAddr,
     device: String,
     probes: ProbeTable,
@@ -76,7 +76,7 @@ impl PortPredictor {
             Some(device) => device.name().to_owned(),
             None => bound.ip().to_string(),
         };
-        Ok(Self { bound, dst, device, probes: ProbeTable::new(), quota_held: 0, probes_created: 0 })
+        Ok(Self { source, dst, device, probes: ProbeTable::new(), quota_held: 0, probes_created: 0 })
     }
 
     async fn acquire_quota(&mut self) -> io::Result<()> {
@@ -93,9 +93,12 @@ impl PortPredictor {
 
     fn create_socket(&self) -> io::Result<EphemeralSocket> {
         let port = MIN_PORT + rand::random::<u16>() % (u16::MAX - MIN_PORT);
-        let mut target = self.bound;
+        let mut target = self.source.local_addr()?;
         target.set_port(port);
-        EphemeralSocket::bind(target)
+        match self.source.bound_device() {
+            Some(device) => EphemeralSocket::bind_to_device(target, device.clone()),
+            None => EphemeralSocket::bind(target),
+        }
     }
 
     fn take_matching_done(&mut self, tx: &Transaction) -> Option<EphemeralSocket> {

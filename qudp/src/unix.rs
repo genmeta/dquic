@@ -178,13 +178,38 @@ impl Io for UdpSocket {
             errno::Errno,
             sys::socket::{MsgFlags, SockaddrIn, SockaddrIn6, sendmsg},
         };
+        let mut cmsgs = Vec::new();
+        let v4_pktinfo;
+        let v6_pktinfo;
+        if let Some(device) = self.bound_device.as_ref() {
+            let src = if send_line.src.ip().is_unspecified() {
+                self.io.local_addr()?
+            } else {
+                send_line.src
+            };
+            match src.ip() {
+                IpAddr::V4(src) => {
+                    v4_pktinfo = libc::in_pktinfo {
+                        ipi_ifindex: device.index().get(),
+                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
+                        ipi_addr: libc::in_addr { s_addr: 0 },
+                    };
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
+                }
+                IpAddr::V6(src) => {
+                    v6_pktinfo =
+                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: device.index().get() };
+                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
+                }
+            }
+        }
         let mut sent_packet = 0;
         for slice in slices.iter() {
             macro_rules! send_batch {
                 ($ty:ty, $addr:expr) => {{
                     let sock_addr = <$ty>::from($addr);
                     loop {
-                        match sendmsg(self.io.as_raw_fd(), &[*slice], &[], MsgFlags::empty(), Some(&sock_addr)) {
+                        match sendmsg(self.io.as_raw_fd(), &[*slice], &cmsgs, MsgFlags::empty(), Some(&sock_addr)) {
                             Ok(_send_bytes) => {
                                 sent_packet += 1;
                                 break;
@@ -361,6 +386,47 @@ impl ToSocketAddr for SockaddrStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
+    #[tokio::test]
+    async fn send_rejects_a_missing_egress_interface_without_socket_level_binding() {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let peer = std::net::UdpSocket::bind(bind).unwrap();
+            let mut socket = UdpSocket::bind(bind.parse().unwrap()).unwrap();
+            // Simulate a removed interface without relying on a socket-level binding.
+            socket.bound_device = Some(BoundDevice::new("removed-interface", u32::MAX).unwrap());
+            let link = qbase::net::route::Link::new(socket.local_addr().unwrap(), peer.local_addr().unwrap());
+            let line = Line::new(link, 64, None, 5);
+
+            let result = socket.sendmsg(&[IoSlice::new(b"probe")], &line);
+            assert!(result.is_err(), "{bind}: a missing interface must not fall back to another egress: {result:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
+    #[tokio::test]
+    async fn packet_info_sends_batches_with_explicit_or_bound_source_addresses() {
+        let index = nix::net::if_::if_nametoindex("lo0").unwrap();
+        for (bind, unspecified) in [("127.0.0.1:0", "0.0.0.0:0"), ("[::1]:0", "[::]:0")] {
+            let peer = std::net::UdpSocket::bind(bind).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            let mut socket = UdpSocket::bind(bind.parse().unwrap()).unwrap();
+            socket.bound_device = Some(BoundDevice::new("lo0", index).unwrap());
+            let local = socket.local_addr().unwrap();
+            for source in [local, unspecified.parse().unwrap()] {
+                let link = qbase::net::route::Link::new(source, peer.local_addr().unwrap());
+                let line = Line::new(link, 64, None, 5);
+                let buffers = [IoSlice::new(b"first"), IoSlice::new(b"other")];
+                assert_eq!(socket.sendmsg(&buffers, &line).unwrap(), 2);
+                for expected in [b"first", b"other"] {
+                    let mut bytes = [0; 16];
+                    let (size, source) = peer.recv_from(&mut bytes).unwrap();
+                    assert_eq!(&bytes[..size], expected);
+                    assert_eq!(source, local);
+                }
+            }
+        }
+    }
 
     #[test]
     fn ipv6_link_local_packet_info_preserves_the_interface_scope() {

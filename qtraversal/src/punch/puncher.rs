@@ -338,11 +338,14 @@ where
         Ok(())
     }
 
-    async fn dynamic_socket(&self, bound: SocketAddr) -> io::Result<(EphemeralSocket, SocketAddr)> {
+    async fn dynamic_socket(&self, source: &UdpSocket) -> io::Result<(EphemeralSocket, SocketAddr)> {
         let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
-        let mut target = bound;
+        let mut target = source.local_addr()?;
         target.set_port(port);
-        let socket = EphemeralSocket::bind(target)?;
+        let socket = match source.bound_device() {
+            Some(device) => EphemeralSocket::bind_to_device(target, device.clone()),
+            None => EphemeralSocket::bind(target),
+        }?;
         let local = socket.udp_socket().local_addr()?;
         let topology = Dock::global().topology();
         let server = qprotocol::StunProtocol::stun_servers()
@@ -391,7 +394,7 @@ where
             (Blocked, _) | (_, Blocked) | (Symmetric, Symmetric) => Err(io::Error::other("unsupported NAT pair")),
             (_, FullCone) => self.retry_hello(&socket, link, id, &tx, true).await,
             (Dynamic, Symmetric) => {
-                let (temporary, outer) = self.dynamic_socket(local.link.src).await?;
+                let (temporary, outer) = self.dynamic_socket(&socket).await?;
                 let temp_addr = temporary.udp_socket().local_addr()?;
                 let temp_socket = temporary.udp_socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
@@ -422,7 +425,7 @@ where
                 self.retry_hello(&socket, link, id, &tx, false).await
             }
             (Dynamic, _) => {
-                let (temporary, outer) = self.dynamic_socket(local.link.src).await?;
+                let (temporary, outer) = self.dynamic_socket(&socket).await?;
                 let temp_addr = temporary.udp_socket().local_addr()?;
                 let temp_socket = temporary.udp_socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
