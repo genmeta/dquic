@@ -1,5 +1,7 @@
-//! Run: cargo run -p dquic --example echo-server -- [interface]
-use std::{num::NonZeroU32, sync::Arc};
+//! Run: cargo run -p dquic --example echo-server -- [interface-name]
+//! The optional argument is a name such as lo (Linux) or lo0 (macOS).
+//! Omit it to let the OS choose the outgoing interface.
+use std::sync::Arc;
 
 use dquic::{ArcConnection, CertificateDer, Dock, Endpoint, PrivateKeyDer, QuicEndpoint, RootCerts, Scope::Loopback, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,15 +10,16 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
-    let interface_name = std::env::args().nth(1);
-    let interface = netwatcher::list_interfaces()?
-        .into_values()
-        .find(|interface| match &interface_name {
-            Some(name) => interface.name == *name,
-            None => interface.ipv4_ips().any(|ip| ip.is_loopback()),
-        })
-        .ok_or_else(|| format!("network interface {} not found", interface_name.as_deref().unwrap_or("loopback")))?;
-    let ifindex = NonZeroU32::new(interface.index).ok_or("interface index must be non-zero")?;
+    let ifindex = match std::env::args().nth(1) {
+        Some(name) => {
+            netwatcher::list_interfaces()?
+                .into_values()
+                .find(|interface| interface.name == name)
+                .ok_or_else(|| format!("network interface {name} not found"))?
+                .index
+        }
+        None => 0,
+    };
     RootCerts::set([CertificateDer::from(include_bytes!("keychain/ca.der").as_slice())])?;
     let endpoint = Endpoint::new(
         "localhost",

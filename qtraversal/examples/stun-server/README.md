@@ -17,7 +17,6 @@ target/release/examples/stun_server --help
 
 ```sh
 RUST_LOG=info target/release/examples/stun_server \
-  --ifindex <ifindex> \
   --bind-ip 10.0.0.10 \
   --public-ip 198.51.100.10 \
   --change-ip 198.51.100.20 \
@@ -26,7 +25,7 @@ RUST_LOG=info target/release/examples/stun_server \
 
 以上是示意地址，部署时替换为实际配置：
 
-- `--ifindex`：发送接口的非零索引；Linux 可用 `cat /sys/class/net/eth0/ifindex` 查询对应网卡。
+- `--ifindex`：可选，默认 `0`，由系统选路；非零值指定发送接口。Linux 可用 `cat /sys/class/net/eth0/ifindex` 查询对应网卡。
 - `--bind-ip`：本机网卡实际拥有的具体 IP。
 - `--public-ip`：客户端看到的公网 IP；公网 IP 直接配置在网卡上时可省略。
 - `--change-ip`：下一台 STUN 节点的公网 IP。
@@ -48,7 +47,6 @@ RUST_LOG=info target/release/examples/stun_server \
 
 ```sh
 target/release/examples/stun_server \
-  --ifindex <ifindex> \
   --bind-ip 2001:db8:1::10 \
   --public-ip 2001:db8:1::10 \
   --change-ip 2001:db8:2::20 \
@@ -94,7 +92,8 @@ sudo systemctl enable --now stun-server
 sudo journalctl -u stun-server -f
 ```
 
-先把 env 文件中的 `STUN_IFINDEX`、三个 IP 和两个端口改成当前节点的实际配置，再启动服务。
+先把 env 文件中的三个 IP 和两个端口改成当前节点的实际配置，再启动服务。
+`STUN_IFINDEX` 默认 `0`；需要固定发送出口时再设置为实际接口索引。
 unit 使用 systemd 动态普通用户运行，默认端口不需要 root；失败后自动重启。
 unit 默认带 `--relay`，仅需 STUN 时从 `ExecStart` 中去掉该参数。
 

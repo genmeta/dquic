@@ -64,7 +64,8 @@ empty results and errors, without retries or periodic refresh. All Punchers wait
 for that same result and select a server matching the temporary socket's family.
 Cancelling a waiter does not cancel or restart DNS.
 `EphemeralSocket::bind(bound, ifindex)` binds that target address, inherits the
-outgoing interface, and registers it with the global Dock and QUIC protocol.
+outgoing interface selection (`0` lets the OS choose), and registers it with the
+global Dock and QUIC protocol.
 It does not reconstruct or resolve a BindUri.
 Address frames carry the Link's outer address.
 

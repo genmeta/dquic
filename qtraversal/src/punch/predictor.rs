@@ -72,7 +72,7 @@ impl PortPredictor {
     pub(super) fn new(bound: SocketAddr, dst: SocketAddr) -> io::Result<Self> {
         let source =
             Dock::global().find_socket(bound).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "source socket unavailable"))?;
-        let device = source.ifindex().get().to_string();
+        let device = source.ifindex().to_string();
         Ok(Self { source, dst, device, probes: ProbeTable::new(), quota_held: 0, probes_created: 0 })
     }
 

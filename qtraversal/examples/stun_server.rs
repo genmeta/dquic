@@ -3,7 +3,6 @@
 use std::{
     io,
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
     sync::Arc,
     time::Duration,
 };
@@ -14,9 +13,9 @@ use qprotocol::{Dock, ForwardProtocol, QuicProtocol, StunProtocol, UdpSocket, pr
 #[derive(Debug, Parser)]
 #[command(version, about = "Serve dquic STUN on two UDP ports; optionally relay dquic packets")]
 struct Options {
-    /// Interface index used for outgoing packets.
-    #[arg(long)]
-    ifindex: NonZeroU32,
+    /// Outgoing interface index; 0 lets the OS choose.
+    #[arg(long, default_value_t = 0)]
+    ifindex: u32,
     /// Concrete IP assigned to this machine (not 0.0.0.0 or ::).
     #[arg(long)]
     bind_ip: IpAddr,

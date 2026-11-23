@@ -1,4 +1,4 @@
-use std::{io::IoSlice, num::NonZeroU32};
+use std::io::IoSlice;
 
 use clap::Parser;
 use qbase::net::route::{Line, Link};
@@ -7,9 +7,9 @@ use qudp::UdpSocket;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Interface index used for outgoing packets.
-    #[arg(long)]
-    ifindex: NonZeroU32,
+    /// Outgoing interface index; 0 lets the OS choose.
+    #[arg(long, default_value_t = 0)]
+    ifindex: u32,
 
     #[arg(long, default_value_t = String::from("127.0.0.1:0"))]
     src: String,

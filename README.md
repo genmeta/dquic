@@ -126,13 +126,14 @@ Core snippets to run inside Tokio; see the complete
 
 ### Initialization
 
-Bind to `127.0.0.1:4433` for both client and server. Supply the loopback interface index as `ifindex: NonZeroU32`.
+Bind a local UDP address. Pass `0` for system routing, or a nonzero interface
+index to select the outgoing interface.
 
 ```rust,no_run
 RootCerts::set([CertificateDer::from(
     include_bytes!("keychain/ca.der").as_slice(),
 )])?;
-let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, ifindex)?);
+let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, 0)?);
 Dock::global().add_socket(socket.clone())?; // More sockets can be added.
 ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
 Resolver::add(Arc::new(SystemResolver));
