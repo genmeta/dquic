@@ -26,7 +26,7 @@ fn receiver() -> StdUdpSocket {
 
 #[tokio::test]
 async fn register_and_deliver_by_endpoint() {
-    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let endpoint = EndpointAddr::direct(raw.local_addr().unwrap());
     let protocol = QuicProtocol::new();
     let delivered = Arc::new(AtomicUsize::new(0));
@@ -49,7 +49,7 @@ async fn register_and_deliver_by_endpoint() {
 
 #[tokio::test]
 async fn direct_pathway_sends_a_batch_without_splitting_datagrams() {
-    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let receiver = receiver();
     let local = EndpointAddr::direct(raw.local_addr().unwrap());
     let remote = EndpointAddr::direct(receiver.local_addr().unwrap());
@@ -74,7 +74,7 @@ async fn direct_pathway_sends_a_batch_without_splitting_datagrams() {
 
 #[tokio::test]
 async fn mediated_pathway_sends_a_batch_of_forward_datagrams_to_agent() {
-    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let receiver = receiver();
     let local = EndpointAddr::direct(raw.local_addr().unwrap());
     let remote = EndpointAddr::mediate(receiver.local_addr().unwrap(), "127.0.0.1:4433".parse().unwrap());
@@ -117,7 +117,7 @@ async fn unavailable_local_endpoint_fails_to_send() {
 async fn reclaimed_udp_socket_fails_to_send_and_clears_registration() {
     let protocol = QuicProtocol::new();
     let local = {
-        let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         let local = EndpointAddr::direct(raw.local_addr().unwrap());
         protocol.register(local, &raw).unwrap();
         local
@@ -133,8 +133,8 @@ async fn reclaimed_udp_socket_fails_to_send_and_clears_registration() {
 #[tokio::test]
 async fn unregister_bound_clears_all_its_endpoints_and_preserves_other_bindings() {
     let protocol = QuicProtocol::new();
-    let first = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let second = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let first = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let second = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let bound = first.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
     let outer = EndpointAddr::direct("8.8.8.8:4567".parse().unwrap());

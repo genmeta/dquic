@@ -63,8 +63,9 @@ cache shares one system DNS lookup on port 20002 across the process, including
 empty results and errors, without retries or periodic refresh. All Punchers wait
 for that same result and select a server matching the temporary socket's family.
 Cancelling a waiter does not cancel or restart DNS.
-`EphemeralSocket::bind(bound)` binds that target address and registers it with the
-global Dock and QUIC protocol. It does not reconstruct or resolve a BindUri.
+`EphemeralSocket::bind(bound, ifindex)` binds that target address, inherits the
+outgoing interface, and registers it with the global Dock and QUIC protocol.
+It does not reconstruct or resolve a BindUri.
 Address frames carry the Link's outer address.
 
 The method returns a `JoinHandle<()>`. Resolving the supplied close future or

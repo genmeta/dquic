@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     future::{Future, poll_fn},
     io::IoSlice,
@@ -32,7 +34,7 @@ async fn all_woken(waiters: &[Arc<SendWake>]) {
 #[tokio::test(flavor = "current_thread")]
 async fn fresh_socket_wakes_ready_poll_and_async_senders_together() {
     let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let link = Link::new(socket.local_addr().unwrap(), receiver.local_addr().unwrap());
     let line = Line::new(link, 64, None, 4);
     let polled = [IoSlice::new(b"poll")];
@@ -66,7 +68,7 @@ async fn fresh_socket_wakes_ready_poll_and_async_senders_together() {
 #[tokio::test(flavor = "current_thread")]
 async fn cancelling_the_last_sender_does_not_strand_other_waiters() {
     let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let link = Link::new(socket.local_addr().unwrap(), receiver.local_addr().unwrap());
     let line = Line::new(link, 64, None, 4);
     let bytes = [IoSlice::new(b"live")];

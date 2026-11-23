@@ -36,8 +36,8 @@ fn binding_request_encodes() {
 async fn new_transactions_do_not_overwrite_each_other() {
     let protocol = Arc::new(StunProtocol::new());
     let dock = isolated_dock(&protocol);
-    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let server = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let server = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     dock.add_socket(client.clone()).unwrap();
     let link = Link::new(client.local_addr().unwrap(), server.local_addr().unwrap());
     let mut first = protocol.new_transaction();
@@ -63,8 +63,8 @@ async fn transaction_retries_with_the_same_id_after_timeout() {
     protocol.disable_service();
     let topology = Arc::new(Topology::new(protocol.clone(), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new())));
     let dock = Dock::new(topology);
-    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let client_addr = client.local_addr().unwrap();
     let link = Link::new(client_addr, agent.local_addr().unwrap());
     dock.add_socket(client).unwrap();

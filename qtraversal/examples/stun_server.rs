@@ -3,6 +3,7 @@
 use std::{
     io,
     net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
     sync::Arc,
     time::Duration,
 };
@@ -13,6 +14,9 @@ use qprotocol::{Dock, ForwardProtocol, QuicProtocol, StunProtocol, UdpSocket, pr
 #[derive(Debug, Parser)]
 #[command(version, about = "Serve dquic STUN on two UDP ports; optionally relay dquic packets")]
 struct Options {
+    /// Interface index used for outgoing packets.
+    #[arg(long)]
+    ifindex: NonZeroU32,
     /// Concrete IP assigned to this machine (not 0.0.0.0 or ::).
     #[arg(long)]
     bind_ip: IpAddr,
@@ -71,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dock = Dock::new(Arc::new(Topology::new(stun.clone(), forward.clone(), Arc::new(QuicProtocol::new()))));
     let ports = [options.port, options.alternate_port];
     // Bind both sockets before starting either receive task, so partial startup fails cleanly.
-    let sockets = ports.map(|port| UdpSocket::bind(SocketAddr::new(options.bind_ip, port)).map(Arc::new));
+    let sockets = ports.map(|port| UdpSocket::bind(SocketAddr::new(options.bind_ip, port), options.ifindex).map(Arc::new));
     let [first, second] = sockets;
     let sockets = [first?, second?];
     for (index, socket) in sockets.iter().enumerate() {

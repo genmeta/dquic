@@ -19,4 +19,5 @@ qtls.workspace = true
 qtransport.workspace = true
 
 [dev-dependencies]
+netwatcher.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "signal"] }

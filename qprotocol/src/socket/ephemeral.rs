@@ -1,6 +1,7 @@
 use std::{
     io::{self, IoSlice},
     net::SocketAddr,
+    num::NonZeroU32,
     sync::Arc,
 };
 
@@ -25,18 +26,9 @@ pub struct EphemeralSocket {
 impl EphemeralSocket {
     /// Bind the target address and register with the global Dock and QUIC protocol.
     /// Port zero lets the OS choose a port.
-    pub fn bind(bound: SocketAddr) -> io::Result<Self> {
-        Self::register(UdpSocket::bind(bound)?)
-    }
-
-    /// Bind the target address to a device before registering reception and QUIC.
-    pub fn bind_to_device(bound: SocketAddr, device: qudp::BoundDevice) -> io::Result<Self> {
-        Self::register(UdpSocket::bind_to_device(bound, device)?)
-    }
-
-    fn register(udp: UdpSocket) -> io::Result<Self> {
+    pub fn bind(bound: SocketAddr, ifindex: NonZeroU32) -> io::Result<Self> {
         let dock = Dock::global();
-        let udp = Arc::new(udp);
+        let udp = Arc::new(UdpSocket::bind(bound, ifindex)?);
         let endpoint = EndpointAddr::direct(udp.local_addr()?);
         let registration = dock
             .add_socket(udp.clone())?

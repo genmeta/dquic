@@ -62,7 +62,7 @@ fn forward_datagram_round_trips_mixed_pathway() {
 
 #[tokio::test]
 async fn unknown_receiving_address_is_dropped() {
-    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let outer = receiver();
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:4433".parse().unwrap()),
@@ -78,7 +78,7 @@ async fn unknown_receiving_address_is_dropped() {
 
 #[tokio::test]
 async fn destination_agent_forwards_to_outer() {
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let outer = receiver();
     let inner = socket.local_addr().unwrap();
     let agent = "127.0.0.1:4434".parse().unwrap();
@@ -100,7 +100,7 @@ async fn destination_agent_forwards_to_outer() {
 
 #[tokio::test]
 async fn intermediate_forwards_to_destination_agent() {
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let agent = receiver();
     let local = socket.local_addr().unwrap();
     let pathway = Pathway::new(
@@ -122,7 +122,7 @@ async fn intermediate_forwards_to_destination_agent() {
 
 #[tokio::test]
 async fn intermediate_forwards_to_direct_destination() {
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let direct = receiver();
     let local = socket.local_addr().unwrap();
     let pathway = Pathway::new(EndpointAddr::direct("127.0.0.1:4433".parse().unwrap()), EndpointAddr::direct(direct.local_addr().unwrap()));
@@ -143,8 +143,8 @@ async fn intermediate_forwards_to_direct_destination() {
 #[tokio::test]
 #[should_panic(expected = "and receiving address")]
 async fn inconsistent_destination_agent_panics() {
-    let receiving = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let receiving = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let local = receiving.local_addr().unwrap();
     let pathway = Pathway::new(
         EndpointAddr::direct("127.0.0.1:4433".parse().unwrap()),

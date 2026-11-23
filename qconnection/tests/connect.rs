@@ -50,7 +50,7 @@ struct Registration(Arc<UdpSocket>);
 
 impl Registration {
     fn new(publish: bool) -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         Dock::global().add_socket(socket.clone()).unwrap();
         if publish {
             ArcAddrBook::global().add_sock_addr(socket.local_addr().unwrap());

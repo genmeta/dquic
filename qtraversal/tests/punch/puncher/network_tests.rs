@@ -56,7 +56,8 @@ struct Peer {
 
 impl Peer {
     async fn new(ip: &str, expected: NatType) -> (Self, mpsc::UnboundedReceiver<ReliableFrame>) {
-        let socket = EphemeralSocket::bind(format!("{ip}:0").parse().unwrap()).unwrap();
+        let socket =
+            EphemeralSocket::bind(format!("{ip}:0").parse().unwrap(), crate::common::interface_index(ip.parse().unwrap())).unwrap();
         let bound = socket.udp_socket().local_addr().unwrap();
         let stun = StunProtocol::global();
         let nat = timeout(Duration::from_secs(15), stun.detect_nat(bound, STUN.parse().unwrap())).await.unwrap().unwrap();
@@ -321,8 +322,8 @@ async fn stun_service() {
     for last in 1..=3 {
         for port in [20002, 20003] {
             let bound = SocketAddr::from(([11, 0, 0, last], port));
-            let socket = Arc::new(UdpSocket::bind(bound).unwrap());
-            Dock::global().add(socket.clone()).unwrap();
+            let socket = Arc::new(UdpSocket::bind(bound, crate::common::interface_index(bound.ip())).unwrap());
+            Dock::global().add_socket(socket.clone()).unwrap();
             StunProtocol::global()
                 .set_change_server(
                     bound,

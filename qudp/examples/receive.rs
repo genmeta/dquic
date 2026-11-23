@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use bytes::BytesMut;
 use clap::Parser;
 use qbase::net::route::Line;
@@ -6,6 +8,10 @@ use qudp::{BATCH_SIZE, UdpSocket};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Interface index used for outgoing packets.
+    #[arg(long)]
+    ifindex: NonZeroU32,
+
     #[arg(short,long, default_value_t = String::from("127.0.0.1:12345"))]
     bind: String,
 }
@@ -17,7 +23,7 @@ async fn main() {
     let args = Args::parse();
     let addr = args.bind.parse().unwrap();
 
-    let socket = UdpSocket::bind(addr).expect("failed to create socket");
+    let socket = UdpSocket::bind(addr, args.ifindex).expect("failed to create socket");
     let mut iovecs: Vec<BytesMut> = (0..BATCH_SIZE)
         .map(|_| {
             let mut buf = BytesMut::with_capacity(1500);

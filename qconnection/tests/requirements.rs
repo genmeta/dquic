@@ -38,8 +38,8 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
             accepted.lock().unwrap().take().unwrap().send(result).ok();
         })
         .unwrap();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer_socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer_socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let link = Link::new(socket.local_addr().unwrap(), peer_socket.local_addr().unwrap());

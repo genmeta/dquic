@@ -23,7 +23,7 @@ struct Binding(Arc<UdpSocket>);
 
 impl Binding {
     fn new() -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         // This test controls delivery itself. Keep the public registration for
         // outgoing strategies, but receive through the fixture instead of Dock.
         Dock::global().add_socket(socket.clone()).unwrap().unwrap().abort();

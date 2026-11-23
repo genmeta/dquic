@@ -12,7 +12,7 @@ async fn send(socket: &UdpSocket, id: TransactionId, message: Message, link: Lin
 }
 
 fn socket() -> Arc<UdpSocket> {
-    Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap())
+    Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap())
 }
 
 fn config(bound: SocketAddr) -> ChangeServer {
@@ -289,7 +289,7 @@ async fn configuration_follows_registration_even_after_the_socket_expires() {
     assert_eq!(protocol.set_change_server(bound, valid).unwrap_err().kind(), io::ErrorKind::NotFound,);
 
     // A request on the same address must not inherit the withdrawn configuration.
-    let server = Arc::new(UdpSocket::bind(bound).unwrap());
+    let server = Arc::new(UdpSocket::bind(bound, crate::common::loopback_ifindex()).unwrap());
     let client = socket();
     protocol
         .on_datagram(&server, TransactionId::random(), Message::Request(Request::default()), Link::new(bound, client.local_addr().unwrap()))

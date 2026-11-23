@@ -56,13 +56,18 @@ for the complete setup.
 [echo-server.rs](examples/echo-server.rs) and [echo-client.rs](examples/echo-client.rs)
 use only `dquic` exports for QUIC, sockets, resolution and certificates. Tokio supplies
 the runtime, Ctrl-C handling and async I/O extensions; no direct `q*` or Rustls imports are needed.
+`netwatcher` resolves interface names to their actual indices.
 
-Run these commands in separate terminals:
+Run these commands in separate terminals. With no argument, both examples select
+the loopback interface (`lo` on Linux, `lo0` on macOS):
 
 ```sh
 cargo run -p dquic --example echo-server
 cargo run -p dquic --example echo-client
 ```
+
+To select an interface explicitly, append `-- <interface-name>` to each command.
+The localhost echo uses the loopback interface; an unknown interface name returns an error.
 
 The server listens on `127.0.0.1:4433`. The anonymous client verifies `localhost`,
 connects, opens a bidirectional stream, writes `hello, dquic!`, and calls `shutdown()`

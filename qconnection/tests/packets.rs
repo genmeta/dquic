@@ -184,7 +184,7 @@ async fn close_at_client_stage(wait: ClientWait) {
         Duration::ZERO,
     );
 
-    let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let link = Link::new(socket.local_addr().unwrap(), "127.0.0.1:30002".parse().unwrap());

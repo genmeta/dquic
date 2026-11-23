@@ -91,14 +91,14 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 
 ### 初始化
 
-`127.0.0.1:4433` 即为客户端所用，也为服务端提供监听。
+`127.0.0.1:4433` 即为客户端所用，也为服务端提供监听。 `ifindex: NonZeroU32` 由调用方提供，取 loopback 网卡的接口索引。
 
 ```rust,no_run
 RootCerts::set([CertificateDer::from(
     include_bytes!("keychain/ca.der").as_slice(),
 )])?;
-let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
-Dock::global().add(socket.clone())?; // 还可以添加更多 socket
+let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, ifindex)?);
+Dock::global().add_socket(socket.clone())?; // 还可以添加更多 socket
 ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
 Resolver::add(Arc::new(SystemResolver));
 ```

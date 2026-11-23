@@ -1,4 +1,4 @@
-use std::io::IoSlice;
+use std::{io::IoSlice, num::NonZeroU32};
 
 use clap::Parser;
 use qbase::net::route::{Line, Link};
@@ -7,6 +7,10 @@ use qudp::UdpSocket;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Interface index used for outgoing packets.
+    #[arg(long)]
+    ifindex: NonZeroU32,
+
     #[arg(long, default_value_t = String::from("127.0.0.1:0"))]
     src: String,
 
@@ -26,7 +30,7 @@ async fn main() {
 
     let args = Args::parse();
     let addr = args.src.parse().unwrap();
-    let socket = UdpSocket::bind(addr).expect("failed to create socket");
+    let socket = UdpSocket::bind(addr, args.ifindex).expect("failed to create socket");
     let dst = args.dst.parse().unwrap();
 
     let send_hdr = Line::new(Link::new(socket.local_addr().expect("failed to get local addr"), dst), 64, None, args.msg_size as u16);

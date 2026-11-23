@@ -1,4 +1,6 @@
 //! Real loopback UDP stress test: one QUIC connection, 1024 streams, 10 MiB each.
+#[path = "../../qudp/tests/common/mod.rs"]
+mod common;
 
 use std::{
     collections::HashSet,
@@ -60,7 +62,7 @@ struct LocalSocket {
 
 impl LocalSocket {
     fn bind(publish: bool) -> Result<Self, Error> {
-        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
+        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, crate::common::loopback_ifindex())?);
         let socket = Self { addr: udp.local_addr()?, udp };
         Dock::global().add_socket(socket.udp.clone())?;
         if publish {

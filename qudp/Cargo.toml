@@ -31,6 +31,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 clap = { workspace = true }
+netdev = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [dev-dependencies.tracing-subscriber]

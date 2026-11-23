@@ -11,7 +11,7 @@ use qbase::net::route::{Line, Link};
 use socket2::Socket;
 use windows_sys::Win32::Networking::WinSock::{self, SOCKET};
 
-use crate::{BoundDevice, Io, UdpSocket};
+use crate::{Io, UdpSocket};
 
 const CMSG_LEN: usize = 128;
 #[derive(Copy, Clone)]
@@ -19,7 +19,7 @@ const CMSG_LEN: usize = 128;
 pub(crate) struct Aligned<T>(pub(crate) T);
 
 impl Io for UdpSocket {
-    fn config(socket: &Socket, addr: SocketAddr) -> std::io::Result<()> {
+    fn setsockopt(socket: &Socket, addr: SocketAddr) -> std::io::Result<()> {
         const OPTION_ON: c_int = 1;
         let io = socket.as_raw_socket().try_into().unwrap();
 
@@ -61,14 +61,6 @@ impl Io for UdpSocket {
                 setsockopt(io, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, OPTION_ON);
             }
         }
-        if let Err(e) = socket.bind(&addr.into()) {
-            tracing::error!(target: "qudp", error = %e, "failed to bind socket");
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, e));
-        }
-        Ok(())
-    }
-
-    fn bind_device_to_socket(_socket: &socket2::SockRef<'_>, _addr: SocketAddr, _device: &BoundDevice) -> io::Result<()> {
         Ok(())
     }
 
@@ -93,38 +85,28 @@ impl Io for UdpSocket {
 
             let mut cmsg = unsafe { first_cmsg(&mut wsa_msg).as_mut() };
             let mut cmsg_len = 0;
-            if !line.src.ip().is_unspecified() || self.bound_device.is_some() {
-                let src = if line.src.ip().is_unspecified() {
-                    self.io.local_addr()?
-                } else {
-                    line.src
-                };
-                let src = socket2::SockAddr::from(src);
-                let ifindex = self.bound_device.as_ref().map_or(0, |device| device.index().get());
-                match src.family() {
-                    WinSock::AF_INET => {
-                        let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
-                        let pktinfo = WinSock::IN_PKTINFO { ipi_addr: src_ip.sin_addr, ipi_ifindex: ifindex };
+            let src = if line.src.ip().is_unspecified() {
+                self.io.local_addr()?
+            } else {
+                line.src
+            };
+            let src = socket2::SockAddr::from(src);
+            let ifindex = self.ifindex.get();
+            match src.family() {
+                WinSock::AF_INET => {
+                    let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
+                    let pktinfo = WinSock::IN_PKTINFO { ipi_addr: src_ip.sin_addr, ipi_ifindex: ifindex };
 
-                        cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, pktinfo, &mut cmsg_len);
-                    }
-                    WinSock::AF_INET6 => {
-                        let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
-                        let scope_id = unsafe { src_ip.Anonymous.sin6_scope_id };
-                        let pktinfo = WinSock::IN6_PKTINFO {
-                            ipi6_addr: src_ip.sin6_addr,
-                            ipi6_ifindex: if self.bound_device.is_some() {
-                                ifindex
-                            } else {
-                                scope_id
-                            },
-                        };
+                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, pktinfo, &mut cmsg_len);
+                }
+                WinSock::AF_INET6 => {
+                    let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
+                    let pktinfo = WinSock::IN6_PKTINFO { ipi6_addr: src_ip.sin6_addr, ipi6_ifindex: ifindex };
 
-                        cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, pktinfo, &mut cmsg_len);
-                    }
-                    _ => {
-                        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-                    }
+                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, pktinfo, &mut cmsg_len);
+                }
+                _ => {
+                    return Err(io::Error::from(io::ErrorKind::InvalidInput));
                 }
             }
 
@@ -138,9 +120,6 @@ impl Io for UdpSocket {
             }
 
             wsa_msg.Control.len = cmsg_len as _;
-            if cmsg_len == 0 {
-                wsa_msg.Control = WinSock::WSABUF { buf: ptr::null_mut(), len: 0 };
-            }
 
             let mut len = 0;
             let ret = unsafe { WinSock::WSASendMsg(self.io.as_raw_socket() as usize, &wsa_msg, 0, &mut len, ptr::null_mut(), None) };

@@ -100,8 +100,8 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     use qprotocol::{QuicProtocol, UdpSocket};
     use tokio::time::Instant;
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths_with_timeouts(
@@ -181,8 +181,8 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
     };
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths(
@@ -241,8 +241,8 @@ async fn sending_runs_again_when_woken_and_exits_on_path_failure() {
     };
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths_with_timeouts(

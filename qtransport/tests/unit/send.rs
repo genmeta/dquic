@@ -1208,8 +1208,8 @@ async fn amplification_rearms_pto_when_credit_returns() {
 async fn ack_only_submission_leaves_credit_below_threshold_and_blocks_pto_without_another_collect() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     QuicProtocol::global().register(EndpointAddr::direct(socket.local_addr().unwrap()), &socket).unwrap();
     let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
     super::install_handshake(&paths, mature.spaces.handshake.clone());
@@ -1378,8 +1378,8 @@ async fn idle_and_amplification_blocked_collectors_wait_without_periodic_wakes()
 async fn sending_uses_its_budget_across_multiple_collections() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths(
@@ -1654,8 +1654,8 @@ async fn collection_reports_unanswered_probes_as_an_io_timeout() {
 async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths(
@@ -1739,8 +1739,8 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
 async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     use qprotocol::{QuicProtocol, UdpSocket};
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths(
@@ -1787,8 +1787,8 @@ async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path()
     use qprotocol::{QuicProtocol, UdpSocket};
     use tokio::time::Instant;
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let paths = crate::common::initial_paths(
@@ -1867,8 +1867,8 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
         *packet.header.dcid()
     }
 
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     QuicProtocol::global().register(local, &socket).unwrap();
     let (paths, mature) = data_spaces(Role::Server, Duration::ZERO);
@@ -2112,8 +2112,8 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
     use qprotocol::{QuicProtocol, UdpSocket};
 
     for change in 0..3 {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
         QuicProtocol::global().register(local, &socket).unwrap();
         let paths =
