@@ -10,23 +10,24 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn bind_sends_on_the_selected_interface_and_drop_unregisters() {
-    let ifindex = crate::common::loopback_ifindex();
-    for bind in ["127.0.0.1:0", "[::1]:0"] {
-        let socket = EphemeralSocket::bind(bind.parse().unwrap(), ifindex).unwrap();
-        let raw = socket.udp_socket().clone();
-        let bound = raw.local_addr().unwrap();
-        assert_eq!(raw.ifindex(), ifindex);
-        let peer = tokio::net::UdpSocket::bind(bind).await.unwrap();
-        let link = Link::new(bound, peer.local_addr().unwrap());
-        assert_eq!(socket.send(&[IoSlice::new(b"probe")], link).await.unwrap(), 1);
-        let mut bytes = [0; 16];
-        let (size, source) = timeout(Duration::from_secs(1), peer.recv_from(&mut bytes)).await.unwrap().unwrap();
-        assert_eq!(&bytes[..size], b"probe");
-        assert_eq!(source, bound);
+    for ifindex in [0, crate::common::loopback_ifindex()] {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let socket = EphemeralSocket::bind(bind.parse().unwrap(), ifindex).unwrap();
+            let raw = socket.udp_socket().clone();
+            let bound = raw.local_addr().unwrap();
+            assert_eq!(raw.ifindex(), ifindex);
+            let peer = tokio::net::UdpSocket::bind(bind).await.unwrap();
+            let link = Link::new(bound, peer.local_addr().unwrap());
+            assert_eq!(socket.send(&[IoSlice::new(b"probe")], link).await.unwrap(), 1);
+            let mut bytes = [0; 16];
+            let (size, source) = timeout(Duration::from_secs(1), peer.recv_from(&mut bytes)).await.unwrap().unwrap();
+            assert_eq!(&bytes[..size], b"probe");
+            assert_eq!(source, bound);
 
-        drop(socket);
-        assert!(Dock::global().find_socket(bound).is_none());
-        assert!(Dock::global().topology().quic().find_socket(EndpointAddr::direct(bound)).is_none());
+            drop(socket);
+            assert!(Dock::global().find_socket(bound).is_none());
+            assert!(Dock::global().topology().quic().find_socket(EndpointAddr::direct(bound)).is_none());
+        }
     }
 }
 

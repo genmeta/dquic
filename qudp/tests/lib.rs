@@ -11,11 +11,39 @@ use qbase::net::route::{Line, Link};
 use qudp::UdpSocket;
 
 #[tokio::test]
+async fn system_selected_interface_sends_and_receives_from_bound_or_wildcard_addresses() -> io::Result<()> {
+    use std::io::IoSlice;
+
+    for (bind, peer_bind) in [("127.0.0.1:0", "127.0.0.1:0"), ("0.0.0.0:0", "127.0.0.1:0"), ("[::1]:0", "[::1]:0"), ("[::]:0", "[::1]:0")] {
+        let socket = UdpSocket::bind(bind.parse().unwrap(), 0)?;
+        assert_eq!(socket.ifindex(), 0);
+        let peer = tokio::net::UdpSocket::bind(peer_bind).await?;
+        let local = socket.local_addr()?;
+        let source = SocketAddr::new(peer.local_addr()?.ip(), local.port());
+        let line = Line::new(Link::new(local, peer.local_addr()?), 64, None, 5);
+        assert_eq!(socket.send(&[IoSlice::new(b"first"), IoSlice::new(b"other")], line).await?, 2);
+        for expected in [b"first", b"other"] {
+            let mut bytes = [0; 16];
+            let (size, received_source) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut bytes)).await??;
+            assert_eq!(&bytes[..size], expected);
+            assert_eq!(received_source, source);
+        }
+
+        peer.send_to(b"reply", source).await?;
+        let mut packets = [BytesMut::zeroed(128)];
+        let mut lines = [Line::default()];
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), socket.receive(&mut packets, &mut lines)).await??, 1);
+        assert_eq!(&packets[0][..lines[0].seg_size as usize], b"reply");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_egress_does_not_filter_reception_or_fall_back_when_sending() -> io::Result<()> {
-    use std::{io::IoSlice, num::NonZeroU32};
+    use std::io::IoSlice;
 
     for bind in ["127.0.0.1:0", "[::1]:0"] {
-        let socket = UdpSocket::bind(bind.parse().unwrap(), NonZeroU32::new(u32::MAX).unwrap())?;
+        let socket = UdpSocket::bind(bind.parse().unwrap(), u32::MAX)?;
         let local = socket.local_addr()?;
         let peer = tokio::net::UdpSocket::bind(bind).await?;
         peer.send_to(b"live", local).await?;

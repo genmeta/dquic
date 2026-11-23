@@ -2,7 +2,6 @@ use std::{
     future::Future,
     io::{self, IoSlice, IoSliceMut},
     net::SocketAddr,
-    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, atomic::AtomicI32},
     task::{Context, Poll, ready},
@@ -30,15 +29,31 @@ pub struct UdpSocket {
     io: tokio::net::UdpSocket,
     send_wakers: Arc<Wakers>,
     ttl: AtomicI32,
-    ifindex: NonZeroU32,
+    ifindex: u32,
 }
 
 impl UdpSocket {
-    /// Bind a local address and use the given interface for every outgoing packet.
-    /// Reception is not restricted to that interface. An unavailable interface
-    /// is reported when sending. IPv6 link-local scopes must match the index;
-    /// a missing scope is filled without changing the address's flowinfo.
-    pub fn bind(addr: SocketAddr, ifindex: NonZeroU32) -> io::Result<Self> {
+    /// Bind a local UDP address and configure outgoing interface selection.
+    ///
+    /// - `ifindex == 0`: let the OS choose the outgoing interface using its
+    ///   routing policy, the destination, and the source address.
+    /// - `ifindex != 0`: select that interface for outgoing packets. An invalid
+    ///   or unusable interface can cause binding or sending to fail.
+    ///
+    /// Neither value filters reception by interface. The bound local address
+    /// and the source address supplied when sending still apply.
+    ///
+    /// For IPv6 link-local addresses, a nonzero index fills a missing scope ID
+    /// and must match any existing scope. With index zero, the address's scope
+    /// is preserved; supply a valid zone where required. Flowinfo is preserved.
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// let socket = qudp::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), 0)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bind(addr: SocketAddr, ifindex: u32) -> io::Result<Self> {
         let addr = scope_addr(addr, ifindex)?;
         let domain = if addr.is_ipv4() {
             Domain::IPV4
@@ -55,7 +70,8 @@ impl UdpSocket {
         Ok(usc)
     }
 
-    pub fn ifindex(&self) -> NonZeroU32 {
+    /// Configured outgoing interface index, or zero for OS selection.
+    pub fn ifindex(&self) -> u32 {
         self.ifindex
     }
 
@@ -101,13 +117,14 @@ impl UdpSocket {
     }
 }
 
-fn scope_addr(mut addr: SocketAddr, ifindex: NonZeroU32) -> io::Result<SocketAddr> {
+fn scope_addr(mut addr: SocketAddr, ifindex: u32) -> io::Result<SocketAddr> {
     if let SocketAddr::V6(v6) = &mut addr
         && v6.ip().is_unicast_link_local()
+        && ifindex != 0
     {
         match v6.scope_id() {
-            0 => v6.set_scope_id(ifindex.get()),
-            scope if scope != ifindex.get() => {
+            0 => v6.set_scope_id(ifindex),
+            scope if scope != ifindex => {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "IPv6 scope does not match the socket interface"));
             }
             _ => {}

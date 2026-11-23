@@ -91,7 +91,7 @@ impl Io for UdpSocket {
                 line.src
             };
             let src = socket2::SockAddr::from(src);
-            let ifindex = self.ifindex.get();
+            let ifindex = self.ifindex;
             match src.family() {
                 WinSock::AF_INET => {
                     let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };

@@ -1,5 +1,3 @@
-use std::num::NonZeroU32;
-
 use bytes::BytesMut;
 use clap::Parser;
 use qbase::net::route::Line;
@@ -8,9 +6,9 @@ use qudp::{BATCH_SIZE, UdpSocket};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Interface index used for outgoing packets.
-    #[arg(long)]
-    ifindex: NonZeroU32,
+    /// Outgoing interface index; 0 lets the OS choose.
+    #[arg(long, default_value_t = 0)]
+    ifindex: u32,
 
     #[arg(short,long, default_value_t = String::from("127.0.0.1:12345"))]
     bind: String,

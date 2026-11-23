@@ -89,7 +89,7 @@ impl Io for UdpSocket {
             match src.ip() {
                 IpAddr::V4(src) => {
                     v4_pktinfo = libc::in_pktinfo {
-                        ipi_ifindex: self.ifindex.get() as _,
+                        ipi_ifindex: self.ifindex as _,
                         ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
                         ipi_addr: libc::in_addr { s_addr: 0 },
                     };
@@ -97,8 +97,7 @@ impl Io for UdpSocket {
                     packet_info_kind = PacketInfoKind::V4;
                 }
                 IpAddr::V6(src) => {
-                    v6_pktinfo =
-                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex.get() as _ };
+                    v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex as _ };
                     cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
                     packet_info_kind = PacketInfoKind::V6;
                 }
@@ -151,14 +150,14 @@ impl Io for UdpSocket {
         match src.ip() {
             IpAddr::V4(src) => {
                 v4_pktinfo = libc::in_pktinfo {
-                    ipi_ifindex: self.ifindex.get(),
+                    ipi_ifindex: self.ifindex,
                     ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
                     ipi_addr: libc::in_addr { s_addr: 0 },
                 };
                 cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
             }
             IpAddr::V6(src) => {
-                v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex.get() };
+                v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex };
                 cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
             }
         }
