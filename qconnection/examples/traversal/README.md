@@ -40,7 +40,7 @@ client 每两秒继续发送问候，但仅在回显内容变化时打印；serv
 - `traversal-client.rs`：配置测试身份，注册 mock resolver，`endpoint.connect("localhost")`，收发消息。
 - `traversal-server.rs`：配置测试身份，`endpoint.listen(...)`，回显每个双向流。
 - `traversal/network.rs`：进程内全局初始化一次。用 `netdev` 扫描活动物理网卡的 IPv4 地址，
-  为每个地址绑定一个 socket，保存原始网卡名称和索引，注册到 Dock / QuicProtocol。
+  为每个地址绑定一个 socket，使用网卡索引固定发送出口，注册到 Dock / QuicProtocol。
   同一个 socket 先完成映射探测，登记通信地址并开始通信，后台再完成 NAT 分类。
   Network 持有 socket 和分类任务，停止时取消任务；结果提交持有 socket 所有者，防止撤销后迟到添加。
 

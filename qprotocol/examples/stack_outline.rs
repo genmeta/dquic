@@ -1,5 +1,6 @@
 use std::{
     io::{self, IoSlice},
+    num::NonZeroU32,
     sync::{Arc, Mutex},
 };
 
@@ -52,8 +53,8 @@ async fn main() -> Result<(), Error> {
         .find(|interface| interface.ipv4.iter().any(|ip| ip.addr().is_loopback()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no loopback interface"))?;
     let ip = interface.ipv4.iter().find(|ip| ip.addr().is_loopback()).unwrap().addr();
-    let device = qudp::BoundDevice::new(interface.name, interface.index)?;
-    let raw = Arc::new(UdpSocket::bind_to_device((ip, 0).into(), device.clone())?);
+    let ifindex = NonZeroU32::new(interface.index).ok_or_else(|| io::Error::other("interface index must be non-zero"))?;
+    let raw = Arc::new(UdpSocket::bind((ip, 0).into(), ifindex)?);
     dock.add_socket(raw.clone())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
@@ -67,7 +68,7 @@ async fn main() -> Result<(), Error> {
     forward.serve(outer.addr(), &raw);
 
     // A second raw socket demonstrates the complete independent receive path.
-    let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);
+    let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), ifindex)?);
     dock.add_socket(peer_raw.clone())?;
     let peer = EndpointAddr::direct(peer_raw.local_addr()?);
 
@@ -85,7 +86,7 @@ async fn main() -> Result<(), Error> {
     // Ephemeral sockets use the global Dock/Topology and never enter ArcAddrBook.
     let mut target = bound;
     target.set_port(0);
-    let ephemeral = EphemeralSocket::bind(target)?;
+    let ephemeral = EphemeralSocket::bind(target, ifindex)?;
     let ephemeral_bound = ephemeral.udp_socket().local_addr()?;
     let punched_endpoint = EndpointAddr::direct(ephemeral_bound);
     let punched = ephemeral;

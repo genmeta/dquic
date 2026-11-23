@@ -214,8 +214,8 @@ async fn socket_wait_is_interrupted_by_disable_or_close_after_collect_waiter_is_
     use qprotocol::{QuicProtocol, UdpSocket};
 
     for close in [false, true] {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
         let local = qbase::net::addr::EndpointAddr::direct(socket.local_addr().unwrap());
         QuicProtocol::global().register(local, &socket).unwrap();
         let (paths, path) = path(Pathway::new(local, peer.local_addr().unwrap().into()));

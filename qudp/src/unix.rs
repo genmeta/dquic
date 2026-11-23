@@ -14,12 +14,12 @@ use nix::{
 use qbase::net::route::Line;
 use socket2::Socket;
 
-use crate::{BoundDevice, Io, UdpSocket};
+use crate::{Io, UdpSocket};
 
 const OPTION_ON: bool = true;
 
 impl Io for UdpSocket {
-    fn config(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
+    fn setsockopt(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
         let io = socket.as_fd();
         nix::sys::socket::setsockopt(&io, sockopt::RcvBuf, &(2 * 1024 * 1024))?;
         match addr {
@@ -41,43 +41,7 @@ impl Io for UdpSocket {
             }
         }
 
-        socket.bind(&addr.into())
-    }
-
-    fn bind_device_to_socket(socket: &socket2::SockRef<'_>, addr: SocketAddr, device: &BoundDevice) -> io::Result<()> {
-        let _ = addr;
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        {
-            if let Err(error) = socket.bind_device(Some(device.name().as_bytes())) {
-                tracing::debug!(
-                    target: "qudp",
-                    interface = device.name(),
-                    ifindex = device.index().get(),
-                    %error,
-                    "failed to apply socket-level device binding; sendmsg packet info will constrain egress interface"
-                );
-            }
-            return Ok(());
-        }
-
-        #[cfg(target_os = "fuchsia")]
-        {
-            return socket.bind_device(Some(device.name().as_bytes()));
-        }
-
-        #[cfg(any(target_os = "ios", target_os = "visionos", target_os = "macos", target_os = "tvos", target_os = "watchos",))]
-        {
-            return match addr {
-                SocketAddr::V4(..) => socket.bind_device_by_index_v4(Some(device.index())),
-                SocketAddr::V6(..) => socket.bind_device_by_index_v6(Some(device.index())),
-            };
-        }
-
-        #[allow(unreachable_code)]
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("binding UDP socket to interface {} is unsupported on this platform", device.name()),
-        ))
+        Ok(())
     }
 
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
@@ -109,14 +73,14 @@ impl Io for UdpSocket {
             V6,
         }
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        let mut packet_info_kind = None;
+        let packet_info_kind;
         #[cfg(any(target_os = "android", target_os = "linux"))]
         let v4_pktinfo;
         #[cfg(any(target_os = "android", target_os = "linux"))]
         let v6_pktinfo;
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        if let Some(device) = self.bound_device.as_ref() {
+        {
             let src = if line.src.ip().is_unspecified() {
                 self.io.local_addr()?
             } else {
@@ -125,31 +89,29 @@ impl Io for UdpSocket {
             match src.ip() {
                 IpAddr::V4(src) => {
                     v4_pktinfo = libc::in_pktinfo {
-                        ipi_ifindex: device.index().get() as _,
+                        ipi_ifindex: self.ifindex.get() as _,
                         ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
                         ipi_addr: libc::in_addr { s_addr: 0 },
                     };
                     cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
-                    packet_info_kind = Some(PacketInfoKind::V4);
+                    packet_info_kind = PacketInfoKind::V4;
                 }
                 IpAddr::V6(src) => {
                     v6_pktinfo =
-                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: device.index().get() as _ };
+                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex.get() as _ };
                     cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
-                    packet_info_kind = Some(PacketInfoKind::V6);
+                    packet_info_kind = PacketInfoKind::V6;
                 }
             }
         }
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        let space = match (has_gso, packet_info_kind) {
-            (false, None) => None,
-            (true, None) => Some(cmsg_space!(libc::c_int)),
-            (false, Some(PacketInfoKind::V4)) => Some(cmsg_space!(libc::in_pktinfo)),
-            (false, Some(PacketInfoKind::V6)) => Some(cmsg_space!(libc::in6_pktinfo)),
-            (true, Some(PacketInfoKind::V4)) => Some(cmsg_space!(libc::c_int, libc::in_pktinfo)),
-            (true, Some(PacketInfoKind::V6)) => Some(cmsg_space!(libc::c_int, libc::in6_pktinfo)),
-        };
+        let space = Some(match (has_gso, packet_info_kind) {
+            (false, PacketInfoKind::V4) => cmsg_space!(libc::in_pktinfo),
+            (false, PacketInfoKind::V6) => cmsg_space!(libc::in6_pktinfo),
+            (true, PacketInfoKind::V4) => cmsg_space!(libc::c_int, libc::in_pktinfo),
+            (true, PacketInfoKind::V6) => cmsg_space!(libc::c_int, libc::in6_pktinfo),
+        });
         #[cfg(not(any(target_os = "android", target_os = "linux")))]
         let space = has_gso.then_some(cmsg_space!(libc::c_int));
 
@@ -181,28 +143,26 @@ impl Io for UdpSocket {
         let mut cmsgs = Vec::new();
         let v4_pktinfo;
         let v6_pktinfo;
-        if let Some(device) = self.bound_device.as_ref() {
-            let src = if send_line.src.ip().is_unspecified() {
-                self.io.local_addr()?
-            } else {
-                send_line.src
-            };
-            match src.ip() {
-                IpAddr::V4(src) => {
-                    v4_pktinfo = libc::in_pktinfo {
-                        ipi_ifindex: device.index().get(),
-                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
-                        ipi_addr: libc::in_addr { s_addr: 0 },
-                    };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
-                }
-                IpAddr::V6(src) => {
-                    v6_pktinfo =
-                        libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: device.index().get() };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
-                }
+        let src = if send_line.src.ip().is_unspecified() {
+            self.io.local_addr()?
+        } else {
+            send_line.src
+        };
+        match src.ip() {
+            IpAddr::V4(src) => {
+                v4_pktinfo = libc::in_pktinfo {
+                    ipi_ifindex: self.ifindex.get(),
+                    ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
+                    ipi_addr: libc::in_addr { s_addr: 0 },
+                };
+                cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
+            }
+            IpAddr::V6(src) => {
+                v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex.get() };
+                cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
             }
         }
+
         let mut sent_packet = 0;
         for slice in slices.iter() {
             macro_rules! send_batch {
@@ -338,7 +298,7 @@ impl Io for UdpSocket {
     }
 }
 
-fn parse_cmsg(cmsg: ControlMessageOwned, line: &mut Line) {
+pub(super) fn parse_cmsg(cmsg: ControlMessageOwned, line: &mut Line) {
     match cmsg {
         ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
             let ip = IpAddr::V4(Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes()));
@@ -380,66 +340,5 @@ impl ToSocketAddr for SockaddrStorage {
             }
             _ => panic!("Unsupported address family"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
-    #[tokio::test]
-    async fn send_rejects_a_missing_egress_interface_without_socket_level_binding() {
-        for bind in ["127.0.0.1:0", "[::1]:0"] {
-            let peer = std::net::UdpSocket::bind(bind).unwrap();
-            let mut socket = UdpSocket::bind(bind.parse().unwrap()).unwrap();
-            // Simulate a removed interface without relying on a socket-level binding.
-            socket.bound_device = Some(BoundDevice::new("removed-interface", u32::MAX).unwrap());
-            let link = qbase::net::route::Link::new(socket.local_addr().unwrap(), peer.local_addr().unwrap());
-            let line = Line::new(link, 64, None, 5);
-
-            let result = socket.sendmsg(&[IoSlice::new(b"probe")], &line);
-            assert!(result.is_err(), "{bind}: a missing interface must not fall back to another egress: {result:?}");
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
-    #[tokio::test]
-    async fn packet_info_sends_batches_with_explicit_or_bound_source_addresses() {
-        let index = nix::net::if_::if_nametoindex("lo0").unwrap();
-        for (bind, unspecified) in [("127.0.0.1:0", "0.0.0.0:0"), ("[::1]:0", "[::]:0")] {
-            let peer = std::net::UdpSocket::bind(bind).unwrap();
-            peer.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
-            let mut socket = UdpSocket::bind(bind.parse().unwrap()).unwrap();
-            socket.bound_device = Some(BoundDevice::new("lo0", index).unwrap());
-            let local = socket.local_addr().unwrap();
-            for source in [local, unspecified.parse().unwrap()] {
-                let link = qbase::net::route::Link::new(source, peer.local_addr().unwrap());
-                let line = Line::new(link, 64, None, 5);
-                let buffers = [IoSlice::new(b"first"), IoSlice::new(b"other")];
-                assert_eq!(socket.sendmsg(&buffers, &line).unwrap(), 2);
-                for expected in [b"first", b"other"] {
-                    let mut bytes = [0; 16];
-                    let (size, source) = peer.recv_from(&mut bytes).unwrap();
-                    assert_eq!(&bytes[..size], expected);
-                    assert_eq!(source, local);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn ipv6_link_local_packet_info_preserves_the_interface_scope() {
-        let mut line = Line::default();
-        let address = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        let packet_info = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: address.octets() }, ipi6_ifindex: 7 };
-
-        parse_cmsg(ControlMessageOwned::Ipv6PacketInfo(packet_info), &mut line);
-
-        let SocketAddr::V6(destination) = line.link.dst else {
-            panic!("IPv6 packet info must produce an IPv6 destination");
-        };
-        assert_eq!(*destination.ip(), address);
-        assert_eq!(destination.scope_id(), 7);
     }
 }

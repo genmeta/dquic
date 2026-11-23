@@ -38,8 +38,8 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
             observed.store(true, Ordering::Relaxed);
         })
         .unwrap();
-    let server_socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let client_socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let server_socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let client_socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let server_addr = server_socket.local_addr().unwrap();
     let client_addr = client_socket.local_addr().unwrap();
     let local = EndpointAddr::direct(server_addr);

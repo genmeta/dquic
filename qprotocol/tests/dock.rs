@@ -1,3 +1,6 @@
+#[path = "../../qudp/tests/common/mod.rs"]
+mod common;
+
 use std::{io, net::SocketAddr, sync::Arc};
 
 use qbase::net::{NatType, addr::EndpointAddr, route::Link};
@@ -12,7 +15,7 @@ async fn one_socket_starts_one_task() {
     let quic = Arc::new(QuicProtocol::new());
     let topology = Arc::new(Topology::new(Arc::new(StunProtocol::new()), Arc::new(ForwardProtocol::new()), quic));
     let dock = Dock::new(topology);
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
 
     assert!(dock.add_socket(socket.clone()).unwrap().is_some());
     assert!(dock.add_socket(socket.clone()).unwrap().is_none());
@@ -24,7 +27,7 @@ async fn one_socket_starts_one_task() {
 #[tokio::test]
 async fn concurrent_adds_register_one_receiver() {
     let dock = isolated_dock();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let barrier = std::sync::Barrier::new(2);
     let runtime = tokio::runtime::Handle::current();
     let results = std::thread::scope(|scope| {
@@ -48,7 +51,7 @@ async fn concurrent_adds_register_one_receiver() {
 async fn old_receiver_cleanup_preserves_a_new_registration_of_the_same_socket() {
     let dock = Dock::global();
     let stun = dock.topology().stun();
-    let old = qprotocol::EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let old = qprotocol::EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let socket = old.udp_socket().clone();
     let bound = socket.local_addr().unwrap();
     assert!(dock.remove(&socket));
@@ -79,7 +82,7 @@ fn isolated_dock() -> Arc<Dock> {
 async fn socket_registration_and_removal_leave_publication_to_the_address_book() {
     let dock = isolated_dock();
     let addresses = ArcAddrBook::new();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let bound = socket.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
     let outer = EndpointAddr::direct("8.8.8.8:4567".parse().unwrap());
@@ -100,7 +103,7 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
     addresses.add_candidate(link, NatType::RestrictedCone);
     assert_eq!(events.try_recv().unwrap(), qprotocol::addr_book::Candidate::New { link, nat: NatType::RestrictedCone });
 
-    let other = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let other = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     dock.add_socket(other.clone()).unwrap().unwrap();
     assert!(dock.remove_bound(bound));
     for alias in [direct, outer, relay] {
@@ -123,10 +126,10 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
 #[tokio::test]
 async fn failed_quic_registration_rolls_back_stun_and_preserves_the_existing_alias() {
     let dock = isolated_dock();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let bound = socket.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
-    let existing = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let existing = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     dock.topology().quic().register(direct, &existing).unwrap();
     assert!(dock.add_socket(socket.clone()).is_err());
     assert!(dock.is_empty());
@@ -142,7 +145,7 @@ async fn shutdown_and_drop_revoke_aliases_with_live_socket_handles() {
     for shutdown in [true, false] {
         let dock = isolated_dock();
         let topology = dock.topology().clone();
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         let bound = socket.local_addr().unwrap();
         let direct = EndpointAddr::direct(bound);
         let handle = dock.add_socket(socket.clone()).unwrap().unwrap();
@@ -165,7 +168,7 @@ async fn shutdown_and_drop_revoke_aliases_with_live_socket_handles() {
 async fn receive_task_exit_removes_the_registration_and_protocol_aliases() {
     use qbase::{datagram::forward::Payload, net::route::Pathway};
     let dock = isolated_dock();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let bound = socket.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
     dock.add_socket(socket.clone()).unwrap().unwrap();

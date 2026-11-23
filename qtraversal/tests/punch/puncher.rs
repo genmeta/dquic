@@ -59,8 +59,8 @@ fn local_addresses_are_announced_when_added_on_the_reliable_queue() {
 
 #[tokio::test]
 async fn adding_another_default_group_binding_probes_that_specific_socket() {
-    let first = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let second = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let first = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
+    let second = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let first_addr = first.udp_socket().local_addr().unwrap();
     let second_addr = second.udp_socket().local_addr().unwrap();
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

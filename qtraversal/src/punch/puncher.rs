@@ -342,10 +342,7 @@ where
         let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
         let mut target = source.local_addr()?;
         target.set_port(port);
-        let socket = match source.bound_device() {
-            Some(device) => EphemeralSocket::bind_to_device(target, device.clone()),
-            None => EphemeralSocket::bind(target),
-        }?;
+        let socket = EphemeralSocket::bind(target, source.ifindex())?;
         let local = socket.udp_socket().local_addr()?;
         let topology = Dock::global().topology();
         let server = qprotocol::StunProtocol::stun_servers()

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     future::pending,
     io,
-    net::{Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -87,15 +87,9 @@ struct Binding {
 }
 
 impl Binding {
-    fn new(device: Option<qudp::BoundDevice>) -> Self {
+    fn new() -> Self {
         let bound = "127.0.0.1:0".parse().unwrap();
-        let socket = Arc::new(
-            match device {
-                Some(device) => UdpSocket::bind_to_device(bound, device),
-                None => UdpSocket::bind(bound),
-            }
-            .unwrap(),
-        );
+        let socket = Arc::new(UdpSocket::bind(bound, crate::common::loopback_ifindex()).unwrap());
         Dock::global().add_socket(socket.clone()).unwrap();
         let endpoint = EndpointAddr::direct(socket.local_addr().unwrap());
         Self { socket, registered: vec![endpoint] }
@@ -140,7 +134,7 @@ fn attach(book: &ArcAddrBook) -> mpsc::UnboundedReceiver<Candidate> {
 #[tokio::test]
 async fn replay_advertises_explicit_candidates_and_refreshes_each_link() {
     let book = ArcAddrBook::new();
-    let mut binding = Binding::new(None);
+    let mut binding = Binding::new();
     let inner = binding.inner();
     let outer = binding.outer([8, 8, 4, 4]);
     let alias = binding.outer([8, 8, 8, 8]);
@@ -178,7 +172,7 @@ async fn replay_advertises_explicit_candidates_and_refreshes_each_link() {
 #[tokio::test]
 async fn endpoint_withdrawal_is_independent_and_socket_withdrawal_removes_all_links() {
     let book = ArcAddrBook::new();
-    let mut binding = Binding::new(None);
+    let mut binding = Binding::new();
     let inner = binding.inner();
     let outer = binding.outer([8, 8, 4, 4]);
     let alias = binding.outer([8, 8, 8, 8]);
@@ -220,7 +214,7 @@ async fn endpoint_withdrawal_is_independent_and_socket_withdrawal_removes_all_li
 #[tokio::test]
 async fn observer_filters_scopes_and_ignores_endpoints_without_candidates() {
     let book = ArcAddrBook::new();
-    let mut binding = Binding::new(None);
+    let mut binding = Binding::new();
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
     book.add_candidate(Link::new(binding.bound(), binding.bound()), NatType::FullCone);
@@ -242,12 +236,7 @@ async fn observer_filters_scopes_and_ignores_endpoints_without_candidates() {
 
 #[tokio::test]
 async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
-    let interface = netdev::get_interfaces()
-        .into_iter()
-        .find(|interface| interface.ipv4.iter().any(|ip| ip.addr() == Ipv4Addr::LOCALHOST))
-        .expect("loopback interface");
-    let device = qudp::BoundDevice::new(interface.name, interface.index).unwrap();
-    let mut binding = Binding::new(Some(device.clone()));
+    let mut binding = Binding::new();
     let book = ArcAddrBook::new();
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
@@ -264,7 +253,7 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
     assert_eq!(source.ip(), binding.bound().ip());
     assert_ne!(source.port(), binding.bound().port(), "predictor must use a temporary socket");
     let probe = Dock::global().find_socket(source).expect("temporary probe socket is registered");
-    assert_eq!(probe.bound_device(), Some(&device), "temporary probes must inherit the source interface");
+    assert_eq!(probe.ifindex(), binding.socket.ifindex(), "temporary probes must inherit the source interface");
     puncher.abort_transactions();
     close.send(()).unwrap();
     task.await.unwrap();
@@ -273,7 +262,7 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
 #[tokio::test]
 async fn alias_probes_use_the_actual_socket_source_address() {
     let book = ArcAddrBook::new();
-    let mut binding = Binding::new(None);
+    let mut binding = Binding::new();
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
     book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::RestrictedCone);
@@ -314,7 +303,7 @@ async fn nat_refresh_stops_old_probes_and_allows_new_address_transactions() {
     }
 
     let book = ArcAddrBook::new();
-    let mut binding = Binding::new(None);
+    let mut binding = Binding::new();
     let outer = binding.outer([8, 8, 4, 4]);
     binding.publish(&book, outer);
     book.add_candidate(Link::new(binding.bound(), outer.addr()), NatType::RestrictedCone);

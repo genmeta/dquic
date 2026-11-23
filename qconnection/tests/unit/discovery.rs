@@ -144,12 +144,7 @@ struct LocalSocket(Arc<UdpSocket>);
 
 impl LocalSocket {
     fn new() -> Self {
-        let interface = netdev::get_interfaces()
-            .into_iter()
-            .find(|interface| interface.ipv4.iter().any(|ip| ip.addr() == std::net::Ipv4Addr::LOCALHOST))
-            .expect("loopback interface");
-        let device = qudp::BoundDevice::new(interface.name, interface.index).unwrap();
-        let socket = Arc::new(UdpSocket::bind_to_device("127.0.0.1:0".parse().unwrap(), device.clone()).unwrap());
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         Dock::global().add_socket(socket.clone()).unwrap();
         let bound = socket.local_addr().unwrap();
         ArcAddrBook::global().add_sock_addr(bound);

@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 
+#[path = "../../../qudp/tests/common/mod.rs"]
+mod net;
+pub fn loopback_ifindex() -> std::num::NonZeroU32 {
+    net::loopback_ifindex()
+}
+
 #[path = "../support/open.rs"]
 pub mod opening;
 

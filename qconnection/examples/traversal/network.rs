@@ -1,5 +1,5 @@
 //! Example network owner: scan interfaces once, register sockets, discover and publish addresses.
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU32, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 use qbase::net::{
@@ -86,8 +86,8 @@ struct Socket {
 
 impl Socket {
     fn bind(addr: SocketAddr, interface: &netdev::Interface) -> Result<Self, Error> {
-        let device = qudp::BoundDevice::new(interface.name.clone(), interface.index)?;
-        let udp = Arc::new(UdpSocket::bind_to_device(addr, device)?);
+        let ifindex = NonZeroU32::new(interface.index).ok_or("interface index must be non-zero")?;
+        let udp = Arc::new(UdpSocket::bind(addr, ifindex)?);
         Dock::global().add_socket(udp.clone())?;
         let bound = udp.local_addr()?;
         let direct = EndpointAddr::direct(bound);
@@ -117,7 +117,7 @@ impl Socket {
         let addresses = ArcAddrBook::global();
         addresses.add_endpoint_addr(bound, outer.into())?;
         addresses.add_endpoint_addr(bound, endpoint)?;
-        println!("STUN: interface={}\n  Local:  {bound}\n  Public: {outer}\n  Relay:  {relay}\n", self.udp.bound_device().unwrap().name());
+        println!("STUN: interface={}\n  Local:  {bound}\n  Public: {outer}\n  Relay:  {relay}\n", self.udp.ifindex());
         Ok(endpoint)
     }
 

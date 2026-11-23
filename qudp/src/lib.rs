@@ -30,41 +30,16 @@ pub struct UdpSocket {
     io: tokio::net::UdpSocket,
     send_wakers: Arc<Wakers>,
     ttl: AtomicI32,
-    bound_device: Option<BoundDevice>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundDevice {
-    name: String,
-    index: NonZeroU32,
-}
-
-impl BoundDevice {
-    pub fn new(name: impl Into<String>, index: u32) -> io::Result<Self> {
-        let index =
-            NonZeroU32::new(index).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "interface index must be non-zero"))?;
-        Ok(Self { name: name.into(), index })
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn index(&self) -> NonZeroU32 {
-        self.index
-    }
+    ifindex: NonZeroU32,
 }
 
 impl UdpSocket {
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
-        Self::bind_scoped(addr, None)
-    }
-
-    pub fn bind_to_device(addr: SocketAddr, device: BoundDevice) -> io::Result<Self> {
-        Self::bind_scoped(addr, Some(device))
-    }
-
-    fn bind_scoped(addr: SocketAddr, bound_device: Option<BoundDevice>) -> io::Result<Self> {
+    /// Bind a local address and use the given interface for every outgoing packet.
+    /// Reception is not restricted to that interface. An unavailable interface
+    /// is reported when sending. IPv6 link-local scopes must match the index;
+    /// a missing scope is filled without changing the address's flowinfo.
+    pub fn bind(addr: SocketAddr, ifindex: NonZeroU32) -> io::Result<Self> {
+        let addr = scope_addr(addr, ifindex)?;
         let domain = if addr.is_ipv4() {
             Domain::IPV4
         } else {
@@ -73,22 +48,19 @@ impl UdpSocket {
 
         let socket = Socket::new(domain, Type::DGRAM, None)?;
         socket.set_nonblocking(true)?;
-        Self::config(&socket, addr)?;
-        if let Some(device) = bound_device.as_ref() {
-            let socket_ref = socket2::SockRef::from(&socket);
-            Self::bind_device_to_socket(&socket_ref, addr, device)?;
-        }
+        Self::setsockopt(&socket, addr)?;
+        socket.bind(&addr.into())?;
         let io = tokio::net::UdpSocket::from_std(socket.into())?;
-        let usc = Self { io, send_wakers: Arc::new(Wakers::new()), ttl: AtomicI32::new(Line::DEFAULT_TTL as i32), bound_device };
+        let usc = Self { io, send_wakers: Arc::new(Wakers::new()), ttl: AtomicI32::new(Line::DEFAULT_TTL as i32), ifindex };
         Ok(usc)
+    }
+
+    pub fn ifindex(&self) -> NonZeroU32 {
+        self.ifindex
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.io.local_addr()
-    }
-
-    pub fn bound_device(&self) -> Option<&BoundDevice> {
-        self.bound_device.as_ref()
     }
 
     /// Wake all concurrent senders through Tokio's single send-readiness waker.
@@ -101,10 +73,13 @@ impl UdpSocket {
     }
 
     pub fn poll_send(&self, cx: &mut Context<'_>, bufs: &[IoSlice<'_>], line: &Line) -> Poll<io::Result<usize>> {
+        let mut line = *line;
+        line.link.src = scope_addr(line.src, self.ifindex)?;
+        line.link.dst = scope_addr(line.dst, self.ifindex)?;
         loop {
             ready!(self.poll_send_ready(cx))?;
             self.set_ttl(line.ttl as i32)?;
-            match self.io.try_io(Interest::WRITABLE, || self.sendmsg(bufs, line)) {
+            match self.io.try_io(Interest::WRITABLE, || self.sendmsg(bufs, &line)) {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Poll::Ready(Err(e)),
@@ -124,33 +99,25 @@ impl UdpSocket {
             }
         }
     }
+}
 
-    /// Bind the socket before sharing or publishing it, and retain the device metadata.
-    pub fn bind_device(&mut self, device: &str) -> io::Result<()> {
-        #[cfg(not(unix))]
-        {
-            let _ = device;
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "binding an existing UDP socket by interface name is unsupported on this platform",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            let index = nix::net::if_::if_nametoindex(device)?;
-            let device = BoundDevice::new(device, index)?;
-            let socket = socket2::SockRef::from(&self.io);
-            Self::bind_device_to_socket(&socket, self.io.local_addr()?, &device)?;
-            self.bound_device = Some(device);
-            Ok(())
+fn scope_addr(mut addr: SocketAddr, ifindex: NonZeroU32) -> io::Result<SocketAddr> {
+    if let SocketAddr::V6(v6) = &mut addr
+        && v6.ip().is_unicast_link_local()
+    {
+        match v6.scope_id() {
+            0 => v6.set_scope_id(ifindex.get()),
+            scope if scope != ifindex.get() => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "IPv6 scope does not match the socket interface"));
+            }
+            _ => {}
         }
     }
+    Ok(addr)
 }
 
 pub trait Io {
-    fn config(io: &socket2::Socket, addr: SocketAddr) -> io::Result<()>;
-
-    fn bind_device_to_socket(io: &socket2::SockRef<'_>, addr: SocketAddr, device: &BoundDevice) -> io::Result<()>;
+    fn setsockopt(io: &socket2::Socket, addr: SocketAddr) -> io::Result<()>;
 
     fn sendmsg(&self, bufs: &[IoSlice<'_>], line: &Line) -> io::Result<usize>;
 

@@ -37,7 +37,7 @@ impl Step {
 impl Network {
     fn new() -> Self {
         let protocol = Arc::new(StunProtocol::new());
-        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         let local = client.local_addr().unwrap();
         let dock = isolated_dock(&protocol);
         dock.add_socket(client.clone()).unwrap();
@@ -260,7 +260,7 @@ async fn missing_attributes_and_invalid_first_server_topology_are_errors() {
 async fn mapping_timeout_is_an_error() {
     let protocol = Arc::new(StunProtocol::new());
     let dock = isolated_dock(&protocol);
-    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let local = client.local_addr().unwrap();
     dock.add_socket(client.clone()).unwrap();
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

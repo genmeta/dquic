@@ -72,10 +72,7 @@ impl PortPredictor {
     pub(super) fn new(bound: SocketAddr, dst: SocketAddr) -> io::Result<Self> {
         let source =
             Dock::global().find_socket(bound).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "source socket unavailable"))?;
-        let device = match source.bound_device() {
-            Some(device) => device.name().to_owned(),
-            None => bound.ip().to_string(),
-        };
+        let device = source.ifindex().get().to_string();
         Ok(Self { source, dst, device, probes: ProbeTable::new(), quota_held: 0, probes_created: 0 })
     }
 
@@ -95,10 +92,7 @@ impl PortPredictor {
         let port = MIN_PORT + rand::random::<u16>() % (u16::MAX - MIN_PORT);
         let mut target = self.source.local_addr()?;
         target.set_port(port);
-        match self.source.bound_device() {
-            Some(device) => EphemeralSocket::bind_to_device(target, device.clone()),
-            None => EphemeralSocket::bind(target),
-        }
+        EphemeralSocket::bind(target, self.source.ifindex())
     }
 
     fn take_matching_done(&mut self, tx: &Transaction) -> Option<EphemeralSocket> {

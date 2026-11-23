@@ -32,10 +32,10 @@ impl Step {
 impl Network {
     fn new() -> Self {
         let protocol = Arc::new(StunProtocol::new());
-        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         let local = client.local_addr().unwrap();
         protocol.register_socket(local, &client);
-        let listener = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
         let port = listener.local_addr().unwrap().port();
         Self {
             protocol,

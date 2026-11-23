@@ -1269,7 +1269,7 @@ async fn close_wakers_are_independent_and_fire_without_repolling() {
 async fn udp_submission_delivers_an_encrypted_stream() {
     use qprotocol::{protocol::quic::QuicProtocol, socket::UdpSocket};
     let [(client, ct, _), (server, st, sp)] = pair(1);
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let remote = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let local = EndpointAddr::direct(socket.local_addr().unwrap());
     let pathway = Pathway::new(local, EndpointAddr::direct(remote.local_addr().unwrap()));

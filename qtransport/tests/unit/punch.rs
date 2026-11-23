@@ -387,7 +387,7 @@ async fn authenticated_packets_start_validation_on_new_post_handshake_paths() {
         let (receiver, sender) = (&pair[receiver], &pair[1 - receiver]);
         let paths = empty_paths(receiver);
         paths.progress.on_initial_received(receiver.peer_cid());
-        let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let socket = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
         let local = EndpointAddr::direct(socket.local_addr().unwrap());
         qprotocol::QuicProtocol::global().register(local, &socket).unwrap();
         let original = paths.add_path(Pathway::new(local, "127.0.0.1:44502".parse().unwrap()));
@@ -457,8 +457,8 @@ async fn unauthenticated_hello_does_not_reach_puncher() {
 #[tokio::test]
 async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers() {
     let [receiver, sender] = pair();
-    let local = qprotocol::EphemeralSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let peer = qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local = qprotocol::EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
+    let peer = qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
     let link = Link::new(local.udp_socket().local_addr().unwrap(), peer.local_addr().unwrap());
     // The advertised peer differs from the datagram source. Replies must use Link.
     let pathway = Pathway::new(link.src.into(), EndpointAddr::direct("192.0.2.1:9".parse().unwrap()));

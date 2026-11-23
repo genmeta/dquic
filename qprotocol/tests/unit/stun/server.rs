@@ -1,7 +1,7 @@
 use super::*;
 
 fn socket() -> Arc<UdpSocket> {
-    Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap())
+    Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap())
 }
 
 fn config(bound: SocketAddr) -> ChangeServer {

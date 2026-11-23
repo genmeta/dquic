@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -8,9 +10,31 @@ use bytes::BytesMut;
 use qbase::net::route::{Line, Link};
 use qudp::UdpSocket;
 
+#[tokio::test]
+async fn invalid_egress_does_not_filter_reception_or_fall_back_when_sending() -> io::Result<()> {
+    use std::{io::IoSlice, num::NonZeroU32};
+
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let socket = UdpSocket::bind(bind.parse().unwrap(), NonZeroU32::new(u32::MAX).unwrap())?;
+        let local = socket.local_addr()?;
+        let peer = tokio::net::UdpSocket::bind(bind).await?;
+        peer.send_to(b"live", local).await?;
+        let mut packets = [BytesMut::zeroed(1500)];
+        let mut lines = [Line::default()];
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), socket.receive(&mut packets, &mut lines)).await??, 1);
+        assert_eq!(&packets[0][..lines[0].seg_size as usize], b"live");
+
+        let line = Line::new(Link::new(local, peer.local_addr()?), 64, None, 5);
+        let buffers = [IoSlice::new(b"probe")];
+        let result = tokio::time::timeout(Duration::from_secs(1), socket.send(&buffers, line)).await?;
+        assert!(result.is_err(), "{bind}: a missing interface must not fall back to another egress: {result:?}");
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn ipv6_wildcard_socket_does_not_receive_ipv4_packets() -> io::Result<()> {
-    let socket4 = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
+    let socket4 = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)), crate::common::loopback_ifindex())?;
     let port = socket4.local_addr()?.port();
 
     let socket6 = std::net::UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))?;
@@ -25,10 +49,10 @@ async fn ipv6_wildcard_socket_does_not_receive_ipv4_packets() -> io::Result<()> 
 
 #[tokio::test(flavor = "current_thread")]
 async fn ipv4_and_ipv6_wildcard_sockets_can_bind_same_port() -> io::Result<()> {
-    let v6 = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
+    let v6 = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)), crate::common::loopback_ifindex())?;
     let port = v6.local_addr()?.port();
 
-    let v4 = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))?;
+    let v4 = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)), crate::common::loopback_ifindex())?;
 
     assert!(matches!(v6.local_addr()?, SocketAddr::V6(_)));
     assert!(matches!(v4.local_addr()?, SocketAddr::V4(_)));
@@ -40,7 +64,7 @@ async fn unreachable_peer_does_not_stop_reception_on_the_shared_socket() -> io::
     use std::io::IoSlice;
 
     for bind in ["127.0.0.1:0", "[::1]:0"] {
-        let socket = UdpSocket::bind(bind.parse().unwrap())?;
+        let socket = UdpSocket::bind(bind.parse().unwrap(), crate::common::loopback_ifindex())?;
         let local = socket.local_addr()?;
         let closed = std::net::UdpSocket::bind(bind)?;
         let unreachable = closed.local_addr()?;
