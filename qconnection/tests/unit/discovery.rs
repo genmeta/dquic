@@ -150,7 +150,7 @@ impl LocalSocket {
             .expect("loopback interface");
         let device = qudp::BoundDevice::new(interface.name, interface.index).unwrap();
         let socket = Arc::new(UdpSocket::bind_to_device("127.0.0.1:0".parse().unwrap(), device.clone()).unwrap());
-        Dock::global().add(socket.clone()).unwrap();
+        Dock::global().add_socket(socket.clone()).unwrap();
         let bound = socket.local_addr().unwrap();
         ArcAddrBook::global().add_sock_addr(bound);
         Self(socket)

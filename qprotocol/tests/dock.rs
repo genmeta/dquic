@@ -14,8 +14,8 @@ async fn one_socket_starts_one_task() {
     let dock = Dock::new(topology);
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
 
-    assert!(dock.add(socket.clone()).unwrap().is_some());
-    assert!(dock.add(socket.clone()).unwrap().is_none());
+    assert!(dock.add_socket(socket.clone()).unwrap().is_some());
+    assert!(dock.add_socket(socket.clone()).unwrap().is_none());
     assert_eq!(dock.len(), 1);
     assert!(dock.remove(&socket));
     assert!(dock.is_empty());
@@ -33,7 +33,7 @@ async fn concurrent_adds_register_one_receiver() {
                 scope.spawn(|| {
                     let _runtime = runtime.enter();
                     barrier.wait();
-                    dock.add(socket.clone()).unwrap()
+                    dock.add_socket(socket.clone()).unwrap()
                 })
             })
             .collect::<Vec<_>>();
@@ -52,7 +52,7 @@ async fn old_receiver_cleanup_preserves_a_new_registration_of_the_same_socket() 
     let socket = old.udp_socket().clone();
     let bound = socket.local_addr().unwrap();
     assert!(dock.remove(&socket));
-    let current = dock.add(socket.clone()).unwrap().unwrap();
+    let current = dock.add_socket(socket.clone()).unwrap().unwrap();
 
     // Dropping the old owner invokes cleanup with its original registration ID.
     drop(old);
@@ -86,7 +86,7 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
     let relay = EndpointAddr::mediate("8.8.4.4:3478".parse().unwrap(), outer.addr());
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
     addresses.attach_puncher(sender);
-    dock.add(socket.clone()).unwrap().unwrap();
+    dock.add_socket(socket.clone()).unwrap().unwrap();
     assert_eq!(addresses.mdns_query(bound.ip()), None);
     addresses.add_sock_addr(bound);
     assert_eq!(addresses.mdns_query(bound.ip()), Some(bound));
@@ -101,7 +101,7 @@ async fn socket_registration_and_removal_leave_publication_to_the_address_book()
     assert_eq!(events.try_recv().unwrap(), qprotocol::addr_book::Candidate::New { link, nat: NatType::RestrictedCone });
 
     let other = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    dock.add(other.clone()).unwrap().unwrap();
+    dock.add_socket(other.clone()).unwrap().unwrap();
     assert!(dock.remove_bound(bound));
     for alias in [direct, outer, relay] {
         assert!(dock.topology().quic().find_socket(alias).is_none());
@@ -128,13 +128,13 @@ async fn failed_quic_registration_rolls_back_stun_and_preserves_the_existing_ali
     let direct = EndpointAddr::direct(bound);
     let existing = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     dock.topology().quic().register(direct, &existing).unwrap();
-    assert!(dock.add(socket.clone()).is_err());
+    assert!(dock.add_socket(socket.clone()).is_err());
     assert!(dock.is_empty());
     assert!(Arc::ptr_eq(&dock.topology().quic().find_socket(direct).unwrap(), &existing));
     let error = dock.topology().stun().detect_outer(bound, "127.0.0.1:9".parse().unwrap()).await.unwrap_err();
     assert!(matches!(error, qprotocol::protocol::stun::StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
     dock.topology().quic().unregister(existing.local_addr().unwrap());
-    assert!(dock.add(socket).unwrap().is_some());
+    assert!(dock.add_socket(socket).unwrap().is_some());
 }
 
 #[tokio::test]
@@ -145,7 +145,7 @@ async fn shutdown_and_drop_revoke_aliases_with_live_socket_handles() {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let bound = socket.local_addr().unwrap();
         let direct = EndpointAddr::direct(bound);
-        let handle = dock.add(socket.clone()).unwrap().unwrap();
+        let handle = dock.add_socket(socket.clone()).unwrap().unwrap();
         if shutdown {
             dock.shutdown();
         }
@@ -168,7 +168,7 @@ async fn receive_task_exit_removes_the_registration_and_protocol_aliases() {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let bound = socket.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
-    dock.add(socket.clone()).unwrap().unwrap();
+    dock.add_socket(socket.clone()).unwrap().unwrap();
     dock.topology().forward().serve(bound, &socket);
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     // Forwarding to an IPv6 destination from an IPv4 socket fails in the receive loop.

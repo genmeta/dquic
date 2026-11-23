@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let bound = socket.local_addr()?;
         let outer = SocketAddr::new(options.public_ip(), ports[index]);
         let changed = SocketAddr::new(options.change_ip, ports[1 - index]);
-        dock.add(socket.clone())?;
+        dock.add_socket(socket.clone())?;
         stun.set_change_server(bound, ChangeServer { change_port: ports[1 - index], change_address: changed, outer_address: outer })?;
         if options.relay {
             // The receiving address selects the socket; the public alias selects

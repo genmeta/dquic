@@ -45,7 +45,7 @@ impl Dock {
     /// Register reception and the direct QUIC address.
     /// The caller manages publication and withdrawal through [`crate::ArcAddrBook`].
     /// The handle identifies this registration even after reception has stopped.
-    pub fn add(self: &Arc<Self>, socket: Arc<UdpSocket>) -> io::Result<Option<AbortHandle>> {
+    pub fn add_socket(self: &Arc<Self>, socket: Arc<UdpSocket>) -> io::Result<Option<AbortHandle>> {
         let bound = socket.local_addr()?;
         // Keep protocol registration and receiver installation under one entry
         // lock so immediate receiver failure cannot leave a partially added socket.
@@ -73,7 +73,7 @@ impl Dock {
         let task = tokio::spawn(async move {
             // Retain the socket through cleanup so every QUIC alias can be revoked.
             if let Err(error) = topology.receive(socket.clone()).await {
-                tracing::warn!(%bound, %error, "UDP reception stopped");
+                tracing::error!(%bound, %error, "UDP reception stopped");
             }
             if let Some(dock) = dock.upgrade() {
                 dock.remove_registration(bound, tokio::task::id());
@@ -108,11 +108,11 @@ impl Dock {
         self.remove_registration(bound, handle.id())
     }
 
-    pub fn remove_bound(&self, bound: SocketAddr) -> bool {
-        let Some(handle) = self.sockets.get(&bound).map(|registration| registration.task.abort_handle()) else {
+    pub fn remove_bound(&self, sock_addr: SocketAddr) -> bool {
+        let Some(handle) = self.sockets.get(&sock_addr).map(|registration| registration.task.abort_handle()) else {
             return false;
         };
-        self.remove_registration(bound, handle.id())
+        self.remove_registration(sock_addr, handle.id())
     }
 
     pub(crate) fn remove_registration(&self, bound: SocketAddr, id: Id) -> bool {

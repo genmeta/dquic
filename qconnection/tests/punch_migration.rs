@@ -35,7 +35,7 @@ struct Socket(Arc<UdpSocket>);
 impl Socket {
     fn new() -> Self {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-        Dock::global().add(socket.clone()).unwrap();
+        Dock::global().add_socket(socket.clone()).unwrap();
         Self(socket)
     }
 

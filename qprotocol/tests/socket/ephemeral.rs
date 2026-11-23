@@ -62,7 +62,7 @@ async fn old_owner_does_not_remove_replacement_registrations() {
     let bound = raw.local_addr().unwrap();
     let endpoint = EndpointAddr::direct(bound);
     assert!(dock.remove(&raw));
-    assert!(dock.add(raw.clone()).unwrap().is_some());
+    assert!(dock.add_socket(raw.clone()).unwrap().is_some());
 
     drop(socket);
     assert!(Arc::ptr_eq(&dock.find_socket(bound).unwrap(), &raw));
