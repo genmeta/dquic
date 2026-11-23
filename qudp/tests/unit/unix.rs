@@ -1,9 +1,9 @@
 use std::net::Ipv6Addr;
 
-use nix::sys::socket::ControlMessageOwned;
+use ::nix::sys::socket::ControlMessageOwned;
 
 use super::*;
-use crate::unix::parse_cmsg;
+use crate::nix::parse_cmsg;
 
 #[tokio::test]
 async fn packet_info_sends_batches_with_explicit_or_bound_source_addresses() {
@@ -27,6 +27,27 @@ async fn packet_info_sends_batches_with_explicit_or_bound_source_addresses() {
             }
         }
     }
+}
+
+#[cfg(target_vendor = "apple")]
+#[tokio::test]
+async fn partial_batch_preserves_the_successful_prefix() -> std::io::Result<()> {
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let peer = tokio::net::UdpSocket::bind(bind).await?;
+        let socket = UdpSocket::bind(bind.parse().unwrap(), 0)?;
+        let link = qbase::net::route::Link::new(socket.local_addr()?, peer.local_addr()?);
+        let line = Line::new(link, 64, None, 4);
+        let oversized = vec![0; u16::MAX as usize + 1];
+        let buffers = [IoSlice::new(b"live"), IoSlice::new(&oversized)];
+
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), socket.send(&buffers, line)).await??, 1);
+        let mut bytes = [0; 16];
+        let (len, source) = tokio::time::timeout(std::time::Duration::from_secs(1), peer.recv_from(&mut bytes)).await??;
+        assert_eq!(&bytes[..len], b"live");
+        assert_eq!(source, socket.local_addr()?);
+        assert_eq!(peer.try_recv_from(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+    Ok(())
 }
 
 #[test]
