@@ -207,7 +207,8 @@ pub struct Line {
     pub ttl: u8,
     // Explicit congestion notification (ECN)
     pub ecn: Option<u8>,
-    // packet segment size
+    /// Datagram segment size. On receive, the buffer length is the total size;
+    /// GRO can place multiple segments in one buffer, with a shorter final segment.
     pub seg_size: u16,
 }
 

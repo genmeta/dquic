@@ -11,6 +11,26 @@ use qbase::net::route::{Line, Link};
 use qudp::UdpSocket;
 
 #[tokio::test]
+async fn receive_returns_the_filled_length_and_allows_buffer_reuse() -> io::Result<()> {
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let socket = UdpSocket::bind(bind.parse().unwrap(), 0)?;
+        let peer = std::net::UdpSocket::bind(bind)?;
+        let mut packets = [BytesMut::zeroed(128), BytesMut::zeroed(128)];
+        let mut lines = [Line::default(); 2];
+        for payload in [b"tiny".as_slice(), b"a longer datagram", b""] {
+            packets[0].resize(128, 0);
+            peer.send_to(payload, socket.local_addr()?)?;
+            let received = tokio::time::timeout(Duration::from_secs(1), socket.receive(&mut packets[..1], &mut lines)).await??;
+            assert_eq!(received, 1);
+            assert_eq!(packets[0].as_ref(), payload);
+            assert_eq!(packets[1].len(), 128);
+            assert_eq!(lines[0].seg_size as usize, payload.len());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn interface_selection_sends_and_receives_from_bound_or_wildcard_addresses() -> io::Result<()> {
     use std::io::IoSlice;
 

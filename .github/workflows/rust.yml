@@ -26,6 +26,9 @@ jobs:
         # Limit test parallelism to 1 thread to avoid resource contention
         # GitHub runners have limited cores (ubuntu/windows=2, macos=3)
         run: cargo test --workspace --verbose -- --test-threads=1
+      - name: Run UDP offload tests
+        if: matrix.target == 'ubuntu'
+        run: cargo test -p qudp -p qprotocol --features qudp/udp_offload_opt -- --test-threads=1
 
   format:
     runs-on: ubuntu-latest

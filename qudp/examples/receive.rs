@@ -24,22 +24,26 @@ async fn main() {
     let socket = UdpSocket::bind(addr, args.ifindex).expect("failed to create socket");
     let mut iovecs: Vec<BytesMut> = (0..BATCH_SIZE)
         .map(|_| {
-            let mut buf = BytesMut::with_capacity(1500);
-            buf.resize(1500, 0);
+            let mut buf = BytesMut::with_capacity(65_535);
+            buf.resize(65_535, 0);
             buf
         })
         .collect();
     let mut lines: Vec<Line> = (0..BATCH_SIZE).map(|_| Line::default()).collect();
 
     loop {
+        for buf in &mut iovecs {
+            buf.resize(65_535, 0);
+        }
         match socket.receive(&mut iovecs, &mut lines).await {
             Ok(n) => {
                 tracing::info!(
                     target: "qudp",
-                    packets = n,
+                    buffers = n,
                     dst = %lines[0].dst,
                     src = %lines[0].src,
-                    len = lines[0].seg_size,
+                    len = iovecs[0].len(),
+                    segment_size = lines[0].seg_size,
                     "received packets"
                 );
             }
