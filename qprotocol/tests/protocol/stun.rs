@@ -38,7 +38,7 @@ async fn new_transactions_do_not_overwrite_each_other() {
     let dock = isolated_dock(&protocol);
     let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let server = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    dock.add(client.clone()).unwrap();
+    dock.add_socket(client.clone()).unwrap();
     let link = Link::new(client.local_addr().unwrap(), server.local_addr().unwrap());
     let mut first = protocol.new_transaction();
     let mut second = protocol.new_transaction();
@@ -67,8 +67,8 @@ async fn transaction_retries_with_the_same_id_after_timeout() {
     let agent = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let client_addr = client.local_addr().unwrap();
     let link = Link::new(client_addr, agent.local_addr().unwrap());
-    dock.add(client).unwrap();
-    dock.add(agent).unwrap();
+    dock.add_socket(client).unwrap();
+    dock.add_socket(agent).unwrap();
 
     let mut transaction = protocol.new_transaction();
     let transaction_id = transaction.id();

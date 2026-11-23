@@ -62,7 +62,7 @@ impl LocalSocket {
     fn bind(publish: bool) -> Result<Self, Error> {
         let udp = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?)?);
         let socket = Self { addr: udp.local_addr()?, udp };
-        Dock::global().add(socket.udp.clone())?;
+        Dock::global().add_socket(socket.udp.clone())?;
         if publish {
             ArcAddrBook::global().add_sock_addr(socket.addr);
         }

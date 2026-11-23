@@ -16,7 +16,7 @@ async fn main() -> Result<(), Error> {
         include_bytes!("keychain/server.ocsp").to_vec(),
     )?;
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:4433".parse()?)?);
-    Dock::global().add(socket.clone())?;
+    Dock::global().add_socket(socket.clone())?;
 
     let endpoint: QuicEndpoint = endpoint.into();
     endpoint.listen(Loopback, |(_, _, connection)| {

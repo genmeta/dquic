@@ -29,8 +29,9 @@ impl EphemeralSocket {
         let dock = Dock::global();
         let udp = Arc::new(UdpSocket::bind(bound)?);
         let endpoint = EndpointAddr::direct(udp.local_addr()?);
-        let registration =
-            dock.add(udp.clone())?.ok_or_else(|| io::Error::new(io::ErrorKind::AddrInUse, "socket is already registered in Dock"))?;
+        let registration = dock
+            .add_socket(udp.clone())?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrInUse, "socket is already registered in Dock"))?;
         let socket = Self { udp, endpoint, registration };
         Ok(socket)
     }

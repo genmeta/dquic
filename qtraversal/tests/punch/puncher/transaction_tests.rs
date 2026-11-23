@@ -26,7 +26,7 @@ impl Binding {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         // This test controls delivery itself. Keep the public registration for
         // outgoing strategies, but receive through the fixture instead of Dock.
-        Dock::global().add(socket.clone()).unwrap().unwrap().abort();
+        Dock::global().add_socket(socket.clone()).unwrap().unwrap().abort();
         Self(socket)
     }
 

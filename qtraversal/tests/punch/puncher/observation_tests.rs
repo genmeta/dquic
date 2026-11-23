@@ -96,7 +96,7 @@ impl Binding {
             }
             .unwrap(),
         );
-        Dock::global().add(socket.clone()).unwrap();
+        Dock::global().add_socket(socket.clone()).unwrap();
         let endpoint = EndpointAddr::direct(socket.local_addr().unwrap());
         Self { socket, registered: vec![endpoint] }
     }

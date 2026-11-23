@@ -88,7 +88,7 @@ impl Socket {
     fn bind(addr: SocketAddr, interface: &netdev::Interface) -> Result<Self, Error> {
         let device = qudp::BoundDevice::new(interface.name.clone(), interface.index)?;
         let udp = Arc::new(UdpSocket::bind_to_device(addr, device)?);
-        Dock::global().add(udp.clone())?;
+        Dock::global().add_socket(udp.clone())?;
         let bound = udp.local_addr()?;
         let direct = EndpointAddr::direct(bound);
         let addresses = ArcAddrBook::global();

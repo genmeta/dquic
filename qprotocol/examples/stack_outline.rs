@@ -54,7 +54,7 @@ async fn main() -> Result<(), Error> {
     let ip = interface.ipv4.iter().find(|ip| ip.addr().is_loopback()).unwrap().addr();
     let device = qudp::BoundDevice::new(interface.name, interface.index)?;
     let raw = Arc::new(UdpSocket::bind_to_device((ip, 0).into(), device.clone())?);
-    dock.add(raw.clone())?;
+    dock.add_socket(raw.clone())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
     addresses.add_sock_addr(bound);
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Error> {
 
     // A second raw socket demonstrates the complete independent receive path.
     let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap())?);
-    dock.add(peer_raw.clone())?;
+    dock.add_socket(peer_raw.clone())?;
     let peer = EndpointAddr::direct(peer_raw.local_addr()?);
 
     let packet = [0x40, 1, 2, 3];

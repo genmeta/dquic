@@ -98,7 +98,7 @@ async fn response_address_uses_the_original_client_and_receiving_socket_configur
         let bound = server.local_addr().unwrap();
         let config = config(bound);
         // Register through Dock, then read forwarded packets explicitly below.
-        dock.add(server.clone()).unwrap().unwrap().abort();
+        dock.add_socket(server.clone()).unwrap().unwrap().abort();
         protocol.set_change_server(bound, config).unwrap();
         let id = TransactionId::random();
         protocol
@@ -137,7 +137,7 @@ async fn change_requests_forward_only_response_address_with_the_original_id() {
         ..config(bound)
     };
     // Register through Dock, then read forwarded packets explicitly below.
-    dock.add(server.clone()).unwrap().unwrap().abort();
+    dock.add_socket(server.clone()).unwrap().unwrap().abort();
     protocol.set_change_server(bound, config).unwrap();
     protocol.enable_service();
 
@@ -170,7 +170,7 @@ async fn change_port_replies_from_the_alternate_socket_through_dock() {
     let alternate = socket();
     let client = socket();
     for socket in [&server, &alternate, &client] {
-        dock.add(socket.clone()).unwrap();
+        dock.add_socket(socket.clone()).unwrap();
     }
     for (socket, other) in [(&server, &alternate), (&alternate, &server)] {
         let bound = socket.local_addr().unwrap();
@@ -196,7 +196,7 @@ async fn change_port_replies_from_the_alternate_socket_through_dock() {
     assert_eq!(response.changed_addr().unwrap(), config(alternate.local_addr().unwrap()).change_address);
     drop(transaction);
     assert!(dock.remove(&alternate));
-    dock.add(alternate.clone()).unwrap();
+    dock.add_socket(alternate.clone()).unwrap();
     let mut transaction = protocol.new_transaction();
     let (_, response) = timeout(
         Duration::from_secs(1),
@@ -216,7 +216,7 @@ async fn send_error_does_not_stop_the_dock_receive_loop() {
     let dock = Dock::new(topology);
     let server = socket();
     let client = socket();
-    dock.add(server.clone()).unwrap();
+    dock.add_socket(server.clone()).unwrap();
     protocol.enable_service();
     let request = Request::with_response_addr("[::1]:10000".parse().unwrap());
     let link = Link::new(client.local_addr().unwrap(), server.local_addr().unwrap());
@@ -236,7 +236,7 @@ async fn configuration_rejects_invalid_addresses_and_requires_registration() {
     let bound = server.local_addr().unwrap();
     let valid = config(bound);
     assert_eq!(protocol.set_change_server(bound, valid).unwrap_err().kind(), io::ErrorKind::NotFound);
-    dock.add(server.clone()).unwrap();
+    dock.add_socket(server.clone()).unwrap();
     protocol.set_change_server(bound, valid).unwrap();
     for config in [
         ChangeServer { change_port: 0, ..valid },
@@ -270,7 +270,7 @@ async fn configuration_follows_registration_even_after_the_socket_expires() {
     let server = socket();
     let bound = server.local_addr().unwrap();
     let valid = config(bound);
-    let receiver = dock.add(server.clone()).unwrap().unwrap();
+    let receiver = dock.add_socket(server.clone()).unwrap().unwrap();
     protocol.set_change_server(bound, valid).unwrap();
     let registered = Arc::downgrade(&server);
     receiver.abort();

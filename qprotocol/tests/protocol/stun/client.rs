@@ -40,7 +40,7 @@ impl Network {
         let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let local = client.local_addr().unwrap();
         let dock = isolated_dock(&protocol);
-        dock.add(client.clone()).unwrap();
+        dock.add_socket(client.clone()).unwrap();
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         listener.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -262,7 +262,7 @@ async fn mapping_timeout_is_an_error() {
     let dock = isolated_dock(&protocol);
     let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
     let local = client.local_addr().unwrap();
-    dock.add(client.clone()).unwrap();
+    dock.add_socket(client.clone()).unwrap();
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let first = server.local_addr().unwrap();
     // Listen without replying. An unbound port can produce an ICMP error on
