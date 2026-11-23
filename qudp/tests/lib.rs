@@ -30,7 +30,11 @@ async fn interface_selection_sends_and_receives_from_bound_or_wildcard_addresses
                 let mut bytes = [0; 16];
                 let (size, received_source) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut bytes)).await??;
                 assert_eq!(&bytes[..size], expected);
-                assert_eq!(received_source, source);
+                // Windows loopback can report an unspecified source for index-only pktinfo.
+                assert!(
+                    received_source == source || (cfg!(windows) && local.ip().is_unspecified() && ifindex != 0 && received_source == local),
+                    "bind={bind}, ifindex={ifindex}: unexpected source {received_source}, expected {source}"
+                );
             }
 
             peer.send_to(b"reply", source).await?;
