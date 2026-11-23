@@ -8,11 +8,11 @@ mod unix;
 
 use std::{
     io::{self, IoSlice, IoSliceMut},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::{AsFd, AsRawFd},
 };
 
-use ::nix::sys::socket::{ControlMessageOwned, SockaddrLike, SockaddrStorage, sockopt};
+use ::nix::sys::socket::{AddressFamily, ControlMessageOwned, SockaddrLike, SockaddrStorage, sockopt};
 use qbase::net::route::Line;
 use socket2::Socket;
 
@@ -43,19 +43,14 @@ impl PacketInfo {
             }
         })
     }
-
-    fn control_message(&self) -> ::nix::sys::socket::ControlMessage<'_> {
-        match self {
-            Self::V4(info) => ::nix::sys::socket::ControlMessage::Ipv4PacketInfo(info),
-            Self::V6(info) => ::nix::sys::socket::ControlMessage::Ipv6PacketInfo(info),
-        }
-    }
 }
 
 impl Io for UdpSocket {
     fn setsockopt(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
         let io = socket.as_fd();
         ::nix::sys::socket::setsockopt(&io, sockopt::RcvBuf, &(2 * 1024 * 1024))?;
+        #[cfg(all(feature = "udp_offload_opt", any(target_os = "android", target_os = "linux")))]
+        ::nix::sys::socket::setsockopt(&io, sockopt::UdpGroSegment, &OPTION_ON)?;
         match addr {
             SocketAddr::V4(_) => {
                 #[cfg(any(target_os = "freebsd", target_os = "macos", target_os = "ios"))]
@@ -160,23 +155,15 @@ pub(crate) fn parse_cmsg(cmsg: ControlMessageOwned, line: &mut Line) {
     }
 }
 
-trait ToSocketAddr {
-    fn to_socketaddr(&self) -> SocketAddr;
+trait ExtractSocketAddr {
+    fn inner(&self) -> SocketAddr;
 }
 
-impl ToSocketAddr for SockaddrStorage {
-    fn to_socketaddr(&self) -> SocketAddr {
+impl ExtractSocketAddr for SockaddrStorage {
+    fn inner(&self) -> SocketAddr {
         match self.family() {
-            Some(::nix::sys::socket::AddressFamily::Inet) => {
-                let sockaddr_in = self.as_sockaddr_in().unwrap();
-                let v4_addr = SocketAddrV4::new(sockaddr_in.ip(), sockaddr_in.port());
-                SocketAddr::V4(v4_addr)
-            }
-            Some(::nix::sys::socket::AddressFamily::Inet6) => {
-                let sockaddr_in6 = self.as_sockaddr_in6().unwrap();
-                let v6_addr = SocketAddrV6::new(sockaddr_in6.ip(), sockaddr_in6.port(), sockaddr_in6.flowinfo(), sockaddr_in6.scope_id());
-                SocketAddr::V6(v6_addr)
-            }
+            Some(AddressFamily::Inet) => SocketAddr::from(*self.as_sockaddr_in().unwrap()),
+            Some(AddressFamily::Inet6) => SocketAddr::from(*self.as_sockaddr_in6().unwrap()),
             _ => panic!("Unsupported address family"),
         }
     }

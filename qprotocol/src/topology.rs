@@ -43,26 +43,30 @@ impl Topology {
         loop {
             let received = socket.receive(&mut packets, &mut lines).await?;
             for index in 0..received {
-                let packet = packets[index].split_to(lines[index].seg_size as usize);
+                let mut packet = packets[index].split();
                 packets[index].resize(MAX_DATAGRAM_SIZE, 0);
                 let link = lines[index].link.flip();
 
-                match be_datagram(packet) {
-                    Ok(Datagram::Stun(transaction_id, message)) => {
-                        self.stun.on_datagram(&socket, transaction_id, message, link).await?;
-                    }
-                    Ok(Datagram::Forward(pathway, datagram)) => {
-                        let remote = pathway.remote();
-                        if self.forward.find_agent(remote.addr()).is_some() || self.quic.find_socket(remote).is_some() {
-                            self.quic.on_packet(datagram.into_raw(), pathway.flip(), link);
-                        } else {
-                            self.forward.on_datagram(link, pathway, datagram).await?;
+                while !packet.is_empty() {
+                    let len = (lines[index].seg_size as usize).min(packet.len());
+                    let datagram = packet.split_to(len);
+                    match be_datagram(datagram) {
+                        Ok(Datagram::Stun(transaction_id, message)) => {
+                            self.stun.on_datagram(&socket, transaction_id, message, link).await?;
                         }
+                        Ok(Datagram::Forward(pathway, datagram)) => {
+                            let remote = pathway.remote();
+                            if self.forward.find_agent(remote.addr()).is_some() || self.quic.find_socket(remote).is_some() {
+                                self.quic.on_packet(datagram.into_raw(), pathway.flip(), link);
+                            } else {
+                                self.forward.on_datagram(link, pathway, datagram).await?;
+                            }
+                        }
+                        Ok(Datagram::Raw(packet)) => {
+                            self.quic.on_packet(packet, Pathway::from(link), link);
+                        }
+                        Err(_) => continue,
                     }
-                    Ok(Datagram::Raw(packet)) => {
-                        self.quic.on_packet(packet, Pathway::from(link), link);
-                    }
-                    Err(_) => continue,
                 }
             }
         }

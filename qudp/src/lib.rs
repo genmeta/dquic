@@ -9,9 +9,10 @@ use std::{
 
 use bytes::BytesMut;
 use qbase::{net::route::Line, util::Wakers};
+use smallvec::SmallVec;
 use socket2::{Domain, Socket, Type};
 use tokio::io::Interest;
-pub const BATCH_SIZE: usize = 64;
+pub const BATCH_SIZE: usize = 8;
 cfg_if::cfg_if! {
     if #[cfg(unix)]{
         #[path = "nix.rs"]
@@ -103,6 +104,8 @@ impl UdpSocket {
         }
     }
 
+    /// Poll for received buffers. Filled views are shortened as described by
+    /// [`Io::recvmsg`]; their lengths carry the total bytes, including GRO segments.
     pub fn poll_recv(&self, cx: &mut Context, bufs: &mut [IoSliceMut<'_>], lines: &mut [Line]) -> Poll<io::Result<usize>> {
         loop {
             ready!(self.poll_recv_ready(cx)?);
@@ -135,6 +138,11 @@ pub trait Io {
 
     fn sendmsg(&self, bufs: &[IoSlice<'_>], line: &Line) -> io::Result<usize>;
 
+    /// Receive into separate buffers and return the number of filled buffers.
+    /// Their views are shortened to the copied byte lengths; rebuild them before reuse.
+    /// With GRO a buffer can contain multiple datagrams, spaced by `Line::seg_size`,
+    /// with a possibly shorter final datagram. Truncated GRO aggregates are discarded
+    /// by returning an empty buffer. Ordinary empty datagrams have segment size zero.
     fn recvmsg(&self, bufs: &mut [IoSliceMut<'_>], line: &mut [Line]) -> io::Result<usize>;
 
     fn set_ttl(&self, ttl: i32) -> io::Result<()>;
@@ -145,6 +153,10 @@ impl UdpSocket {
         Send { socket: self, iovecs, line }
     }
 
+    /// Receive at most `BATCH_SIZE` buffers, truncating each filled buffer to its
+    /// actual byte length. Restore their writable lengths before receiving again.
+    /// With Linux / Android `udp_offload_opt`, split each buffer at `Line::seg_size` boundaries;
+    /// the last datagram can be shorter. Provide enough space for the whole aggregate.
     pub fn receive<'a>(&'a self, iovecs: &'a mut [BytesMut], lines: &'a mut [Line]) -> Receive<'a> {
         Receive { socket: self, iovecs, lines }
     }
@@ -176,7 +188,13 @@ impl Future for Receive<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut bufs = this.iovecs.iter_mut().map(|b| IoSliceMut::new(b)).collect::<Vec<_>>();
-        this.socket.poll_recv(cx, &mut bufs, this.lines)
+        let mut bufs: SmallVec<[_; BATCH_SIZE]> = this.iovecs.iter_mut().take(BATCH_SIZE).map(|b| IoSliceMut::new(b)).collect();
+        let received = ready!(this.socket.poll_recv(cx, &mut bufs, this.lines))?;
+        let lengths: [_; BATCH_SIZE] = std::array::from_fn(|index| bufs.get(index).map_or(0, |buf| buf.len()));
+        drop(bufs);
+        for (buf, len) in this.iovecs.iter_mut().zip(lengths).take(received) {
+            buf.truncate(len);
+        }
+        Poll::Ready(Ok(received))
     }
 }

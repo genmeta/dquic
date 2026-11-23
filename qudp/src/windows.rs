@@ -157,6 +157,9 @@ impl Io for UdpSocket {
     }
 
     fn recvmsg(&self, bufs: &mut [std::io::IoSliceMut<'_>], lines: &mut [Line]) -> std::io::Result<usize> {
+        if bufs.is_empty() || lines.is_empty() {
+            return Ok(0);
+        }
         let wsa_recvmsg_ptr = wsarecvmsg_ptr().expect("valid function pointer for WSARecvMsg");
 
         let mut ctrl_buf = Aligned([0; CMSG_LEN]);
@@ -222,6 +225,9 @@ impl Io for UdpSocket {
             self.local_addr()?
         };
         lines[0] = Line { link: Link::new(addr.unwrap(), dst), ttl: Line::DEFAULT_TTL, ecn: Some(ecn_bits as u8), seg_size: len as u16 };
+        // WSARecvMsg wrote at most the supplied buffer length.
+        let buffer = &mut bufs[0];
+        *buffer = std::io::IoSliceMut::new(unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr(), len as usize) });
         Ok(1)
     }
 

@@ -17,6 +17,7 @@ bytes = { workspace = true }
 cfg-if = { workspace = true }
 libc = "0.2"
 qbase = { workspace = true }
+smallvec = { workspace = true }
 tracing = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
@@ -47,4 +48,5 @@ name = "receive"
 path = "examples/receive.rs"
 
 [features]
-gso = []
+# UDP GSO and GRO on Linux / Android; requires kernel support (Linux 5.0+).
+udp_offload_opt = []
