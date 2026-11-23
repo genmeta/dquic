@@ -20,7 +20,7 @@ qbase = { workspace = true }
 tracing = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
-nix = { version = "0.31", features = ["socket", "uio", "net"] }
+nix = { version = "0.32", features = ["socket", "uio", "net"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
