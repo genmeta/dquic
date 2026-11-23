@@ -18,6 +18,38 @@ use crate::{Io, UdpSocket};
 
 const OPTION_ON: bool = true;
 
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+enum PacketInfo {
+    V4(libc::in_pktinfo),
+    V6(libc::in6_pktinfo),
+}
+
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+impl PacketInfo {
+    fn new(src: IpAddr, ifindex: u32) -> Option<Self> {
+        if src.is_unspecified() && ifindex == 0 {
+            return None;
+        }
+        Some(match src {
+            IpAddr::V4(src) => Self::V4(libc::in_pktinfo {
+                ipi_ifindex: ifindex as _,
+                ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
+                ipi_addr: libc::in_addr { s_addr: 0 },
+            }),
+            IpAddr::V6(src) => {
+                Self::V6(libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: ifindex as _ })
+            }
+        })
+    }
+
+    fn control_message(&self) -> nix::sys::socket::ControlMessage<'_> {
+        match self {
+            Self::V4(info) => nix::sys::socket::ControlMessage::Ipv4PacketInfo(info),
+            Self::V6(info) => nix::sys::socket::ControlMessage::Ipv6PacketInfo(info),
+        }
+    }
+}
+
 impl Io for UdpSocket {
     fn setsockopt(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
         let io = socket.as_fd();
@@ -67,50 +99,28 @@ impl Io for UdpSocket {
         cmsgs.push(nix::sys::socket::ControlMessage::UdpGsoSegments(&line.seg_size));
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        #[derive(Clone, Copy)]
-        enum PacketInfoKind {
-            V4,
-            V6,
-        }
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        let packet_info_kind;
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        let v4_pktinfo;
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        let v6_pktinfo;
-
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        {
+        let packet_info = {
             let src = if line.src.ip().is_unspecified() {
                 self.io.local_addr()?
             } else {
                 line.src
             };
-            match src.ip() {
-                IpAddr::V4(src) => {
-                    v4_pktinfo = libc::in_pktinfo {
-                        ipi_ifindex: self.ifindex as _,
-                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
-                        ipi_addr: libc::in_addr { s_addr: 0 },
-                    };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
-                    packet_info_kind = PacketInfoKind::V4;
-                }
-                IpAddr::V6(src) => {
-                    v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex as _ };
-                    cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
-                    packet_info_kind = PacketInfoKind::V6;
-                }
-            }
+            PacketInfo::new(src.ip(), self.ifindex)
+        };
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Some(info) = &packet_info {
+            cmsgs.push(info.control_message());
         }
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        let space = Some(match (has_gso, packet_info_kind) {
-            (false, PacketInfoKind::V4) => cmsg_space!(libc::in_pktinfo),
-            (false, PacketInfoKind::V6) => cmsg_space!(libc::in6_pktinfo),
-            (true, PacketInfoKind::V4) => cmsg_space!(libc::c_int, libc::in_pktinfo),
-            (true, PacketInfoKind::V6) => cmsg_space!(libc::c_int, libc::in6_pktinfo),
-        });
+        let space = match (has_gso, &packet_info) {
+            (false, None) => None,
+            (true, None) => Some(cmsg_space!(libc::c_int)),
+            (false, Some(PacketInfo::V4(_))) => Some(cmsg_space!(libc::in_pktinfo)),
+            (false, Some(PacketInfo::V6(_))) => Some(cmsg_space!(libc::in6_pktinfo)),
+            (true, Some(PacketInfo::V4(_))) => Some(cmsg_space!(libc::c_int, libc::in_pktinfo)),
+            (true, Some(PacketInfo::V6(_))) => Some(cmsg_space!(libc::c_int, libc::in6_pktinfo)),
+        };
         #[cfg(not(any(target_os = "android", target_os = "linux")))]
         let space = has_gso.then_some(cmsg_space!(libc::c_int));
 
@@ -139,27 +149,15 @@ impl Io for UdpSocket {
             errno::Errno,
             sys::socket::{MsgFlags, SockaddrIn, SockaddrIn6, sendmsg},
         };
-        let mut cmsgs = Vec::new();
-        let v4_pktinfo;
-        let v6_pktinfo;
         let src = if send_line.src.ip().is_unspecified() {
             self.io.local_addr()?
         } else {
             send_line.src
         };
-        match src.ip() {
-            IpAddr::V4(src) => {
-                v4_pktinfo = libc::in_pktinfo {
-                    ipi_ifindex: self.ifindex,
-                    ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(src.octets()) },
-                    ipi_addr: libc::in_addr { s_addr: 0 },
-                };
-                cmsgs.push(nix::sys::socket::ControlMessage::Ipv4PacketInfo(&v4_pktinfo));
-            }
-            IpAddr::V6(src) => {
-                v6_pktinfo = libc::in6_pktinfo { ipi6_addr: libc::in6_addr { s6_addr: src.octets() }, ipi6_ifindex: self.ifindex };
-                cmsgs.push(nix::sys::socket::ControlMessage::Ipv6PacketInfo(&v6_pktinfo));
-            }
+        let packet_info = PacketInfo::new(src.ip(), self.ifindex);
+        let mut cmsgs = Vec::new();
+        if let Some(info) = &packet_info {
+            cmsgs.push(info.control_message());
         }
 
         let mut sent_packet = 0;

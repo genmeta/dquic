@@ -14,6 +14,30 @@ use windows_sys::Win32::Networking::WinSock::{self, SOCKET};
 use crate::{Io, UdpSocket};
 
 const CMSG_LEN: usize = 128;
+
+enum PacketInfo {
+    V4(WinSock::IN_PKTINFO),
+    V6(WinSock::IN6_PKTINFO),
+}
+
+impl PacketInfo {
+    fn new(src: IpAddr, ifindex: u32) -> Option<Self> {
+        if src.is_unspecified() && ifindex == 0 {
+            return None;
+        }
+        Some(match src {
+            IpAddr::V4(src) => Self::V4(WinSock::IN_PKTINFO {
+                ipi_addr: WinSock::IN_ADDR { S_un: WinSock::IN_ADDR_0 { S_addr: u32::from_ne_bytes(src.octets()) } },
+                ipi_ifindex: ifindex,
+            }),
+            IpAddr::V6(src) => Self::V6(WinSock::IN6_PKTINFO {
+                ipi6_addr: WinSock::IN6_ADDR { u: WinSock::IN6_ADDR_0 { Byte: src.octets() } },
+                ipi6_ifindex: ifindex,
+            }),
+        })
+    }
+}
+
 #[derive(Copy, Clone)]
 #[repr(align(8))] // Conservative bound for align_of<WinSock::CMSGHDR>
 pub(crate) struct Aligned<T>(pub(crate) T);
@@ -66,6 +90,12 @@ impl Io for UdpSocket {
 
     fn sendmsg(&self, bufs: &[std::io::IoSlice<'_>], line: &Line) -> std::io::Result<usize> {
         let dst = socket2::SockAddr::from(line.dst);
+        let src = if line.src.ip().is_unspecified() {
+            self.io.local_addr()?
+        } else {
+            line.src
+        };
+        let packet_info = PacketInfo::new(src.ip(), self.ifindex);
         let mut count = 0;
 
         for buf in bufs {
@@ -85,29 +115,14 @@ impl Io for UdpSocket {
 
             let mut cmsg = unsafe { first_cmsg(&mut wsa_msg).as_mut() };
             let mut cmsg_len = 0;
-            let src = if line.src.ip().is_unspecified() {
-                self.io.local_addr()?
-            } else {
-                line.src
-            };
-            let src = socket2::SockAddr::from(src);
-            let ifindex = self.ifindex;
-            match src.family() {
-                WinSock::AF_INET => {
-                    let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN) };
-                    let pktinfo = WinSock::IN_PKTINFO { ipi_addr: src_ip.sin_addr, ipi_ifindex: ifindex };
-
-                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, pktinfo, &mut cmsg_len);
+            match &packet_info {
+                Some(PacketInfo::V4(info)) => {
+                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, *info, &mut cmsg_len);
                 }
-                WinSock::AF_INET6 => {
-                    let src_ip = unsafe { ptr::read(src.as_ptr() as *const WinSock::SOCKADDR_IN6) };
-                    let pktinfo = WinSock::IN6_PKTINFO { ipi6_addr: src_ip.sin6_addr, ipi6_ifindex: ifindex };
-
-                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, pktinfo, &mut cmsg_len);
+                Some(PacketInfo::V6(info)) => {
+                    cmsg = append_cmsg(&wsa_msg, cmsg, WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO, *info, &mut cmsg_len);
                 }
-                _ => {
-                    return Err(io::Error::from(io::ErrorKind::InvalidInput));
-                }
+                None => {}
             }
 
             if let Some(ecn) = line.ecn {
@@ -120,6 +135,9 @@ impl Io for UdpSocket {
             }
 
             wsa_msg.Control.len = cmsg_len as _;
+            if cmsg_len == 0 {
+                wsa_msg.Control = WinSock::WSABUF { buf: ptr::null_mut(), len: 0 };
+            }
 
             let mut len = 0;
             let ret = unsafe { WinSock::WSASendMsg(self.io.as_raw_socket() as usize, &wsa_msg, 0, &mut len, ptr::null_mut(), None) };
