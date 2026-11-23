@@ -263,7 +263,8 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
     assert_eq!(&bytes[..size], b"probe");
     assert_eq!(source.ip(), binding.bound().ip());
     assert_ne!(source.port(), binding.bound().port(), "predictor must use a temporary socket");
-    assert!(Dock::global().find_socket(source).is_some());
+    let probe = Dock::global().find_socket(source).expect("temporary probe socket is registered");
+    assert_eq!(probe.bound_device(), Some(&device), "temporary probes must inherit the source interface");
     puncher.abort_transactions();
     close.send(()).unwrap();
     task.await.unwrap();

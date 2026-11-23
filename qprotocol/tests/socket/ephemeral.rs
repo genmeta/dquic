@@ -1,8 +1,38 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{
+    io::{self, IoSlice},
+    sync::Arc,
+    time::Duration,
+};
 
-use qbase::net::addr::EndpointAddr;
+use qbase::net::{addr::EndpointAddr, route::Link};
 use qprotocol::{Dock, EphemeralSocket, UdpSocket, protocol::stun::StunError};
 use tokio::time::timeout;
+
+#[tokio::test]
+async fn bind_to_device_sends_from_the_bound_address_and_drop_unregisters() {
+    let interface = netdev::get_interfaces()
+        .into_iter()
+        .find(|interface| interface.ipv4.iter().any(|ip| ip.addr().is_loopback()))
+        .expect("loopback interface");
+    let device = qudp::BoundDevice::new(interface.name, interface.index).unwrap();
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let socket = EphemeralSocket::bind_to_device(bind.parse().unwrap(), device.clone()).unwrap();
+        let raw = socket.udp_socket().clone();
+        let bound = raw.local_addr().unwrap();
+        assert_eq!(raw.bound_device(), Some(&device));
+        let peer = tokio::net::UdpSocket::bind(bind).await.unwrap();
+        let link = Link::new(bound, peer.local_addr().unwrap());
+        assert_eq!(socket.send(&[IoSlice::new(b"probe")], link).await.unwrap(), 1);
+        let mut bytes = [0; 16];
+        let (size, source) = timeout(Duration::from_secs(1), peer.recv_from(&mut bytes)).await.unwrap().unwrap();
+        assert_eq!(&bytes[..size], b"probe");
+        assert_eq!(source, bound);
+
+        drop(socket);
+        assert!(Dock::global().find_socket(bound).is_none());
+        assert!(Dock::global().topology().quic().find_socket(EndpointAddr::direct(bound)).is_none());
+    }
+}
 
 #[tokio::test]
 async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {

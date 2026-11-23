@@ -26,8 +26,17 @@ impl EphemeralSocket {
     /// Bind the target address and register with the global Dock and QUIC protocol.
     /// Port zero lets the OS choose a port.
     pub fn bind(bound: SocketAddr) -> io::Result<Self> {
+        Self::register(UdpSocket::bind(bound)?)
+    }
+
+    /// Bind the target address to a device before registering reception and QUIC.
+    pub fn bind_to_device(bound: SocketAddr, device: qudp::BoundDevice) -> io::Result<Self> {
+        Self::register(UdpSocket::bind_to_device(bound, device)?)
+    }
+
+    fn register(udp: UdpSocket) -> io::Result<Self> {
         let dock = Dock::global();
-        let udp = Arc::new(UdpSocket::bind(bound)?);
+        let udp = Arc::new(udp);
         let endpoint = EndpointAddr::direct(udp.local_addr()?);
         let registration = dock
             .add_socket(udp.clone())?
