@@ -14,8 +14,8 @@ use tokio::io::Interest;
 pub const BATCH_SIZE: usize = 64;
 cfg_if::cfg_if! {
     if #[cfg(unix)]{
-        #[path = "unix.rs"]
-        mod unix;
+        #[path = "nix.rs"]
+        mod nix;
     } else if #[cfg(windows)] {
         #[path = "windows.rs"]
         mod windows;
@@ -106,12 +106,9 @@ impl UdpSocket {
     pub fn poll_recv(&self, cx: &mut Context, bufs: &mut [IoSliceMut<'_>], lines: &mut [Line]) -> Poll<io::Result<usize>> {
         loop {
             ready!(self.poll_recv_ready(cx)?);
-            let f = || self.recvmsg(bufs, lines);
-            let ret = self.io.try_io(Interest::READABLE, f);
-            if matches!(&ret, Err(e) if e.kind() == io::ErrorKind::WouldBlock) {
-                continue;
-            } else {
-                return Poll::Ready(ret);
+            match self.io.try_io(Interest::READABLE, || self.recvmsg(bufs, lines)) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return Poll::Ready(result),
             }
         }
     }
