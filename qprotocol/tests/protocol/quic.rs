@@ -43,7 +43,7 @@ async fn register_and_deliver_by_endpoint() {
     assert!(protocol.on_packet(BytesMut::from(&b"quic"[..]), link.into(), link));
     assert_eq!(delivered.load(Ordering::Relaxed), 1);
 
-    protocol.unregister(raw.local_addr().unwrap());
+    protocol.unregister(endpoint, &raw);
     assert!(protocol.find_socket(endpoint).is_none());
 }
 
@@ -131,22 +131,25 @@ async fn reclaimed_udp_socket_fails_to_send_and_clears_registration() {
 }
 
 #[tokio::test]
-async fn unregister_bound_clears_all_its_endpoints_and_preserves_other_bindings() {
+async fn unregister_endpoint_only_removes_the_owned_endpoint() {
     let protocol = QuicProtocol::new();
     let first = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let second = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
     let bound = first.local_addr().unwrap();
     let direct = EndpointAddr::direct(bound);
-    let outer = EndpointAddr::direct("8.8.8.8:4567".parse().unwrap());
-    let mediated = EndpointAddr::mediate("127.0.0.1:3478".parse().unwrap(), outer.addr());
+    let mediated = EndpointAddr::mediate("127.0.0.1:3478".parse().unwrap(), "8.8.8.8:4567".parse().unwrap());
     let other = EndpointAddr::direct(second.local_addr().unwrap());
     protocol.register(direct, &first).unwrap();
-    protocol.register(outer, &first).unwrap();
     protocol.register(mediated, &first).unwrap();
     protocol.register(other, &second).unwrap();
-    protocol.unregister(bound);
+    protocol.unregister(mediated, &second);
+    assert!(Arc::ptr_eq(&protocol.find_socket(mediated).unwrap(), &first));
+    protocol.unregister(mediated, &first);
+    assert!(protocol.find_socket(mediated).is_none());
+    assert!(Arc::ptr_eq(&protocol.find_socket(direct).unwrap(), &first));
+    protocol.unregister(mediated, &first);
+    protocol.unregister(direct, &first);
     assert!(protocol.find_socket(direct).is_none());
-    assert!(protocol.find_socket(outer).is_none());
     assert!(protocol.find_socket(mediated).is_none());
     assert!(Arc::ptr_eq(&protocol.find_socket(other).unwrap(), &second));
 }

@@ -3,7 +3,7 @@
 //! Omit it to let the OS choose the outgoing interface.
 use std::{error::Error, sync::Arc};
 
-use dquic::{ArcAddrBook, CertificateDer, Dock, QuicEndpoint, Resolver, RootCerts, SystemResolver, UdpSocket};
+use dquic::{CertificateDer, Dock, QuicEndpoint, Resolver, RootCerts, SystemResolver, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main(flavor = "current_thread")]
@@ -19,9 +19,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         None => 0,
     };
     RootCerts::set([CertificateDer::from(include_bytes!("keychain/ca.der").as_slice())])?;
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, ifindex)?);
-    Dock::global().add_socket(socket.clone())?;
-    ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
+    Dock::global().with_socket_factory(Arc::new(move |addr| UdpSocket::bind(addr, ifindex)));
+    let _socket = Dock::global().use_socket("127.0.0.1:0".parse()?)?;
     Resolver::add(Arc::new(SystemResolver));
 
     let endpoint = QuicEndpoint::anonymous();

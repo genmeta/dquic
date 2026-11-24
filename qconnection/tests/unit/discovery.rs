@@ -11,7 +11,7 @@ use qbase::{
     net::{Family, addr::EndpointAddr, route::Pathway},
     role::Role,
 };
-use qprotocol::{ArcAddrBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, EphemeralSocket, QuicProtocol, UdpSocket};
 use qresolve::{Resolve, ResolveFuture, ResolveResult, Source};
 
 use crate::{Error, Paths, lifecycle::client::resolve_name_and_match_path};
@@ -140,15 +140,16 @@ fn paths() -> Arc<Paths> {
     )
 }
 
-struct LocalSocket(Arc<UdpSocket>);
+struct LocalSocket(Arc<UdpSocket>, Option<EphemeralSocket>);
 
 impl LocalSocket {
     fn new() -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
-        Dock::global().add_socket(socket.clone()).unwrap();
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = owner.socket().clone();
         let bound = socket.local_addr().unwrap();
         ArcAddrBook::global().add_sock_addr(bound);
-        Self(socket)
+        Self(socket, Some(owner))
     }
 
     fn endpoint(&self) -> EndpointAddr {
@@ -159,7 +160,7 @@ impl LocalSocket {
 impl Drop for LocalSocket {
     fn drop(&mut self) {
         ArcAddrBook::global().del_sock_addr(self.0.local_addr().unwrap());
-        Dock::global().remove(&self.0);
+        self.1.take();
     }
 }
 
@@ -287,9 +288,12 @@ async fn loopback_dns_excludes_non_loopback_local_endpoints() {
 #[tokio::test]
 async fn discovery_creates_paths_after_socket_registration_has_disappeared() {
     let _guard = DISCOVERY_TESTS.lock().await;
-    let local = LocalSocket::new();
+    let mut local = LocalSocket::new();
     let bound = local.0.local_addr().unwrap();
-    Dock::global().remove(&local.0);
+    local.1.take();
+    while Dock::global().find_socket(bound).is_some() {
+        tokio::task::yield_now().await;
+    }
     let peer = EndpointAddr::direct("127.0.0.1:8443".parse().unwrap());
     for source in [Source::System, Source::Mdns { nic_ip: bound.ip() }] {
         let paths = paths();

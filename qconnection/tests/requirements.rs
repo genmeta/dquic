@@ -99,6 +99,6 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
         "a failed handshake must not invoke the accept callback"
     );
     common::drop_paths_and_wait(paths).await;
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
     ServerRegistry::global().remove("localhost");
 }

@@ -1,7 +1,7 @@
 use std::{
-    io,
+    collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -10,48 +10,55 @@ use qbase::{
     frame::{AddAddressFrame, Frame, PunchDoneFrame, PunchHelloFrame, PunchMeNowFrame, ReliableFrame, io::SendFrame},
     net::{
         NatType,
-        route::{Line, Link, Pathway},
+        route::{Link, Pathway},
     },
 };
-use qprotocol::{Dock, UdpSocket};
+use qprotocol::{Dock, EphemeralSocket, QuicProtocol, UdpSocket};
 use qtraversal::punch::ArcPuncher;
 use tokio::{sync::mpsc, task::Id};
 
 use super::support::{Encoder, decode};
 
-struct Binding(Arc<UdpSocket>);
+type Receivers = Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<(BytesMut, Link)>>>;
+
+fn receivers() -> &'static Receivers {
+    static RECEIVERS: OnceLock<Receivers> = OnceLock::new();
+    RECEIVERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct Binding {
+    owner: EphemeralSocket,
+    received: tokio::sync::Mutex<mpsc::UnboundedReceiver<(BytesMut, Link)>>,
+}
 
 impl Binding {
     fn new() -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
-        // This test controls delivery itself. Keep the public registration for
-        // outgoing strategies, but receive through the fixture instead of Dock.
-        Dock::global().add_socket(socket.clone()).unwrap().unwrap().abort();
-        Self(socket)
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            QuicProtocol::global().on_receive(|packet, _, link| {
+                if let Some(sender) = receivers().lock().unwrap().get(&link.src) {
+                    let _ = sender.send((packet, link));
+                }
+            });
+        });
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (sent, received) = mpsc::unbounded_channel();
+        receivers().lock().unwrap().insert(owner.socket().local_addr().unwrap(), sent);
+        Self { owner, received: tokio::sync::Mutex::new(received) }
     }
 
     fn bound(&self) -> SocketAddr {
-        self.0.local_addr().unwrap()
+        self.owner.socket().local_addr().unwrap()
     }
 
     async fn receive_hello(&self, expected: PunchHelloFrame) -> SocketAddr {
         tokio::time::timeout(Duration::from_secs(2), async {
-            let mut packets = [BytesMut::zeroed(128)];
-            let mut lines = [Line::default()];
+            let mut received = self.received.lock().await;
             loop {
-                match self.0.receive(&mut packets, &mut lines).await {
-                    // Collision probes intentionally target unbound loopback
-                    // ports. Windows reports their ICMP replies on this socket;
-                    // they are not a peer response in the arbitration scenario.
-                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => continue,
-                    result => {
-                        result.unwrap();
-                    }
-                }
-                let bytes = packets[0].split_to(lines[0].seg_size as usize);
-                packets[0].resize(128, 0);
+                let (bytes, link) = received.recv().await.unwrap();
                 if decode(bytes).into_iter().any(|frame| matches!(frame, Frame::PunchHello(hello) if hello == expected)) {
-                    return lines[0].link.src;
+                    return link.dst;
                 }
             }
         })
@@ -62,7 +69,7 @@ impl Binding {
 
 impl Drop for Binding {
     fn drop(&mut self) {
-        Dock::global().remove(&self.0);
+        receivers().lock().unwrap().remove(&self.bound());
     }
 }
 
@@ -174,7 +181,13 @@ async fn simultaneous_active_peers_agree_on_roles_in_both_delivery_orders() {
                 }
                 puncher.release_temporary_sockets();
                 if let Some(source) = temporary {
-                    assert!(Dock::global().find_socket(source).is_none());
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while Dock::global().find_socket(source).is_some() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
                 }
                 // Original bindings survive temporary-socket cleanup.
                 assert!(Dock::global().find_socket(link.src).is_some());

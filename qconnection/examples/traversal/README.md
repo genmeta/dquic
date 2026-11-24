@@ -40,18 +40,18 @@ client 每两秒继续发送问候，但仅在回显内容变化时打印；serv
 - `traversal-client.rs`：配置测试身份，注册 mock resolver，`endpoint.connect("localhost")`，收发消息。
 - `traversal-server.rs`：配置测试身份，`endpoint.listen(...)`，回显每个双向流。
 - `traversal/network.rs`：进程内全局初始化一次。用 `netdev` 扫描活动物理网卡的 IPv4 地址，
-  为每个地址绑定一个 socket，使用网卡索引固定发送出口，注册到 Dock / QuicProtocol。
-  同一个 socket 先完成映射探测，登记通信地址并开始通信，后台再完成 NAT 分类。
-  Network 持有 socket 和分类任务，停止时取消任务；结果提交持有 socket 所有者，防止撤销后迟到添加。
+  将 IP 与网卡索引的映射交给 factory，调用 bootstrap 配置远端节点，再由 Dock::socket 创建常驻 socket。
+  Dock 自动探测、登记端点和 Candidate；Network 只等待 Mediate 端点就绪，不重复启动探测任务。
+  Dock 在接收退出时取消探测再撤销结果，防止迟到添加。
 
 STUN 使用 `nat.genmeta.net:20002`。server 选择一个 IPv4 STUN/中转服务地址；client 使用
 server 端点中的同一个 agent，以保证返回地址对应这台中转服务。实际 socket 地址和探测出的
-Direct / Mediate 端点登记到 ArcAddrBook。内网 self Link 显式登记为 FullCone，外网 Link
+Direct / Mediate 端点登记到 ArcAddrBook。内网 self Link 由 Dock 登记为 FullCone，外网 Link
 取得 NAT 分类后登记 Candidate，连接内的 Puncher 通过 attach 自动消费。分类失败不撤销已可通信的端点。
 
 全局 `Resolver` 默认没有任何解析源。示例仅用 `Resolver::add` 注册一个 mock，将测试证书
 上的域名 `localhost` 映射为 server 的 **中转端点**。公网 Direct 和内网 Direct 地址均通过
-连接内的地址帧交换，不加入 mock DNS。STUN 自己解析服务域名，不依赖这个全局 resolver。
+连接内的地址帧交换，不加入 mock DNS。示例在 bootstrap 前解析 STUN 服务域名，不依赖这个全局 resolver。
 
 证书和 CA 使用仓库 `tests/keychain/localhost` 的测试材料。
 

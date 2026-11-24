@@ -67,21 +67,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    // This server owns its topology; it never bootstraps the client's global DNS.
+    // This server owns an independent topology with no remote bootstrap nodes.
     let stun = Arc::new(StunProtocol::new());
     stun.disable_service();
     let forward = Arc::new(ForwardProtocol::new());
     let dock = Dock::new(Arc::new(Topology::new(stun.clone(), forward.clone(), Arc::new(QuicProtocol::new()))));
     let ports = [options.port, options.alternate_port];
-    // Bind both sockets before starting either receive task, so partial startup fails cleanly.
-    let sockets = ports.map(|port| UdpSocket::bind(SocketAddr::new(options.bind_ip, port), options.ifindex).map(Arc::new));
+    let ifindex = options.ifindex;
+    dock.with_socket_factory(Arc::new(move |addr| UdpSocket::bind(addr, ifindex)));
+    let sockets = ports.map(|port| dock.use_socket(SocketAddr::new(options.bind_ip, port)));
     let [first, second] = sockets;
     let sockets = [first?, second?];
     for (index, socket) in sockets.iter().enumerate() {
         let bound = socket.local_addr()?;
         let outer = SocketAddr::new(options.public_ip(), ports[index]);
         let changed = SocketAddr::new(options.change_ip, ports[1 - index]);
-        dock.add_socket(socket.clone())?;
         stun.set_change_server(bound, ChangeServer { change_port: ports[1 - index], change_address: changed, outer_address: outer })?;
         if options.relay {
             // The receiving address selects the socket; the public alias selects
@@ -105,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         forward.stop_serving(socket.local_addr()?);
         forward.stop_serving(SocketAddr::new(options.public_ip(), ports[index]));
     }
-    dock.shutdown();
     result?;
     tracing::info!("STUN server stopped");
     Ok(())

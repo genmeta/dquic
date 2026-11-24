@@ -126,16 +126,17 @@ Core snippets to run inside Tokio; see the complete
 
 ### Initialization
 
-Bind a local UDP address. Pass `0` for system routing, or a nonzero interface
-index to select the outgoing interface.
+Create permanent sockets through Dock. When STUN discovery is needed, configure
+remote nodes with `bootstrap(nodes)` before creating sockets.
+The default factory binds with interface index `0` for system routing; an external
+factory can select an interface. Dock publishes local endpoints and, when nodes
+are configured, automatically discovers STUN mappings and NAT candidates.
 
 ```rust,no_run
 RootCerts::set([CertificateDer::from(
     include_bytes!("keychain/ca.der").as_slice(),
 )])?;
-let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, 0)?);
-Dock::global().add_socket(socket.clone())?; // More sockets can be added.
-ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
+let socket = Dock::global().use_socket("127.0.0.1:0".parse()?)?;
 Resolver::add(Arc::new(SystemResolver));
 ```
 

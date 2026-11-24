@@ -5,15 +5,25 @@ use std::{
 };
 
 use qbase::net::{addr::EndpointAddr, route::Link};
-use qprotocol::{Dock, EphemeralSocket, UdpSocket, protocol::stun::StunError};
+use qprotocol::{
+    Dock, UdpSocket,
+    protocol::{ForwardProtocol, QuicProtocol, StunProtocol, stun::StunError},
+    topology::Topology,
+};
 use tokio::time::timeout;
+
+fn isolated_dock() -> Arc<Dock> {
+    Dock::new(Arc::new(Topology::new(Arc::new(StunProtocol::new()), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new()))))
+}
 
 #[tokio::test]
 async fn bind_sends_on_the_selected_interface_and_drop_unregisters() {
     for ifindex in [0, crate::common::loopback_ifindex()] {
         for bind in ["127.0.0.1:0", "[::1]:0"] {
-            let socket = EphemeralSocket::bind(bind.parse().unwrap(), ifindex).unwrap();
-            let raw = socket.udp_socket().clone();
+            let dock = isolated_dock();
+            dock.with_socket_factory(Arc::new(move |addr| UdpSocket::bind(addr, ifindex)));
+            let socket = dock.ephemeral_socket(bind.parse().unwrap()).unwrap();
+            let raw = socket.socket().clone();
             let bound = raw.local_addr().unwrap();
             assert_eq!(raw.ifindex(), ifindex);
             let peer = tokio::net::UdpSocket::bind(bind).await.unwrap();
@@ -25,23 +35,25 @@ async fn bind_sends_on_the_selected_interface_and_drop_unregisters() {
             assert_eq!(source, bound);
 
             drop(socket);
-            assert!(Dock::global().find_socket(bound).is_none());
-            assert!(Dock::global().topology().quic().find_socket(EndpointAddr::direct(bound)).is_none());
+            while dock.find_socket(bound).is_some() {
+                tokio::task::yield_now().await;
+            }
+            assert!(dock.topology().quic().find_socket(EndpointAddr::direct(bound)).is_none());
         }
     }
 }
 
 #[tokio::test]
 async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
-    let dock = Dock::global();
+    let dock = isolated_dock();
     let stun = dock.topology().stun();
     let quic = dock.topology().quic();
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     quic.on_receive(move |packet, pathway, _| {
         let _ = sent.send((packet, pathway));
     });
-    let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
-    let raw = socket.udp_socket().clone();
+    let socket = dock.ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+    let raw = socket.socket().clone();
     let bound = raw.local_addr().unwrap();
     let endpoint = EndpointAddr::direct(bound);
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -52,6 +64,9 @@ async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
     assert_eq!(pathway.local(), endpoint);
 
     drop(socket);
+    while dock.find_socket(bound).is_some() {
+        tokio::task::yield_now().await;
+    }
     assert!(dock.find_socket(bound).is_none());
     assert!(quic.find_socket(endpoint).is_none());
     assert_eq!(raw.local_addr().unwrap(), bound);
@@ -61,7 +76,7 @@ async fn bind_receives_quic_and_drop_unregisters_even_with_a_live_udp_handle() {
 
 #[tokio::test]
 async fn failed_quic_registration_rolls_back_dock_and_preserves_the_existing_alias() {
-    let dock = Dock::global();
+    let dock = isolated_dock();
     let stun = dock.topology().stun();
     let quic = dock.topology().quic();
     let existing = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
@@ -71,39 +86,22 @@ async fn failed_quic_registration_rolls_back_dock_and_preserves_the_existing_ali
     quic.register(endpoint, &existing).unwrap();
     drop(reservation);
 
-    let result = EphemeralSocket::bind(bound, crate::common::loopback_ifindex());
+    let result = dock.ephemeral_socket(bound);
     assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::AddrInUse));
     assert!(dock.find_socket(bound).is_none());
     assert!(Arc::ptr_eq(&quic.find_socket(endpoint).unwrap(), &existing));
     let error = stun.detect_outer(bound, existing.local_addr().unwrap()).await.unwrap_err();
     assert!(matches!(error, StunError::Io(error) if error.kind() == io::ErrorKind::NotFound));
-    quic.unregister(existing.local_addr().unwrap());
-}
-
-#[tokio::test]
-async fn old_owner_does_not_remove_replacement_registrations() {
-    let dock = Dock::global();
-    let quic = dock.topology().quic();
-    let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
-    let raw = socket.udp_socket().clone();
-    let bound = raw.local_addr().unwrap();
-    let endpoint = EndpointAddr::direct(bound);
-    assert!(dock.remove(&raw));
-    assert!(dock.add_socket(raw.clone()).unwrap().is_some());
-
-    drop(socket);
-    assert!(Arc::ptr_eq(&dock.find_socket(bound).unwrap(), &raw));
-    assert!(Arc::ptr_eq(&quic.find_socket(endpoint).unwrap(), &raw));
-    assert!(dock.remove(&raw));
+    quic.unregister(endpoint, &existing);
 }
 
 #[tokio::test]
 async fn cancelling_the_owner_releases_the_receive_task_and_port() {
-    let dock = Dock::global();
+    let dock = isolated_dock();
     let quic = dock.topology().quic();
-    let socket = EphemeralSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap();
-    let bound = socket.udp_socket().local_addr().unwrap();
-    let weak = Arc::downgrade(socket.udp_socket());
+    let socket = dock.ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+    let bound = socket.socket().local_addr().unwrap();
+    let weak = Arc::downgrade(socket.socket());
     let task = tokio::spawn(async move {
         let _socket = socket;
         std::future::pending::<()>().await;
@@ -111,6 +109,9 @@ async fn cancelling_the_owner_releases_the_receive_task_and_port() {
     tokio::task::yield_now().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    while dock.find_socket(bound).is_some() {
+        tokio::task::yield_now().await;
+    }
     assert!(dock.find_socket(bound).is_none());
     assert!(quic.find_socket(EndpointAddr::direct(bound)).is_none());
     timeout(Duration::from_secs(1), async {

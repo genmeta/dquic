@@ -91,15 +91,13 @@ DQuic 在 [Using QUIC to traverse NATs](https://datatracker.ietf.org/doc/html/dr
 
 ### 初始化
 
-绑定本地 UDP 地址。第二个参数传 `0` 时由系统选路，传非零接口索引时指定发送出口网卡。
+通过 Dock 创建常驻 socket。需要 STUN 探测时，先调用 `bootstrap(nodes)` 配置远端节点；不需要时可直接省略。默认 factory 使用接口索引 `0`，由系统选路；外部 factory 可以指定网卡。Dock 自动发布本地端点，并在配置节点后探测 STUN 映射和 NAT 候选。
 
 ```rust,no_run
 RootCerts::set([CertificateDer::from(
     include_bytes!("keychain/ca.der").as_slice(),
 )])?;
-let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, 0)?);
-Dock::global().add_socket(socket.clone())?; // 还可以添加更多 socket
-ArcAddrBook::global().add_sock_addr(socket.local_addr()?);
+let socket = Dock::global().use_socket("127.0.0.1:0".parse()?)?;
 Resolver::add(Arc::new(SystemResolver));
 ```
 

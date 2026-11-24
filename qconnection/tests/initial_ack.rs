@@ -129,6 +129,6 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
         8,
     );
     assert!(!incoming.load(Ordering::Relaxed), "a repeated Initial must keep routing to the existing connection");
-    QuicProtocol::global().unregister(server_socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &server_socket);
     ServerRegistry::global().remove("localhost");
 }

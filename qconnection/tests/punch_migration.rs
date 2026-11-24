@@ -19,7 +19,7 @@ use qbase::{
 use qconnection::{
     ArcConnection, ArcLocalCids, ArcReliableFrames, Error, Paths, Scope, ServerRegistry, TlsContext, client_growing, server_growing,
 };
-use qprotocol::{ArcAddrBook, Dock, QuicProtocol, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, EphemeralSocket, QuicProtocol, UdpSocket};
 use qtransport::{StreamReader, StreamWriter, keys::ArcKeys, packet::channel, router::QuicRouter, space::InitialSpace};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -30,13 +30,14 @@ use tokio::{
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(3);
 
-struct Socket(Arc<UdpSocket>);
+struct Socket(Arc<UdpSocket>, Option<EphemeralSocket>);
 
 impl Socket {
     fn new() -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
-        Dock::global().add_socket(socket.clone()).unwrap();
-        Self(socket)
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = owner.socket().clone();
+        Self(socket, Some(owner))
     }
 
     fn endpoint(&self) -> EndpointAddr {
@@ -49,9 +50,9 @@ impl Socket {
         ArcAddrBook::global().add_candidate(Link::new(bound, bound), NatType::FullCone);
     }
 
-    fn withdraw(&self) {
+    fn withdraw(&mut self) {
         ArcAddrBook::global().del_sock_addr(self.0.local_addr().unwrap());
-        Dock::global().remove(&self.0);
+        self.1.take();
     }
 }
 
@@ -248,7 +249,7 @@ async fn echo(client: &mut (StreamReader, StreamWriter), server: &mut (StreamRea
 async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_socket_loss() {
     common::use_system_resolver();
     let server_socket = Socket::new();
-    let old_socket = Socket::new();
+    let mut old_socket = Socket::new();
     server_socket.publish();
     old_socket.publish();
     let (mut client, mut server) = connect(&server_socket).await;
@@ -299,6 +300,7 @@ async fn added_address_punches_validates_and_keeps_the_stream_alive_after_old_so
 
     // Remove the old socket, not the Path. Its sender must detect the failure itself.
     old_socket.withdraw();
+    assert!(wait_for(|| Dock::global().find_socket(old_socket.0.local_addr().unwrap()).is_none()).await);
     assert!(QuicProtocol::global().find_socket(old_socket.endpoint()).is_none());
     assert!(Dock::global().find_socket(old_socket.0.local_addr().unwrap()).is_none());
     let payload: Vec<_> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();

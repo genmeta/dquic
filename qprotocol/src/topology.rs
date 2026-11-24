@@ -5,11 +5,9 @@ use qbase::{
     datagram::{Datagram, be_datagram},
     net::route::{Line, Pathway},
 };
+use qudp::UdpSocket;
 
-use crate::{
-    protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol},
-    socket::UdpSocket,
-};
+use crate::protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol};
 
 const MAX_DATAGRAM_SIZE: usize = 65_535;
 

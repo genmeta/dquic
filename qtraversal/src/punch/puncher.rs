@@ -339,14 +339,14 @@ where
     }
 
     async fn dynamic_socket(&self, source: &UdpSocket) -> io::Result<(EphemeralSocket, SocketAddr)> {
-        let port = 1024 + rand::random::<u16>() % (u16::MAX - 1024);
         let mut target = source.local_addr()?;
-        target.set_port(port);
-        let socket = EphemeralSocket::bind(target, source.ifindex())?;
-        let local = socket.udp_socket().local_addr()?;
+        target.set_port(0);
+        let socket = Dock::global().ephemeral_socket(target)?;
+        let local = socket.socket().local_addr()?;
         let topology = Dock::global().topology();
-        let server = qprotocol::StunProtocol::stun_servers()
-            .await?
+        let server = topology
+            .stun()
+            .stun_servers()
             .iter()
             .copied()
             .find(|server| server.is_ipv4() == local.is_ipv4())
@@ -356,7 +356,7 @@ where
     }
 
     fn retain_temporary(&self, socket: EphemeralSocket) -> io::Result<()> {
-        let local = socket.udp_socket().local_addr()?;
+        let local = socket.socket().local_addr()?;
         self.0.temporary_sockets.insert(EndpointAddr::direct(local), socket);
         Ok(())
     }
@@ -392,8 +392,8 @@ where
             (_, FullCone) => self.retry_hello(&socket, link, id, &tx, true).await,
             (Dynamic, Symmetric) => {
                 let (temporary, outer) = self.dynamic_socket(&socket).await?;
-                let temp_addr = temporary.udp_socket().local_addr()?;
-                let temp_socket = temporary.udp_socket().clone();
+                let temp_addr = temporary.socket().local_addr()?;
+                let temp_socket = temporary.socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
                 self.retain_temporary(temporary)?;
                 now.set_addr(outer);
@@ -423,8 +423,8 @@ where
             }
             (Dynamic, _) => {
                 let (temporary, outer) = self.dynamic_socket(&socket).await?;
-                let temp_addr = temporary.udp_socket().local_addr()?;
-                let temp_socket = temporary.udp_socket().clone();
+                let temp_addr = temporary.socket().local_addr()?;
+                let temp_socket = temporary.socket().clone();
                 let temp_endpoint = EndpointAddr::direct(temp_addr);
                 self.retain_temporary(temporary)?;
                 now.set_addr(outer);
