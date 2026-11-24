@@ -48,5 +48,6 @@ name = "receive"
 path = "examples/receive.rs"
 
 [features]
+default = ["udp_offload_opt"]
 # UDP GSO and GRO on Linux / Android; requires kernel support (Linux 5.0+).
 udp_offload_opt = []
