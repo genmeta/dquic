@@ -22,7 +22,7 @@ use qbase::{
     role::Role,
 };
 use qconnection::{ArcConnection, QuicEndpoint, Scopes, ServerRegistry};
-use qprotocol::{ArcAddrBook, Dock, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, EphemeralSocket, UdpSocket};
 use qresolve::{EndpointAddr, Family, Resolve, ResolveFuture, Resolver, Source};
 use tls_backend::pki_types::pem::PemObject;
 use tokio::{
@@ -56,15 +56,15 @@ impl Resolve for LocalResolver {
 }
 
 struct LocalSocket {
-    udp: Arc<UdpSocket>,
+    owner: Option<EphemeralSocket>,
     addr: SocketAddr,
 }
 
 impl LocalSocket {
     fn bind(publish: bool) -> Result<Self, Error> {
-        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0".parse()?, crate::common::loopback_ifindex())?);
-        let socket = Self { addr: udp.local_addr()?, udp };
-        Dock::global().add_socket(socket.udp.clone())?;
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket("127.0.0.1:0".parse()?)?;
+        let socket = Self { addr: owner.socket().local_addr()?, owner: Some(owner) };
         if publish {
             ArcAddrBook::global().add_sock_addr(socket.addr);
         }
@@ -75,7 +75,7 @@ impl LocalSocket {
 impl Drop for LocalSocket {
     fn drop(&mut self) {
         ArcAddrBook::global().del_sock_addr(self.addr);
-        Dock::global().remove(&self.udp);
+        self.owner.take();
     }
 }
 

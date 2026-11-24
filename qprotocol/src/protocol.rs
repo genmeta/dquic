@@ -1,5 +1,4 @@
 pub mod forward;
-pub mod mdns;
 pub mod quic;
 pub mod stun;
 

@@ -19,19 +19,18 @@ See [the test guide](tools/README.md) for cases, topology and logs.
 
 ## Architecture
 
-`qtraversal` owns connection-scoped NAT hole punching for QUIC. `qprotocol::Dock`
-registers sockets, their direct QUIC addresses and receive tasks. `ArcAddrBook`
-owns socket addresses, endpoint snapshots and ordered Link/NAT candidate subscriptions.
-The network owner registers extra socket aliases with `QuicProtocol` before
-explicitly publishing endpoints through `ArcAddrBook`. It withdraws addresses
-through `ArcAddrBook::del_sock_addr(bound)` before removing the socket from Dock;
-Dock revokes every QUIC endpoint for that binding with `unregister(bound)`.
-The network owner runs STUN mapping discovery and NAT classification independently.
+`qtraversal` owns connection-scoped NAT hole punching for QUIC. Applications
+configure remote STUN nodes with `Dock::bootstrap(nodes)` and interface selection
+with `with_socket_factory`, then create permanent sockets through `Dock::socket`.
+Dock owns reception, publishes local endpoints, discovers Direct/Mediate mappings,
+and publishes measured Link/NAT candidates through `ArcAddrBook`. Reception exit
+cancels discovery before withdrawing endpoints, candidates and protocol routes.
+The close callback runs after cleanup for permanent sockets only.
 
 `ArcPuncher` keeps connection-specific address advertisements and punch
 transactions, the active and passive NAT strategy matrix, port predictor and
 probe scheduler. Temporary probe sockets own their Dock/QUIC registrations and
-never enter ArcAddrBook. Dropping their owner releases the registrations.
+never enter ArcAddrBook. Dropping their owner asynchronously releases the registrations and socket without a close callback.
 
 ## ArcAddrBook integration
 
@@ -41,8 +40,8 @@ channel. `ArcPuncher::observe_candidates(receiver, scopes, closed)` consumes the
 queued replay before returning and filters the outer address by the connection's
 scopes. Endpoint publication and candidate observation are independent.
 
-- The network owner registers a candidate only once its NAT type is known.
-  Internal and loopback self Links can be explicitly registered as FullCone.
+- Dock registers discovered candidates once their NAT type is known.
+  Internal and loopback self Links are registered as FullCone when created.
 - One Link identifies one actual socket → outer mapping. Direct and Mediate
   aliases of the same mapping do not create duplicate advertisements.
 - NAT refresh withdraws and re-advertises that exact Link, cancelling transactions
@@ -56,17 +55,14 @@ scopes. Endpoint publication and candidate observation are independent.
 Punch addresses retain their Link: `link.src` finds the actual socket in Dock,
 while `link.dst` is advertised in ADD_ADDRESS. Temporary probes use the actual
 bound IP with a new port and never register candidates in ArcAddrBook.
-The STUN module fixes the name to `nat.genmeta.net`. `StunProtocol::global()`
-starts one background task to warm `StunProtocol::stun_servers()`. The global
-Dock uses this STUN instance. The function-local static
-cache shares one system DNS lookup on port 20002 across the process, including
-empty results and errors, without retries or periodic refresh. All Punchers wait
-for that same result and select a server matching the temporary socket's family.
-Cancelling a waiter does not cancel or restart DNS.
-`EphemeralSocket::bind(bound, ifindex)` binds that target address, inherits the
-outgoing interface selection (`0` lets the OS choose), and registers it with the
-global Dock and QUIC protocol.
-It does not reconstruct or resolve a BindUri.
+Remote nodes come from the application's earlier `Dock::bootstrap(nodes)` call.
+`StunProtocol::stun_servers(&self)` returns that node snapshot without DNS or I/O.
+Punchers select a node matching the temporary socket's address family.
+Both dynamic and predicted sockets use `Dock::global().ephemeral_socket(bound)`
+with port zero, so the OS allocates each local port and the factory selects the
+interface. Temporary sockets do not start Dock's automatic discovery, publish
+candidates, or invoke `on_socket_closed`. The caller retains the owner of a winning
+probe socket for the connection lifetime.
 Address frames carry the Link's outer address.
 
 The method returns a `JoinHandle<()>`. Resolving the supplied close future or

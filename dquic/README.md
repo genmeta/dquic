@@ -42,10 +42,14 @@ with protocol defaults for missing fields. ALPN defaults to `h3`. Configure tran
 handshake identities. Dropping a pending connect future closes its unclaimed
 connection and stops discovery through the normal lifecycle.
 
-Before connecting or listening, configure trust with `qtls::RootCerts`, register
-sockets with `qprotocol::Dock` and `qprotocol::QuicProtocol`, publish local
-addresses in `qprotocol::ArcAddrBook`, and add name resolution sources through
-`qresolve::Resolver::add`. The global resolver starts empty.
+Before connecting or listening, configure trust with `qtls::RootCerts` and create
+permanent sockets through `Dock::socket(addr)`. To enable STUN discovery, call
+`Dock::global().bootstrap(nodes)` with remote STUN addresses before creating sockets.
+Dock publishes local endpoints and, when nodes are configured, discovers STUN
+Direct/Mediate mappings and measured NAT candidates automatically. Configure
+interface selection through `with_socket_factory`; the default uses index zero.
+Add name resolution sources through `qresolve::Resolver::add`; the global resolver
+starts empty. Omit bootstrap when STUN discovery is not needed.
 
 See the [connection API documentation](../qconnection/README.md) and the
 [runnable traversal examples](../qconnection/examples/traversal/README.md)

@@ -163,15 +163,22 @@ async fn detects_dynamic_mapping_and_unanswered_third_probe() {
 
 #[tokio::test(start_paused = true)]
 async fn invalid_third_server_topology_is_an_error() {
-    let network = Network::new();
-    let mut second = network.binding(1, network.outer);
-    second.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(network.servers[0])]));
-    assert!(
-        network
-            .run(network.protocol.detect_nat(network.local, network.servers[0]), vec![network.binding(0, network.outer), second])
-            .await
-            .is_err()
-    );
+    for wrong_family in [false, true] {
+        let network = Network::new();
+        let changed = if wrong_family {
+            "[::1]:3479".parse().unwrap()
+        } else {
+            network.servers[0]
+        };
+        let mut second = network.binding(1, network.outer);
+        second.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(changed)]));
+        assert!(
+            network
+                .run(network.protocol.detect_nat(network.local, network.servers[0]), vec![network.binding(0, network.outer), second])
+                .await
+                .is_err()
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

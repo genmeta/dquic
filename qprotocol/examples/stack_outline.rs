@@ -5,14 +5,13 @@ use std::{
 
 use qbase::net::{addr::EndpointAddr, route::Pathway};
 use qprotocol::{
-    ArcAddrBook, Dock, UdpSocket,
+    ArcAddrBook, Dock,
     addr_book::AddressBookError,
     protocol::{
         forward::ForwardProtocol,
         quic::{EndpointInUse, QuicProtocol},
         stun::StunProtocol,
     },
-    socket::ephemeral::EphemeralSocket,
     topology::Topology,
 };
 
@@ -44,25 +43,22 @@ async fn main() -> Result<(), Error> {
     let forward = Arc::new(ForwardProtocol::new());
     let topology = Arc::new(Topology::new(stun.clone(), forward.clone(), quic.clone()));
     let dock = Dock::new(topology);
-    let addresses = ArcAddrBook::new();
+    let addresses = ArcAddrBook::global();
 
     // This example uses a private bind, so its bound address is Direct(inner).
-    let raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), 0)?);
-    dock.add_socket(raw.clone())?;
+    let raw = dock.use_socket("127.0.0.1:0".parse().unwrap())?;
     let bound = raw.local_addr()?;
     let inner = EndpointAddr::direct(bound);
-    addresses.add_sock_addr(bound);
     forward.serve(inner.addr(), &raw);
 
-    // A FullCone result would add Direct(outer), while retaining the same raw socket.
-    let outer = EndpointAddr::direct("203.0.113.10:50000".parse().unwrap());
+    // A NAT mapping adds Mediate(agent, outer), including for FullCone NAT.
+    let outer = EndpointAddr::mediate("198.51.100.2:3478".parse().unwrap(), "203.0.113.10:50000".parse().unwrap());
     quic.register(outer, &raw)?;
     addresses.add_endpoint_addr(bound, outer)?;
     forward.serve(outer.addr(), &raw);
 
     // A second raw socket demonstrates the complete independent receive path.
-    let peer_raw = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), 0)?);
-    dock.add_socket(peer_raw.clone())?;
+    let peer_raw = dock.use_socket("127.0.0.1:0".parse().unwrap())?;
     let peer = EndpointAddr::direct(peer_raw.local_addr()?);
 
     let packet = [0x40, 1, 2, 3];
@@ -73,21 +69,18 @@ async fn main() -> Result<(), Error> {
     let remote_agent = EndpointAddr::mediate("198.51.100.2:3478".parse().unwrap(), "192.0.2.20:50000".parse().unwrap());
     let mixed_path = Pathway::new(outer, remote_agent);
     println!("Direct Path: {direct_path}");
-    println!("Direct -> Agent Path: {mixed_path}");
+    println!("Agent Path: {mixed_path}");
     println!("mDNS: {:?}", addresses.mdns_query(bound.ip()));
 
-    // Ephemeral sockets use the global Dock/Topology and never enter ArcAddrBook.
+    // Ephemeral sockets never enter ArcAddrBook.
     let mut target = bound;
     target.set_port(0);
-    let ephemeral = EphemeralSocket::bind(target, 0)?;
-    let ephemeral_bound = ephemeral.udp_socket().local_addr()?;
+    let ephemeral = dock.ephemeral_socket(target)?;
+    let ephemeral_bound = ephemeral.socket().local_addr()?;
     let punched_endpoint = EndpointAddr::direct(ephemeral_bound);
     let punched = ephemeral;
     println!("punched Direct endpoint: {punched_endpoint}");
 
     drop(punched);
-    dock.remove(&peer_raw);
-    addresses.del_sock_addr(bound);
-    dock.shutdown();
     Ok(())
 }

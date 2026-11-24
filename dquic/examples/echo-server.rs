@@ -27,8 +27,8 @@ async fn main() -> Result<(), Error> {
         PrivateKeyDer::try_from(include_bytes!("keychain/server.key.der").as_slice())?,
         include_bytes!("keychain/server.ocsp").to_vec(),
     )?;
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:4433".parse()?, ifindex)?);
-    Dock::global().add_socket(socket.clone())?;
+    Dock::global().with_socket_factory(Arc::new(move |addr| UdpSocket::bind(addr, ifindex)));
+    let _socket = Dock::global().use_socket("127.0.0.1:4433".parse()?)?;
 
     let endpoint: QuicEndpoint = endpoint.into();
     endpoint.listen(Loopback, |(_, _, connection)| {

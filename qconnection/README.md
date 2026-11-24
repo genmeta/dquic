@@ -64,9 +64,11 @@ cargo test --release -p qconnection --test local_transfer -- --ignored --nocaptu
 DQUIC_TEST_STREAMS=4 cargo test -p qconnection --test local_transfer -- --ignored --nocapture
 ```
 
-可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块统一扫描网卡、注册 Dock 并探测地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
+可运行的 client/server 示例见 [STUN 与 QUIC 打洞](examples/traversal/README.md)。examples 的 `network` 模块扫描网卡并配置 factory、bootstrap，随后由 Dock 自动探测和发布地址。客户端通过全局 `Resolver::add` 注册解析源，再调用 `QuicEndpoint::connect`；全局 resolver 默认为空。`ArcConnection::validated_paths()` 提供已验证路径快照。
 
-网络所有者先通过 `Dock::add(socket)` 登记接收任务及直接 QUIC 地址，再调用 `ArcAddrBook::global().add_sock_addr(bound)`。额外别名先通过 `QuicProtocol::register` 登记通信路由，再调用 `add_endpoint_addr(bound, endpoint)`。取得 NAT 类型后，单独调用 `add_candidate(Link::new(bound, outer), nat)`；内网直接可达的 self Link 也由所有者显式登记为 FullCone。撤销单个端点与候选分别使用 `del_endpoint_addr` 和 `del_candidate`。socket 结束时先停止探测结果提交，调用 `del_sock_addr(bound)` 清除该 socket 的全部端点和候选，再从 Dock 移除 socket。Dock 撤销该绑定的全部 QUIC 路由。
+网络所有者通过 `Dock::global().use_socket(addr)` 创建常驻 socket；需要 STUN 探测时，先通过 `Dock::global().bootstrap(nodes)` 配置远端节点，不需要时省略 bootstrap。Dock 自动登记 STUN、Direct QUIC 和本地地址簿记录；内网与回环 self Link 登记为 FullCone。公网、内网统一保留 Direct(local_addr)，取得 STUN 映射后再登记一个 Mediate(agent, outer)，即使是公网 IP、FullCone 或映射地址等于本地地址，也保留 agent 转发路径。首个同地址族节点作为 agent，NAT 分类沿它的 CHANGED-ADDRESS 找到同地址族的第二、第三个辅助节点；公网 socket 同样执行完整 NAT 探测，Candidate 使用实际分类结果，不根据分类结果撤销 Mediate。
+
+初次探测完成后，每 20 秒向 agent 发送一次 Binding Request，响应等待最多 3 秒。连续失败 3 次撤销该映射的端点、QUIC 路由和 Candidate，保留本地通信记录并继续心跳；响应恢复后重新登记。映射变化时先撤销旧映射，再以已有 NAT 类型登记新映射。外部网卡发现通过 `with_socket_factory` 提供接口索引，默认值为 0。接收或 STUN 发送出现 socket 致命错误时停止接收和探测，撤销地址簿记录和协议路由，最后调用 `on_socket_closed`。临时 socket 通过 `Dock::global().ephemeral_socket(addr)` 创建，drop 后异步注销并释放，不启动自动探测和保活，不进入地址簿，也不调用关闭回调。
 
 `QuicEndpoint::connect(server_name)` 将名称传给 `client_growing`，查询全局 Resolver 并持续消费 `lookup(server_name, "", None)` 返回的流。每条普通 DNS 记录通过 `ArcAddrBook::matches(peer_ep_addr)` 取得可连接的本地 EndpointAddr，返回 `SmallVec<[EndpointAddr; 4]>`；mDNS 的 `Source::Mdns { nic_ip }` 通过 `mdns_query(nic_ip)` 选取本地实际 socket 地址。地址簿使用 `EndpointAddr::can_connect_to` 筛选类型、地址族、可用性和回环范围；客户端发现模块直接调用 `paths.add_path`，socket 或传输失败由 Path 的发送和退休流程处理。重复 Pathway 复用已有路径。显式端口用于解析，TLS 使用去掉端口的主机名。解析失败或流结束后仍无可用路径时通知连接关闭；服务端不启动 DNS 查询。
 
@@ -143,7 +145,7 @@ Initial、Handshake、1-RTT 各自持有 typed receiver 并独立等待该空间
 
 客户端和服务端创建 `Paths` 时就创建并持有 `ArcPuncher`，复用连接的可靠帧队列。`ProbeEncoder` 持有共享 Spaces 和握手 CID 句柄，在实际编码时查找 Data space，复用其 1-RTT 密钥和包号。地址观察仍在握手确认后启动；关闭时取消 Puncher 事务并释放临时 socket。1-RTT 接收流程解密认证后，将 `ADD_ADDRESS`、`REMOVE_ADDRESS`、`PUNCH_ME_NOW`、`PUNCH_HELLO`、`PUNCH_DONE` 交给该 Puncher；后两者保留收到数据报时的实际 `Link`，不从广告地址重建 UDP 地址。
 
-Puncher 不接收 STUN server 参数。`stun` 模块内常量指定 `nat.genmeta.net`；`StunProtocol::global()` 首次初始化时启动唯一的后台任务调用 `StunProtocol::stun_servers()`，该函数用进程内静态缓存保证系统 DNS 只解析一次（端口 `20002`），保存 IPv4/IPv6 地址快照。全局 Dock 的 Topology 复用该 STUN 实例，所有 Puncher 共用解析结果，空结果和错误同样保存，不重试、不定时刷新，等待者取消不影响解析。
+Puncher 不接收 STUN server 参数。应用在创建常驻 socket 前调用 `Dock::bootstrap(nodes)`，地址族匹配的节点供自动映射探测和 NAT 分类使用。`StunProtocol::global()` 不做 DNS 查询，`stun_servers(&self)` 返回配置快照；DNS 和接口发现由外部负责。动态打洞创建临时 socket 后，从同一 STUN 实例取得节点并主动探测其映射。打洞本地端口统一传 0，由系统分配。
 
 接收流程当前先通过 `path_for` 取得或创建路径、记入接收字节，再进行解密认证。认证成功后才接纳新的被动路径（第 7 项）已回退，仍待后续处理。
 

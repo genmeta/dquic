@@ -37,10 +37,9 @@ impl Step {
 impl Network {
     fn new() -> Self {
         let protocol = Arc::new(StunProtocol::new());
-        let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
-        let local = client.local_addr().unwrap();
         let dock = isolated_dock(&protocol);
-        dock.add_socket(client.clone()).unwrap();
+        let client = dock.use_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let local = client.local_addr().unwrap();
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         listener.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -250,19 +249,25 @@ async fn missing_attributes_and_invalid_first_server_topology_are_errors() {
         first.response = Some(Response::with(attrs));
         assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
     }
-    let network = Network::new();
-    let mut first = network.binding(0, network.outer);
-    first.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(network.servers[0])]));
-    assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
+    for wrong_family in [false, true] {
+        let network = Network::new();
+        let changed = if wrong_family {
+            "[::1]:3479".parse().unwrap()
+        } else {
+            network.servers[0]
+        };
+        let mut first = network.binding(0, network.outer);
+        first.response = Some(Response::with(vec![Attr::MappedAddress(network.outer), Attr::ChangedAddress(changed)]));
+        assert!(network.run(network.protocol.detect_nat(network.local, network.servers[0]), vec![first]).await.is_err());
+    }
 }
 
 #[tokio::test(start_paused = true)]
 async fn mapping_timeout_is_an_error() {
     let protocol = Arc::new(StunProtocol::new());
     let dock = isolated_dock(&protocol);
-    let client = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
+    let client = dock.use_socket("127.0.0.1:0".parse().unwrap()).unwrap();
     let local = client.local_addr().unwrap();
-    dock.add_socket(client.clone()).unwrap();
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let first = server.local_addr().unwrap();
     // Listen without replying. An unbound port can produce an ICMP error on

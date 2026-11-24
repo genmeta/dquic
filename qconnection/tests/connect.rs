@@ -12,7 +12,7 @@ use std::{
 use futures::{FutureExt, StreamExt, channel::mpsc, stream};
 use qbase::{cid::ConnectionId, endpoint::Anonymous, net::Family, role::Role};
 use qconnection::{QuicEndpoint, Scope, ServerRegistry};
-use qprotocol::{ArcAddrBook, Dock, UdpSocket};
+use qprotocol::{ArcAddrBook, Dock, EphemeralSocket, UdpSocket};
 use qresolve::{Record, Resolve, ResolveFuture, Resolver};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -46,23 +46,24 @@ impl Resolve for StreamingResolver {
     }
 }
 
-struct Registration(Arc<UdpSocket>);
+struct Registration(Arc<UdpSocket>, Option<EphemeralSocket>);
 
 impl Registration {
     fn new(publish: bool) -> Self {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0".parse().unwrap(), crate::common::loopback_ifindex()).unwrap());
-        Dock::global().add_socket(socket.clone()).unwrap();
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = owner.socket().clone();
         if publish {
             ArcAddrBook::global().add_sock_addr(socket.local_addr().unwrap());
         }
-        Self(socket)
+        Self(socket, Some(owner))
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
         ArcAddrBook::global().del_sock_addr(self.0.local_addr().unwrap());
-        Dock::global().remove(&self.0);
+        self.1.take();
     }
 }
 

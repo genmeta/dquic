@@ -48,8 +48,8 @@ struct AddrBook {
 /// outer address. If the socket has a public IP address, the inner and outer
 /// addresses are identical.
 ///
-/// The network owner manages sockets, communication routes and agent probes.
-/// Finish old probes before removing or reusing a socket address.
+/// Dock manages permanent sockets, STUN discovery, routes and automatic withdrawal.
+/// External registrations must finish old probes before removing an address.
 #[derive(Clone)]
 pub struct ArcAddrBook(Arc<Mutex<AddrBook>>);
 

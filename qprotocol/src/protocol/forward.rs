@@ -10,8 +10,7 @@ use qbase::net::{
     addr::EndpointAddr,
     route::{Line, Link, Pathway},
 };
-
-use crate::socket::UdpSocket;
+use qudp::UdpSocket;
 
 #[derive(Default)]
 pub struct ForwardProtocol {

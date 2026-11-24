@@ -142,7 +142,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     assert!(!common::take_heartbeat(&path));
     path.close();
     common::wait_for_sender_exit(&path).await;
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test(start_paused = true)]
@@ -230,7 +230,7 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
     common::wait_for_sender_exit(&path).await;
     assert_eq!(terminator.await, error);
     assert!(paths.entries.lock().unwrap().is_empty());
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test(start_paused = true)]
@@ -282,5 +282,5 @@ async fn sending_runs_again_when_woken_and_exits_on_path_failure() {
     path.close();
     common::wait_for_sender_exit(&path).await;
     assert!(paths.entries.lock().unwrap().is_empty());
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }

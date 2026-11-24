@@ -1,7 +1,6 @@
 use std::{
     future::poll_fn,
     io::{self, IoSlice},
-    net::SocketAddr,
     sync::{Arc, RwLock, Weak},
     task::{Context, Poll},
 };
@@ -15,9 +14,8 @@ use qbase::{
         route::{Line, Link, Pathway},
     },
 };
+use qudp::UdpSocket;
 use thiserror::Error;
-
-use crate::socket::UdpSocket;
 
 type Receiver = dyn Fn(BytesMut, Pathway, Link) + Send + Sync + 'static;
 
@@ -60,11 +58,9 @@ impl QuicProtocol {
         Ok(())
     }
 
-    /// Revoke every endpoint for a local binding and discard expired registrations.
-    pub fn unregister(&self, bound: SocketAddr) {
-        self.sockets.retain(|_, registered| {
-            registered.upgrade().is_some_and(|socket| socket.local_addr().is_ok_and(|registered| registered != bound))
-        });
+    /// Revoke one endpoint if it belongs to this socket, retaining its other endpoints.
+    pub fn unregister(&self, endpoint: EndpointAddr, socket: &Arc<UdpSocket>) {
+        self.sockets.remove_if(&endpoint, |_, registered| Weak::ptr_eq(registered, &Arc::downgrade(socket)));
     }
 
     pub fn find_socket(&self, endpoint_addr: EndpointAddr) -> Option<Arc<UdpSocket>> {

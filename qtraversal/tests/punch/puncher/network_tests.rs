@@ -56,9 +56,10 @@ struct Peer {
 
 impl Peer {
     async fn new(ip: &str, expected: NatType) -> (Self, mpsc::UnboundedReceiver<ReliableFrame>) {
-        let socket =
-            EphemeralSocket::bind(format!("{ip}:0").parse().unwrap(), crate::common::interface_index(ip.parse().unwrap())).unwrap();
-        let bound = socket.udp_socket().local_addr().unwrap();
+        Dock::global().bootstrap([STUN.parse().unwrap()]);
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::interface_index(addr.ip()))));
+        let socket = Dock::global().ephemeral_socket(format!("{ip}:0").parse().unwrap()).unwrap();
+        let bound = socket.socket().local_addr().unwrap();
         let stun = StunProtocol::global();
         let nat = timeout(Duration::from_secs(15), stun.detect_nat(bound, STUN.parse().unwrap())).await.unwrap().unwrap();
         assert_eq!(nat, expected, "NAT classification for {bound}");
@@ -76,7 +77,7 @@ impl Peer {
     }
 
     fn bound(&self) -> SocketAddr {
-        self.socket.udp_socket().local_addr().unwrap()
+        self.socket.socket().local_addr().unwrap()
     }
 }
 
@@ -284,6 +285,15 @@ async fn run(a: NatType, b: NatType, start: Start, blocked: bool) {
         assert_eq!(winning != peer.bound(), peer.nat == NatType::Symmetric);
         assert!(Dock::global().find_socket(winning).is_some());
         peer.puncher.release_temporary_sockets();
+        if peer.nat == NatType::Symmetric {
+            timeout(Duration::from_secs(1), async {
+                while Dock::global().find_socket(winning).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
         assert_eq!(Dock::global().find_socket(winning).is_none(), peer.nat == NatType::Symmetric);
         assert!(Dock::global().find_socket(peer.bound()).is_some());
     }
@@ -322,8 +332,8 @@ async fn stun_service() {
     for last in 1..=3 {
         for port in [20002, 20003] {
             let bound = SocketAddr::from(([11, 0, 0, last], port));
-            let socket = Arc::new(UdpSocket::bind(bound, crate::common::interface_index(bound.ip())).unwrap());
-            Dock::global().add_socket(socket.clone()).unwrap();
+            Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::interface_index(addr.ip()))));
+            let socket = Dock::global().ephemeral_socket(bound).unwrap();
             StunProtocol::global()
                 .set_change_server(
                     bound,

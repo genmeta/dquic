@@ -17,8 +17,7 @@ async fn receive_delivers_every_segment_including_a_short_tail() -> io::Result<(
         });
         let topology = Arc::new(Topology::new(Arc::new(StunProtocol::new()), Arc::new(ForwardProtocol::new()), quic));
         let dock = Dock::new(topology);
-        let socket = Arc::new(UdpSocket::bind(bind.parse().unwrap(), 0)?);
-        dock.add_socket(socket.clone())?;
+        let socket = dock.use_socket(bind.parse().unwrap())?;
         let peer = UdpSocket::bind(bind.parse().unwrap(), 0)?;
         let link = Link::new(peer.local_addr()?, socket.local_addr()?);
         let payload = b"\x40one\x40two\x40x";
@@ -34,7 +33,6 @@ async fn receive_delivers_every_segment_including_a_short_tail() -> io::Result<(
         }
         assert_eq!(bytes, payload);
         assert!(received.try_recv().is_err());
-        dock.remove(&socket);
     }
     Ok(())
 }

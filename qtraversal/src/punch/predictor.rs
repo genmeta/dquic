@@ -16,7 +16,6 @@ use super::{
 };
 
 const MAX_CONCURRENT_SOCKETS: usize = 60;
-const MIN_PORT: u16 = 1024;
 const MAX_PROBES: u32 = 300;
 const PACING_INTERVAL: Duration = Duration::from_millis(20);
 const FIRST_PROBE_ID: u32 = 1;
@@ -89,10 +88,9 @@ impl PortPredictor {
     }
 
     fn create_socket(&self) -> io::Result<EphemeralSocket> {
-        let port = MIN_PORT + rand::random::<u16>() % (u16::MAX - MIN_PORT);
         let mut target = self.source.local_addr()?;
-        target.set_port(port);
-        EphemeralSocket::bind(target, self.source.ifindex())
+        target.set_port(0);
+        Dock::global().ephemeral_socket(target)
     }
 
     fn take_matching_done(&mut self, tx: &Transaction) -> Option<EphemeralSocket> {
@@ -124,10 +122,10 @@ impl PortPredictor {
         self.probes_created += 1;
         let result = async {
             let socket = self.create_socket()?;
-            let local = socket.udp_socket().local_addr()?;
+            let local = socket.socket().local_addr()?;
             let probe_id = self.probes.allocate_probe_id();
             let hello = PunchHelloFrame::new(punch_id.local_seq, punch_id.remote_seq, probe_id);
-            send(socket.udp_socket().clone(), Link::new(local, self.dst), PACKET_TTL, hello).await?;
+            send(socket.socket().clone(), Link::new(local, self.dst), PACKET_TTL, hello).await?;
             self.probes.insert(probe_id, socket, local.port());
             Ok(())
         }

@@ -1254,7 +1254,7 @@ async fn ack_only_submission_leaves_credit_below_threshold_and_blocks_pto_withou
     paths.del_path(&path);
     path.close();
     paths.terminator.terminate();
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(EndpointAddr::direct(socket.local_addr().unwrap()), &socket);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1430,7 +1430,7 @@ async fn sending_uses_its_budget_across_multiple_collections() {
     sender.await.unwrap();
     paths.del_path(&path);
     assert!(paths.entries.lock().unwrap().is_empty());
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test]
@@ -1732,7 +1732,7 @@ async fn sending_commits_the_udp_prefix_and_recovers_only_the_failed_suffix() {
     path.send(&mut datagrams[..count], &paths.idle_timer()).await.unwrap();
     assert!(datagrams.iter().all(|datagram| datagram.packets.is_empty()));
     paths.del_path(&path);
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1779,7 +1779,7 @@ async fn retired_path_rejects_collected_datagrams_before_udp_submission() {
     path.refresh(&mut datagrams, &mut frames);
     assert!(space.sent_journal.lock_guard().packet(pn).is_none());
     paths.del_path(&path);
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1844,7 +1844,7 @@ async fn submission_skips_retired_initial_and_accounts_live_handshake_and_path()
         assert_eq!(recovered, expected, "only the live space starts its journal timer");
     }
     paths.del_path(&path);
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test]
@@ -1923,7 +1923,7 @@ async fn sender_transmits_with_the_old_cid_until_its_replacement_arrives() {
     assert!(matches!(poll_collect(&other, &mut datagrams, &mut frames, &mut Context::from_waker(Waker::noop())), Poll::Ready(Err(error))
         if error.kind() == io::ErrorKind::BrokenPipe));
     paths.retire_all();
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
 }
 
 #[tokio::test]
@@ -2161,7 +2161,7 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
             common::retire_all(&paths);
             common::wait_for_sender_exit(&first).await;
             common::wait_for_sender_exit(&second).await;
-            QuicProtocol::global().unregister(socket.local_addr().unwrap());
+            QuicProtocol::global().unregister(local, &socket);
             continue;
         }
         tokio::time::timeout(Duration::from_secs(1), peer.receive(&mut received, &mut lines)).await.unwrap().unwrap();
@@ -2195,6 +2195,6 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
         common::retire_all(&paths);
         common::wait_for_sender_exit(&first).await;
         common::wait_for_sender_exit(&second).await;
-        QuicProtocol::global().unregister(socket.local_addr().unwrap());
+        QuicProtocol::global().unregister(local, &socket);
     }
 }

@@ -17,7 +17,7 @@ use qbase::{
     },
     packet::assemble::Package,
 };
-use qprotocol::{ArcAddrBook, Dock, QuicProtocol, UdpSocket, addr_book::Candidate};
+use qprotocol::{ArcAddrBook, Dock, EphemeralSocket, QuicProtocol, UdpSocket, addr_book::Candidate};
 use qtraversal::punch::{ArcPuncher, PunchPacketEncoder};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -82,6 +82,7 @@ impl PunchPacketEncoder for Encoder {
 }
 
 struct Binding {
+    _owner: EphemeralSocket,
     socket: Arc<UdpSocket>,
     registered: Vec<EndpointAddr>,
 }
@@ -89,10 +90,11 @@ struct Binding {
 impl Binding {
     fn new() -> Self {
         let bound = "127.0.0.1:0".parse().unwrap();
-        let socket = Arc::new(UdpSocket::bind(bound, crate::common::loopback_ifindex()).unwrap());
-        Dock::global().add_socket(socket.clone()).unwrap();
+        Dock::global().with_socket_factory(Arc::new(|addr| UdpSocket::bind(addr, crate::common::loopback_ifindex())));
+        let owner = Dock::global().ephemeral_socket(bound).unwrap();
+        let socket = owner.socket().clone();
         let endpoint = EndpointAddr::direct(socket.local_addr().unwrap());
-        Self { socket, registered: vec![endpoint] }
+        Self { socket, registered: vec![endpoint], _owner: owner }
     }
 
     fn bound(&self) -> SocketAddr {
@@ -116,12 +118,6 @@ impl Binding {
         self.register(endpoint);
         book.add_sock_addr(self.bound());
         book.add_endpoint_addr(self.bound(), endpoint).unwrap();
-    }
-}
-
-impl Drop for Binding {
-    fn drop(&mut self) {
-        Dock::global().remove(&self.socket);
     }
 }
 
@@ -253,7 +249,7 @@ async fn advertised_alias_keeps_the_bound_address_for_temporary_probes() {
     assert_eq!(source.ip(), binding.bound().ip());
     assert_ne!(source.port(), binding.bound().port(), "predictor must use a temporary socket");
     let probe = Dock::global().find_socket(source).expect("temporary probe socket is registered");
-    assert_eq!(probe.ifindex(), binding.socket.ifindex(), "temporary probes must inherit the source interface");
+    assert_eq!(probe.ifindex(), binding.socket.ifindex(), "the factory must select the same interface for the source IP");
     puncher.abort_transactions();
     close.send(()).unwrap();
     task.await.unwrap();

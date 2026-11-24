@@ -251,6 +251,6 @@ async fn socket_wait_is_interrupted_by_disable_or_close_after_collect_waiter_is_
         path.refresh(&mut datagrams, &mut frames);
         paths.del_path(&path);
         paths.retire_all();
-        QuicProtocol::global().unregister(socket.local_addr().unwrap());
+        QuicProtocol::global().unregister(local, &socket);
     }
 }

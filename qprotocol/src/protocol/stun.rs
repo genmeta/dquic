@@ -2,7 +2,7 @@ use std::{
     io::{self, IoSlice},
     net::SocketAddr,
     sync::{
-        Arc, LazyLock, OnceLock, Weak,
+        Arc, OnceLock, RwLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -10,10 +10,6 @@ use std::{
 
 use bytes::BytesMut;
 use dashmap::{DashMap, mapref::entry::Entry};
-use futures::{
-    FutureExt, StreamExt,
-    future::{BoxFuture, Shared},
-};
 pub use qbase::datagram::stun::{
     Attribute as Attr, BindingRequest, BindingRequest as Request, BindingResponse, BindingResponse as Response, Message, MessageType,
     TransactionId, Type, WriteStunMessage, WriteStunType, WriteTransactionId, be_stun_message, be_stun_type, be_transaction_id,
@@ -22,22 +18,13 @@ use qbase::{
     ArcReceiving, Cancelled,
     datagram::{Datagram, WriteDatagram},
     net::{
-        NatType, NetFeature,
-        addr::EndpointAddr,
+        AddrFamily, NatType, NetFeature,
         route::{Line, Link},
     },
 };
-use qresolve::{Resolve, SystemResolver};
+use qudp::UdpSocket;
 use thiserror::Error;
 use tokio::time::timeout;
-
-use crate::socket::UdpSocket;
-
-const STUN_SERVER: &str = "nat.genmeta.net";
-const STUN_PORT: &str = "20002";
-
-type StunServers = Result<Arc<[SocketAddr]>, Arc<io::Error>>;
-type StunLookup = Shared<BoxFuture<'static, StunServers>>;
 
 const PROBE_ATTEMPTS: u8 = 30;
 const FILTER_ATTEMPTS: u8 = 3;
@@ -90,6 +77,7 @@ impl Drop for Transaction {
 }
 
 pub struct StunProtocol {
+    servers: RwLock<Arc<[SocketAddr]>>,
     transactions: DashMap<TransactionId, ArcReceiving<(Link, Response)>>,
     sockets: DashMap<SocketAddr, Weak<UdpSocket>>,
     service: Arc<AtomicBool>,
@@ -103,27 +91,30 @@ impl Default for StunProtocol {
 }
 
 impl StunProtocol {
-    /// Global STUN protocol. First initialization starts DNS in the current Tokio runtime.
+    /// Process-wide STUN protocol; initialization performs no network operations.
     pub fn global() -> &'static Arc<Self> {
         static STUN: OnceLock<Arc<StunProtocol>> = OnceLock::new();
-        STUN.get_or_init(|| {
-            tokio::spawn(async {
-                if let Err(error) = Self::stun_servers().await {
-                    tracing::debug!(%error, "STUN bootstrap DNS lookup failed");
-                }
-            });
-            Arc::new(Self::new())
-        })
+        STUN.get_or_init(|| Arc::new(Self::new()))
     }
 
-    /// One process-wide DNS result, including empty results and failures.
-    pub async fn stun_servers() -> io::Result<Arc<[SocketAddr]>> {
-        static SERVERS: LazyLock<StunLookup> = LazyLock::new(|| resolve_stun_servers(Arc::new(SystemResolver)));
-        SERVERS.clone().await.map_err(|error| io::Error::new(error.kind(), error))
+    /// Remote nodes configured by Dock::bootstrap, in probe order.
+    pub fn stun_servers(&self) -> Arc<[SocketAddr]> {
+        self.servers.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_servers(&self, nodes: impl IntoIterator<Item = SocketAddr>) {
+        let mut servers = Vec::new();
+        for node in nodes {
+            if !servers.contains(&node) {
+                servers.push(node);
+            }
+        }
+        *self.servers.write().unwrap() = servers.into();
     }
 
     pub fn new() -> Self {
         Self {
+            servers: RwLock::new(Arc::from([])),
             transactions: DashMap::new(),
             sockets: DashMap::new(),
             service: Arc::new(AtomicBool::new(true)),
@@ -262,8 +253,12 @@ impl StunProtocol {
         };
         let outer_addr = first.map_addr()?;
         let server2 = first.changed_addr()?;
-        if server2.ip() == stun_server.ip() || server2.port() == stun_server.port() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "CHANGED-ADDRESS must change both IP and port").into());
+        if server2.family() != local_addr.family() || server2.ip() == stun_server.ip() || server2.port() == stun_server.port() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CHANGED-ADDRESS must use the socket's address family and change both IP and port",
+            )
+            .into());
         }
         let mut features = NetFeature::empty();
 
@@ -279,8 +274,16 @@ impl StunProtocol {
                 return Ok(NatType::Symmetric);
             }
             let server3 = second.changed_addr()?;
-            if server3.ip() == stun_server.ip() || server3.ip() == server2.ip() || server3.port() == server2.port() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "NAT detection requires a third IP and a changed port").into());
+            if server3.family() != local_addr.family()
+                || server3.ip() == stun_server.ip()
+                || server3.ip() == server2.ip()
+                || server3.port() == server2.port()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NAT detection requires a third IP of the socket's address family and a changed port",
+                )
+                .into());
             }
             (server2, Some(server3))
         };
@@ -440,21 +443,4 @@ async fn send_datagram(socket: &UdpSocket, transaction_id: TransactionId, messag
     } else {
         Err(io::Error::new(io::ErrorKind::WriteZero, "STUN socket sent zero datagrams"))
     }
-}
-
-fn resolve_stun_servers(resolver: Arc<dyn Resolve>) -> StunLookup {
-    async move {
-        let mut records = resolver.lookup(STUN_SERVER, STUN_PORT, None).await.map_err(Arc::new)?;
-        let mut servers = Vec::new();
-        while let Some((_, endpoint)) = records.next().await {
-            if let EndpointAddr::Direct { addr } = endpoint
-                && !servers.contains(&addr)
-            {
-                servers.push(addr);
-            }
-        }
-        Ok(servers.into())
-    }
-    .boxed()
-    .shared()
 }

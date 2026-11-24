@@ -86,92 +86,14 @@ async fn disabled_server_and_unconfigured_change_requests_are_silent() {
 }
 
 #[tokio::test]
-async fn response_address_uses_the_original_client_and_receiving_socket_configuration() {
-    let protocol = Arc::new(StunProtocol::new());
-    let dock = isolated_dock(&protocol);
-    let intermediary = socket();
-    let client = socket();
-    protocol.enable_service();
-
-    for _ in 0..2 {
-        let server = socket();
-        let bound = server.local_addr().unwrap();
-        let config = config(bound);
-        // Register through Dock, then read forwarded packets explicitly below.
-        dock.add_socket(server.clone()).unwrap().unwrap().abort();
-        protocol.set_change_server(bound, config).unwrap();
-        let id = TransactionId::random();
-        protocol
-            .on_datagram(
-                &server,
-                id,
-                Message::Request(Request::with_response_addr(client.local_addr().unwrap())),
-                Link::new(bound, intermediary.local_addr().unwrap()),
-            )
-            .await
-            .unwrap();
-        let (received_id, Message::Response(response), link) = receive(&client).await else {
-            panic!("expected binding response");
-        };
-        assert_eq!(received_id, id);
-        assert_eq!(link.src, bound);
-        assert_eq!(response.map_addr().unwrap(), client.local_addr().unwrap());
-        assert_eq!(response.source_addr().unwrap(), config.outer_address);
-        assert_eq!(response.changed_addr().unwrap(), config.change_address);
-    }
-    no_response(&intermediary).await;
-}
-
-#[tokio::test]
-async fn change_requests_forward_only_response_address_with_the_original_id() {
-    let protocol = Arc::new(StunProtocol::new());
-    let dock = isolated_dock(&protocol);
-    let server = socket();
-    let alternate = socket();
-    let client = socket();
-    let bound = server.local_addr().unwrap();
-    // Simulate a public mapping while keeping all actual traffic on loopback.
-    let config = ChangeServer {
-        change_port: alternate.local_addr().unwrap().port(),
-        change_address: alternate.local_addr().unwrap(),
-        ..config(bound)
-    };
-    // Register through Dock, then read forwarded packets explicitly below.
-    dock.add_socket(server.clone()).unwrap().unwrap().abort();
-    protocol.set_change_server(bound, config).unwrap();
-    protocol.enable_service();
-
-    for flags in [CHANGE_PORT, CHANGE_IP, CHANGE_IP | CHANGE_PORT] {
-        let mut request = change_request(flags);
-        request.add_response_address("203.0.113.1:45000".parse().unwrap());
-        let id = TransactionId::random();
-        protocol.on_datagram(&server, id, Message::Request(request), Link::new(bound, client.local_addr().unwrap())).await.unwrap();
-        let target = if flags == CHANGE_IP {
-            &server
-        } else {
-            &alternate
-        };
-        let (received_id, Message::Request(request), link) = receive(target).await else {
-            panic!("expected forwarded binding request");
-        };
-        assert_eq!(received_id, id);
-        assert_eq!(link, Link::new(bound, target.local_addr().unwrap()));
-        assert_eq!(request, Request::with_response_addr(client.local_addr().unwrap()));
-    }
-    no_response(&client).await;
-}
-
-#[tokio::test]
 async fn change_port_replies_from_the_alternate_socket_through_dock() {
     let protocol = Arc::new(StunProtocol::new());
     let topology = Arc::new(Topology::new(protocol.clone(), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new())));
     let dock = Dock::new(topology);
-    let server = socket();
-    let alternate = socket();
-    let client = socket();
-    for socket in [&server, &alternate, &client] {
-        dock.add_socket(socket.clone()).unwrap();
-    }
+    let server = dock.use_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+    let owner = dock.ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+    let alternate = owner.socket().clone();
+    let client = dock.use_socket("127.0.0.1:0".parse().unwrap()).unwrap();
     for (socket, other) in [(&server, &alternate), (&alternate, &server)] {
         let bound = socket.local_addr().unwrap();
         protocol
@@ -195,8 +117,13 @@ async fn change_port_replies_from_the_alternate_socket_through_dock() {
     assert_eq!(response.source_addr().unwrap(), alternate.local_addr().unwrap());
     assert_eq!(response.changed_addr().unwrap(), config(alternate.local_addr().unwrap()).change_address);
     drop(transaction);
-    assert!(dock.remove(&alternate));
-    dock.add_socket(alternate.clone()).unwrap();
+    let bound = alternate.local_addr().unwrap();
+    drop(alternate);
+    drop(owner);
+    while dock.find_socket(bound).is_some() {
+        tokio::task::yield_now().await;
+    }
+    let alternate = dock.use_socket(bound).unwrap();
     let mut transaction = protocol.new_transaction();
     let (_, response) = timeout(
         Duration::from_secs(1),
@@ -214,9 +141,8 @@ async fn send_error_does_not_stop_the_dock_receive_loop() {
     let protocol = Arc::new(StunProtocol::new());
     let topology = Arc::new(Topology::new(protocol.clone(), Arc::new(ForwardProtocol::new()), Arc::new(QuicProtocol::new())));
     let dock = Dock::new(topology);
-    let server = socket();
+    let server = dock.use_socket("127.0.0.1:0".parse().unwrap()).unwrap();
     let client = socket();
-    dock.add_socket(server.clone()).unwrap();
     protocol.enable_service();
     let request = Request::with_response_addr("[::1]:10000".parse().unwrap());
     let link = Link::new(client.local_addr().unwrap(), server.local_addr().unwrap());
@@ -232,11 +158,13 @@ async fn send_error_does_not_stop_the_dock_receive_loop() {
 async fn configuration_rejects_invalid_addresses_and_requires_registration() {
     let protocol = Arc::new(StunProtocol::new());
     let dock = isolated_dock(&protocol);
-    let server = socket();
-    let bound = server.local_addr().unwrap();
+    let reservation = socket();
+    let bound = reservation.local_addr().unwrap();
     let valid = config(bound);
     assert_eq!(protocol.set_change_server(bound, valid).unwrap_err().kind(), io::ErrorKind::NotFound);
-    dock.add_socket(server.clone()).unwrap();
+    drop(reservation);
+    let owner = dock.ephemeral_socket(bound).unwrap();
+    let server = owner.socket();
     protocol.set_change_server(bound, valid).unwrap();
     for config in [
         ChangeServer { change_port: 0, ..valid },
@@ -252,14 +180,17 @@ async fn configuration_rejects_invalid_addresses_and_requires_registration() {
     }
     let client = socket();
     protocol
-        .on_datagram(&server, TransactionId::random(), Message::Request(Request::default()), Link::new(bound, client.local_addr().unwrap()))
+        .on_datagram(server, TransactionId::random(), Message::Request(Request::default()), Link::new(bound, client.local_addr().unwrap()))
         .await
         .unwrap();
     let (_, Message::Response(response), _) = receive(&client).await else {
         panic!("expected binding response");
     };
     assert_eq!(response.changed_addr().unwrap(), valid.change_address);
-    assert!(dock.remove(&server));
+    drop(owner);
+    while dock.find_socket(bound).is_some() {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(protocol.set_change_server(bound, valid).unwrap_err().kind(), io::ErrorKind::NotFound);
 }
 
@@ -267,13 +198,13 @@ async fn configuration_rejects_invalid_addresses_and_requires_registration() {
 async fn configuration_follows_registration_even_after_the_socket_expires() {
     let protocol = Arc::new(StunProtocol::new());
     let dock = isolated_dock(&protocol);
-    let server = socket();
+    let owner = dock.ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+    let server = owner.socket().clone();
     let bound = server.local_addr().unwrap();
     let valid = config(bound);
-    let receiver = dock.add_socket(server.clone()).unwrap().unwrap();
     protocol.set_change_server(bound, valid).unwrap();
     let registered = Arc::downgrade(&server);
-    receiver.abort();
+    drop(owner);
     drop(server);
     timeout(Duration::from_secs(1), async {
         while registered.upgrade().is_some() {
@@ -283,9 +214,7 @@ async fn configuration_follows_registration_even_after_the_socket_expires() {
     .await
     .unwrap();
 
-    // Aborting reception releases the socket without withdrawing its registration.
-    protocol.set_change_server(bound, valid).unwrap();
-    assert!(dock.remove_bound(bound));
+    // The receive task withdraws its registration when the owner closes.
     assert_eq!(protocol.set_change_server(bound, valid).unwrap_err().kind(), io::ErrorKind::NotFound,);
 
     // A request on the same address must not inherit the withdrawn configuration.

@@ -255,7 +255,7 @@ async fn close_at_client_stage(wait: ClientWait) {
                 if error.kind() == qbase::error::ErrorKind::TransportParameter));
             common::drop_paths_and_wait(paths).await;
             assert!(!route_exists(&router, cid).await);
-            QuicProtocol::global().unregister(socket.local_addr().unwrap());
+            QuicProtocol::global().unregister(local, &socket);
             return;
         }
         tokio::task::yield_now().await;
@@ -316,7 +316,7 @@ async fn close_at_client_stage(wait: ClientWait) {
     assert!(handshake.keys.get().is_err());
     assert!(handshake.crypto.writer().write(&[]).await.is_err());
     assert!(!route_exists(&router, cid).await);
-    QuicProtocol::global().unregister(socket.local_addr().unwrap());
+    QuicProtocol::global().unregister(local, &socket);
     drop(connection);
 }
 
