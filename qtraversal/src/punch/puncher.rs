@@ -14,7 +14,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     net::{
-        NatType,
+        AddrFamily, NatType,
         addr::EndpointAddr,
         route::{Line, Link, Pathway},
     },
@@ -341,23 +341,28 @@ where
     async fn dynamic_socket(&self, source: &UdpSocket) -> io::Result<(EphemeralSocket, SocketAddr)> {
         let mut target = source.local_addr()?;
         target.set_port(0);
-        let socket = Dock::global().ephemeral_socket(target)?;
-        let local = socket.socket().local_addr()?;
+        let ephemeral = Dock::global().ephemeral_socket(target)?;
+        let sock_addr = ephemeral.socket().local_addr()?;
         let topology = Dock::global().topology();
         let server = topology
             .stun()
             .stun_servers()
             .iter()
             .copied()
-            .find(|server| server.is_ipv4() == local.is_ipv4())
+            .find(|server| server.family() == sock_addr.family())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no STUN server for address family"))?;
-        let outer = socket.outer_addr(topology.stun(), server).await.map_err(io::Error::other)?;
-        Ok((socket, outer))
+        let outer = topology
+            .stun()
+            .detect_outer(sock_addr, server)
+            .await
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "STUN mapping probe timed out"))?;
+        Ok((ephemeral, outer))
     }
 
     fn retain_temporary(&self, socket: EphemeralSocket) -> io::Result<()> {
-        let local = socket.socket().local_addr()?;
-        self.0.temporary_sockets.insert(EndpointAddr::direct(local), socket);
+        let sock_addr = socket.socket().local_addr()?;
+        self.0.temporary_sockets.insert(EndpointAddr::direct(sock_addr), socket);
         Ok(())
     }
 

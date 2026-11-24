@@ -63,7 +63,7 @@ impl Peer {
         let stun = StunProtocol::global();
         let nat = timeout(Duration::from_secs(15), stun.detect_nat(bound, STUN.parse().unwrap())).await.unwrap().unwrap();
         assert_eq!(nat, expected, "NAT classification for {bound}");
-        let outer = socket.outer_addr(stun, STUN.parse().unwrap()).await.unwrap();
+        let outer = stun.detect_outer(bound, STUN.parse().unwrap()).await.unwrap().expect("STUN mapping probe timed out");
         println!("NAT {bound} -> {outer}: {nat:?}");
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let encoder = Encoder::default();

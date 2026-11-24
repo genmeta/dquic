@@ -27,7 +27,7 @@ type CloseSocket = dyn Fn(SocketAddr) + Send + Sync + 'static;
 pub struct Dock {
     sockets: Arc<DashMap<SocketAddr, Weak<UdpSocket>>>,
     factory: RwLock<Arc<CreateSocket>>,
-    recycle: Arc<RwLock<Arc<CloseSocket>>>,
+    recycle: RwLock<Arc<CloseSocket>>,
     topology: Arc<Topology>,
 }
 
@@ -48,7 +48,7 @@ impl Dock {
         Arc::new(Self {
             sockets: Arc::new(DashMap::new()),
             factory: RwLock::new(Arc::new(|addr| UdpSocket::bind(addr, 0))),
-            recycle: Arc::new(RwLock::new(Arc::new(|_| {}))),
+            recycle: RwLock::new(Arc::new(|_| {})),
             topology,
         })
     }
@@ -118,8 +118,7 @@ impl Dock {
         }
 
         let (close, reception) = AbortHandle::new_pair();
-        let sockets = self.sockets.clone();
-        let recycle = self.recycle.clone();
+        let dock = self.clone();
         let topology = self.topology.clone();
         let receiving = socket.clone();
         let nodes = topology.stun().stun_servers();
@@ -129,9 +128,9 @@ impl Dock {
             let result = {
                 let receive = Abortable::new(topology.receive(receiving.clone()), reception);
                 tokio::pin!(receive);
-                let discovery = async {
+                let paving = async {
                     if permanent && !sock_addr.ip().is_unspecified() {
-                        discover(&topology, &addresses, &receiving, &nodes, &mut endpoint).await?;
+                        pave_out(&topology, &addresses, &receiving, &nodes, &mut endpoint).await?;
                     }
                     Ok::<(), io::Error>(())
                 };
@@ -139,7 +138,7 @@ impl Dock {
                 // from publishing endpoints or candidates for a closed socket.
                 tokio::select! {
                     result = &mut receive => result,
-                    result = discovery => match result {
+                    result = paving => match result {
                         Ok(()) => receive.await,
                         Err(error) => Ok(Err(error)),
                     },
@@ -156,10 +155,10 @@ impl Dock {
                 topology.quic().unregister(directed, &receiving);
             }
             topology.stun().unregister_socket(sock_addr, &registered);
-            sockets.remove(&sock_addr);
+            dock.sockets.remove(&sock_addr);
             drop(receiving);
             if permanent {
-                let callback = recycle.read().unwrap().clone();
+                let callback = dock.recycle.read().unwrap().clone();
                 callback(sock_addr);
             }
         });
@@ -180,7 +179,7 @@ impl Dock {
     }
 }
 
-async fn discover(
+async fn pave_out(
     topology: &Topology,
     addresses: &ArcAddrBook,
     socket: &Arc<UdpSocket>,

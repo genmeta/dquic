@@ -1,16 +1,12 @@
 use std::{
     io::{self, IoSlice},
-    net::SocketAddr,
     sync::Arc,
 };
 
 use futures::future::AbortHandle;
 use qbase::net::route::Link;
 
-use crate::{
-    UdpSocket,
-    protocol::stun::{StunError, StunProtocol},
-};
+use crate::UdpSocket;
 
 /// Owns a temporary socket and stops reception on drop.
 /// The receiver then unregisters and releases the socket without notifying
@@ -23,12 +19,6 @@ pub struct EphemeralSocket {
 impl EphemeralSocket {
     pub fn socket(&self) -> &Arc<UdpSocket> {
         &self.socket
-    }
-
-    pub async fn outer_addr(&self, stun: &Arc<StunProtocol>, agent: SocketAddr) -> Result<SocketAddr, StunError> {
-        stun.detect_outer(self.socket.local_addr()?, agent)
-            .await?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "STUN mapping probe timed out").into())
     }
 
     pub async fn send(&self, packets: &[IoSlice<'_>], link: Link) -> io::Result<usize> {

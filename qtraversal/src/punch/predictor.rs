@@ -87,7 +87,7 @@ impl PortPredictor {
         Ok(())
     }
 
-    fn create_socket(&self) -> io::Result<EphemeralSocket> {
+    fn ephemeral_socket(&self) -> io::Result<EphemeralSocket> {
         let mut target = self.source.local_addr()?;
         target.set_port(0);
         Dock::global().ephemeral_socket(target)
@@ -121,12 +121,12 @@ impl PortPredictor {
         self.acquire_quota().await?;
         self.probes_created += 1;
         let result = async {
-            let socket = self.create_socket()?;
-            let local = socket.socket().local_addr()?;
+            let ephemeral = self.ephemeral_socket()?;
+            let sock_addr = ephemeral.socket().local_addr()?;
             let probe_id = self.probes.allocate_probe_id();
             let hello = PunchHelloFrame::new(punch_id.local_seq, punch_id.remote_seq, probe_id);
-            send(socket.socket().clone(), Link::new(local, self.dst), PACKET_TTL, hello).await?;
-            self.probes.insert(probe_id, socket, local.port());
+            send(ephemeral.socket().clone(), Link::new(sock_addr, self.dst), PACKET_TTL, hello).await?;
+            self.probes.insert(probe_id, ephemeral, sock_addr.port());
             Ok(())
         }
         .await;
