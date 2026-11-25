@@ -82,7 +82,6 @@ clap = { version = "4", features = ["derive"] }
 tracing-subscriber = "0.3"
 
 # members
-dquic = { path = "./dquic", version = "0.8.0" }
 qmacro = { path = "./qmacro", version = "0.6.0" }
 qbase = { path = "./qbase", version = "0.7.0" }
 qevent = { path = "./qevent", version = "0.7.0" }
