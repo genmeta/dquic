@@ -42,7 +42,7 @@ impl Default for TlsLimits {
             max_handshake_bytes: 256 * 1024,
             max_flight_bytes: 256 * 1024,
             max_certificate_chain_bytes: 256 * 1024,
-            max_certificates: 8,
+            max_certificates: 16,
             max_ocsp_bytes: 64 * 1024,
             max_session_bytes: 64 * 1024,
         }

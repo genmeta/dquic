@@ -304,3 +304,36 @@ The TLS chain limits and Forward/spin-bit classification are unchanged. All 13
 official scenarios remain required in each direction, including the known
 long-chain amplification-limit failure; no retry or relaxed result check was
 introduced.
+
+### Long certificate chains (2026-11-25)
+
+The latest pre-fix [run 45562876988](https://github.com/genmeta/dquic/actions/runs/45562876988)
+completed 130 checks: 118 succeeded, 11 failed and one was unsupported. Nine
+failures and the unsupported result were amplification-limit cases; the other
+two failures were dquic-client/quiche-server rebinding.
+
+The user authorized resolving the long-chain limitation. The workspace now
+uses the published rustls-webpki 0.103.15 source with only its intermediate
+depth bound raised from 6 to 16, and qtls defaults to at most 16 supplied
+certificates. All other WebPKI source files and validation/work budgets are
+unchanged. See the [patch provenance](../../vendor/rustls-webpki/UPSTREAM.md),
+including Cargo's downstream-workspace patch requirement.
+
+Regression tests reproduced the local certificate-count rejection and,
+independently, WebPKI's depth rejection with an explicit larger qtls limit.
+After the correction, mutual authentication with 9 and 16 certificates and
+valid OCSP succeeds. Invalid intermediate signatures, unknown roots, name
+constraints and configured local/peer count and byte limits still fail.
+The default native workspace passed 1016 tests/doctests; the feature-enabled
+workspace passed 1021, with eight ignored in each build. Clippy for qtls/dquic,
+workspace formatting, 11 Python checks and six comment tests passed.
+The official Linux matrix must be rerun before claiming that the
+amplification-limit scenario passes.
+
+The independent [quic-go/quiche control run 45557873049](https://github.com/genmeta/dquic/actions/runs/45557873049)
+also fails both rebinding tests without dquic. In the dquic/quiche port-rebind
+capture, stream bytes 388736..424828 never arrive, while bytes
+424828..2000593 arrive after successful path validation. The quic-go control
+also retains stream gaps. This supports investigating quiche's old-path
+recovery; it does not establish a tested upstream fix. The production matrix
+continues to require both rebinding checks without retries or exclusions.

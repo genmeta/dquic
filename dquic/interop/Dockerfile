@@ -17,6 +17,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
 COPY --from=planner /src/recipe.json recipe.json
+# cargo-chef's recipe contains workspace members, not the excluded WebPKI patch.
+COPY --from=planner /src/vendor vendor
 RUN cargo chef cook --release -p dquic --examples --features interop-test --recipe-path recipe.json
 COPY . .
 # Restore the original local package versions masked by cargo-chef's recipe.

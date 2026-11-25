@@ -1,6 +1,7 @@
 mod support;
 mod handshake {
     mod client_ocsp;
+    mod long_chain;
     mod server_ocsp;
 }
 
