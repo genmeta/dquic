@@ -156,7 +156,7 @@ the title starts CI; subsequent commits and reopening the PR rerun it while
 the marker remains. PR body edits neither rerun nor cancel it, and do not replace
 the result comment. Untagged PRs skip the jobs. The endpoint image is built once
 for `linux/amd64` and reused by five parallel peer jobs: quic-go,
-ngtcp2, quiche, quinn and aioquic. No registry credentials are needed.
+ngtcp2, msquic, quinn and aioquic. No registry credentials are needed.
 
 Each peer job runs both client/server directions through the official
 [Interop Runner](https://github.com/quic-interop/quic-interop-runner), pinned to
@@ -173,6 +173,20 @@ disabled. The workspace regression also runs with `dquic/interop-test` enabled.
 The unsupported features listed above, and the ECN scenario requiring ECN
 marking/validation, are outside this required set. A green workflow only covers
 the selected scenarios.
+
+The workflow's final `report` job publishes the complete matrix in its Actions
+summary and in the downloadable `interop-report` artifact, including when tests
+fail. This report is available before the PR-comment workflow reaches `main`.
+It records the run, commit, build/regression status, both directions and every
+selected test. MsQuic uses the official Runner image
+`ghcr.io/microsoft/msquic/qns:main`; image digests are preserved with the logs.
+The artifact includes its input result JSON and run/job metadata. After
+extracting it, regenerate the report with:
+
+```sh
+python3 dquic/interop/report.py interop-results --run interop-run.json \
+  --jobs interop-jobs.json --output interop-report.md
+```
 
 The simulator normally probes server readiness with an unknown QUIC version
 and requires a Version Negotiation response. For dquic servers, `ci.py`
@@ -221,3 +235,28 @@ python3 dquic/interop/ci.py target/interop-runner quic-go
 
 Use a new `--output` directory for each rerun; Runner log directories must not
 already exist. Add `--measurements` to include the performance checks.
+
+## Functional coverage
+
+The report describes the HTTP/0.9 interop endpoint and its shared dquic stack.
+The latest completed results and limitations are recorded in
+[VALIDATION.md](VALIDATION.md).
+
+| Function | Verification |
+| --- | --- |
+| QUIC v1, TLS 1.3, ALPN `hq-interop` | `handshake`, both roles |
+| IPv4 and IPv6 | normal scenarios and `ipv6` |
+| Binary file transfers, receive-window updates and FIN | `transfer`, `longrtt`, native file-content tests |
+| Concurrent streams and stream-limit updates | `multiplexing`, native 128-stream test |
+| Recovery from temporary blackholes | `blackhole` |
+| Address validation and amplification limits with a nine-certificate chain | `amplificationlimit` |
+| Handshake and transfer under packet loss/corruption | four loss/corruption scenarios |
+| NAT port and address rebinding | `rebind-port`, `rebind-addr` |
+| Full TLS verification with up to 16 supplied certificates | native mutual-authentication, OCSP, invalid-chain and resource-limit regressions |
+| Optional NSS TLS key logging | native subprocess test and Runner packet analysis |
+
+The endpoint does not expose Retry, resumption, 0-RTT, HTTP/3, QUIC v2,
+explicit key-update initiation or preferred-address migration. ECN and native
+STUN/Forward/hole-punching extensions are outside this standard-peer matrix.
+Throughput and TCP cross-traffic measurements require a separate manual run;
+correctness results do not provide hardware throughput measurements.

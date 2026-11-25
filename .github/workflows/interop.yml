@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        peer: [quic-go, ngtcp2, quiche, quinn, aioquic]
+        peer: [quic-go, ngtcp2, msquic, quinn, aioquic]
     steps:
       - uses: actions/checkout@v6
       - name: Check out official Interop Runner
@@ -142,3 +142,45 @@ jobs:
           path: target/interop/
           retention-days: 7
           if-no-files-found: warn
+
+  report:
+    needs: [regression, image, interop]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.title, '[interop]') &&
+      (github.event.action != 'edited' || github.event.changes.title != null)))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: interop-results-*
+          path: target/interop-results
+      - name: Collect run and job metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p target
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > target/interop-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs' > target/interop-jobs.json
+      - name: Render functional test report
+        run: |
+          python3 dquic/interop/report.py target/interop-results \
+            --run target/interop-run.json --jobs target/interop-jobs.json \
+            --output target/interop-report.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: interop-report
+          path: |
+            target/interop-report.md
+            target/interop-run.json
+            target/interop-jobs.json
+            target/interop-results/
+          retention-days: 7
+          if-no-files-found: error

@@ -41,6 +41,18 @@ class ReportCheck(unittest.TestCase):
         self.assertIn("dquic → quic-go", report)
         self.assertIn("quic-go → dquic", report)
 
+    def test_msquic_results_and_current_certificate_support_are_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_results(root, "msquic", "dquic", "msquic")
+            write_results(root, "msquic", "msquic", "dquic")
+            report = render_report(root, RUN, [])
+        self.assertIn("26 passed · 0 failed · 0 unsupported · 104 missing", report)
+        self.assertIn("dquic → msquic", report)
+        self.assertIn("msquic → dquic", report)
+        self.assertNotIn("nine-certificate chain beyond", report)
+        self.assertIn("16 supplied certificates", report)
+
     def test_partial_matrix_keeps_failures_unsupported_and_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
