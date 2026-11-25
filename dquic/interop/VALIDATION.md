@@ -112,7 +112,7 @@ run are in
 
 The [workflow](../../.github/workflows/interop.yml) builds the endpoint image
 once, runs the feature-enabled workspace regression, and tests dquic against
-quic-go, ngtcp2, quiche, quinn and aioquic in both directions. The 13 required
+quic-go, ngtcp2, msquic, quinn and aioquic in both directions. The 13 required
 scenarios are listed in [README.md](README.md#github-actions). Missing,
 unsupported, null and failed results all fail the job; no failure is converted
 to a passing or skipped result. Performance measurements are opt-in and were
@@ -332,13 +332,37 @@ workspace formatting, 11 Python checks and six comment tests passed.
 The qwebpki fork passed 415 Ring tests and 430 AWS-LC tests (two ignored in
 each build), including 16-intermediate success and 17-intermediate rejection.
 qrustls passed 232 unit tests, 259 API tests and 15 doctests (five ignored).
-The official Linux matrix must be rerun before claiming that the
-amplification-limit scenario passes.
+The official [run 45574680047](https://github.com/genmeta/dquic/actions/runs/45574680047)
+tested `a95983a5583c63d5e33c17bf8c22f7fce80715c3` with the published registry
+dependencies. All ten amplification-limit checks passed. The complete matrix
+had 126 successes and four failures, all in the quiche group: dquic-client
+handshakecorruption, dquic-client rebind-port/rebind-addr and quiche-client
+rebind-port. Each other peer passed 26/26. The Linux feature-enabled workspace
+passed 1030 tests/doctests, with 23 ignored; the regular Rust CI also passed
+on Linux, macOS and Windows.
 
 The independent [quic-go/quiche control run 45557873049](https://github.com/genmeta/dquic/actions/runs/45557873049)
 also fails both rebinding tests without dquic. In the dquic/quiche port-rebind
 capture, stream bytes 388736..424828 never arrive, while bytes
 424828..2000593 arrive after successful path validation. The quic-go control
 also retains stream gaps. This supports investigating quiche's old-path
-recovery; it does not establish a tested upstream fix. The production matrix
-continues to require both rebinding checks without retries or exclusions.
+recovery; it does not establish a tested upstream fix. Both rebinding checks
+remain required in the replacement matrix.
+
+### MsQuic matrix and functional report (2026-11-25)
+
+The user requested replacing quiche with MsQuic. The current required peers
+are quic-go, ngtcp2, msquic, quinn and aioquic. The official Runner's MsQuic
+image is `ghcr.io/microsoft/msquic/qns:main`, in both roles. This changes the
+comparison peer while preserving all 13 tests in both directions: 130 checks
+must succeed, including both NAT rebinding tests and all loss/corruption tests.
+The quiche run above remains a historical failure record.
+
+The workflow now renders one functional test report after all matrix jobs,
+using read-only run/job metadata and the actual result JSON. Its
+`interop-report` artifact contains the Markdown report, result JSON and
+run/job metadata; its Actions summary presents the same matrix. The report
+records failures and missing data as such, and its TLS note reflects the
+published long-chain support. See the [functional coverage table](README.md#functional-coverage)
+for the relation between scenarios and endpoint functions. Optional throughput
+measurements and endpoint features outside the matrix are listed separately.

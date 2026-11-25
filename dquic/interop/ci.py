@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 
+PEERS = ("quic-go", "ngtcp2", "msquic", "quinn", "aioquic")
 TESTS = (
     "handshake", "transfer", "longrtt", "multiplexing", "blackhole",
     "amplificationlimit", "handshakeloss", "transferloss",
@@ -40,7 +41,7 @@ def check_results(data, client, server, measurements=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runner", type=Path)
-    parser.add_argument("peer", choices=("quic-go", "ngtcp2", "quiche", "quinn", "aioquic"))
+    parser.add_argument("peer", choices=PEERS)
     parser.add_argument("--output", type=Path, default=Path("target/interop"))
     parser.add_argument("--measurements", action="store_true")
     args = parser.parse_args()

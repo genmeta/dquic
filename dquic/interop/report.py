@@ -8,10 +8,9 @@ import json
 import os
 from pathlib import Path
 
-from ci import TESTS, check_results
+from ci import PEERS, TESTS, check_results
 
 
-PEERS = ("quic-go", "ngtcp2", "quiche", "quinn", "aioquic")
 SYMBOLS = {"succeeded": "✅", "failed": "❌", "unsupported": "➖", "missing": "❓"}
 
 
@@ -62,9 +61,10 @@ def render_report(artifacts, run, jobs):
         sections.extend(["", *notes, "", "</details>", ""])
 
     url = run["html_url"]
+    conclusion = f" · CI: **{text(run['conclusion'])}**" if run.get("conclusion") else ""
     header = ["## QUIC interop", "",
-              f"Commit: `{run['head_sha']}` · [Run {run['id']}, attempt {run['run_attempt']}]({url}) "
-              f"· CI: **{text(run['conclusion'])}**", "",
+              f"Commit: `{run['head_sha']}` · [Run {run['id']}, attempt {run['run_attempt']}]({url})"
+              f"{conclusion}", "",
               f"**{counts['succeeded']} passed · {counts['failed']} failed · "
               f"{counts['unsupported']} unsupported · {counts['missing']} missing**", ""]
     checks = [f"[{text(job['name'])}: {text(job['conclusion'])}]({job['html_url']})"
@@ -74,8 +74,11 @@ def render_report(artifacts, run, jobs):
     return "\n".join([
         *header, *table, "", "✅ passed · ❌ failed · ➖ unsupported · ❓ missing/unrun", "",
         *sections,
-        "Known limitation: `amplificationlimit` uses a nine-certificate chain beyond the current TLS "
-        "validation limits. These failures remain visible; TLS validation is unchanged.", "",
+        "Scope: QUIC v1 and the 13 selected scenarios in both directions. The endpoint supports "
+        "16 supplied certificates by default, including the Runner's nine-certificate chain. "
+        "Certificate chains, names and signatures remain verified; interop-test permits missing OCSP.", "",
+        "Outside this matrix: Retry, resumption, 0-RTT, HTTP/3, QUIC v2, explicit key-update initiation, "
+        "preferred-address migration and ECN. Performance measurements are not included in these counts.", "",
         f"[Full logs, packet captures and TLS key logs]({url}#artifacts) (retained for seven days).", "",
     ])
 
@@ -83,10 +86,12 @@ def render_report(artifacts, run, jobs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifacts", type=Path)
+    parser.add_argument("--run", type=Path, help="Actions run JSON; defaults to the workflow_run event")
     parser.add_argument("--jobs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
+    run = (json.loads(args.run.read_text()) if args.run else
+           json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"])
     report = render_report(args.artifacts, run, json.loads(args.jobs.read_text()))
     args.output.write_text(report)
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):

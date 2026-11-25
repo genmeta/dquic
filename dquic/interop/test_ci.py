@@ -61,7 +61,7 @@ class ResultCheck(unittest.TestCase):
         self.assertTrue(passed)
         self.assertEqual(rows[-1], ("crosstraffic", "succeeded", "9500 kbps"))
 
-    def test_server_readiness_does_not_require_unimplemented_version_negotiation(self):
+    def test_msquic_runs_both_directions_and_retains_server_readiness_rules(self):
         waits = {}
 
         def run(command, **options):
@@ -76,8 +76,8 @@ class ResultCheck(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "implementations_quic.json").write_text(json.dumps({"quic-go": {"image": "test:local"}}))
-            args = ["ci.py", str(root), "quic-go", "--output", str(root / "output")]
+            (root / "implementations_quic.json").write_text(json.dumps({"msquic": {"image": "test:local"}}))
+            args = ["ci.py", str(root), "msquic", "--output", str(root / "output")]
             with (
                 patch("sys.argv", args),
                 patch("ci.subprocess.run", side_effect=run),
@@ -86,7 +86,7 @@ class ResultCheck(unittest.TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertIn("INTEROP_WAIT_FOR_SERVER", (root / "docker-compose.override.yml").read_text())
-        self.assertEqual(waits, {"quic-go": "server:443", "dquic": ""})
+        self.assertEqual(waits, {"msquic": "server:443", "dquic": ""})
 
 
 if __name__ == "__main__":
