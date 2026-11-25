@@ -11,6 +11,10 @@ aioquic-client to dquic-server handshake fix.
 Build with `interop-test` to allow peers and local credentials without OCSP.
 Without this feature, missing OCSP remains an error. Certificate names, chains,
 signatures and validity are still checked, and supplied OCSP is always validated.
+The workspace supports chains of up to 16 supplied certificates by default,
+including the Runner's nine-certificate amplification test. It uses a
+[WebPKI depth patch](../../vendor/rustls-webpki/UPSTREAM.md); certificate byte
+limits and all other validation rules remain enabled.
 Cargo features apply to every use of the enabled crate within the same build;
 use a separate build for normal deployments.
 
@@ -200,8 +204,7 @@ their smaller windows and larger stream sets.
 updates one bot comment on opted-in PRs, including fork PRs. It shows pass,
 failure, unsupported and missing counts, all individual checks, regression
 and image status, the tested commit and links to full artifacts. Older commits
-and runs cannot overwrite newer results. Missing or invalid JSON stays missing;
-the existing nine-certificate TLS limitation remains documented as a failure.
+and runs cannot overwrite newer results. Missing or invalid JSON stays missing.
 The reporting workflow runs trusted default-branch code and reads only JSON
 artifacts from the test run. It must first be merged into `main` before GitHub
 can trigger its `workflow_run` event. No additional token secret is needed.
