@@ -1,6 +1,12 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from ci import MEASUREMENTS, TESTS, check_results
+from ci import MEASUREMENTS, TESTS, check_results, main
 
 
 def result(measurements=False):
@@ -54,6 +60,33 @@ class ResultCheck(unittest.TestCase):
         rows, passed = check_results(result(measurements=True), "dquic", "quic-go", measurements=True)
         self.assertTrue(passed)
         self.assertEqual(rows[-1], ("crosstraffic", "succeeded", "9500 kbps"))
+
+    def test_server_readiness_does_not_require_unimplemented_version_negotiation(self):
+        waits = {}
+
+        def run(command, **options):
+            if "run.py" in command:
+                client = command[command.index("-c") + 1]
+                server = command[command.index("-s") + 1]
+                waits[server] = options.get("env", {}).get("INTEROP_WAIT_FOR_SERVER")
+                data = result()
+                data.update(clients=[client], servers=[server])
+                Path(command[command.index("-j") + 1]).write_text(json.dumps(data))
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "implementations_quic.json").write_text(json.dumps({"quic-go": {"image": "test:local"}}))
+            args = ["ci.py", str(root), "quic-go", "--output", str(root / "output")]
+            with (
+                patch("sys.argv", args),
+                patch("ci.subprocess.run", side_effect=run),
+                patch("builtins.print"),
+                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(root / "summary.md")}),
+            ):
+                self.assertEqual(main(), 0)
+            self.assertIn("INTEROP_WAIT_FOR_SERVER", (root / "docker-compose.override.yml").read_text())
+        self.assertEqual(waits, {"quic-go": "server:443", "dquic": ""})
 
 
 if __name__ == "__main__":
