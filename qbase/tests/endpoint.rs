@@ -34,7 +34,7 @@ fn construction_rejects_unloadable_private_key() {
 }
 
 #[test]
-fn empty_ocsp_follows_interop_feature() {
+fn empty_ocsp_follows_must_staple_feature() {
     let result = Endpoint::new("localhost", vec![certificate(CERT)], PrivateKeyDer::from_pem_slice(KEY).unwrap(), Vec::new());
-    assert_eq!(result.is_ok(), cfg!(feature = "interop-test"));
+    assert_eq!(result.is_ok(), !cfg!(feature = "ocsp-must-staple"));
 }

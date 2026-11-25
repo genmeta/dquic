@@ -60,7 +60,7 @@ impl LocalAuthority {
         ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
         rustls::pki_types::DnsName::try_from(name.as_ref()).map_err(|_| InvalidLocalAuthority::InvalidName)?;
-        if ocsp.is_empty() && !cfg!(feature = "interop-test") {
+        if ocsp.is_empty() && cfg!(feature = "ocsp-must-staple") {
             return Err(InvalidLocalAuthority::EmptyOcsp);
         }
 

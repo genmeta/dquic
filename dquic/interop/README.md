@@ -8,17 +8,19 @@ aioquic-client to dquic-server handshake fix.
 
 ## Features and key logging
 
-Build with `interop-test` to allow peers and local credentials without OCSP.
-Without this feature, missing OCSP remains an error. Certificate names, chains,
-signatures and validity are still checked, and supplied OCSP is always validated.
+Default builds allow peers and local credentials without OCSP.
+The optional `ocsp-must-staple` feature requires OCSP for all certificates,
+independently of the certificate's TLS Feature extension. Leave it disabled for
+the Runner. Certificate names, chains, signatures and validity are still checked,
+and supplied OCSP is always validated.
 The workspace supports chains of up to 16 supplied certificates by default,
 including the Runner's nine-certificate amplification test. It uses a
 published `qwebpki` dependency through `qrustls`; certificate byte limits and
 all other validation rules remain enabled. Consumers need no local Cargo patch.
 Cargo features apply to every use of the enabled crate within the same build;
-use a separate build for normal deployments.
+use a separate build when a different OCSP policy is needed.
 
-TLS key logging is a runtime API, available without `interop-test`:
+TLS key logging is a runtime API, independent of `ocsp-must-staple`:
 
 ```rust,no_run
 let mut endpoint = dquic::QuicEndpoint::anonymous();
@@ -36,15 +38,16 @@ it for Runner packet analysis. Key log files can decrypt captured traffic.
 Run from the repository root:
 
 ```sh
-cargo build -p dquic --example interop --features interop-test
-cargo test -p dquic --test interop --features interop-test
+cargo build -p dquic --example interop
+cargo test -p dquic --test interop
 cargo test -p qtls --tests -- --test-threads=1
-cargo test -p qtls --features interop-test --tests -- --test-threads=1
+cargo test -p qtls --features ocsp-must-staple --tests -- --test-threads=1
 ```
 
-The interop tests include a real loopback QUIC connection without OCSP, binary
-file transfers over 128 streams, small receive windows, FIN handling and file
-root containment. They do not require Docker.
+The interop tests include a real loopback QUIC connection, binary file transfers
+over 128 streams, small receive windows, FIN handling and file root containment.
+The QUIC test omits OCSP by default and supplies a valid staple when
+`ocsp-must-staple` is enabled. These tests do not require Docker.
 
 ## Runner contract
 
@@ -169,7 +172,8 @@ Each peer job runs both client/server directions through the official
 
 All 130 selected checks must succeed. A failed, unsupported, missing, duplicate
 or unrun result fails CI. Automatic conversion of failures to unsupported is
-disabled. The workspace regression also runs with `dquic/interop-test` enabled.
+disabled. The workspace regression runs with default features and with
+`dquic/ocsp-must-staple` enabled.
 The unsupported features listed above, and the ECN scenario requiring ECN
 marking/validation, are outside this required set. A green workflow only covers
 the selected scenarios.

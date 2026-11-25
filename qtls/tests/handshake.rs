@@ -160,7 +160,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
             Vec::new(),
         )
         .is_ok(),
-        cfg!(feature = "interop-test")
+        !cfg!(feature = "ocsp-must-staple")
     );
 
     for ocsp in [CLIENT_OCSP, SERVER_REVOKED_OCSP] {
@@ -203,7 +203,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
             Vec::new(),
         )
         .is_ok(),
-        cfg!(feature = "interop-test")
+        !cfg!(feature = "ocsp-must-staple")
     );
 
     let client = TlsClient::new(ClientTlsConfig {

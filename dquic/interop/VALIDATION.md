@@ -7,22 +7,26 @@ the GitHub Actions results below.
 ## Workspace regression
 
 ```sh
-cargo test --offline --workspace -- --test-threads=1
-CARGO_INCREMENTAL=0 cargo test --offline --workspace --features dquic/interop-test -- --test-threads=1
-cargo clippy --offline -p dquic -p qbase -p qprotocol -p qconnection -p qtransport \
-  --all-targets --features dquic/interop-test -- -D warnings
+CARGO_INCREMENTAL=0 cargo test --offline --workspace -- --test-threads=1
+CARGO_INCREMENTAL=0 cargo test --offline --workspace --features dquic/ocsp-must-staple -- --test-threads=1
+CARGO_INCREMENTAL=0 cargo clippy --offline -p dquic -p qbase -p qconnection -p qtls \
+  --all-targets --features dquic/ocsp-must-staple -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Default workspace: 1010 tests and doctests passed, 8 ignored. With
-`dquic/interop-test`: 1015 passed, 8 ignored. Clippy, formatting, whitespace
+Default workspace: 1021 tests and doctests passed, 8 ignored. With
+`dquic/ocsp-must-staple`: 1021 passed, 8 ignored. Clippy, formatting, whitespace
 checks and shell syntax checks passed. UDP tests require permission to bind
 local sockets; a sandbox denial must not be interpreted as a protocol failure.
 
 The new interop tests cover binary files, concurrent HTTP/0.9 streams, FIN,
 oversized requests, path containment, and 128 streams over a real QUIC connection
-with small receive windows and no OCSP. TLS tests check both feature settings,
-invalid supplied OCSP and invalid certificates. A subprocess test verifies that
+with small receive windows. The OCSP policy feature is disabled by default:
+missing local and peer OCSP is accepted, while enabling `ocsp-must-staple`
+requires it. The QUIC transfer omits OCSP by default and supplies a valid staple
+in strict mode. TLS tests check both feature settings, invalid supplied OCSP
+and invalid certificates. Explicit `validate_ocsp` still rejects empty responses
+in both modes. A subprocess test verifies that
 the client and server log identical NSS secrets when enabled, and that setting
 SSLKEYLOGFILE alone does not enable logging.
 
@@ -111,7 +115,7 @@ run are in
 ## GitHub Actions
 
 The [workflow](../../.github/workflows/interop.yml) builds the endpoint image
-once, runs the feature-enabled workspace regression, and tests dquic against
+once, runs workspace regressions with both OCSP policies, and tests dquic against
 quic-go, ngtcp2, msquic, quinn and aioquic in both directions. The 13 required
 scenarios are listed in [README.md](README.md#github-actions). Missing,
 unsupported, null and failed results all fail the job; no failure is converted

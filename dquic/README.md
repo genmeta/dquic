@@ -58,10 +58,11 @@ for the complete setup.
 ## Interop testing and TLS key logging
 
 The [interop example](interop/README.md) provides an HTTP/0.9 client and server
-for the QUIC Interop Runner. Build it with `--features interop-test` to allow
-missing peer and local OCSP. This feature keeps certificate name, chain,
-signature and validity checks, and still rejects invalid supplied OCSP.
-Default builds require OCSP.
+for the QUIC Interop Runner. Default builds allow missing peer and local OCSP.
+Enable `--features ocsp-must-staple` to require OCSP for all certificates.
+This is a local policy independent of the certificate's TLS Feature extension.
+Both modes check certificate names, chains, signatures and validity, and reject
+invalid supplied OCSP. The interop example needs no extra features.
 
 TLS key logging is controlled by code and is disabled by default:
 
@@ -72,7 +73,7 @@ endpoint.set_keylog(true);
 
 Subsequent connections and listeners write NSS key logs to `SSLKEYLOGFILE`
 when the variable is set. Call `set_keylog(false)` to disable logging for
-future connections and listeners. This API does not require `interop-test`.
+future connections and listeners. This API is independent of `ocsp-must-staple`.
 
 ## Echo examples
 

@@ -17,11 +17,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release -p dquic --examples --features interop-test --recipe-path recipe.json
+RUN cargo chef cook --release -p dquic --examples --recipe-path recipe.json
 COPY . .
 # Restore the original local package versions masked by cargo-chef's recipe.
 COPY --from=planner /src/Cargo.lock Cargo.lock
-RUN cargo build --locked --release -p dquic --example interop --features interop-test
+RUN cargo build --locked --release -p dquic --example interop
 
 FROM martenseemann/quic-network-simulator-endpoint:latest
 COPY --from=build /src/target/release/examples/interop /usr/local/bin/dquic-interop

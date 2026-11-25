@@ -41,8 +41,10 @@ jobs:
         run: python3 -m unittest discover -s dquic/interop -p 'test_*.py' -v
       - name: Test PR comments
         run: node --test dquic/interop/test_comment.cjs
-      - name: Test workspace with interop enabled
-        run: cargo test --workspace --features dquic/interop-test -- --test-threads=1
+      - name: Test workspace with default OCSP policy
+        run: cargo test --workspace -- --test-threads=1
+      - name: Test workspace with required OCSP staples
+        run: cargo test --workspace --features dquic/ocsp-must-staple -- --test-threads=1
 
   image:
     if: >-
