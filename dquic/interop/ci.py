@@ -56,6 +56,13 @@ def main():
         "role": "both",
     }
     manifest.write_text(json.dumps(implementations, indent=2) + "\n")
+    # The simulator's readiness probe requires Version Negotiation, which dquic
+    # does not implement yet. Actual handshake tests still verify server readiness.
+    (runner / "docker-compose.override.yml").write_text(
+        'services:\n  sim:\n    environment:\n      WAITFORSERVER: "${INTEROP_WAIT_FOR_SERVER}"\n'
+        '  server:\n    environment:\n      RUST_LOG: "debug"\n'
+        '  client:\n    environment:\n      RUST_LOG: "debug"\n'
+    )
     images = [implementations[args.peer]["image"], "martenseemann/quic-network-simulator"]
     if args.measurements:
         images.append("martenseemann/quic-interop-iperf-endpoint")
@@ -77,7 +84,8 @@ def main():
         ]
         print("Running:", " ".join(command), flush=True)
         # Run the reverse direction even if this direction fails.
-        completed = subprocess.run(command, cwd=runner)
+        environment = dict(os.environ, INTEROP_WAIT_FOR_SERVER="" if server == "dquic" else "server:443")
+        completed = subprocess.run(command, cwd=runner, env=environment)
         failed |= completed.returncode != 0
         try:
             rows, passed = check_results(json.loads(result.read_text()), client, server, args.measurements)

@@ -125,7 +125,8 @@ Set `RUST_LOG=debug` when diagnosing handshake or transport failures.
 Several Runner tests map to the endpoint's `transfer` behavior; supporting that
 behavior does not declare those tests passed. Retry, resumption, 0-RTT, HTTP/3,
 v2, explicit key-update initiation and preferred-address migration are not
-implemented here. QLOGDIR export is not wired by this adapter. The Docker image
+implemented here. Version Negotiation responses are also not implemented.
+QLOGDIR export is not wired by this adapter. The Docker image
 and cross-implementation matrix run on Linux in the workflow below.
 
 ## GitHub Actions
@@ -150,6 +151,12 @@ disabled. The workspace regression also runs with `dquic/interop-test` enabled.
 The unsupported features listed above, and the ECN scenario requiring ECN
 marking/validation, are outside this required set. A green workflow only covers
 the selected scenarios.
+
+The simulator normally probes server readiness with an unknown QUIC version
+and requires a Version Negotiation response. For dquic servers, `ci.py`
+disables this preliminary probe using a Compose override; actual handshake and
+transfer tests must still succeed. Peer servers retain the upstream probe.
+The override also enables Rust debug logs. It does not change Runner test checks.
 
 Enable `measurements` in a manual run to add upstream `goodput` and
 `crosstraffic` measurements in both directions (five repetitions each). Their
