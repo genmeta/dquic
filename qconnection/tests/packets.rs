@@ -58,7 +58,7 @@ async fn route_exists(router: &QuicRouter, cid: ConnectionId) -> bool {
     router.on_incoming(move |_, _, _| {
         observed.store(true, Ordering::Relaxed);
     });
-    router.deliver(packet, link.into(), link);
+    router.deliver(packet, link.into(), link, 0);
     !incoming.load(Ordering::Relaxed)
 }
 

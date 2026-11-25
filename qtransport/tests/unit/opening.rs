@@ -51,7 +51,8 @@ async fn receive(data: Arc<DataSpace>, paths: Arc<crate::Paths>, buffers: Vec<By
         let DataHeader::Short(header) = packet.header else {
             panic!()
         };
-        tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
+        let credit = packet.bytes.len();
+        tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), link.into(), link)).unwrap();
     }
     drop(tx);
     crate::receiving::receive_1rtt_pkt_and_deliver_frames(
@@ -127,16 +128,17 @@ async fn authentication_budget_spans_levels_paths_and_generations_and_stops_queu
             paths.progress.facts(),
         ));
         let link = Link::new("127.0.0.1:48001".parse().unwrap(), format!("127.0.0.1:{}", 49000 + epoch as u16).parse().unwrap());
+        let credit = packet.bytes.len();
         match packet.header {
             DataHeader::Long(qbase::packet::long::DataHeader::Initial(header)) => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
-                tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
+                tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), link.into(), link)).unwrap();
                 drop(tx);
                 crate::receiving::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
             }
             DataHeader::Long(qbase::packet::long::DataHeader::Handshake(header)) => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
-                tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
+                tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), link.into(), link)).unwrap();
                 drop(tx);
                 crate::receiving::recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
             }

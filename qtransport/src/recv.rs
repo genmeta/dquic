@@ -23,7 +23,7 @@ use crate::{
 pub type PacketReceiver<H> = crate::packet::channel::PacketReceiver<H>;
 
 fn drop_packet(header: impl LogPacketHeader, buffer: bytes::BytesMut, pn_offset: usize, pn: Option<u64>, error: impl ToString) {
-    CipherPacket::new(header, buffer, pn_offset).drop_on_decryption_failure(pn, error);
+    CipherPacket::new(header, buffer, pn_offset, 0).drop_on_decryption_failure(pn, error);
 }
 
 fn key_error(error: PacketError) -> crate::Error {
@@ -53,13 +53,18 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
         packet = packets.recv() => packet,
     } {
         parsed_frames.clear();
-        let received_bytes = packet.payload_len();
-        let Ok(keys) = space.keys.get() else {
-            break;
-        };
+        let mut credit = packet.credit();
         if scopes.is_some_and(|scopes| !pathway.belongs_to(scopes)) {
             continue;
         }
+        // Known paths count datagram bytes even if this packet is discarded.
+        let path = paths.entries.lock().unwrap().get(&pathway).cloned();
+        if let Some(path) = path {
+            path.validation.on_received(std::mem::take(&mut credit));
+        }
+        let Ok(keys) = space.keys.get() else {
+            break;
+        };
         let result = (|| -> Result<(), crate::Error> {
             let scid = (epoch == Epoch::Initial).then(|| *packet.scid());
             let (header, mut buffer, pn_offset) = packet.split();
@@ -73,7 +78,7 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
             let pn = match space.rcvd_journal.decode_pn(encoded) {
                 Ok(pn) => pn,
                 Err(error) => {
-                    CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(None, error);
+                    CipherPacket::new(header, buffer, pn_offset, 0).drop_on_invalid(None, error);
                     return Ok(());
                 }
             };
@@ -90,7 +95,7 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
             };
             space.rcvd_journal.on_authenticated(pn);
             if let Err(error) = LongSpecificBits::from(buffer[0]).pn_len() {
-                CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(Some(pn), &error);
+                CipherPacket::new(header, buffer, pn_offset, 0).drop_on_invalid(Some(pn), &error);
                 return Err(QuicError::from(error).into());
             }
             if plain_len == 0 {
@@ -114,7 +119,7 @@ pub async fn recv_ih_pkt_and_deliver_frames<H>(
             }
             // Admit paths only after authentication and complete frame parsing.
             let path = paths.get_or_create_path(&pathway);
-            path.validation.on_received(received_bytes);
+            path.validation.on_received(credit);
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);
@@ -187,10 +192,14 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
         packet = packets.recv() => packet,
     } {
         parsed_frames.clear();
-        let received_bytes = packet.payload_len();
+        let mut credit = packet.credit();
         let keys = &data.keys;
         if scopes.is_some_and(|scopes| !pathway.belongs_to(scopes)) {
             continue;
+        }
+        let path = paths.entries.lock().unwrap().get(&pathway).cloned();
+        if let Some(path) = path {
+            path.validation.on_received(std::mem::take(&mut credit));
         }
         let result = (|| -> Result<(), crate::Error> {
             let (header, mut buffer, pn_offset) = packet.split();
@@ -204,7 +213,7 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
             let pn = match data.rcvd_journal.decode_pn(encoded) {
                 Ok(pn) => pn,
                 Err(error) => {
-                    CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(None, error);
+                    CipherPacket::new(header, buffer, pn_offset, 0).drop_on_invalid(None, error);
                     return Ok(());
                 }
             };
@@ -227,7 +236,7 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
             data.rcvd_journal.on_authenticated(pn);
             keys.on_opened(pn, &opening, paths.pto_for(&pathway, Epoch::Data)).map_err(key_error)?;
             if let Err(error) = specific_bits.pn_len() {
-                CipherPacket::new(header, buffer, pn_offset).drop_on_invalid(Some(pn), &error);
+                CipherPacket::new(header, buffer, pn_offset, 0).drop_on_invalid(Some(pn), &error);
                 return Err(QuicError::from(error).into());
             }
             if plain_len == 0 {
@@ -245,7 +254,7 @@ pub async fn receive_1rtt_pkt_and_deliver_frames(
             }
             // Admit paths only after authentication and complete frame parsing.
             let path = paths.get_or_create_path(&pathway);
-            path.validation.on_received(received_bytes);
+            path.validation.on_received(credit);
             let now = Instant::now();
             terminator.on_rcvd_packet(now);
             let _ = idle.on_rcvd_at(now);

@@ -375,6 +375,10 @@ impl ArcValidation {
     }
 
     pub fn on_received(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+
         let mut state = self.0.lock().unwrap();
         let Ok(Some(credit)) = state.credit() else {
             return;

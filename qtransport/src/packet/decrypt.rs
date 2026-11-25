@@ -30,11 +30,17 @@ pub struct CipherPacket<H> {
     header: H,
     payload: BytesMut,
     offset: usize,
+    // The first packet carries the UDP payload length, later packets carry zero.
+    credit: usize,
 }
 
 impl<H> CipherPacket<H> {
     pub fn payload_len(&self) -> usize {
         self.payload.len()
+    }
+
+    pub(crate) fn credit(&self) -> usize {
+        self.credit
     }
 
     /// Transfer the header and packet bytes to the receiving pipeline.
@@ -47,8 +53,8 @@ impl<H> CipherPacket<H>
 where
     H: LogPacketHeader,
 {
-    pub fn new(header: H, payload: BytesMut, offset: usize) -> Self {
-        Self { header, payload, offset }
+    pub fn new(header: H, payload: BytesMut, offset: usize, credit: usize) -> Self {
+        Self { header, payload, offset, credit }
     }
 
     pub fn header(&self) -> &H {

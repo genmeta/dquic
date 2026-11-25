@@ -60,6 +60,19 @@ fn version_negotiation_datagram_remains_raw() {
 }
 
 #[test]
+fn spin_bit_with_marked_dcid_remains_raw() {
+    // dquic-issued CIDs have their first bit set. A v0 Forward type does not.
+    for first in 0x60..=0x7f {
+        for dcid in [0x80, 0xff] {
+            let input = [first, dcid, 0xaa, 0xbb];
+            let (remain, ty) = be_datagram_type(&input).unwrap();
+            assert_eq!(ty, Type::Raw);
+            assert_eq!(remain, input);
+        }
+    }
+}
+
+#[test]
 fn invalid_fixed_bit_is_rejected() {
     assert!(be_datagram_type(&[0b0010_0000, 0]).is_err());
     assert!(be_datagram_type(&[0b1010_0000, 0, 0, 0, 0]).is_err());

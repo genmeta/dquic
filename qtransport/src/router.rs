@@ -15,7 +15,7 @@ use qbase::{
         io::{ReceiveFrame, SendFrame},
     },
     net::route::{Link, Pathway},
-    packet::{DataHeader, GetDcid, PacketReader, long},
+    packet::{DataHeader, DataPacket, GetDcid, PacketReader, long},
 };
 
 use crate::packet::{CipherPacket, channel::Inbox};
@@ -98,21 +98,20 @@ impl QuicRouter {
 
     /// Parse a UDP datagram without blocking the protocol's shared receive callback.
     pub fn receive(&self, bytes: BytesMut, pathway: Pathway, link: Link, cid_len: usize) {
+        let mut credit = bytes.len();
         for packet in PacketReader::new(bytes, cid_len) {
             let Ok(packet) = packet else { break };
-            self.deliver(packet, pathway, link);
+            self.deliver(packet, pathway, link, std::mem::take(&mut credit));
         }
     }
 
-    pub fn deliver(&self, packet: Packet, pathway: Pathway, link: Link) {
+    pub fn deliver(&self, packet: Packet, pathway: Pathway, link: Link, credit: usize) {
         if let Some(inbox) = self.find_entry(&packet, &link) {
-            inbox.try_send(packet, pathway, link);
+            inbox.try_send(packet, pathway, link, credit);
             return;
         }
-        if let Packet::Data(qbase::packet::DataPacket { header: DataHeader::Long(long::DataHeader::Initial(header)), bytes, offset }) =
-            packet
-        {
-            (self.incoming_cb.read().unwrap())(CipherPacket::new(header, bytes, offset), pathway, link);
+        if let Packet::Data(DataPacket { header: DataHeader::Long(long::DataHeader::Initial(header)), bytes, offset }) = packet {
+            (self.incoming_cb.read().unwrap())(CipherPacket::new(header, bytes, offset, credit), pathway, link);
         }
     }
 
@@ -157,6 +156,8 @@ where
     T: Send + Sync + 'static,
 {
     fn gen_unique_cid(&self) -> ConnectionId {
+        // Keep the first bit set so datagram classification can distinguish a
+        // QUIC short header with Spin = 1 from the v0 Forward type byte.
         core::iter::from_fn(|| Some(ConnectionId::random_gen_with_mark(8, 0x80, 0x7F)))
             .find(|cid| {
                 let signpost = Signpost::from(*cid);

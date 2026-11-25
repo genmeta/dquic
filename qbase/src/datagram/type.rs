@@ -42,7 +42,9 @@ pub fn be_datagram_type(input: &[u8]) -> nom::IResult<&[u8], Type> {
     }
 
     if first & HEADER_FORM_BIT == 0 {
-        if first & FORWARD_BIT == 0 {
+        // The Forward marker overlaps QUIC's Spin Bit. Locally issued QUIC
+        // CIDs start with a set high bit; a v0 Forward type byte never does.
+        if first & FORWARD_BIT == 0 || input.first().is_some_and(|dcid| dcid & 0x80 != 0) {
             return Ok((original, Type::Raw));
         }
 

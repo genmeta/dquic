@@ -76,7 +76,7 @@ fn packet_way() -> (Pathway, Link) {
 
 fn enqueue(inbox: &channel::Inbox, packet: Packet) -> bool {
     let (pathway, link) = packet_way();
-    inbox.try_send(packet, pathway, link)
+    inbox.try_send(packet, pathway, link, 0)
 }
 
 mod receive;
