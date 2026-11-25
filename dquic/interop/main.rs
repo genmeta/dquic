@@ -98,7 +98,8 @@ fn configure(endpoint: &mut QuicEndpoint, role: Role, keylog: bool) -> Result<()
     endpoint.set_alpn(vec![http09::ALPN.to_vec()]);
     endpoint.set_keylog(keylog);
     for (id, value) in [
-        (ParameterId::InitialMaxData, 128 * 1024_u32),
+        (ParameterId::InitialMaxData, 1024 * 1024_u32),
+        (ParameterId::InitialMaxStreamsBidi, 32_u32),
         (ParameterId::InitialMaxStreamDataBidiLocal, 64 * 1024),
         (ParameterId::InitialMaxStreamDataBidiRemote, 64 * 1024),
     ] {

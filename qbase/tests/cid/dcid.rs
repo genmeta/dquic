@@ -208,3 +208,33 @@ fn an_applied_handshake_handle_keeps_the_peer_identity_when_path_cids_rotate() {
     assert_eq!(retired.0.lock().unwrap()[0].sequence(), 0);
     assert!(borrow(&remote.apply_dcid()).is_pending());
 }
+
+#[test]
+fn zero_length_peer_cid_remains_available_after_rebinding_and_is_never_retired() {
+    let retired = Retired::default();
+    let remote = ArcRemoteCids::server(ConnectionId::default(), retired.clone());
+    remote.set_limit(4);
+    let first = remote.apply_dcid();
+    first.upgrade();
+    first.refresh();
+    remote.upgrade();
+    let rebound = remote.apply_dcid();
+    assert_eq!(borrow(&rebound), Poll::Ready(Some(ConnectionId::default())));
+    first.retire();
+    first.refresh();
+    assert_eq!(borrow(&first), Poll::Ready(None));
+    assert_eq!(borrow(&rebound), Poll::Ready(Some(ConnectionId::default())));
+    rebound.refresh();
+    rebound.retire();
+    assert!(retired.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn zero_length_peer_cid_cannot_be_replaced_with_new_connection_id() {
+    let remote = ArcRemoteCids::server(ConnectionId::default(), Retired::default());
+    remote.set_limit(4);
+    assert_eq!(
+        remote.recv_frame(NewConnectionIdFrame::new(cid(1), 1u32.into(), 0u32.into())).unwrap_err().kind(),
+        qbase::error::ErrorKind::ProtocolViolation
+    );
+}

@@ -58,7 +58,8 @@ strings and fragments are not supported.
 
 `handshake` and `transfer` use one connection per origin and concurrent streams.
 `multiconnect` establishes a new connection for every file. Initial receive
-windows are 64 KiB per stream and 128 KiB per connection. Temporary sockets
+windows are 64 KiB per stream and 1 MiB per connection, with 32 initial
+bidirectional streams. Temporary sockets
 publish only Direct addresses, without STUN bootstrap or NAT Candidates, so
 the adapter does not advertise dquic traversal frames to standard peers.
 
@@ -185,6 +186,15 @@ Each job publishes a result table in its Actions summary and an `interop-PEER`
 artifact containing JSON results, endpoint diagnostics, packet captures, TLS
 key logs, image IDs/digests and tool versions. The temporary CA and generated
 traffic are only for these tests. Artifacts expire after seven days.
+
+The interop endpoint advertises a 1 MiB connection receive window, 64 KiB
+bidirectional stream receive windows and 32 initially available bidirectional
+streams. The transfer inputs (2, 3 and 5 MiB) still require window updates, and
+the 1999-file multiplexing test still requires MAX_STREAMS increases. The larger
+connection window avoids ngtcp2's small-window transfer stall. The conservative
+initial stream limit avoids partial request writes that quiche's HTTP/0.9
+example client does not retry. These are adapter settings; native tests retain
+their smaller windows and larger stream sets.
 
 [QUIC interop report](../../.github/workflows/interop-report.yml) creates or
 updates one bot comment on opted-in PRs, including fork PRs. It shows pass,
