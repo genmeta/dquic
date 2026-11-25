@@ -18,7 +18,7 @@ use crate::root::RootCertsSnapshot;
 /// Validate a fetched local staple using the same issuer/signature/status/time checks as TLS.
 /// Daily fetching is the caller's policy; no renewal deadline is returned.
 pub fn validate_ocsp(response: &[u8], certificates: &[CertificateDer<'_>], now: UnixTime) -> Result<(), rustls::Error> {
-    if response.len() > crate::TlsLimits::default().max_ocsp_bytes {
+    if response.is_empty() || response.len() > crate::TlsLimits::default().max_ocsp_bytes {
         return Err(invalid());
     }
     let (leaf, intermediates) = certificates.split_first().ok_or_else(invalid)?;
@@ -40,7 +40,11 @@ pub(crate) fn verify(
     algorithms: WebPkiSupportedAlgorithms,
 ) -> Result<(), rustls::Error> {
     if response.is_empty() {
-        return Err(invalid());
+        return if cfg!(feature = "interop-test") {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
     }
 
     let certificate = Certificate::from_der(end_entity.as_ref()).map_err(|_| invalid())?;

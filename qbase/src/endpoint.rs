@@ -26,13 +26,14 @@ impl Endpoint {
     /// Names and certificate material are retained as supplied. Certificate
     /// parsing, key matching, validity and trust checks belong to the handshake.
     /// An unusable private key is returned immediately as an error.
+    /// Empty OCSP is accepted only with the `interop-test` feature.
     pub fn new(
         name: &str,
         certs: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
         ocsp: Vec<u8>,
     ) -> Result<Arc<Self>, qtls::RustlsError> {
-        if ocsp.is_empty() {
+        if ocsp.is_empty() && !cfg!(feature = "interop-test") {
             return Err(qtls::RustlsError::General("endpoint OCSP staple is empty".into()));
         }
         let signing_key = qtls::default_provider().key_provider.load_private_key(key)?;

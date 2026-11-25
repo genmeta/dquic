@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.aws
+.cargo
+AGENTS.md
+target
+design
+images
+**/*.log
+**/*.sqlog

@@ -62,6 +62,7 @@ pub struct TlsClient {
     authority: Option<LocalAuthority>,
     resumption: ClientResumptionConfig,
     limits: TlsLimits,
+    keylog: bool,
 }
 
 pub struct TlsServer {
@@ -71,6 +72,7 @@ pub struct TlsServer {
     authority: LocalAuthority,
     resumption: ServerResumptionConfig,
     limits: TlsLimits,
+    keylog: bool,
 }
 
 impl TlsClient {
@@ -87,7 +89,13 @@ impl TlsClient {
             authority: config.authority,
             resumption: config.resumption,
             limits: config.limits,
+            keylog: false,
         })
+    }
+
+    /// Enable NSS key logging to the file named by SSLKEYLOGFILE for new handshakes.
+    pub fn set_keylog(&mut self, enabled: bool) {
+        self.keylog = enabled;
     }
 
     pub fn initial_keys(
@@ -115,6 +123,9 @@ impl TlsClient {
             .with_custom_certificate_verifier(verifier.clone())
             .with_client_cert_resolver(client_cert.clone());
         config.alpn_protocols = self.alpn.to_vec();
+        if self.keylog {
+            config.key_log = Arc::new(rustls::KeyLogFile::new());
+        }
         config.enable_early_data = false;
         config.resumption = match &self.resumption {
             ClientResumptionConfig::Disabled => rustls::client::Resumption::disabled(),
@@ -160,7 +171,13 @@ impl TlsServer {
             authority: config.authority,
             resumption: config.resumption,
             limits: config.limits,
+            keylog: false,
         })
+    }
+
+    /// Enable NSS key logging to the file named by SSLKEYLOGFILE for new handshakes.
+    pub fn set_keylog(&mut self, enabled: bool) {
+        self.keylog = enabled;
     }
 
     pub fn initial_keys(
@@ -186,6 +203,9 @@ impl TlsServer {
             Arc::new(crate::handshake::ClientVerifier::new(self.roots.clone(), self.provider.clone(), peer.clone(), self.limits)?);
         let mut config = builder.with_client_cert_verifier(verify_client).with_cert_resolver(server_cert);
         config.alpn_protocols = self.alpn.to_vec();
+        if self.keylog {
+            config.key_log = Arc::new(rustls::KeyLogFile::new());
+        }
         config.max_early_data_size = 0;
         configure_server_resumption(&mut config, &self.resumption, quic_version, peer.clone(), self.limits);
         require_fips(config.fips())?;

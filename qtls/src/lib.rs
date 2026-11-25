@@ -2,6 +2,10 @@
 //!
 //! `qtls` owns no socket, QUIC connection, CRYPTO stream, runtime, or waker.
 //! Callers feed contiguous CRYPTO bytes and pull typed events.
+//!
+//! The `interop-test` feature permits missing OCSP without bypassing certificate
+//! verification or accepting invalid supplied OCSP. TLS key logging is controlled
+//! by [`TlsClient::set_keylog`] and [`TlsServer::set_keylog`], independently of features.
 
 mod authority;
 mod config;
@@ -38,7 +42,7 @@ pub use rustls::crypto::ring::default_provider;
 pub use rustls::{
     Error as RustlsError, SignatureScheme,
     crypto::{CryptoProvider, WebPkiSupportedAlgorithms},
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject},
     sign::SigningKey,
 };
 

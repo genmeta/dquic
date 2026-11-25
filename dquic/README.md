@@ -55,6 +55,25 @@ See the [connection API documentation](../qconnection/README.md) and the
 [runnable traversal examples](../qconnection/examples/traversal/README.md)
 for the complete setup.
 
+## Interop testing and TLS key logging
+
+The [interop example](interop/README.md) provides an HTTP/0.9 client and server
+for the QUIC Interop Runner. Build it with `--features interop-test` to allow
+missing peer and local OCSP. This feature keeps certificate name, chain,
+signature and validity checks, and still rejects invalid supplied OCSP.
+Default builds require OCSP.
+
+TLS key logging is controlled by code and is disabled by default:
+
+```no_run
+let mut endpoint = dquic::QuicEndpoint::anonymous();
+endpoint.set_keylog(true);
+```
+
+Subsequent connections and listeners write NSS key logs to `SSLKEYLOGFILE`
+when the variable is set. Call `set_keylog(false)` to disable logging for
+future connections and listeners. This API does not require `interop-test`.
+
 ## Echo examples
 
 [echo-server.rs](examples/echo-server.rs) and [echo-client.rs](examples/echo-client.rs)

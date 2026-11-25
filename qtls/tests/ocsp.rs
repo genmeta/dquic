@@ -11,6 +11,7 @@ fn response_must_be_current() {
     let certificate = CertificateDer::from_pem_slice(include_bytes!("keychain/localhost/server-extended-validity.cert")).unwrap();
     let response = include_bytes!("keychain/localhost/server.ocsp");
     validate_ocsp(response, std::slice::from_ref(&certificate), UnixTime::now()).unwrap();
+    assert!(validate_ocsp(&[], std::slice::from_ref(&certificate), UnixTime::now()).is_err());
     for now in [1_700_000_000, 2_200_000_000] {
         assert!(matches!(
             validate_ocsp(response, std::slice::from_ref(&certificate), UnixTime::since_unix_epoch(Duration::from_secs(now))),
