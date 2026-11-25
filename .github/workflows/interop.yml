@@ -1,0 +1,124 @@
+name: QUIC interop
+
+on:
+  push:
+    branches: ["main", "interop/*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      measurements:
+        description: Also run goodput and TCP cross-traffic measurements
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: interop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Test result validation
+        run: python3 -m unittest discover -s dquic/interop -p 'test_ci.py' -v
+      - name: Test workspace with interop enabled
+        run: cargo test --workspace --features dquic/interop-test -- --test-threads=1
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build endpoint image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dquic/interop/Dockerfile
+          platforms: linux/amd64
+          tags: dquic-interop:local
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=docker,dest=${{ runner.temp }}/dquic-interop.tar
+          cache-from: type=gha,scope=interop
+          cache-to: type=gha,scope=interop,mode=max
+      - name: Compress image
+        run: zstd -T0 "$RUNNER_TEMP/dquic-interop.tar" -o "$RUNNER_TEMP/dquic-interop.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: interop-image
+          path: ${{ runner.temp }}/dquic-interop.tar.zst
+          retention-days: 3
+          if-no-files-found: error
+
+  interop:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        peer: [quic-go, ngtcp2, quiche, quinn, aioquic]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out official Interop Runner
+        uses: actions/checkout@v4
+        with:
+          repository: quic-interop/quic-interop-runner
+          ref: ee53e50e1ed33b7871bf67bdb0a7de7d173dd8bb
+          path: target/interop-runner
+      # The Runner's compose file requires interface_name and modern IPv6 support.
+      - uses: docker/setup-docker-action@v4
+        with:
+          version: v28.3.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: interop-image
+          path: ${{ runner.temp }}
+      - name: Load endpoint image
+        run: docker load --input "$RUNNER_TEMP/dquic-interop.tar.zst"
+      - name: Install packet analysis and Runner dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo modprobe ip6table_filter
+          sudo add-apt-repository -y ppa:wireshark-dev/nightly
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tshark
+          python -m pip install -r target/interop-runner/requirements.txt
+          mkdir -p target/interop
+          tshark --version > target/interop/tshark-version.txt
+          docker version > target/interop/docker-version.txt
+          docker compose version >> target/interop/docker-version.txt
+          git -C target/interop-runner rev-parse HEAD > target/interop/runner-revision.txt
+      - name: Run both directions
+        env:
+          PEER: ${{ matrix.peer }}
+          MEASUREMENTS: ${{ inputs.measurements || false }}
+        run: |
+          options=()
+          if [[ "$MEASUREMENTS" == true ]]; then options+=(--measurements); fi
+          python dquic/interop/ci.py target/interop-runner "$PEER" "${options[@]}"
+      - name: Upload results, logs, packet captures and key logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-${{ matrix.peer }}
+          path: target/interop/
+          retention-days: 7
+          if-no-files-found: warn

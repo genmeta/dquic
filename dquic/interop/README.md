@@ -126,4 +126,51 @@ Several Runner tests map to the endpoint's `transfer` behavior; supporting that
 behavior does not declare those tests passed. Retry, resumption, 0-RTT, HTTP/3,
 v2, explicit key-update initiation and preferred-address migration are not
 implemented here. QLOGDIR export is not wired by this adapter. The Docker image
-and cross-implementation matrix must be verified on a Docker-capable Linux host.
+and cross-implementation matrix run on Linux in the workflow below.
+
+## GitHub Actions
+
+[QUIC interop](../../.github/workflows/interop.yml) runs on pushes to `main` and
+`interop/*`, pull requests to `main`, and manual dispatch. The endpoint image is
+built once for `linux/amd64` and reused by five parallel peer jobs: quic-go,
+ngtcp2, quiche, quinn and aioquic. No registry credentials are needed.
+
+Each peer job runs both client/server directions through the official
+[Interop Runner](https://github.com/quic-interop/quic-interop-runner), pinned to
+`ee53e50e1ed33b7871bf67bdb0a7de7d173dd8bb`. Required scenarios are:
+
+* `handshake`, `transfer`, `longrtt`, `multiplexing`, `blackhole`;
+* `amplificationlimit`, `handshakeloss`, `transferloss`;
+* `handshakecorruption`, `transfercorruption`, `ipv6`;
+* `rebind-port`, `rebind-addr`.
+
+All 130 selected checks must succeed. A failed, unsupported, missing, duplicate
+or unrun result fails CI. Automatic conversion of failures to unsupported is
+disabled. The workspace regression also runs with `dquic/interop-test` enabled.
+The unsupported features listed above, and the ECN scenario requiring ECN
+marking/validation, are outside this required set. A green workflow only covers
+the selected scenarios.
+
+Enable `measurements` in a manual run to add upstream `goodput` and
+`crosstraffic` measurements in both directions (five repetitions each). Their
+results must also succeed; values are reported without a speed threshold.
+Shared Actions machines and the simulated 10 Mbps link are useful for regression
+checks, but hardware throughput comparisons require a dedicated benchmark host.
+
+Each job publishes a result table in its Actions summary and an `interop-PEER`
+artifact containing JSON results, endpoint diagnostics, packet captures, TLS
+key logs, image IDs/digests and tool versions. The temporary CA and generated
+traffic are only for these tests. Artifacts expire after seven days.
+
+To run the same matrix entry locally with Docker and a recent tshark installed:
+
+```sh
+git clone https://github.com/quic-interop/quic-interop-runner target/interop-runner
+git -C target/interop-runner checkout ee53e50e1ed33b7871bf67bdb0a7de7d173dd8bb
+python3 -m pip install -r target/interop-runner/requirements.txt
+docker build -f dquic/interop/Dockerfile -t dquic-interop:local .
+python3 dquic/interop/ci.py target/interop-runner quic-go
+```
+
+Use a new `--output` directory for each rerun; Runner log directories must not
+already exist. Add `--measurements` to include the performance checks.
