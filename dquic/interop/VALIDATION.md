@@ -228,3 +228,36 @@ were added to obtain a green status.
 The workflow is deliberately strict and is not yet evidence that every selected
 scenario passes. Passing native tests or a subset of peers must not be reported
 as an all-green interoperability matrix.
+
+### Build cache and PR reporting (2026-11-25)
+
+[Run 45549214528](https://github.com/genmeta/dquic/actions/runs/45549214528)
+validated the dependency-layer cache and smaller release image on Linux with
+Rust 1.88.0 and cargo-chef 0.1.78. Every build used a separate BuildKit builder
+and restored the GitHub Actions cache:
+
+| Change | Complete build step | Cargo packages compiled |
+| --- | ---: | --- |
+| Same source, warm cache | 12 seconds | None |
+| Interop documentation only | 7 seconds | None |
+| Real Rust program content | 98 seconds | 13 workspace packages, about 22 seconds of Cargo compilation |
+
+The source check changed the CLI description and verified the new description
+in the exported image. A 64 KiB HTTP/0.9 loopback transfer, byte comparison,
+both TLS key logs and the preserved Cargo.lock also passed. The compressed image
+artifact was 78,305,576 bytes, versus 111,440,572 bytes in
+[the original PR image job](https://github.com/genmeta/dquic/actions/runs/45545894214/job/138975304153),
+using the same Docker exporter and zstd command (about 30% smaller).
+These are hosted-runner build measurements, not QUIC throughput measurements.
+
+All 11 Python checks and 6 comment API mock tests passed, along with actionlint
+for both interop workflows. Rendering the earlier real 130-check artifacts
+preserved the exact 105 passed / 24 failed / 1 unsupported counts. Skipped
+body-edit runs, obsolete commits and older results cannot replace newer PR
+comments. Missing or invalid matrices remain missing.
+
+The comment publisher uses trusted default-branch code and JSON-only artifacts.
+Actual automatic bot publication starts after `interop-report.yml` lands on
+`main`, as required by GitHub's `workflow_run` trigger. No main merge or live PR
+comment was performed for this validation. The protocol failures above remain
+unchanged by this build/reporting work.

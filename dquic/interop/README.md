@@ -100,6 +100,19 @@ and credentials out of the build context. It follows the
 The image retains the resolved Cargo.lock at `/usr/local/share/dquic/Cargo.lock`.
 Pin base image digests and preserve the lockfile for repeatable benchmarks.
 
+The build uses pinned `cargo-chef` 0.1.78 to cache third-party dependencies
+separately from project sources. Workflow files and reporting scripts do not
+enter the build context; `dquic/README.md` remains because the library includes
+it. The final executable is built from the real sources with the planner's
+original lockfile and `--locked`, after restoring local package versions.
+This container alone disables release debug symbols to reduce cache and image
+transfers; workspace profiles, tracing and TLS key logging are unchanged.
+Actions exports intermediate layers with `mode=max`, builds the image once,
+and shares a zstd artifact without recompressing it. Source changes can reuse
+dependency layers when manifests and dependency resolution stay unchanged.
+GitHub's branch cache access rules still apply: main builds seed the cache
+available to PRs; a new PR cannot reuse another feature branch's private cache.
+
 Add the following member to the Runner's `implementations_quic.json`:
 
 ```json
@@ -131,9 +144,13 @@ and cross-implementation matrix run on Linux in the workflow below.
 
 ## GitHub Actions
 
-[QUIC interop](../../.github/workflows/interop.yml) runs on pushes to `main` and
-`interop/*`, pull requests to `main`, and manual dispatch. The endpoint image is
-built once for `linux/amd64` and reused by five parallel peer jobs: quic-go,
+[QUIC interop](../../.github/workflows/interop.yml) runs on pushes to `main`,
+manual dispatch, and pull requests to `main` whose title contains `[interop]`.
+For example: `fix: handle packet loss [interop]`. Adding the marker by editing
+the title starts CI; subsequent commits and reopening the PR rerun it while
+the marker remains. PR body edits neither rerun nor cancel it, and do not replace
+the result comment. Untagged PRs skip the jobs. The endpoint image is built once
+for `linux/amd64` and reused by five parallel peer jobs: quic-go,
 ngtcp2, quiche, quinn and aioquic. No registry credentials are needed.
 
 Each peer job runs both client/server directions through the official
@@ -168,6 +185,16 @@ Each job publishes a result table in its Actions summary and an `interop-PEER`
 artifact containing JSON results, endpoint diagnostics, packet captures, TLS
 key logs, image IDs/digests and tool versions. The temporary CA and generated
 traffic are only for these tests. Artifacts expire after seven days.
+
+[QUIC interop report](../../.github/workflows/interop-report.yml) creates or
+updates one bot comment on opted-in PRs, including fork PRs. It shows pass,
+failure, unsupported and missing counts, all individual checks, regression
+and image status, the tested commit and links to full artifacts. Older commits
+and runs cannot overwrite newer results. Missing or invalid JSON stays missing;
+the existing nine-certificate TLS limitation remains documented as a failure.
+The reporting workflow runs trusted default-branch code and reads only JSON
+artifacts from the test run. It must first be merged into `main` before GitHub
+can trigger its `workflow_run` event. No additional token secret is needed.
 
 To run the same matrix entry locally with Docker and a recent tshark installed:
 

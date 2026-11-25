@@ -1,4 +1,5 @@
 .git
+.github
 .agents
 .codex
 .aws
@@ -7,5 +8,12 @@ AGENTS.md
 target
 design
 images
+**/*.md
+!README.md
+!dquic/README.md
+dquic/interop/*.py
+dquic/interop/*.cjs
+**/__pycache__
+dquic/interop/Dockerfile*
 **/*.log
 **/*.sqlog
