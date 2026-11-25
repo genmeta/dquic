@@ -23,14 +23,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
   PYTHONDONTWRITEBYTECODE: '1'
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   regression:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Test result validation
         run: python3 -m unittest discover -s dquic/interop -p 'test_ci.py' -v
@@ -41,10 +40,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
       - name: Build endpoint image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: dquic/interop/Dockerfile
@@ -56,7 +55,7 @@ jobs:
           cache-to: type=gha,scope=interop,mode=max
       - name: Compress image
         run: zstd -T0 "$RUNNER_TEMP/dquic-interop.tar" -o "$RUNNER_TEMP/dquic-interop.tar.zst"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: interop-image
           path: ${{ runner.temp }}/dquic-interop.tar.zst
@@ -72,21 +71,21 @@ jobs:
       matrix:
         peer: [quic-go, ngtcp2, quiche, quinn, aioquic]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check out official Interop Runner
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: quic-interop/quic-interop-runner
           ref: ee53e50e1ed33b7871bf67bdb0a7de7d173dd8bb
           path: target/interop-runner
       # The Runner's compose file requires interface_name and modern IPv6 support.
-      - uses: docker/setup-docker-action@v4
+      - uses: docker/setup-docker-action@v5
         with:
           version: v28.3.0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: interop-image
           path: ${{ runner.temp }}
@@ -116,7 +115,7 @@ jobs:
           python dquic/interop/ci.py target/interop-runner "$PEER" "${options[@]}"
       - name: Upload results, logs, packet captures and key logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: interop-${{ matrix.peer }}
           path: target/interop/

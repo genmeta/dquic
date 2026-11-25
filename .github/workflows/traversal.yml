@@ -9,19 +9,18 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   punch:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run isolated NAT traversal matrix
         run: bash qtraversal/tools/run.sh
       - name: Upload traversal logs and NAT counters
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: traversal-logs
           path: target/traversal-docker/

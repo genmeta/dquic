@@ -60,6 +60,8 @@ jobs:
     name: Webhook
     runs-on: ubuntu-latest
     steps:
+      # Upstream still targets node20 (checked 2026-11-25).
+      # Keep this action until a native node24 version is published.
       - uses: KaminariOS/feishu-bot-webhook-action@main
         with:
           webhook: ${{ secrets.FEISHU_BOT_WEBHOOK }}
