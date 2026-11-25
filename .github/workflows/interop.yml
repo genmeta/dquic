@@ -2,9 +2,10 @@ name: QUIC interop
 
 on:
   push:
-    branches: ["main", "interop/*"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
     inputs:
       measurements:
@@ -16,7 +17,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: interop-${{ github.workflow }}-${{ github.ref }}
+  # Body-only edits must not cancel a running test of the same PR.
+  group: interop-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.title == null && 'metadata' || 'tests' }}
   cancel-in-progress: true
 
 env:
@@ -26,17 +28,27 @@ env:
 
 jobs:
   regression:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.title, '[interop]') &&
+      (github.event.action != 'edited' || github.event.changes.title != null))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Test result validation
-        run: python3 -m unittest discover -s dquic/interop -p 'test_ci.py' -v
+        run: python3 -m unittest discover -s dquic/interop -p 'test_*.py' -v
+      - name: Test PR comments
+        run: node --test dquic/interop/test_comment.cjs
       - name: Test workspace with interop enabled
         run: cargo test --workspace --features dquic/interop-test -- --test-threads=1
 
   image:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.title, '[interop]') &&
+      (github.event.action != 'edited' || github.event.changes.title != null))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -59,6 +71,7 @@ jobs:
         with:
           name: interop-image
           path: ${{ runner.temp }}/dquic-interop.tar.zst
+          compression-level: 0
           retention-days: 3
           if-no-files-found: error
 
@@ -113,6 +126,14 @@ jobs:
           options=()
           if [[ "$MEASUREMENTS" == true ]]; then options+=(--measurements); fi
           python dquic/interop/ci.py target/interop-runner "$PEER" "${options[@]}"
+      - name: Upload JSON results for PR reporting
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: interop-results-${{ matrix.peer }}
+          path: target/interop/*_*.json
+          retention-days: 7
+          if-no-files-found: warn
       - name: Upload results, logs, packet captures and key logs
         if: always()
         uses: actions/upload-artifact@v6

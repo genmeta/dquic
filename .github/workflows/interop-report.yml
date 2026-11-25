@@ -1,0 +1,64 @@
+name: QUIC interop report
+
+on:
+  workflow_run:
+    workflows: ["QUIC interop"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: interop-report-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Never check out or execute the PR's code with the comment write token.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Find the current opted-in PR
+        id: pr
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {prepareReport} = require('./dquic/interop/comment.cjs');
+            const report = await prepareReport(github, context);
+            if (!report) return;
+            const {pr, jobs} = report;
+            core.setOutput('number', pr.number);
+            const fs = require('node:fs');
+            fs.mkdirSync('target', {recursive: true});
+            fs.writeFileSync('target/interop-jobs.json', JSON.stringify(jobs));
+      - name: Download JSON results only
+        if: steps.pr.outputs.number != ''
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: interop-results-*
+          path: ${{ runner.temp }}/interop-results
+      - name: Render the result matrix
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 dquic/interop/report.py "$RUNNER_TEMP/interop-results" \
+            --jobs target/interop-jobs.json --output target/interop-comment.md
+      - name: Update the PR comment
+        if: always() && steps.pr.outputs.number != ''
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {publishReport} = require('./dquic/interop/comment.cjs');
+            const body = require('node:fs').readFileSync('target/interop-comment.md', 'utf8');
+            await publishReport(github, context, body);
