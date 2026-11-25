@@ -100,10 +100,19 @@ fn mutual_auth_publishes_both_authorities() {
 
 #[test]
 fn anonymous_client_completes_without_remote_authority() {
+    anonymous_handshake(false);
+}
+
+#[test]
+fn keylog_enabled_client_and_server() {
+    anonymous_handshake(true);
+}
+
+fn anonymous_handshake(keylog: bool) {
     let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
     let server_authority = authority(&provider, "localhost", SERVER_CERT, SERVER_KEY, SERVER_OCSP);
-    let client = TlsClient::new(ClientTlsConfig {
+    let mut client = TlsClient::new(ClientTlsConfig {
         provider: provider.clone(),
         alpn: vec![b"h3".to_vec()],
         authority: None,
@@ -111,7 +120,7 @@ fn anonymous_client_completes_without_remote_authority() {
         limits: TlsLimits::default(),
     })
     .unwrap();
-    let server = TlsServer::new(ServerTlsConfig {
+    let mut server = TlsServer::new(ServerTlsConfig {
         provider,
         alpn: vec![b"h3".to_vec()],
         authority: server_authority,
@@ -119,6 +128,9 @@ fn anonymous_client_completes_without_remote_authority() {
         limits: TlsLimits::default(),
     })
     .unwrap();
+
+    client.set_keylog(keylog);
+    server.set_keylog(keylog);
 
     let (_, _, client_events, server_events) = handshake(&client, &server).unwrap();
     assert!(client_events.summary.unwrap().local.is_none());
@@ -138,7 +150,7 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
     })
     .unwrap();
 
-    assert!(
+    assert_eq!(
         LocalAuthority::new(
             &provider,
             "localhost".into(),
@@ -146,7 +158,8 @@ fn supplied_server_ocsp_requires_current_matching_good_status() {
             PrivateKeyDer::from_pem_slice(SERVER_KEY).unwrap(),
             Vec::new(),
         )
-        .is_err()
+        .is_ok(),
+        cfg!(feature = "interop-test")
     );
 
     for ocsp in [CLIENT_OCSP, SERVER_REVOKED_OCSP] {
@@ -180,7 +193,7 @@ fn presented_client_certificate_requires_matching_ocsp() {
     let _roots = set_roots();
     let provider = Arc::new(crypto_provider());
 
-    assert!(
+    assert_eq!(
         LocalAuthority::new(
             &provider,
             "client".into(),
@@ -188,7 +201,8 @@ fn presented_client_certificate_requires_matching_ocsp() {
             PrivateKeyDer::from_pem_slice(CLIENT_KEY).unwrap(),
             Vec::new(),
         )
-        .is_err()
+        .is_ok(),
+        cfg!(feature = "interop-test")
     );
 
     let client = TlsClient::new(ClientTlsConfig {
@@ -453,6 +467,40 @@ fn authority_signs_without_exposing_the_signing_key() {
     let signature = authority.sign(SignatureScheme::ECDSA_NISTP256_SHA256, b"message").unwrap();
     assert!(!signature.is_empty());
     assert!(authority.sign(SignatureScheme::ED25519, b"message").is_err());
+}
+
+#[test]
+fn keylog_follows_api_and_environment() {
+    let path = std::env::temp_dir().join(format!("dquic-tls-keylog-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "keylog_enabled_client_and_server", "--test-threads=1"])
+        .env("SSLKEYLOGFILE", &path)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    {
+        let contents = std::fs::read_to_string(&path).expect("TLS key logging must create SSLKEYLOGFILE");
+        for label in
+            ["CLIENT_HANDSHAKE_TRAFFIC_SECRET", "SERVER_HANDSHAKE_TRAFFIC_SECRET", "CLIENT_TRAFFIC_SECRET_0", "SERVER_TRAFFIC_SECRET_0"]
+        {
+            let entries: Vec<_> = contents.lines().filter(|line| line.starts_with(label)).collect();
+            assert_eq!(entries.len(), 2, "both peers must log {label}: {contents}");
+            assert_eq!(entries[0], entries[1], "both peers must derive the same secret");
+            let fields: Vec<_> = entries[0].split_whitespace().collect();
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[1].len(), 64);
+            assert!(fields[1..].iter().all(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "anonymous_client_completes_without_remote_authority", "--test-threads=1"])
+        .env("SSLKEYLOGFILE", &path)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(!path.exists(), "setting SSLKEYLOGFILE alone must not enable key logging");
 }
 
 fn assert_rejected(result: Result<HandshakeSummary, qtls::TlsError>, expected: rustls::AlertDescription) {

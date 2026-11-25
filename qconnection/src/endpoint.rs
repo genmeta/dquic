@@ -29,6 +29,7 @@ pub struct QuicEndpoint {
     alpn: Vec<Vec<u8>>,
     client_parameters: ClientParameters,
     server_parameters: ServerParameters,
+    keylog: bool,
 }
 
 impl From<Endpoint> for QuicEndpoint {
@@ -68,6 +69,7 @@ impl QuicEndpoint {
             alpn: vec![b"h3".to_vec()],
             client_parameters: ClientParameters::default(),
             server_parameters: ServerParameters::default(),
+            keylog: false,
         }
     }
 
@@ -78,6 +80,12 @@ impl QuicEndpoint {
     /// Sets ALPN protocols in preference order for subsequent connect and listen calls.
     pub fn set_alpn(&mut self, alpn: Vec<Vec<u8>>) {
         self.alpn = alpn;
+    }
+
+    /// Enable NSS key logging to SSLKEYLOGFILE for subsequent connect and listen calls.
+    /// Disabled by default; the environment variable alone does not enable logging.
+    pub fn set_keylog(&mut self, enabled: bool) {
+        self.keylog = enabled;
     }
 
     pub fn set_parameters(
@@ -111,14 +119,16 @@ impl QuicEndpoint {
 
     fn tls_server(&self, identity: &Endpoint) -> Result<qtls::TlsServer, Error> {
         let authority = Self::authority(identity)?;
-        qtls::TlsServer::new(qtls::ServerTlsConfig {
+        let mut server = qtls::TlsServer::new(qtls::ServerTlsConfig {
             provider: Arc::new(qtls::default_provider()),
             alpn: self.alpn.clone(),
             authority,
             resumption: qtls::ServerResumptionConfig::Disabled,
             limits: Default::default(),
         })
-        .map_err(|error| internal_error(error.to_string()))
+        .map_err(|error| internal_error(error.to_string()))?;
+        server.set_keylog(self.keylog);
+        Ok(server)
     }
 
     /// Resolve the peer in the background and pair discovered peers with the current ArcAddrBook endpoints.
@@ -136,7 +146,7 @@ impl QuicEndpoint {
                 .set(ParameterId::ClientName, authority.name().to_owned())
                 .map_err(|error| internal_error(error.to_string()))?;
         }
-        let identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
+        let mut identity = qtls::TlsClient::new(qtls::ClientTlsConfig {
             provider: Arc::new(qtls::default_provider()),
             alpn: self.alpn.clone(),
             authority: local,
@@ -144,6 +154,7 @@ impl QuicEndpoint {
             limits: Default::default(),
         })
         .map_err(|error| internal_error(error.to_string()))?;
+        identity.set_keylog(self.keylog);
         let origin_dcid = ConnectionId::random_gen(8);
         let initial_keys =
             identity.initial_keys(qtls::QuicVersion::V1, origin_dcid.as_ref()).map_err(|error| internal_error(error.to_string()))?;

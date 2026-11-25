@@ -19,5 +19,20 @@ qtls.workspace = true
 qtransport.workspace = true
 
 [dev-dependencies]
+clap.workspace = true
 netwatcher.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "io-util", "signal"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "signal", "fs", "time"] }
+
+[features]
+interop-test = ["qconnection/interop-test"]
+
+[[example]]
+name = "interop"
+path = "interop/main.rs"
+required-features = ["interop-test"]
+
+[[test]]
+name = "interop"
+path = "interop/tests.rs"
+required-features = ["interop-test"]

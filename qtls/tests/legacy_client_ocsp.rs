@@ -85,8 +85,13 @@ fn drain_client(
 }
 
 #[test]
-fn legacy_authenticated_client_without_ocsp_is_rejected() {
-    let error = connect_without_client_ocsp().unwrap_err();
+fn legacy_authenticated_client_without_ocsp_follows_interop_feature() {
+    let result = connect_without_client_ocsp();
+    if cfg!(feature = "interop-test") {
+        result.unwrap();
+        return;
+    }
+    let error = result.unwrap_err();
     assert!(
         matches!(
             error.downcast_ref::<qtls::TlsError>(),

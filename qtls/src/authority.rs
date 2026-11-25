@@ -60,11 +60,11 @@ impl LocalAuthority {
         ocsp: Vec<u8>,
     ) -> Result<Self, InvalidLocalAuthority> {
         rustls::pki_types::DnsName::try_from(name.as_ref()).map_err(|_| InvalidLocalAuthority::InvalidName)?;
-        if ocsp.is_empty() {
+        if ocsp.is_empty() && !cfg!(feature = "interop-test") {
             return Err(InvalidLocalAuthority::EmptyOcsp);
         }
 
-        certified_key.ocsp = Some(ocsp.clone());
+        certified_key.ocsp = (!ocsp.is_empty()).then(|| ocsp.clone());
         Ok(Self { name, certificates: certified_key.cert.into(), public_key, ocsp, signing_key: certified_key.key })
     }
 
@@ -94,7 +94,11 @@ impl LocalAuthority {
     }
 
     pub(crate) fn certified_key(&self) -> Arc<CertifiedKey> {
-        Arc::new(CertifiedKey { cert: self.certificates.to_vec(), key: self.signing_key.clone(), ocsp: Some(self.ocsp.to_vec()) })
+        Arc::new(CertifiedKey {
+            cert: self.certificates.to_vec(),
+            key: self.signing_key.clone(),
+            ocsp: (!self.ocsp.is_empty()).then(|| self.ocsp.to_vec()),
+        })
     }
 }
 
