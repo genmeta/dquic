@@ -76,7 +76,7 @@ def render_report(artifacts, run, jobs):
         *sections,
         "Scope: QUIC v1 and the 13 selected scenarios in both directions. The endpoint supports "
         "16 supplied certificates by default, including the Runner's nine-certificate chain. "
-        "Certificate chains, names and signatures remain verified; interop-test permits missing OCSP.", "",
+        "Certificate chains, names and signatures remain verified; ocsp-must-staple is disabled to permit missing OCSP.", "",
         "Outside this matrix: Retry, resumption, 0-RTT, HTTP/3, QUIC v2, explicit key-update initiation, "
         "preferred-address migration and ECN. Performance measurements are not included in these counts.", "",
         f"[Full logs, packet captures and TLS key logs]({url}#artifacts) (retained for seven days).", "",

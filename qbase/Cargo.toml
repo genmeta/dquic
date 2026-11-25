@@ -42,4 +42,4 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 rustls = { workspace = true, features = ["ring"] }
 
 [features]
-interop-test = ["qtls/interop-test"]
+ocsp-must-staple = ["qtls/ocsp-must-staple"]

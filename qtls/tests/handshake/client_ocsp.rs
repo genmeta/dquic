@@ -35,10 +35,10 @@ fn connect(certificate: CertificateDer<'static>, key: &[u8], ocsp: &[u8]) -> Res
 }
 
 #[test]
-fn authenticated_client_without_ocsp_follows_interop_feature() {
+fn authenticated_client_without_ocsp_follows_must_staple_feature() {
     let _roots = set_roots();
     let result = connect(CertificateDer::from_pem_slice(CLIENT_CERT).unwrap(), CLIENT_KEY, &[]);
-    if cfg!(feature = "interop-test") {
+    if !cfg!(feature = "ocsp-must-staple") {
         assert_eq!(result.unwrap().remote.unwrap().name(), "client");
     } else {
         assert_rejected(result, rustls::AlertDescription::BadCertificateStatusResponse);

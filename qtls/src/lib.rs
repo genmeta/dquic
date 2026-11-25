@@ -3,8 +3,9 @@
 //! `qtls` owns no socket, QUIC connection, CRYPTO stream, runtime, or waker.
 //! Callers feed contiguous CRYPTO bytes and pull typed events.
 //!
-//! The `interop-test` feature permits missing OCSP without bypassing certificate
-//! verification or accepting invalid supplied OCSP. TLS key logging is controlled
+//! Missing OCSP is allowed by default; `ocsp-must-staple` requires it for all
+//! certificates. Certificate verification and supplied OCSP validation remain
+//! enabled in both modes. TLS key logging is controlled
 //! by [`TlsClient::set_keylog`] and [`TlsServer::set_keylog`], independently of features.
 
 mod authority;

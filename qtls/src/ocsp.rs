@@ -40,10 +40,10 @@ pub(crate) fn verify(
     algorithms: WebPkiSupportedAlgorithms,
 ) -> Result<(), rustls::Error> {
     if response.is_empty() {
-        return if cfg!(feature = "interop-test") {
-            Ok(())
-        } else {
+        return if cfg!(feature = "ocsp-must-staple") {
             Err(invalid())
+        } else {
+            Ok(())
         };
     }
 

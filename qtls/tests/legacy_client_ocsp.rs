@@ -85,9 +85,9 @@ fn drain_client(
 }
 
 #[test]
-fn legacy_authenticated_client_without_ocsp_follows_interop_feature() {
+fn legacy_authenticated_client_without_ocsp_follows_must_staple_feature() {
     let result = connect_without_client_ocsp();
-    if cfg!(feature = "interop-test") {
+    if !cfg!(feature = "ocsp-must-staple") {
         result.unwrap();
         return;
     }

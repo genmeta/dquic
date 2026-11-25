@@ -69,7 +69,7 @@ async fn symlinks_cannot_escape_the_file_root() {
 }
 
 #[tokio::test]
-async fn quic_http09_transfers_without_ocsp_with_small_windows() {
+async fn quic_http09_transfers_with_small_windows() {
     use std::{sync::Arc, time::Duration};
 
     use dquic::{
@@ -86,7 +86,11 @@ async fn quic_http09_transfers_without_ocsp_with_small_windows() {
         "localhost",
         vec![CertificateDer::from_pem_slice(include_bytes!("../../qtls/tests/keychain/localhost/server.cert")).unwrap()],
         PrivateKeyDer::from_pem_slice(include_bytes!("../../qtls/tests/keychain/localhost/server.key")).unwrap(),
-        Vec::new(),
+        if cfg!(feature = "ocsp-must-staple") {
+            include_bytes!("../../qtls/tests/keychain/localhost/server.ocsp").to_vec()
+        } else {
+            Vec::new()
+        },
     )
     .unwrap();
     let server_socket = Dock::global().ephemeral_socket("127.0.0.1:0".parse().unwrap()).unwrap();
