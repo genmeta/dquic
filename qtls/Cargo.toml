@@ -17,7 +17,7 @@ pkix-path = { version = "0.3.2", default-features = false, features = ["std"] }
 pkix-revocation = { version = "0.3.3", default-features = false, features = ["ocsp"] }
 ring = { workspace = true, optional = true }
 aws-lc-rs = { version = "1.12", optional = true, default-features = false }
-rustls = { package = "qrustls", version = "=0.23.45", default-features = false, features = ["std"] }
+rustls = { package = "qrustls", version = "=0.23.46", default-features = false, features = ["std"] }
 signature = "3"
 spki = "0.8"
 thiserror = { workspace = true }

@@ -312,12 +312,14 @@ completed 130 checks: 118 succeeded, 11 failed and one was unsupported. Nine
 failures and the unsupported result were amplification-limit cases; the other
 two failures were dquic-client/quiche-server rebinding.
 
-The user authorized resolving the long-chain limitation. The workspace now
-uses the published rustls-webpki 0.103.15 source with only its intermediate
-depth bound raised from 6 to 16, and qtls defaults to at most 16 supplied
-certificates. All other WebPKI source files and validation/work budgets are
-unchanged. See the [patch provenance](../../vendor/rustls-webpki/UPSTREAM.md),
-including Cargo's downstream-workspace patch requirement.
+The user authorized resolving the long-chain limitation. qtls defaults to at
+most 16 supplied certificates and depends on qrustls 0.23.46, which uses the
+published qwebpki 0.103.17 package. The
+[genmeta fork](https://github.com/genmeta/rustls-webpki/commit/e22c7f4) is based
+on upstream's 0.103.17 stable branch and raises the intermediate-depth bound
+from 6 to 16. Upstream validation and work budgets remain enabled. Consumers
+resolve these registry dependencies normally, without vendor files, Git
+dependencies or an application-level Cargo patch.
 
 Regression tests reproduced the local certificate-count rejection and,
 independently, WebPKI's depth rejection with an explicit larger qtls limit.
@@ -327,6 +329,9 @@ constraints and configured local/peer count and byte limits still fail.
 The default native workspace passed 1016 tests/doctests; the feature-enabled
 workspace passed 1021, with eight ignored in each build. Clippy for qtls/dquic,
 workspace formatting, 11 Python checks and six comment tests passed.
+The qwebpki fork passed 415 Ring tests and 430 AWS-LC tests (two ignored in
+each build), including 16-intermediate success and 17-intermediate rejection.
+qrustls passed 232 unit tests, 259 API tests and 15 doctests (five ignored).
 The official Linux matrix must be rerun before claiming that the
 amplification-limit scenario passes.
 
