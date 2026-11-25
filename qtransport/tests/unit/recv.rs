@@ -74,6 +74,7 @@ async fn receive_ping(role: Role, epoch: Epoch, corrupt: bool, paths: &Arc<Paths
 }
 
 async fn receive_bytes(bytes: BytesMut, space: Arc<Space<ArcKeys>>, paths: &Arc<Paths>, path: &Arc<Path>) {
+    let credit = bytes.len();
     let Packet::Data(packet) = PacketReader::new(bytes, 8).next().unwrap().unwrap() else {
         panic!()
     };
@@ -81,13 +82,13 @@ async fn receive_bytes(bytes: BytesMut, space: Arc<Space<ArcKeys>>, paths: &Arc<
     match packet.header {
         DataHeader::Long(long::DataHeader::Initial(header)) => {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), path.pathway, link)).unwrap();
+            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), path.pathway, link)).unwrap();
             drop(tx);
             recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }
         DataHeader::Long(long::DataHeader::Handshake(header)) => {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset), path.pathway, link)).unwrap();
+            tx.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), path.pathway, link)).unwrap();
             drop(tx);
             recv_ih_pkt_and_deliver_frames((rx, None), space, paths.clone()).await;
         }

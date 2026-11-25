@@ -261,7 +261,7 @@ async fn collector_mixes_spaces_and_selected_crypto_advances() {
         let DataHeader::Long(long::DataHeader::Initial(header)) = parsed.header else {
             panic!()
         };
-        let packet = CipherPacket::new(header, parsed.bytes, parsed.offset).open_long(&keys(true).opening, |_| Ok(pn)).unwrap().unwrap();
+        let packet = CipherPacket::new(header, parsed.bytes, parsed.offset, 0).open_long(&keys(true).opening, |_| Ok(pn)).unwrap().unwrap();
         for frame in FrameReader::new(
             packet.body(),
             qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(Default::default(), Default::default()).initial(vec![])),
@@ -438,12 +438,16 @@ async fn closing_is_collected_before_failed_crypto_and_termination_leaves_no_dat
         use qbase::packet::GetType;
         let ty = packet.get_type();
         let body = match packet.header {
-            DataHeader::Long(long::DataHeader::Initial(header)) => {
-                CipherPacket::new(header, packet.bytes, packet.offset).open_long(&keys(false).opening, |_| Ok(pn)).unwrap().unwrap().body()
-            }
-            DataHeader::Long(long::DataHeader::Handshake(header)) => {
-                CipherPacket::new(header, packet.bytes, packet.offset).open_long(&keys(false).opening, |_| Ok(pn)).unwrap().unwrap().body()
-            }
+            DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset, 0)
+                .open_long(&keys(false).opening, |_| Ok(pn))
+                .unwrap()
+                .unwrap()
+                .body(),
+            DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset, 0)
+                .open_long(&keys(false).opening, |_| Ok(pn))
+                .unwrap()
+                .unwrap()
+                .body(),
             _ => panic!(),
         };
         let decoded = FrameReader::new(body, ty).collect::<Result<Vec<_>, _>>().unwrap();
@@ -2180,7 +2184,7 @@ async fn collected_datagrams_cancel_on_deactivation_and_complete_when_cid_source
                 let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
                     panic!("expected Initial header");
                 };
-                let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+                let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
                     .open_long(&keys(true).opening, |pn| Ok(pn.decode(0)))
                     .unwrap()
                     .unwrap();

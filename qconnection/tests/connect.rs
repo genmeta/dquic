@@ -231,6 +231,7 @@ fn route_exists(cid: ConnectionId) -> bool {
         }),
         link.into(),
         link,
+        0,
     );
     !incoming.load(Ordering::SeqCst)
 }

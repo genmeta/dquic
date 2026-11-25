@@ -49,20 +49,20 @@ impl Inbox {
     }
 
     /// A connection must never backpressure the shared UDP receive loop.
-    pub fn try_send(&self, packet: Packet, pathway: Pathway, link: Link) -> bool {
+    pub fn try_send(&self, packet: Packet, pathway: Pathway, link: Link, credit: usize) -> bool {
         match packet {
             Packet::Data(packet) => match packet.header {
                 DataHeader::Long(long::DataHeader::Initial(header)) => {
-                    self.initial.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                    self.initial.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).is_ok()
                 }
                 DataHeader::Long(long::DataHeader::Handshake(header)) => {
-                    self.handshake.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                    self.handshake.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).is_ok()
                 }
                 DataHeader::Long(long::DataHeader::ZeroRtt(header)) => {
-                    self.zero_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                    self.zero_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).is_ok()
                 }
                 DataHeader::Short(header) => {
-                    self.one_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).is_ok()
+                    self.one_rtt.try_send((CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).is_ok()
                 }
             },
             Packet::VN(_) | Packet::Retry(_) => false,

@@ -89,7 +89,8 @@ async fn server_rejects_client_parameters_with_a_different_initial_scid() {
     let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
         panic!("expected Initial header");
     };
-    assert!(inbox.try_send_initial(CipherPacket::new(header, packet.bytes, packet.offset), pathway, link));
+    let credit = packet.bytes.len();
+    assert!(inbox.try_send_initial(CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link));
     let tick = qconnection::recv::tick(paths.clone());
     let growing = server_growing(initial_space, received, paths.clone(), ArcTokenRegistry::with_provider(Arc::new(NoopTokenRegistry)));
     let growing = tokio::spawn(async move { tokio::join!(growing, tick).0 });

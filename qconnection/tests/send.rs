@@ -115,12 +115,12 @@ async fn mixed_packets_record_each_space() {
             panic!()
         };
         let opened = match packet.header {
-            DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
+            DataHeader::Long(long::DataHeader::Initial(header)) => CipherPacket::new(header, packet.bytes, packet.offset, 0)
                 .open_long(&keys(true).opening, |_| Ok(pns[index].pn))
                 .unwrap()
                 .unwrap()
                 .body(),
-            DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset)
+            DataHeader::Long(long::DataHeader::Handshake(header)) => CipherPacket::new(header, packet.bytes, packet.offset, 0)
                 .open_long(&keys(true).opening, |_| Ok(pns[index].pn))
                 .unwrap()
                 .unwrap()
@@ -193,7 +193,7 @@ fn vec_sealing_and_io_slice_encoding_preserve_the_encoded_pn() {
         panic!()
     };
     let ty = parsed_header.get_type();
-    let opened = CipherPacket::new(parsed_header, parsed.bytes, parsed.offset)
+    let opened = CipherPacket::new(parsed_header, parsed.bytes, parsed.offset, 0)
         .open_long(&common::initial_keys(true).opening, |_| Ok(7))
         .unwrap()
         .unwrap();
@@ -299,14 +299,14 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
             };
             let (epoch, plaintext) = match packet.header {
                 DataHeader::Long(long::DataHeader::Initial(header)) => {
-                    let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+                    let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
                         .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
                         .unwrap()
                         .unwrap();
                     (Epoch::Initial, FrameReader::new(opened.body(), opened.get_type()).collect::<Result<Vec<_>, _>>().unwrap())
                 }
                 DataHeader::Long(long::DataHeader::Handshake(header)) => {
-                    let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+                    let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
                         .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Handshake).unwrap().pn))
                         .unwrap()
                         .unwrap();
@@ -318,7 +318,7 @@ async fn recursive_packing_pads_the_last_packet_and_decrypts_each_space() {
                         .data
                         .keys
                         .open_packet(
-                            CipherPacket::new(header, packet.bytes, packet.offset),
+                            CipherPacket::new(header, packet.bytes, packet.offset, 0),
                             |_| Ok(packet_metadata(&pns, Epoch::Data).unwrap().pn),
                             Duration::from_secs(1),
                         )
@@ -426,7 +426,7 @@ fn recursive_packing_retains_initial_token_and_skips_closed_sources() {
         assert_eq!(header.token(), b"token");
         assert_eq!(*header.scid(), scid);
         assert_eq!(*header.dcid(), dcid);
-        let opened = CipherPacket::new(header, packet.bytes, packet.offset)
+        let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
             .open_long(&keys(true).opening, |_| Ok(packet_metadata(&pns, Epoch::Initial).unwrap().pn))
             .unwrap()
             .unwrap();

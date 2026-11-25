@@ -3,8 +3,8 @@
 The `interop` example implements HTTP/0.9 over QUIC using `hq-interop` ALPN.
 It shares dquic's connection and transport implementation. Its source, tests and
 container entry point live in this directory.
-See [validation results](VALIDATION.md) for completed checks and the outstanding
-aioquic-client to dquic-server handshake timeout.
+See [validation results](VALIDATION.md) for completed checks and the
+aioquic-client to dquic-server handshake fix.
 
 ## Features and key logging
 
@@ -61,6 +61,13 @@ strings and fragments are not supported.
 windows are 64 KiB per stream and 128 KiB per connection. Temporary sockets
 publish only Direct addresses, without STUN bootstrap or NAT Candidates, so
 the adapter does not advertise dquic traversal frames to standard peers.
+
+dquic keeps its Forward marker at `0x20`. For short datagrams, the high bit of
+the following byte distinguishes a dquic-issued DCID from a v0 Forward type:
+issued CIDs always start with a set high bit, while the Forward type does not.
+This lets standard peers send either Spin Bit value without changing the
+Forward encoding or requiring Spin Bit negotiation. Initial packets use long
+headers, so their original DCID does not need this mark.
 
 Defaults bind the Runner's concrete IPv4 and IPv6 addresses. For local testing,
 override `--bind`, `--certs`, `--www`, `--downloads`, and `--name` as needed:

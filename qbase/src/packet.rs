@@ -127,6 +127,7 @@ impl ops::AddAssign for PacketContent {
 
 /// The sum type of all QUIC packets.
 #[derive(Debug, Clone)]
+#[enum_dispatch(GetType)]
 pub enum Packet {
     VN(VersionNegotiationHeader),
     Retry(RetryHeader),

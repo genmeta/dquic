@@ -23,6 +23,6 @@ async fn initial_without_a_listening_server_leaves_no_odcid_route() {
     };
     let link = Link::new("127.0.0.1:4433".parse().unwrap(), "127.0.0.1:9000".parse().unwrap());
 
-    router.deliver(packet(), link.into(), link);
+    router.deliver(packet(), link.into(), link, 0);
     assert!(router.find_entry(&packet(), &link).is_none());
 }

@@ -100,7 +100,7 @@ async fn server_sends_initial_ack_before_client_hello_is_complete() {
     let DataHeader::Long(long::DataHeader::Initial(header)) = reply.header else {
         panic!("expected Initial")
     };
-    let opened = CipherPacket::new(header, reply.bytes, reply.offset).open_long(&keys.opening, |_| Ok(0)).unwrap().unwrap();
+    let opened = CipherPacket::new(header, reply.bytes, reply.offset, 0).open_long(&keys.opening, |_| Ok(0)).unwrap().unwrap();
     let mut acks = 0;
     for frame in
         FrameReader::new(opened.body(), qbase::packet::GetType::get_type(&LongHeaderBuilder::with_cid(odcid, scid).initial(vec![])))

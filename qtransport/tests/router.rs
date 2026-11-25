@@ -8,7 +8,7 @@ use qbase::{
     cid::{ArcLocalCids, ConnectionId, GenUniqueCid, RetireCid},
     frame::{NewConnectionIdFrame, io::SendFrame},
     net::route::{Link, Pathway},
-    packet::{DataHeader, DataPacket, GetDcid, LongHeaderBuilder, long},
+    packet::{DataHeader, DataPacket, GetDcid, LongHeaderBuilder, OneRttHeader, long},
     role::Role,
 };
 use qtransport::{
@@ -43,7 +43,7 @@ async fn empty_cid_routes_by_peer_address() {
     let (inbox, mut rcvd_pkt) = channel::new();
     router.insert(way().1.dst.into(), inbox, ());
     let (pathway, link) = way();
-    router.deliver(packet(ConnectionId::default()), pathway, link);
+    router.deliver(packet(ConnectionId::default()), pathway, link, 0);
     assert!(rcvd_pkt.initial.recv().await.is_some());
     router.remove(&way().1.dst.into());
     assert!(!is_routed(&router, &packet(ConnectionId::default())));
@@ -59,7 +59,7 @@ async fn old_registry_cannot_retire_a_replacement() {
     let current = router.insert(cid.into(), replacement, ());
     old.retire_cid(cid);
     let (pathway, link) = way();
-    router.deliver(packet(cid), pathway, link);
+    router.deliver(packet(cid), pathway, link, 0);
     assert!(rcvd_pkt.initial.recv().await.is_some());
     current.retire_cid(cid);
     assert!(!is_routed(&router, &packet(cid)));
@@ -77,11 +77,11 @@ async fn retained_route_drops_late_initials_after_the_receiver_closes() {
     drop(received);
 
     let (pathway, link) = way();
-    router.deliver(packet(cid), pathway, link);
+    router.deliver(packet(cid), pathway, link, 0);
     assert_eq!(*incoming.lock().unwrap(), 0);
 
     registry.retire_cid(cid);
-    router.deliver(packet(cid), pathway, link);
+    router.deliver(packet(cid), pathway, link, 0);
     assert_eq!(*incoming.lock().unwrap(), 1);
 }
 
@@ -94,17 +94,28 @@ async fn incoming_initial_uses_the_router_callback() {
         *delivered.lock().unwrap() = Some((packet, pathway, link));
     });
     let cid = ConnectionId::from_slice(b"unrouted");
-    let mut handshake = match packet(cid) {
+    let builder = || LongHeaderBuilder::with_cid(cid, cid);
+    let (pathway, link) = way();
+    for packet in [Packet::VN(builder().vn(vec![1])), Packet::Retry(builder().retry(vec![], [0; 16]))] {
+        router.deliver(packet, pathway, link, 0);
+        assert!(incoming.lock().unwrap().is_none());
+    }
+    let mut data = match packet(cid) {
         Packet::Data(packet) => packet,
         _ => unreachable!(),
     };
-    handshake.header = DataHeader::Long(long::DataHeader::Handshake(LongHeaderBuilder::with_cid(cid, cid).handshake()));
-    let (pathway, link) = way();
-    router.deliver(Packet::Data(handshake), pathway, link);
-    assert!(incoming.lock().unwrap().is_none());
+    for header in [
+        DataHeader::Long(long::DataHeader::Handshake(builder().handshake())),
+        DataHeader::Long(long::DataHeader::ZeroRtt(builder().zero_rtt())),
+        DataHeader::Short(OneRttHeader::new(Default::default(), cid)),
+    ] {
+        data.header = header;
+        router.deliver(Packet::Data(data.clone()), pathway, link, 0);
+        assert!(incoming.lock().unwrap().is_none());
+    }
 
     let (pathway, link) = way();
-    router.deliver(packet(cid), pathway, link);
+    router.deliver(packet(cid), pathway, link, 0);
     let (received, pathway, link) = incoming.lock().unwrap().take().unwrap();
     assert_eq!(*received.dcid(), cid);
     assert_eq!((pathway, link), way());
@@ -143,7 +154,7 @@ fn concurrent_initials_share_one_connection_and_preserve_both_paths() {
     std::thread::scope(|scope| {
         for link in links {
             let router = &router;
-            scope.spawn(move || router.deliver(packet(odcid), link.into(), link));
+            scope.spawn(move || router.deliver(packet(odcid), link.into(), link, 0));
         }
     });
 
@@ -162,7 +173,7 @@ fn concurrent_initials_share_one_connection_and_preserve_both_paths() {
 
     for cid in [odcid, *scid] {
         let (pathway, link) = way();
-        router.deliver(packet(cid), pathway, link);
+        router.deliver(packet(cid), pathway, link, 0);
         assert_eq!(*received.initial.try_recv().unwrap().0.dcid(), cid);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -186,17 +197,17 @@ fn try_insert_keeps_full_or_closed_inboxes_until_retirement() {
             drop(received.take());
         } else {
             for _ in 0..8 {
-                assert!(inbox.try_send(packet(odcid), pathway, link));
+                assert!(inbox.try_send(packet(odcid), pathway, link, 0));
             }
         }
-        assert!(!inbox.try_send(packet(odcid), pathway, link));
+        assert!(!inbox.try_send(packet(odcid), pathway, link, 0));
 
         // A caller that missed the route earlier must not replace it, even now.
         let (candidate, _) = channel::new();
         let Err(existing) = router.try_insert(odcid.into(), candidate, ()) else {
             panic!("an occupied route must not create another connection");
         };
-        assert!(!existing.try_send(packet(odcid), pathway, link));
+        assert!(!existing.try_send(packet(odcid), pathway, link, 0));
         assert!(is_routed(&router, &packet(odcid)));
         if let Some(received) = received.as_mut() {
             for _ in 0..8 {
@@ -208,7 +219,7 @@ fn try_insert_keeps_full_or_closed_inboxes_until_retirement() {
         registry.retire_cid(odcid);
         let (replacement, mut received) = channel::new();
         let replacement = router.try_insert(odcid.into(), replacement, ()).unwrap();
-        router.deliver(packet(odcid), pathway, link);
+        router.deliver(packet(odcid), pathway, link, 0);
         assert_eq!(*received.initial.try_recv().unwrap().0.dcid(), odcid);
         // The previous owner cannot delete the new registration.
         registry.retire_cid(odcid);
@@ -236,11 +247,15 @@ async fn registry_routes_issued_cids_and_forwards_frames() {
     let first = registry.gen_unique_cid();
     let second = registry.gen_unique_cid();
     assert_ne!(first, second);
+    // Datagram classification relies on every issued CID keeping this mark.
+    for cid in [first, second] {
+        assert_eq!(cid[0] & 0x80, 0x80);
+    }
     let frame = NewConnectionIdFrame::new(first, 1u32.into(), 0u32.into());
     registry.send_frame([frame]);
     assert_eq!(*frames.0.lock().unwrap(), vec![frame]);
     let (pathway, link) = way();
-    router.deliver(packet(first), pathway, link);
+    router.deliver(packet(first), pathway, link, 0);
     assert!(rcvd_pkt.initial.recv().await.is_some());
     registry.retire_cid(first);
     assert!(!is_routed(&router, &packet(first)));

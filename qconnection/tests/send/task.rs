@@ -132,7 +132,7 @@ async fn submitting_an_ack_only_packet_starts_the_connection_idle_timer() {
     let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
         panic!()
     };
-    let opened = CipherPacket::new(header, packet.bytes, packet.offset).open_long(&keys(false).opening, |_| Ok(0)).unwrap().unwrap();
+    let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0).open_long(&keys(false).opening, |_| Ok(0)).unwrap().unwrap();
     use qbase::packet::GetType;
     assert!(FrameReader::new(opened.body(), opened.get_type()).all(|frame| matches!(frame.unwrap().0, Frame::Ack(_) | Frame::Padding(_))));
     let reason = paths.terminator.clone().await;
@@ -219,8 +219,10 @@ async fn closed_source_does_not_stop_sending_close_responses_before_termination(
         let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
             panic!()
         };
-        let opened =
-            CipherPacket::new(header, packet.bytes, packet.offset).open_long(&keys(true).opening, |pn| Ok(pn.decode(0))).unwrap().unwrap();
+        let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
+            .open_long(&keys(true).opening, |pn| Ok(pn.decode(0)))
+            .unwrap()
+            .unwrap();
         let decoded = FrameReader::new(opened.body(), opened.get_type()).collect::<Result<Vec<_>, _>>().unwrap();
         assert!(decoded.iter().any(|(frame, _)| matches!(frame, Frame::Close(_))));
         assert!(decoded.iter().all(|(frame, _)| matches!(frame, Frame::Close(_) | Frame::Padding(_))));
@@ -272,8 +274,10 @@ async fn sending_runs_again_when_woken_and_exits_on_path_failure() {
         let DataHeader::Long(long::DataHeader::Initial(header)) = packet.header else {
             panic!()
         };
-        let opened =
-            CipherPacket::new(header, packet.bytes, packet.offset).open_long(&keys(true).opening, |pn| Ok(pn.decode(0))).unwrap().unwrap();
+        let opened = CipherPacket::new(header, packet.bytes, packet.offset, 0)
+            .open_long(&keys(true).opening, |pn| Ok(pn.decode(0)))
+            .unwrap()
+            .unwrap();
         assert!(
             FrameReader::new(opened.body(), opened.get_type())
                 .any(|frame| matches!(frame.unwrap().0, Frame::Crypto(_, bytes) if bytes.as_ref() == message))

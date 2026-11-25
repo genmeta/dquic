@@ -25,7 +25,7 @@ fn way() -> (Pathway, Link) {
 async fn routes_each_level_to_its_typed_receiver() {
     let (inbox, mut rcvd_pkt) = new();
     let (pathway, link) = way();
-    assert!(inbox.try_send(initial_packet(), pathway, link));
+    assert!(inbox.try_send(initial_packet(), pathway, link, 0));
     assert_eq!(rcvd_pkt.initial.recv().await.unwrap().0.payload_len(), 0);
 }
 
@@ -33,10 +33,10 @@ async fn routes_each_level_to_its_typed_receiver() {
 async fn full_receiver_does_not_block_routing() {
     let (inbox, _rcvd_pkt) = new();
     let (pathway, link) = way();
-    while inbox.try_send(initial_packet(), pathway, link) {}
+    while inbox.try_send(initial_packet(), pathway, link, 0) {}
 
     tokio::time::timeout(Duration::from_millis(25), async {
-        assert!(!inbox.try_send(initial_packet(), pathway, link));
+        assert!(!inbox.try_send(initial_packet(), pathway, link, 0));
     })
     .await
     .expect("routing must not wait for one connection's full receiver");

@@ -132,7 +132,8 @@ async fn receive_on_paths(
         let DataHeader::Short(header) = packet.header else {
             panic!("expected 1-RTT packet");
         };
-        tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).unwrap();
+        let credit = packet.bytes.len();
+        tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).unwrap();
     }
     drop(tx);
     let closed = paths.terminator.clone();
@@ -229,7 +230,8 @@ async fn closing_data_receiver_processes_peer_close_after_business_frames_and_wa
     let DataHeader::Short(header) = packet.header else {
         panic!()
     };
-    tx.send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), pathway, link)).await.unwrap();
+    let credit = packet.bytes.len();
+    tx.send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset, credit), pathway, link)).await.unwrap();
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
     assert!(terminator.clone().now_or_never().is_none());
@@ -289,7 +291,8 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
             let DataHeader::Short(header) = packet.header else {
                 panic!("expected 1-RTT packet");
             };
-            tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset), link.into(), link)).unwrap();
+            let credit = packet.bytes.len();
+            tx.try_send((qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset, credit), link.into(), link)).unwrap();
         }
         drop(tx);
         let handshake = ArcHandshakeDone::new(receiver.parameters.role(), receiver.spaces.data.reliable_frames.clone());
@@ -324,7 +327,7 @@ async fn data_close_follows_frame_order_and_reception_continues_after_errors() {
 }
 
 #[tokio::test]
-async fn data_authentication_controls_path_admission_and_receive_credit() {
+async fn authentication_controls_path_admission_but_not_known_path_credit() {
     for receiving in [0, 1] {
         let pair = pair();
         let (receiver, sender) = (&pair[receiving], &pair[1 - receiving]);
@@ -350,10 +353,10 @@ async fn data_authentication_controls_path_admission_and_receive_credit() {
         assert_eq!(crate::common::path_credit(path), expected);
         assert!(!path.validation.is_blocking(), "one authenticated punch probe must fund path validation");
 
-        // Neither failed authentication nor duplicate packets credit an existing path.
+        // An existing path counts received datagrams even if their packets are discarded.
         receive_on_paths(receiver, &paths, vec![forged, packet.clone()], link.into(), link, Scopes::ALL).await;
         assert!(Arc::ptr_eq(&paths.entries.lock().unwrap().get(&link.into()).cloned().unwrap(), path));
-        assert_eq!(crate::common::path_credit(path), expected);
+        assert_eq!(crate::common::path_credit(path), expected.map(|credit| credit * 3));
 
         // A replay with a new source address must not create a second path.
         let replay_link = Link::new(link.src, "127.0.0.1:43003".parse().unwrap());
@@ -482,7 +485,7 @@ async fn hello_replies_on_received_link_using_connection_keys_and_packet_numbers
         .data
         .keys
         .open_packet(
-            qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset),
+            qtransport::packet::CipherPacket::new(header, packet.bytes, packet.offset, 0),
             |pn| sender.spaces.data.rcvd_journal.decode_pn(pn),
             Duration::from_secs(1),
         )
