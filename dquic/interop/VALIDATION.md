@@ -261,3 +261,46 @@ Actual automatic bot publication starts after `interop-report.yml` lands on
 `main`, as required by GitHub's `workflow_run` trigger. No main merge or live PR
 comment was performed for this validation. The protocol failures above remain
 unchanged by this build/reporting work.
+
+### Protocol corrections (2026-11-25)
+
+Three corrections address failures observed in the original PR matrix:
+
+* A zero-length peer CID is now available to every path through independent
+  path cells. Previously the first path consumed the only empty CID and a
+  rebound path waited indefinitely for another CID. Retiring these cells never
+  emits RETIRE_CONNECTION_ID, and NEW_CONNECTION_ID from such a peer is rejected
+  as a protocol violation. See
+  [RFC 9000 section 5.1.1](https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1).
+* PTO exponential backoff now multiplies the entire smoothed-RTT plus variance
+  expression. Missing parentheses previously left the smoothed RTT outside
+  the multiplier. The regression reproduced 165 ms instead of the expected
+  198 ms on the first backoff. See
+  [RFC 9002 section 6.2.1](https://www.rfc-editor.org/rfc/rfc9002.html#section-6.2.1).
+* The interop adapter uses a 1 MiB connection window, 64 KiB stream windows and
+  32 initial bidirectional streams. A single-variable connection-window
+  experiment passed ngtcp2 transfer and multiplexing in both directions in
+  [run 45551631387](https://github.com/genmeta/dquic/actions/runs/45551631387).
+  The initial-stream-limit experiment passed quiche's original 1999-file
+  multiplexing test in both directions in
+  [run 45552887860](https://github.com/genmeta/dquic/actions/runs/45552887860).
+  Packet captures showed truncated request writes without FIN in the failing
+  quiche-client case; its
+  [HTTP/0.9 example](https://github.com/cloudflare/quiche/blob/master/apps/src/common.rs)
+  does not retry partial stream writes.
+  These adapter settings avoid that peer-client behavior without accepting
+  incomplete HTTP requests. Production endpoint defaults are unchanged.
+
+Both new CID tests and the PTO test failed before their respective corrections
+and passed afterward. The 23 CID tests, 649 affected-crate tests (one ignored),
+38 congestion tests and all five native interop tests passed on macOS. Native
+interop still includes 128 simultaneous streams with 64 KiB connection and
+32 KiB stream receive windows. Clippy for the changed crates, formatting,
+whitespace checks, 11 Python checks, six comment tests and actionlint passed.
+The full Linux feature-enabled workspace regression passed 1027 Rust tests and
+doctests, with 23 ignored.
+
+The TLS chain limits and Forward/spin-bit classification are unchanged. All 13
+official scenarios remain required in each direction, including the known
+long-chain amplification-limit failure; no retry or relaxed result check was
+introduced.

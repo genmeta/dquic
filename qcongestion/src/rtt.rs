@@ -81,7 +81,7 @@ impl Rtt {
     /// duration = (smoothed_rtt + max(4 * rttvar, kGranularity))
     ///     * (2 ^ pto_count)
     fn base_pto(&self, pto_count: u32) -> Duration {
-        self.smoothed_rtt + std::cmp::max(4 * self.rttvar, GRANULARITY) * (1 << pto_count)
+        (self.smoothed_rtt + std::cmp::max(4 * self.rttvar, GRANULARITY)) * (1 << pto_count)
     }
 
     fn try_backoff_rtt(&mut self) {
@@ -138,4 +138,16 @@ impl ArcRtt {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pto_backs_off_the_entire_rtt_estimate() {
+        for rtt in [Rtt::default(), Rtt { smoothed_rtt: Duration::from_millis(100), rttvar: Duration::ZERO, ..Rtt::default() }] {
+            let base = rtt.base_pto(0);
+            for count in 1..=6 {
+                assert_eq!(rtt.base_pto(count), base * (1 << count));
+            }
+        }
+    }
+}

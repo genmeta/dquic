@@ -94,6 +94,14 @@ where
     ///
     /// Return the reset token of this [`NewConnectionIdFrame`] if it is valid.
     fn recv_new_cid_frame(&mut self, frame: NewConnectionIdFrame) -> Result<Option<ResetToken>, Error> {
+        if matches!(self.cid_deque.get(0), Some(Some((_, cid, _))) if cid.is_empty()) {
+            return Err(QuicError::new(
+                ErrorKind::ProtocolViolation,
+                frame.frame_type().into(),
+                "NEW_CONNECTION_ID from a peer using a zero-length CID",
+            )
+            .into());
+        }
         let seq = frame.sequence();
         let retire_prior_to = frame.retire_prior_to();
         // Discard frames for CIDs already retired by the peer.
@@ -209,6 +217,13 @@ where
     /// Apply for a new connection ID, and return an [`ArcCidCell`], which may be not ready state.
     fn allocate_cell(&mut self, is_using: bool) -> ArcCidCell<RETIRED> {
         let cell = ArcCidCell::new(self.retired_cids.clone(), is_using);
+        // A zero-length CID is used on every path and has no replacement pool.
+        if let Some(Some((seq, cid, _))) = self.cid_deque.get(0)
+            && cid.is_empty()
+        {
+            cell.0.lock().unwrap().assign(*seq, *cid);
+            return cell;
+        }
         self.pending_cells.push_back(cell.clone());
         self.arrange_idle_cid();
         cell
@@ -341,9 +356,11 @@ where
         }
         let keep = usize::from(!self.is_retired);
         while self.allocated_cids.len() > keep {
-            let (seq, _) = self.allocated_cids.pop_back().unwrap();
-            let sequence = VarInt::try_from(seq).expect("Sequence of connection id is very hard to exceed VARINT_MAX");
-            self.retired_cids.send_frame([RetireConnectionIdFrame::new(sequence)]);
+            let (seq, cid) = self.allocated_cids.pop_back().unwrap();
+            if !cid.is_empty() {
+                let sequence = VarInt::try_from(seq).expect("Sequence of connection id is very hard to exceed VARINT_MAX");
+                self.retired_cids.send_frame([RetireConnectionIdFrame::new(sequence)]);
+            }
         }
     }
 
