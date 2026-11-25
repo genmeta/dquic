@@ -13,8 +13,8 @@ Without this feature, missing OCSP remains an error. Certificate names, chains,
 signatures and validity are still checked, and supplied OCSP is always validated.
 The workspace supports chains of up to 16 supplied certificates by default,
 including the Runner's nine-certificate amplification test. It uses a
-[WebPKI depth patch](../../vendor/rustls-webpki/UPSTREAM.md); certificate byte
-limits and all other validation rules remain enabled.
+published `qwebpki` dependency through `qrustls`; certificate byte limits and
+all other validation rules remain enabled. Consumers need no local Cargo patch.
 Cargo features apply to every use of the enabled crate within the same build;
 use a separate build for normal deployments.
 

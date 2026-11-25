@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/rustls-webpki"]
 members = [
     "dquic",
     "qmacro",
@@ -99,9 +98,6 @@ qtraversal = { path = "./qtraversal", version = "0.8.0" }
 
 [profile.bench]
 debug = true
-
-[patch.crates-io]
-rustls-webpki = { path = "vendor/rustls-webpki" }
 
 [profile.release]
 debug = true
