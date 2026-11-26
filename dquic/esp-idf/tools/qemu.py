@@ -54,7 +54,7 @@ command = [str(qemu), "-M", "esp32c3", "-nographic", "-no-reboot", "-nic", "none
            "-global", "driver=nvram.esp32c3.efuse,property=drive,value=efuse",
            "-global", "driver=timer.esp32c3.timg,property=wdt_disable,value=true"]
 markers = ["PASS: Tokio UDP loopback", "PASS: qtls QUIC TLS handshake"] if binary == "dependencies" else [
-    "PASS: pointer-sized counters wrap and preserve sampled deltas on C3",
+    "PASS: pointer-sized counters wrap and preserve sampled deltas",
     "PASS: qudp datagram boundaries, truncation and buffer reuse",
     "PASS: verified QUIC handshake", "PASS: bidirectional echo"]
 markers += ["Returned from app_main()"]

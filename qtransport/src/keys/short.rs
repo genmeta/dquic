@@ -1,15 +1,11 @@
 use std::{
     collections::VecDeque,
     ops::RangeInclusive,
-    sync::{
-        Arc, Mutex,
-        atomic::Ordering,
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
 };
 
 use portable_atomic::AtomicU64;
-
 use qbase::{
     error::{ErrorKind, QuicError},
     packet::{KeyPhaseBit, ShortSpecificBits},

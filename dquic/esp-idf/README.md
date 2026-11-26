@@ -1,4 +1,4 @@
-# ESP32-C3 / ESP-IDF 验证
+# ESP32-C3、ESP32-C6 / ESP-IDF 验证
 
 工程位于 `dquic/esp-idf/`，与 `dquic/examples/`、`dquic/interop/` 平级。
 保留独立 Cargo workspace，隔离 ESP-IDF 的工具链和目标配置，使用 `std`、
@@ -7,8 +7,8 @@
 - `dependencies`：Tokio UDP 回环、带证书验证的 QUIC TLS 握手。
 - `echo`：ESP UDP 后端的报文边界/截断/缓冲复用、32 位指标回绕及采样差值、完整 dquic 握手、一个双向流的回显及双向 FIN。
 
-两端均运行于同一 C3 的 ESP-IDF/lwIP 回环接口。可在开发板或官方 QEMU
-运行；本次验证没有连接实物开发板。
+两端均运行于同一芯片的 ESP-IDF/lwIP 回环接口。C3 使用官方 QEMU，
+C6 使用 USB 连接的实物开发板；Wi-Fi 联网收发需要另行验证。
 
 ## 构建
 
@@ -23,6 +23,17 @@ cd dquic/esp-idf
 python3 tools/build.py dependencies
 python3 tools/build.py echo
 ```
+
+默认构建 C3；构建 C6 时增加芯片参数：
+
+```sh
+python3 tools/build.py dependencies esp32c6
+python3 tools/build.py echo esp32c6
+```
+
+C3 的 Rust 目标为 `riscv32imc-esp-espidf`，C6 为
+`riscv32imac-esp-espidf`。两者共用 Rust 工具链、SDK 和应用代码，生成的
+SDK 配置分别存放在 `target/esp32c3/`、`target/esp32c6/`。
 
 `build.py` 先构建 SDK，再让 ring 使用其 GCC。它还生成含绝对分区表路径的
 本地 sdkconfig defaults。Rust 1.88 通过 `RUSTC_BOOTSTRAP=1` 使用 `build-std`；
@@ -61,7 +72,49 @@ python3 tools/build.py echo
 
 临时目录可能在系统清理后消失；标准 SDK/工具安装可按前面的步骤重新准备。
 
-## 2026-11-26 验证结果
+## C6 上板执行
+
+使用原生 USB Serial/JTAG 接口，`sdkconfig.defaults.esp32c6` 将控制台输出到
+同一 USB 端口。下面的 `python` 仍指 SDK Python；串口路径以实际枚举结果为准。
+刷入前可用 `python -m esptool --port PORT flash_id` 确认芯片与 Flash 容量，
+再用 `read_flash 0 SIZE backup.bin` 备份原固件。
+
+```sh
+python tools/flash.py dependencies /dev/cu.usbmodem142401
+python tools/flash.py echo /dev/cu.usbmodem142401
+```
+
+脚本将所选 Rust ELF 转为镜像，按 SDK 生成的偏移写入 bootloader、分区表和
+应用，然后复位并检查所有成功标记及 `Returned from app_main()`。串口记录、
+应用镜像和烧录日志保存在 `target/hardware/esp32c6/`。分区及镜像仍使用
+4 MiB 布局，也可用于实际 Flash 容量更大的板子。
+
+### 2026-11-26 C6 实板结果
+
+| 项目 | 结果 |
+| --- | --- |
+| 芯片 / Flash | ESP32-C6 revision 0.2 / 16 MiB |
+| 目标 / SDK | `riscv32imac-esp-espidf` / ESP-IDF v5.4.2 |
+| 依赖链固件 | 编译、链接、实板 UDP 回环与 QUIC TLS 握手通过 |
+| dquic 固件 | 计数器回绕、UDP 边界/截断、证书验证握手、18 字节回显及双向 FIN 通过 |
+| 正常退出 | 两份固件均出现 `Returned from app_main()` |
+| 依赖链应用镜像 | 2,018,064 字节 |
+| dquic 应用镜像 | 3,469,568 字节 |
+| dquic 剩余堆 | 初始化 399,520 字节；最低 177,088 字节；完成时 197,760 字节 |
+
+实板串口记录仅保存在本地 `target/hardware/esp32c6/`，分别为
+`dependencies.txt` 和 `echo.txt`。当前板上保留 `echo` 验证固件。
+原始 16 MiB Flash 已备份到 `target/hardware/esp32c6/original-flash-16mb.bin`，
+记录了 SHA-256，并通过 `esptool verify_flash` 与板上原始数据比对一致。
+该备份仅保存在本机，受 Git 忽略规则保护。恢复命令为：
+
+```sh
+python -m esptool --chip esp32c6 --port /dev/cu.usbmodem142401 write_flash 0 target/hardware/esp32c6/original-flash-16mb.bin
+```
+
+增加 C6 构建选择后，默认 C3 的完整固件构建及 QEMU 回显回归均通过。
+
+## 2026-11-26 C3 QEMU 验证结果
 
 | 项目 | 结果 |
 | --- | --- |
@@ -77,8 +130,8 @@ python3 tools/build.py echo
 | dquic 应用镜像 | 3,534,128 字节 |
 | dquic 仿真剩余堆 | 初始化约 247 KiB；最低约 26 KiB；完成时约 48 KiB |
 
-完整串口记录见 [依赖链](validation/dependencies.txt) 和
-[dquic 回显](validation/echo.txt)。Flash 分区表与 SDK 生成结果已比较一致。
+完整串口记录仅保存在本地 `target/qemu/dependencies.log` 和
+`target/qemu/echo.log`。Flash 分区表与 SDK 生成结果已比较一致。
 镜像大小对应上述验证构建，不是去除所有可选功能后的最小体积。
 
 桌面验证覆盖 `qudp` 20 项、连接/密钥 17 项、计数器 8 项、流发送 14 项、
@@ -109,11 +162,11 @@ cargo run -p dquic --example esp-loopback
   缓冲或超长报文导致的截断内容整包丢弃。示例同时缩小流控窗口和并发流数，
   见 `src/echo.rs`。
 - 连接指标使用 `AtomicUsize`，累计 ACK 字节数允许回绕。采样增量使用
-  `current.wrapping_sub(previous)`；C3 上两次采样之间须少于 4 GiB。
+  `current.wrapping_sub(previous)`；C3/C6 上两次采样之间须少于 4 GiB。
   pending/inflight 各自需能由 `usize` 表示。密钥安全限制仍使用 64 位计数。
 - 验证固件把编译时间设为测试时钟，并在无 Wi-Fi 的回环测试中启用 SAR
   熵源。实际联网应用需要自己的时间同步和熵源初始化；Wi-Fi/BT 与 SAR
   熵源的使用约束见 [Espressif RNG 文档](https://docs.espressif.com/projects/esp-idf/en/v5.4.2/esp32c3/api-reference/system/random.html)。
 - 主任务栈配置为 64 KiB，Tokio 阻塞任务栈为 8 KiB。最低堆余量来自同芯片
-  双端回环仿真，不包含 Wi-Fi。实物 Wi-Fi、吞吐、丢包、NAT 穿越、迁移、
+  双端回环，C3 使用 QEMU、C6 使用实板，均不包含 Wi-Fi。实物 Wi-Fi、吞吐、丢包、NAT 穿越、迁移、
   断线重连和长期运行尚未验证。

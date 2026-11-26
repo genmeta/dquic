@@ -1,5 +1,6 @@
 /.embuild/
 /target/
+/validation/
 /sdkconfig
 /sdkconfig.old
 __pycache__/
