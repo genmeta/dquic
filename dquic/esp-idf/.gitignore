@@ -1,0 +1,6 @@
+/.embuild/
+/target/
+/sdkconfig
+/sdkconfig.old
+__pycache__/
+!/Cargo.lock

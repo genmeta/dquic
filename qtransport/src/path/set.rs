@@ -1,14 +1,12 @@
 use std::{
     collections::BTreeMap,
     io,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
     task::Waker,
     time::Duration,
 };
 
+use portable_atomic::AtomicU64;
 use qbase::{
     Epoch,
     error::{ErrorKind, QuicError},
@@ -148,7 +146,7 @@ impl Paths {
     /// Run until the connection terminates or this path fails or is closed.
     /// The detached task's owner calls del_path after this method returns.
     pub(crate) async fn send_via(&self, path: &Path) -> io::Result<()> {
-        let mut datagrams = std::array::from_fn::<_, 8, _>(|_| Datagram::default());
+        let mut datagrams = std::array::from_fn::<_, { qprotocol::QuicProtocol::MAX_DATAGRAMS }, _>(|_| Datagram::default());
         let mut frames = Vec::with_capacity(256);
         let terminator = path.terminator.clone();
         let idle_timer = self.idle_timer();

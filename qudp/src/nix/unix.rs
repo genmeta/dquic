@@ -157,8 +157,11 @@ pub(super) fn recvmsg(socket: &UdpSocket, bufs: &mut [IoSliceMut<'_>], recv_line
             return Err(Errno::ENOBUFS.into());
         }
         let link = Link::new(addresses[index].inner(), recv_lines[index].dst);
-        #[cfg_attr(not(any(target_os = "android", target_os = "linux")), allow(unused_mut))]
-        let mut len = messages[index].msg_len as usize;
+        let len = if header.msg_flags & libc::MSG_TRUNC != 0 {
+            0
+        } else {
+            messages[index].msg_len as usize
+        };
         let mut line = Line { link, ttl: 0, ecn: None, seg_size: len as u16 };
         // The kernel returned complete control data. CMSG macros bound the headers,
         // and fixed payload lengths are checked before copying potentially unaligned data.
@@ -179,10 +182,6 @@ pub(super) fn recvmsg(socket: &UdpSocket, bufs: &mut [IoSliceMut<'_>], recv_line
                     #[cfg(any(target_os = "android", target_os = "linux"))]
                     (libc::SOL_UDP, libc::UDP_GRO) if cmsg.cmsg_len >= libc::CMSG_LEN(size_of::<libc::c_int>() as _) as _ => {
                         line.seg_size = ptr::read_unaligned::<libc::c_int>(libc::CMSG_DATA(current).cast()) as u16;
-                        // Discard a truncated aggregate rather than deliver an incomplete tail datagram.
-                        if header.msg_flags & libc::MSG_TRUNC != 0 {
-                            len = 0;
-                        }
                     }
                     _ => {}
                 }

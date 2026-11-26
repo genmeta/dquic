@@ -9,7 +9,9 @@ use qudp::UdpSocket;
 
 use crate::protocol::{forward::ForwardProtocol, quic::QuicProtocol, stun::StunProtocol};
 
-const MAX_DATAGRAM_SIZE: usize = 65_535;
+// A GRO message can span multiple sender bursts. Size it for the receive-side
+// aggregation limit rather than the number of messages in one syscall.
+const RECV_BUFFER_SIZE: usize = qbase::datagram::MAX_DATAGRAM_SIZE * qudp::MAX_GRO_SEGMENTS;
 
 pub struct Topology {
     stun: Arc<StunProtocol>,
@@ -35,14 +37,14 @@ impl Topology {
     }
 
     pub async fn receive(&self, socket: Arc<UdpSocket>) -> io::Result<()> {
-        let mut packets = (0..qudp::BATCH_SIZE).map(|_| BytesMut::zeroed(MAX_DATAGRAM_SIZE)).collect::<Vec<_>>();
+        let mut packets = (0..qudp::BATCH_SIZE).map(|_| BytesMut::zeroed(RECV_BUFFER_SIZE)).collect::<Vec<_>>();
         let mut lines = vec![Line::default(); qudp::BATCH_SIZE];
 
         loop {
             let received = socket.receive(&mut packets, &mut lines).await?;
             for index in 0..received {
                 let mut packet = packets[index].split();
-                packets[index].resize(MAX_DATAGRAM_SIZE, 0);
+                packets[index].resize(RECV_BUFFER_SIZE, 0);
                 let link = lines[index].link.flip();
 
                 while !packet.is_empty() {

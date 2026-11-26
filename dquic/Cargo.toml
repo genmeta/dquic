@@ -28,6 +28,10 @@ tokio = { workspace = true, features = ["rt", "macros", "io-util", "signal", "fs
 ocsp-must-staple = ["qconnection/ocsp-must-staple"]
 
 [[example]]
+name = "esp-loopback"
+path = "esp-idf/src/loopback.rs"
+
+[[example]]
 name = "interop"
 path = "interop/main.rs"
 

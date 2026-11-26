@@ -12,9 +12,19 @@ use qbase::{net::route::Line, util::Wakers};
 use smallvec::SmallVec;
 use socket2::{Domain, Socket, Type};
 use tokio::io::Interest;
-pub const BATCH_SIZE: usize = 8;
+pub const BATCH_SIZE: usize = if cfg!(target_os = "espidf") { 1 } else { 8 };
+/// Maximum datagrams in one GRO receive message, independent of the syscall batch.
+/// Linux defines UDP_GRO_CNT_MAX as 64; other supported backends do not enable GRO.
+pub const MAX_GRO_SEGMENTS: usize = if cfg!(all(feature = "udp_offload_opt", any(target_os = "linux", target_os = "android"))) {
+    64
+} else {
+    1
+};
+
 cfg_if::cfg_if! {
-    if #[cfg(unix)]{
+    if #[cfg(target_os = "espidf")] {
+        mod espidf;
+    } else if #[cfg(unix)]{
         #[path = "nix.rs"]
         mod nix;
     } else if #[cfg(windows)] {
@@ -48,6 +58,9 @@ impl UdpSocket {
     /// and must match any existing scope. With index zero, the address's scope
     /// is preserved; supply a valid zone where required. Flowinfo is preserved.
     ///
+    /// ESP-IDF currently requires a concrete local IP and interface index zero.
+    /// Bind a separate socket to each local IP instead of using a wildcard.
+    ///
     /// ```no_run
     /// # async fn example() -> std::io::Result<()> {
     /// let socket = qudp::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), 0)?;
@@ -55,6 +68,8 @@ impl UdpSocket {
     /// # }
     /// ```
     pub fn bind(addr: SocketAddr, ifindex: u32) -> io::Result<Self> {
+        #[cfg(target_os = "espidf")]
+        espidf::validate_bind(addr, ifindex)?;
         let addr = scope_addr(addr, ifindex)?;
         let domain = if addr.is_ipv4() {
             Domain::IPV4
@@ -141,8 +156,8 @@ pub trait Io {
     /// Receive into separate buffers and return the number of filled buffers.
     /// Their views are shortened to the copied byte lengths; rebuild them before reuse.
     /// With GRO a buffer can contain multiple datagrams, spaced by `Line::seg_size`,
-    /// with a possibly shorter final datagram. Truncated GRO aggregates are discarded
-    /// by returning an empty buffer. Ordinary empty datagrams have segment size zero.
+    /// with a possibly shorter final datagram. Truncated datagrams and GRO messages
+    /// are discarded in full. Ordinary empty datagrams have segment size zero.
     fn recvmsg(&self, bufs: &mut [IoSliceMut<'_>], line: &mut [Line]) -> io::Result<usize>;
 
     fn set_ttl(&self, ttl: i32) -> io::Result<()>;

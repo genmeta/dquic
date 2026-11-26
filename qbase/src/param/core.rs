@@ -301,6 +301,7 @@ impl Default for ClientParameters {
         let mut params = Self::new();
 
         for (id, value) in [
+            (ParameterId::MaxUdpPayloadSize, crate::datagram::MAX_DATAGRAM_SIZE as u32),
             (ParameterId::InitialMaxStreamsBidi, 100u32),
             (ParameterId::InitialMaxStreamsUni, 100u32),
             (ParameterId::InitialMaxData, 1u32 << 20),
@@ -323,6 +324,7 @@ impl Default for ServerParameters {
         let mut params = Self::new();
 
         for (id, value) in [
+            (ParameterId::MaxUdpPayloadSize, crate::datagram::MAX_DATAGRAM_SIZE as u32),
             (ParameterId::InitialMaxStreamsBidi, 100u32),
             (ParameterId::InitialMaxStreamsUni, 100u32),
             (ParameterId::InitialMaxData, 1u32 << 20),

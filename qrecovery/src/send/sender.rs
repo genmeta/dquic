@@ -112,7 +112,7 @@ impl<TX> ReadySender<TX> {
         });
 
         // Update metrics when application writes data
-        self.metrics.add_pending(data_len);
+        self.metrics.add_pending(data.len());
 
         self.sndbuf.write(data);
         Ok(())
@@ -267,7 +267,7 @@ impl<TX> SendingSender<TX> {
         });
 
         // Update metrics when application writes data
-        self.metrics.add_pending(data_len);
+        self.metrics.add_pending(data.len());
 
         self.tx_wakers.wake_all();
         self.sndbuf.write(data);

@@ -15,6 +15,7 @@ use qbase::{
 fn local_defaults_advertise_usable_flow_control_and_role_timeouts() {
     fn check<R>(params: &core::Parameters<R>, timeout: u64) {
         for (id, expected) in [
+            (ParameterId::MaxUdpPayloadSize, 1536),
             (ParameterId::InitialMaxStreamsBidi, 100),
             (ParameterId::InitialMaxStreamsUni, 100),
             (ParameterId::InitialMaxData, 1 << 20),
@@ -36,6 +37,8 @@ fn local_defaults_advertise_usable_flow_control_and_role_timeouts() {
 #[test]
 fn absent_peer_parameters_keep_protocol_defaults() {
     fn check<R>(params: &core::Parameters<R>) {
+        assert!(!params.contains(ParameterId::MaxUdpPayloadSize));
+        assert_eq!(params.get::<u64>(ParameterId::MaxUdpPayloadSize), 65527);
         assert!(!params.contains(ParameterId::InitialMaxData));
         assert_eq!(params.get::<u64>(ParameterId::InitialMaxData), 0);
         assert_eq!(params.get::<u64>(ParameterId::InitialMaxStreamsBidi), 0);

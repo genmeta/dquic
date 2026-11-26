@@ -29,7 +29,7 @@ where
                 is_all_rcvd = o.on_data_acked(&frame);
 
                 // Update metrics when data is acknowledged
-                let acked_len = frame.range().end - frame.range().start;
+                let acked_len = frame.len();
                 if acked_len > 0 {
                     self.metrics.on_data_acked(acked_len);
                 }

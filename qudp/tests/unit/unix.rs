@@ -69,7 +69,7 @@ async fn receive_batches_respect_buffer_and_metadata_capacity() -> std::io::Resu
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[tokio::test]
-async fn receive_preserves_empty_datagrams_and_reports_copied_payload_length() -> std::io::Result<()> {
+async fn receive_preserves_empty_datagrams_and_discards_truncated_payloads() -> std::io::Result<()> {
     for bind in ["127.0.0.1:0", "[::1]:0"] {
         let socket = UdpSocket::bind(bind.parse().unwrap(), 0)?;
         let peer = std::net::UdpSocket::bind(bind)?;
@@ -81,8 +81,8 @@ async fn receive_preserves_empty_datagrams_and_reports_copied_payload_length() -
 
         assert_eq!(socket.recvmsg(&mut buffers, &mut lines)?, 2);
         assert_eq!(lines[0].seg_size, 0);
-        assert_eq!(lines[1].seg_size, 4);
-        assert_eq!(&buffers[1][..], b"long");
+        assert_eq!(lines[1].seg_size, 0);
+        assert!(buffers[1].is_empty());
         for line in lines {
             assert_eq!(line.src, peer.local_addr()?);
             assert_eq!(line.dst, socket.local_addr()?);

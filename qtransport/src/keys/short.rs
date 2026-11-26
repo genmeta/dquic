@@ -3,10 +3,12 @@ use std::{
     ops::RangeInclusive,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::Ordering,
     },
     time::Duration,
 };
+
+use portable_atomic::AtomicU64;
 
 use qbase::{
     error::{ErrorKind, QuicError},
