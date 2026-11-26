@@ -21,6 +21,8 @@ smallvec = { workspace = true }
 tracing = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(all(unix, not(target_os = "espidf")))'.dependencies]
 nix = { version = "0.32", features = ["socket", "uio", "net"] }
 
 [target.'cfg(windows)'.dependencies]

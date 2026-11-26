@@ -1,0 +1,41 @@
+[package]
+name = "dquic-esp-idf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+echo = ["dep:dquic"]
+
+[dependencies]
+bytes = "1"
+dquic = { path = "..", optional = true }
+esp-idf-sys = "0.38.1"
+qtls = { path = "../../qtls" }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+
+[build-dependencies]
+embuild = "0.33"
+
+[[bin]]
+name = "echo"
+path = "src/main.rs"
+required-features = ["echo"]
+
+[profile.dev]
+opt-level = "s"
+debug = 1
+
+[profile.release]
+opt-level = "s"
+debug = 1
+
+[package.metadata.esp-idf-sys]
+esp_idf_version = "v5.4.2"
+esp_idf_tools_install_dir = "workspace"
+mcu = "esp32c3"
+esp_idf_components = ["main", "driver", "esp_netif", "esp_event", "esp_hw_support", "bootloader_support", "vfs", "pthread", "lwip"]

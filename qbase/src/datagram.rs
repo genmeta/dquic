@@ -1,5 +1,8 @@
 //! Classification and wire codecs for UDP datagrams carried by dquic.
 
+/// Default single-datagram receive budget until path MTU discovery is available.
+pub const MAX_DATAGRAM_SIZE: usize = 1536;
+
 pub mod error;
 pub mod forward;
 pub mod io;

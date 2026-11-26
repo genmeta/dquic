@@ -1,9 +1,12 @@
+#[cfg(target_os = "espidf")]
+use std::net::ToSocketAddrs;
 use std::{
     fmt::Display,
     io,
     net::{Ipv6Addr, SocketAddr},
 };
 
+#[cfg(not(target_os = "espidf"))]
 use dns_lookup::{AddrFamily, AddrInfoHints, SockType, getaddrinfo};
 use futures::{FutureExt, StreamExt, future, stream};
 
@@ -47,6 +50,7 @@ impl Resolve for SystemResolver {
     }
 }
 
+#[cfg(not(target_os = "espidf"))]
 fn lookup_socket_addrs(hostname: &str, servname: &str, family: Option<Family>) -> io::Result<Vec<SocketAddr>> {
     let (hostname, port) = split_name_port(hostname);
     let servname = port.unwrap_or(servname);
@@ -61,6 +65,27 @@ fn lookup_socket_addrs(hostname: &str, servname: &str, family: Option<Family>) -
         ..AddrInfoHints::default()
     };
     getaddrinfo(Some(hostname), Some(servname), Some(hints))?.map(|info| info.map(|info| info.sockaddr)).collect()
+}
+
+#[cfg(target_os = "espidf")]
+fn lookup_socket_addrs(hostname: &str, servname: &str, family: Option<Family>) -> io::Result<Vec<SocketAddr>> {
+    let (hostname, port) = split_name_port(hostname);
+    // lwIP has no system service database. Preserve the common HTTP names.
+    let port = match port.unwrap_or(servname) {
+        "" | "https" => 443,
+        "http" => 80,
+        port => port
+            .parse::<u16>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ESP-IDF requires a numeric, http or https service"))?,
+    };
+    Ok((hostname, port)
+        .to_socket_addrs()?
+        .filter(|addr| match family {
+            None => true,
+            Some(Family::V4) => addr.is_ipv4(),
+            Some(Family::V6) => addr.is_ipv6(),
+        })
+        .collect())
 }
 
 /// Split an optional numeric port from a hostname or bracketed IPv6 address.

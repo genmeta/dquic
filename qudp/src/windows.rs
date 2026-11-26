@@ -180,7 +180,15 @@ impl Io for UdpSocket {
         unsafe {
             let rc = (wsa_recvmsg_ptr)(self.io.as_raw_socket() as usize, &mut wsa_msg, &mut len, ptr::null_mut(), None);
             if rc == -1 {
-                return Err(io::Error::last_os_error());
+                let error = WinSock::WSAGetLastError();
+                if error == WinSock::WSAEMSGSIZE {
+                    // The truncated datagram was consumed. Keep the socket alive
+                    // and expose no partial payload or ancillary information.
+                    bufs[0] = std::io::IoSliceMut::new(&mut []);
+                    lines[0] = Line::default();
+                    return Ok(1);
+                }
+                return Err(io::Error::from_raw_os_error(error));
             }
         }
 

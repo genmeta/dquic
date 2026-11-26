@@ -9,6 +9,11 @@ use tokio::sync::mpsc;
 
 use crate::packet::CipherPacket;
 
+#[cfg(not(target_os = "espidf"))]
+const RCV_PKT_BUF_SIZE: usize = 128;
+#[cfg(target_os = "espidf")]
+const RCV_PKT_BUF_SIZE: usize = 8;
+
 pub type PacketSender<H> = mpsc::Sender<(CipherPacket<H>, Pathway, Link)>;
 pub type PacketReceiver<H> = mpsc::Receiver<(CipherPacket<H>, Pathway, Link)>;
 
@@ -32,7 +37,7 @@ pub fn new() -> (Inbox, RcvdPacket) {
     let (initial_tx, initial_rx) = mpsc::channel(8);
     let (handshake_tx, handshake_rx) = mpsc::channel(8);
     let (zero_rtt_tx, zero_rtt_rx) = mpsc::channel(8);
-    let (one_rtt_tx, one_rtt_rx) = mpsc::channel(128);
+    let (one_rtt_tx, one_rtt_rx) = mpsc::channel(RCV_PKT_BUF_SIZE);
     (
         Inbox { initial: initial_tx, handshake: handshake_tx, zero_rtt: zero_rtt_tx, one_rtt: one_rtt_tx },
         RcvdPacket { initial: initial_rx, handshake: handshake_rx, zero_rtt: zero_rtt_rx, one_rtt: one_rtt_rx },

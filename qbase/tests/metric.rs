@@ -86,3 +86,35 @@ fn test_arc_connection_metrics() {
     assert_eq!(metrics.inflight_bytes(), 100);
     assert_eq!(metrics.pending_bytes(), 0);
 }
+
+#[test]
+fn acked_counter_wraps_and_preserves_sampled_delta() {
+    let metrics = ConnectionMetrics::default();
+    for amount in [usize::MAX, 1, usize::MAX, 1] {
+        let before = metrics.acked_bytes();
+        metrics.add_pending(amount);
+        metrics.on_data_sent(amount);
+        assert_eq!(metrics.inflight_bytes(), amount);
+        metrics.on_data_acked(amount);
+        assert_eq!(metrics.acked_bytes().wrapping_sub(before), amount);
+        assert_eq!(metrics.pending_bytes(), 0);
+        assert_eq!(metrics.inflight_bytes(), 0);
+    }
+    assert_eq!(metrics.acked_bytes(), 0);
+}
+
+#[test]
+fn acked_counter_crosses_the_signed_boundary() {
+    let metrics = ConnectionMetrics::default();
+    let amount = isize::MAX as usize;
+    metrics.add_pending(amount);
+    metrics.on_data_sent(amount);
+    metrics.on_data_acked(amount);
+    let before = metrics.acked_bytes();
+
+    metrics.add_pending(1);
+    metrics.on_data_sent(1);
+    metrics.on_data_acked(1);
+    assert_eq!(metrics.acked_bytes(), amount + 1);
+    assert_eq!(metrics.acked_bytes().wrapping_sub(before), 1);
+}

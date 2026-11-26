@@ -114,7 +114,7 @@ where
         let fresh_bytes = available - remaining;
         credit.post_sent(fresh_bytes);
         if fresh_bytes > 0 {
-            self.metrics.on_data_sent(fresh_bytes as u64);
+            self.metrics.on_data_sent(fresh_bytes);
         }
         result
     }

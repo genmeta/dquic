@@ -29,6 +29,9 @@ zeroize = "1.7"
 pkix-signature = { package = "signature", version = "2" }
 pkix-x509-cert = { package = "x509-cert", version = "0.2" }
 
+[target.'cfg(target_os = "espidf")'.dependencies]
+ring = { workspace = true, optional = true, features = ["less-safe-getrandom-espidf"] }
+
 [features]
 default = ["ring"]
 ring = ["dep:ring", "rustls/ring"]

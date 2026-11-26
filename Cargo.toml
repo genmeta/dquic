@@ -53,6 +53,7 @@ netdev = "0.47"
 nom = "8"
 netwatcher = "0.8"
 pin-project-lite = "0.2"
+portable-atomic = { version = "1", features = ["std"] }
 rand = "0.10"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["std"] }

@@ -93,8 +93,12 @@ pub(super) fn recvmsg(socket: &UdpSocket, bufs: &mut [IoSliceMut<'_>], recv_line
                 }
                 recv_lines[0].dst.set_port(socket.local_addr()?.port());
                 recv_lines[0].src = recv_msg.address.unwrap().inner();
-                recv_lines[0].seg_size = recv_msg.bytes as u16;
-                let len = recv_msg.bytes;
+                let len = if recv_msg.flags.contains(MsgFlags::MSG_TRUNC) {
+                    0
+                } else {
+                    recv_msg.bytes
+                };
+                recv_lines[0].seg_size = len as u16;
                 // The receive used only this buffer; expose exactly the copied bytes.
                 let buffer = &mut bufs[0];
                 *buffer = IoSliceMut::new(unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr(), len) });

@@ -11,10 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-dns-lookup = "4"
 futures = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 qbase = { workspace = true }
+
+[target.'cfg(not(target_os = "espidf"))'.dependencies]
+dns-lookup = "4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

@@ -45,6 +45,27 @@ mod sys {
         assert!(addrs.iter().all(|addr| addr.port() == 8443));
     }
 
+    #[cfg(target_os = "espidf")]
+    #[test]
+    fn esp_resolver_preserves_port_override_and_family() {
+        let addrs = lookup_socket_addrs("127.0.0.1:8443", "invalid", Some(Family::V4)).unwrap();
+        assert_eq!(addrs, vec!["127.0.0.1:8443".parse().unwrap()]);
+        assert!(lookup_socket_addrs("127.0.0.1", "443", Some(Family::V6)).unwrap().is_empty());
+        assert_eq!(lookup_socket_addrs("[::1]:9443", "443", Some(Family::V6)).unwrap(), vec!["[::1]:9443".parse().unwrap()]);
+    }
+
+    #[cfg(target_os = "espidf")]
+    #[test]
+    fn esp_resolver_handles_common_services_and_rejects_unknown_names() {
+        for (service, port) in [("", 443), ("https", 443), ("http", 80), ("1234", 1234)] {
+            let addrs = lookup_socket_addrs("127.0.0.1", service, None).unwrap();
+            assert_eq!(addrs[0].port(), port);
+        }
+        for service in ["ssh", "65536", "-1"] {
+            assert_eq!(lookup_socket_addrs("127.0.0.1", service, None).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
     #[tokio::test]
     async fn system_dns_never_treats_certificate_sequence_as_a_port() {
         for name in ["dhttp.net", "alice.dhttp.net", "ALICE.DHTTP.NET.:2", "alice.dhttp.net:999999999999999999999"] {

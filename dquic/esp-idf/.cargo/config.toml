@@ -1,0 +1,15 @@
+[build]
+target = "riscv32imc-esp-espidf"
+
+[target.riscv32imc-esp-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+# Only build-std needs an unstable Cargo option; firmware uses stable Rust.
+RUSTC_BOOTSTRAP = "1"
+# Espressif GCC 14's ilp32 ABI omits this macro; ring uses it to select 32-bit C.
+CFLAGS_riscv32imc_esp_espidf = "-D__ILP32__=1 -g0"
