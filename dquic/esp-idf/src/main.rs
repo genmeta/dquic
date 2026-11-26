@@ -14,7 +14,7 @@ fn main() -> Result<(), dquic_esp_idf::Error> {
         assert_eq!(metrics.inflight_bytes(), 0);
     }
     assert_eq!(metrics.acked_bytes(), 0);
-    println!("PASS: pointer-sized counters wrap and preserve sampled deltas on C3");
+    println!("PASS: pointer-sized counters wrap and preserve sampled deltas");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().thread_stack_size(8192).build()?;
     runtime.block_on(async {
         udp::check().await?;

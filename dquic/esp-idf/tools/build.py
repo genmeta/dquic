@@ -7,19 +7,25 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 os.chdir(root)
-binary = sys.argv[1] if len(sys.argv) == 2 else "dependencies"
-if binary not in ("dependencies", "echo"):
-    raise SystemExit("usage: python3 tools/build.py [dependencies|echo]")
+binary = sys.argv[1] if len(sys.argv) > 1 else "dependencies"
+chip = sys.argv[2] if len(sys.argv) > 2 else "esp32c3"
+targets = {"esp32c3": "riscv32imc-esp-espidf", "esp32c6": "riscv32imac-esp-espidf"}
+if len(sys.argv) > 3 or binary not in ("dependencies", "echo") or chip not in targets:
+    raise SystemExit("usage: python3 tools/build.py [dependencies|echo] [esp32c3|esp32c6]")
 
 env = os.environ.copy()
 env["RUSTC_BOOTSTRAP"] = "1"  # Rust 1.88's build-std; application code is stable.
+env["MCU"] = chip
 env.setdefault("CARGO_BUILD_JOBS", "2")
 for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH"):
     env.pop(variable, None)
-target = root / "target"
-target.mkdir(exist_ok=True)
+target = root / "target" / chip
+target.mkdir(parents=True, exist_ok=True)
 defaults = target / "sdkconfig.defaults"
 contents = (root / "sdkconfig.defaults").read_text().replace('"partitions.csv"', '"' + str(root / "partitions.csv") + '"')
+chip_defaults = root / f"sdkconfig.defaults.{chip}"
+if chip_defaults.exists():
+    contents += "\n" + chip_defaults.read_text()
 if not defaults.exists() or defaults.read_text() != contents:
     defaults.write_text(contents)
 env["ESP_IDF_SDKCONFIG_DEFAULTS"] = str(defaults)
@@ -41,7 +47,7 @@ if sdk.is_dir() and gcc and python_env:
     if "LIBCLANG_PATH" not in env and Path("/Library/Developer/CommandLineTools/usr/lib/libclang.dylib").exists():
         env["LIBCLANG_PATH"] = "/Library/Developer/CommandLineTools/usr/lib"
 
-cargo = ["cargo", "build", "--locked", "-Z", "build-std=std,panic_abort"]
+cargo = ["cargo", "build", "--locked", "--target", targets[chip], "-Z", "build-std=std,panic_abort"]
 # SDK setup must precede ring's C build. Repeating this is incremental.
 subprocess.run(cargo + ["-p", "esp-idf-sys"], env=env, check=True)
 if not gcc:
